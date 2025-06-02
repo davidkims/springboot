@@ -7,8 +7,22 @@ jobs:
   sql_backup_and_migration:
     runs-on: ubuntu-latest
 
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: example_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
     env:
-      DB_HOST: localhost
+      DB_HOST: 127.0.0.1
       DB_PORT: 3306
       DB_NAME: example_db
       DB_USER: root
@@ -17,10 +31,15 @@ jobs:
       MIGRATION_FILE: ./migrations/migrate.sql
 
     steps:
-      - name: 🛒 Checkout Repository
+      - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 Create backup directory
+      - name: 🕒 Wait for MySQL to Become Ready
+        run: |
+          echo "⏳ Waiting for MySQL..."
+          sleep 30
+
+      - name: 📁 Create Backup Directory
         run: |
           sudo mkdir -p $BACKUP_DIR
           sudo chmod -R 777 $BACKUP_DIR
@@ -29,38 +48,26 @@ jobs:
         run: |
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
-
           echo "🔁 백업 시작: $BACKUP_FILE"
-          mysqldump -h $DB_HOST -P $DB_PORT -u $DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE || {
+          mysqldump -h $DB_HOST -P $DB_PORT -u$DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE || {
             echo "❌ 백업 실패" >> backup-report.md
             exit 1
           }
-
           echo "✅ 백업 완료: $BACKUP_FILE" >> backup-report.md
           ls -lh $BACKUP_DIR >> backup-report.md
 
       - name: 🧱 Run DB Migration
         run: |
           echo "🔁 마이그레이션 시작: $MIGRATION_FILE"
-          mysql -h $DB_HOST -P $DB_PORT -u $DB_USER -p$DB_PASS $DB_NAME < $MIGRATION_FILE || {
+          mysql -h $DB_HOST -P $DB_PORT -u$DB_USER -p$DB_PASS $DB_NAME < $MIGRATION_FILE || {
             echo "❌ 마이그레이션 실패" >> migration-report.md
             exit 1
           }
-
           echo "✅ 마이그레이션 완료" >> migration-report.md
 
-      - name: 📦 디스크 공간 확보 (.github/workflows)
+      - name: 📋 Show Logs
         run: |
-          if sudo fallocate -l 50G .github/workflows/.reserved_space; then
-            echo "✅ 디스크 예약 성공"
-          else
-            echo "⚠️ fallocate 실패 → dd로 대체 시도"
-            sudo dd if=/dev/zero of=.github/workflows/.reserved_space bs=1M count=51200 || echo "❌ 예약 실패"
-          fi
-
-      - name: 📋 로그 출력
-        run: |
-          echo "🔍 백업 로그:"
-          cat backup-report.md || echo "❌ backup-report.md 없음"
-          echo "🔍 마이그레이션 로그:"
-          cat migration-report.md || echo "❌ migration-report.md 없음"
+          echo "📄 Backup Log:"
+          cat backup-report.md || echo "No backup-report.md"
+          echo "📄 Migration Log:"
+          cat migration-report.md || echo "No migration-report.md"
