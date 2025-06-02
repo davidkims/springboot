@@ -1,4 +1,4 @@
-name: 🐬 MySQL Backup via Docker Container
+name: 🐬 MySQL Backup via Persistent Docker Containers
 
 on:
   workflow_dispatch:
@@ -8,37 +8,42 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      MYSQL_CONTAINER_NAME: backup-mysql
       MYSQL_IMAGE: mysql:8.0
       DB_NAME: example_db
       DB_USER: root
       DB_PASS: password
-      DB_PORT: 3307
+      DB_PORT: 3306
       BACKUP_DIR: /opt/backup/sql
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🐳 Run MySQL Backup Container
+      - name: 🕒 Generate Unique Timestamp and Container Name
+        id: vars
+        run: |
+          echo "timestamp=$(date +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+          echo "container=backup-mysql-$(date +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: 🐳 Launch MySQL Backup Container (Persistent)
         run: |
           docker run -d \
-            --name $MYSQL_CONTAINER_NAME \
+            --name ${{ steps.vars.outputs.container }} \
             -e MYSQL_ROOT_PASSWORD=$DB_PASS \
             -e MYSQL_DATABASE=$DB_NAME \
-            -p $DB_PORT:3306 \
+            -p ${{ steps.vars.outputs.timestamp:8 }}:3306 \
             $MYSQL_IMAGE
-
+          
           echo "⏳ 컨테이너 초기화 대기 중..."
           sleep 30
 
-      - name: 🛠️ Create MySQL config file (.my.cnf)
+      - name: 🔐 Create MySQL .my.cnf Secure Login File
         run: |
           echo "[client]" > ~/.my.cnf
           echo "user=$DB_USER" >> ~/.my.cnf
           echo "password=$DB_PASS" >> ~/.my.cnf
           echo "host=127.0.0.1" >> ~/.my.cnf
-          echo "port=$DB_PORT" >> ~/.my.cnf
+          echo "port=3306" >> ~/.my.cnf
           chmod 600 ~/.my.cnf
 
       - name: 📁 Create Backup Directory
@@ -46,12 +51,12 @@ jobs:
           sudo mkdir -p $BACKUP_DIR
           sudo chmod -R 777 $BACKUP_DIR
 
-      - name: 💾 Perform mysqldump Backup
+      - name: 💾 Run mysqldump Backup (Persistent Container)
         run: |
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          TIMESTAMP=${{ steps.vars.outputs.timestamp }}
           BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
-          echo "🔁 백업 시작: $BACKUP_FILE"
 
+          echo "🔁 백업 시작: $BACKUP_FILE"
           mysqldump $DB_NAME > $BACKUP_FILE || {
             echo "❌ 백업 실패"
             exit 1
@@ -59,8 +64,3 @@ jobs:
 
           echo "✅ 백업 완료: $BACKUP_FILE"
           ls -lh $BACKUP_DIR
-
-      - name: 🧹 Clean Up Docker Container
-        run: |
-          echo "🧼 컨테이너 정리 중..."
-          docker rm -f $MYSQL_CONTAINER_NAME || true
