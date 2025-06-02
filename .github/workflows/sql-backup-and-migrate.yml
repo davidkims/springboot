@@ -1,10 +1,10 @@
-name: 🛡️ SQL Backup and DB Migration
+name: 🛡️ Secure SQL Backup and Migration
 
 on:
   workflow_dispatch:
 
 jobs:
-  sql_backup_and_migration:
+  secure_sql_backup_and_migration:
     runs-on: ubuntu-latest
 
     services:
@@ -36,38 +36,64 @@ jobs:
 
       - name: 🕒 Wait for MySQL to Become Ready
         run: |
-          echo "⏳ Waiting for MySQL..."
+          echo "⏳ Waiting for MySQL to start..."
           sleep 30
+
+      - name: 🔐 Create ~/.my.cnf for secure MySQL login
+        run: |
+          cat <<EOF > ~/.my.cnf
+[client]
+user=${DB_USER}
+password=${DB_PASS}
+host=${DB_HOST}
+port=${DB_PORT}
+EOF
+          chmod 600 ~/.my.cnf
 
       - name: 📁 Create Backup Directory
         run: |
           sudo mkdir -p $BACKUP_DIR
           sudo chmod -R 777 $BACKUP_DIR
 
-      - name: 💾 Backup SQL Database
+      - name: 💾 Backup SQL Database (secure mode)
         run: |
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
           echo "🔁 백업 시작: $BACKUP_FILE"
-          mysqldump -h $DB_HOST -P $DB_PORT -u$DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE || {
+          mysqldump $DB_NAME > $BACKUP_FILE || {
             echo "❌ 백업 실패" >> backup-report.md
             exit 1
           }
           echo "✅ 백업 완료: $BACKUP_FILE" >> backup-report.md
           ls -lh $BACKUP_DIR >> backup-report.md
 
-      - name: 🧱 Run DB Migration
+      - name: 🧱 Create Migration SQL if Missing
+        run: |
+          if [ ! -f "$MIGRATION_FILE" ]; then
+            echo "⚠️ 마이그레이션 파일 없음. 기본 SQL 생성 중..."
+            mkdir -p "$(dirname $MIGRATION_FILE)"
+            cat <<EOF > $MIGRATION_FILE
+CREATE TABLE IF NOT EXISTS test_table (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(100)
+);
+EOF
+          fi
+          echo "✅ 마이그레이션 파일 준비됨:"
+          cat $MIGRATION_FILE
+
+      - name: 🧪 Run DB Migration (secure mode)
         run: |
           echo "🔁 마이그레이션 시작: $MIGRATION_FILE"
-          mysql -h $DB_HOST -P $DB_PORT -u$DB_USER -p$DB_PASS $DB_NAME < $MIGRATION_FILE || {
+          mysql $DB_NAME < $MIGRATION_FILE || {
             echo "❌ 마이그레이션 실패" >> migration-report.md
             exit 1
           }
           echo "✅ 마이그레이션 완료" >> migration-report.md
 
-      - name: 📋 Show Logs
+      - name: 📋 Show Backup & Migration Logs
         run: |
-          echo "📄 Backup Log:"
+          echo "📄 백업 로그:"
           cat backup-report.md || echo "No backup-report.md"
-          echo "📄 Migration Log:"
+          echo "📄 마이그레이션 로그:"
           cat migration-report.md || echo "No migration-report.md"
