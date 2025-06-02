@@ -1,0 +1,116 @@
+name: 🔄 Finance Smart Backup with PostgreSQL & Kafka
+
+on:
+  workflow_dispatch:
+
+jobs:
+  finance-backup:
+    runs-on: ubuntu-latest
+
+    env:
+      ROOT_PASS: rootpass123
+      SQL_DIR: /opt/finance/sql
+      BACKUP_DIR: /opt/finance/backups
+      KAFKA_LOG: /opt/finance/kafka.log
+      PG_DB: postgres_finance
+      PG_USER: postgres
+      PG_PASS: pgpass
+      TYPES: |
+        bank_transfer
+        check_card
+        credit_card
+        bitcoin
+        stock
+        futures
+
+    steps:
+      - name: 📁 디렉토리 준비 및 SQL 생성
+        run: |
+          sudo mkdir -p $SQL_DIR $BACKUP_DIR
+          sudo chmod -R 777 /opt/finance
+          echo "CREATE TABLE IF NOT EXISTS transfers (id SERIAL PRIMARY KEY, type VARCHAR(30), amount NUMERIC, currency VARCHAR(5), status VARCHAR(20));" > $SQL_DIR/init.sql
+          echo "INSERT INTO transfers(type, amount, currency, status) VALUES
+            ('bank_transfer', 100000, 'KRW', 'completed'),
+            ('check_card', 20000, 'KRW', 'completed'),
+            ('credit_card', 150000, 'KRW', 'completed'),
+            ('bitcoin', 0.03, 'BTC', 'pending'),
+            ('stock', 1000000, 'KRW', 'completed'),
+            ('futures', 500000, 'KRW', 'pending');" >> $SQL_DIR/init.sql
+
+      - name: 🐘 PostgreSQL 설치 및 초기화
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql
+          sudo -u postgres psql -c "CREATE DATABASE $PG_DB;"
+          sudo -u postgres psql -d $PG_DB -c "CREATE TABLE IF NOT EXISTS logs (type VARCHAR, status VARCHAR, backup_time TIMESTAMP);"
+
+      - name: 🔁 거래유형 컨테이너 처리 루프
+        run: |
+          for TYPE in $TYPES; do
+            DB_NAME="db_${TYPE}"
+            DB_USER="user_${TYPE}"
+            DB_PASS="pass_${TYPE}"
+            CONTAINER="mysql_${TYPE}"
+            PORT=$((3307 + RANDOM % 1000))
+
+            echo "🚀 $TYPE 컨테이너 실행 중 (포트: $PORT)"
+            docker run -d --rm \
+              --name $CONTAINER \
+              -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
+              -e MYSQL_DATABASE=$DB_NAME \
+              -e MYSQL_USER=$DB_USER \
+              -e MYSQL_PASSWORD=$DB_PASS \
+              -v $SQL_DIR:/docker-entrypoint-initdb.d \
+              -p $PORT:3306 \
+              mysql:8.0
+
+            echo "🕒 컨테이너 초기화 대기 중..."
+            sleep 30
+
+            STATUS=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+
+            echo "🔍 $TYPE completed 상태 개수: $STATUS"
+
+            if [ "$STATUS" != "0" ]; then
+              BACKUP_FILE=$BACKUP_DIR/${TYPE}_backup.sql
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE
+              echo "✅ 백업 완료: $BACKUP_FILE"
+
+              TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+              sudo -u postgres psql -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'completed', '$TIMESTAMP');"
+              echo "$TIMESTAMP [$TYPE] 백업 완료" >> $KAFKA_LOG
+            else
+              echo "⏭️ 백업 생략: 아직 pending 상태"
+            fi
+
+            echo "🔄 pending 상태 트랜잭션을 completed 로 전환 중..."
+            mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -e "USE $DB_NAME; UPDATE transfers SET status='completed' WHERE type='$TYPE' AND status='pending';"
+
+            STATUS_AFTER=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+
+            if [ "$STATUS_AFTER" -gt "$STATUS" ]; then
+              echo "🔁 상태 변경 감지됨 → 재백업 수행"
+              REBACKUP=$BACKUP_DIR/${TYPE}_rebaked.sql
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $REBACKUP
+              echo "♻️ 재백업 완료: $REBACKUP"
+              TIMESTAMP2=$(date +'%Y-%m-%d %H:%M:%S')
+              sudo -u postgres psql -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'rebackup', '$TIMESTAMP2');"
+              echo "$TIMESTAMP2 [$TYPE] 재백업 완료" >> $KAFKA_LOG
+            fi
+
+            docker stop $CONTAINER
+          done
+
+      - name: 📦 모든 백업 압축
+        run: |
+          cd $BACKUP_DIR
+          tar -czf finance-full-backups-${{ github.run_id }}.tar.gz *.sql
+          ls -lh $BACKUP_DIR
+
+      - name: 📜 PostgreSQL 로그 보기
+        run: |
+          sudo -u postgres psql -d $PG_DB -c "SELECT * FROM logs;"
+
+      - name: 📄 Kafka 형식 로그 출력
+        run: |
+          echo "📄 Kafka Log:"
+          cat $KAFKA_LOG || echo "No kafka-style logs found"
