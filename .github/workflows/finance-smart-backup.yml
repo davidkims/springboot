@@ -1,8 +1,8 @@
-name: 🔄 Finance Smart Backup with PostgreSQL & Kafka
+name: 🔄 Finance Smart Backup with PostgreSQL & Kafka + OTP
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # Every 5 minutes
+    - cron: "*/5 * * * *"  # 매 5분마다 실행
   workflow_dispatch:
 
 jobs:
@@ -36,22 +36,42 @@ jobs:
             amount NUMERIC,
             currency VARCHAR(5),
             status VARCHAR(20),
+            otp_code VARCHAR(10),
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           );" > $SQL_DIR/init.sql
-          echo "INSERT INTO transfers(type, amount, currency, status) VALUES
-            ('bank_transfer', 100000, 'KRW', 'completed'),
-            ('check_card', 20000, 'KRW', 'completed'),
-            ('credit_card', 150000, 'KRW', 'completed'),
-            ('bitcoin', 0.03, 'BTC', 'pending'),
-            ('stock', 1000000, 'KRW', 'completed'),
-            ('futures', 500000, 'KRW', 'pending');" >> $SQL_DIR/init.sql
+          echo "INSERT INTO transfers(type, amount, currency, status, otp_code) VALUES
+            ('bank_transfer', 100000, 'KRW', 'completed', '123456'),
+            ('check_card', 20000, 'KRW', 'completed', '654321'),
+            ('credit_card', 150000, 'KRW', 'completed', '111222'),
+            ('bitcoin', 0.03, 'BTC', 'pending', '999999'),
+            ('stock', 1000000, 'KRW', 'completed', '333444'),
+            ('futures', 500000, 'KRW', 'pending', '555666');" >> $SQL_DIR/init.sql
 
       - name: 🐐 Install and Start PostgreSQL
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql
+          sudo apt-get install -y postgresql oathtool
           sudo systemctl start postgresql
           sudo systemctl enable postgresql
+
+      - name: 🔐 Create OTP Secret and Validate
+        run: |
+          OTP_SECRET=JBSWY3DPEHPK3PXP
+          OTP_CODE=$(oathtool --totp -b $OTP_SECRET)
+          echo "Generated OTP: $OTP_CODE"
+          echo $OTP_CODE > /opt/finance/otp.code
+
+      - name: 🔐 Create MySQL .my.cnf for Secure Auth
+        run: |
+          echo "[client]" > ~/.my.cnf
+          echo "user=root" >> ~/.my.cnf
+          echo "password=$ROOT_PASS" >> ~/.my.cnf
+          chmod 600 ~/.my.cnf
+
+      - name: 🔐 Create PostgreSQL .pgpass
+        run: |
+          echo "127.0.0.1:5432:$PG_DB:$PG_USER:$PG_PASS" > ~/.pgpass
+          chmod 600 ~/.pgpass
 
       - name: 🐐 Create PostgreSQL DB and Financial Tables
         run: |
@@ -99,16 +119,30 @@ jobs:
               purchase_price NUMERIC,
               account_id INT
             );
+            CREATE TABLE IF NOT EXISTS forex_trades (
+              id SERIAL PRIMARY KEY,
+              base_currency VARCHAR(10),
+              quote_currency VARCHAR(10),
+              rate NUMERIC,
+              amount NUMERIC,
+              trade_time TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS futures_contracts (
+              id SERIAL PRIMARY KEY,
+              symbol VARCHAR(20),
+              contract_size NUMERIC,
+              margin NUMERIC,
+              expiration_date DATE
+            );
+            CREATE TABLE IF NOT EXISTS payment_gateway_logs (
+              id SERIAL PRIMARY KEY,
+              gateway_name VARCHAR(50),
+              request_payload TEXT,
+              response_payload TEXT,
+              status VARCHAR(20),
+              timestamp TIMESTAMP
+            );
           "
-
-      - name: 🔐 Setup Secure MySQL and PostgreSQL Credentials
-        run: |
-          echo "[client]" > ~/.my.cnf
-          echo "user=root" >> ~/.my.cnf
-          echo "password=$ROOT_PASS" >> ~/.my.cnf
-          chmod 600 ~/.my.cnf
-          echo "127.0.0.1:5432:$PG_DB:$PG_USER:$PG_PASS" > ~/.pgpass
-          chmod 600 ~/.pgpass
 
       - name: ↺ Run Per-Type Backup Loop
         run: |
@@ -133,29 +167,23 @@ jobs:
             echo "⏳ Waiting for $TYPE container to initialize"
             sleep 30
 
-            STATUS=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
-            echo "🔍 $TYPE completed: $STATUS"
+            OTP_EXPECTED=$(cat /opt/finance/otp.code)
+            OTP_DB=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT otp_code FROM transfers WHERE type='$TYPE' AND status='completed' LIMIT 1;")
 
-            if [ "$STATUS" != "0" ]; then
-              BACKUP_FILE=$BACKUP_DIR/${TYPE}_backup.sql
-              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE
-              echo "✅ Backup completed: $BACKUP_FILE"
-              TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
-              psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'completed', '$TIMESTAMP');"
-              echo "$TIMESTAMP [$TYPE] backup done" >> $KAFKA_LOG
-            fi
+            if [ "$OTP_EXPECTED" = "$OTP_DB" ]; then
+              STATUS=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+              echo "🔍 $TYPE completed: $STATUS"
 
-            echo "⚡ Updating pending transactions to completed for $TYPE"
-            mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -e "USE $DB_NAME; UPDATE transfers SET status='completed' WHERE type='$TYPE' AND status='pending';"
-
-            STATUS_AFTER=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
-            if [ "$STATUS_AFTER" -gt "$STATUS" ]; then
-              REBACKUP=$BACKUP_DIR/${TYPE}_rebackup.sql
-              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $REBACKUP
-              echo "♻️ Re-backup done: $REBACKUP"
-              TIMESTAMP2=$(date +'%Y-%m-%d %H:%M:%S')
-              psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'rebackup', '$TIMESTAMP2');"
-              echo "$TIMESTAMP2 [$TYPE] rebackup done" >> $KAFKA_LOG
+              if [ "$STATUS" != "0" ]; then
+                BACKUP_FILE=$BACKUP_DIR/${TYPE}_backup.sql
+                mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE
+                echo "✅ Backup completed: $BACKUP_FILE"
+                TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+                sudo -u postgres psql -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'completed', '$TIMESTAMP');"
+                echo "$TIMESTAMP [$TYPE] backup done" >> $KAFKA_LOG
+              fi
+            else
+              echo "❌ OTP 인증 실패: $TYPE"
             fi
 
             docker stop $CONTAINER
@@ -169,7 +197,7 @@ jobs:
 
       - name: 📓 View PostgreSQL Logs
         run: |
-          psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "SELECT * FROM logs;"
+          sudo -u postgres psql -d $PG_DB -c "SELECT * FROM logs;"
 
       - name: 📄 Kafka-style Logs
         run: |
