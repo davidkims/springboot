@@ -1,0 +1,75 @@
+name: 🧾 SQL + Docker Finance Ledger
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # 매 시간마다 실행
+  workflow_dispatch:
+
+jobs:
+  ledger-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/davidkims/finance-ledger
+      IMAGE_TAG: latest
+      BACKUP_DIR: /tmp/finance-backup
+      DB_FILE: finance.db
+
+    steps:
+      - name: 📁 프로젝트 디렉토리 및 파일 준비
+        run: |
+          mkdir -p app
+          mkdir -p $BACKUP_DIR
+
+          cat <<EOF > app/Dockerfile
+          FROM python:3.10-slim
+          WORKDIR /app
+          COPY . .
+          RUN pip install --no-cache-dir sqlite-utils
+          CMD ["python3", "ledger.py"]
+          EOF
+
+          cat <<EOF > app/ledger.py
+          import sqlite3
+          import datetime
+
+          conn = sqlite3.connect("${{ env.DB_FILE }}")
+          c = conn.cursor()
+
+          c.execute("CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT, type TEXT, amount REAL, status TEXT, timestamp TEXT)")
+
+          data = [
+            ("check_card", "payment", 20000, "completed", datetime.datetime.now()),
+            ("credit_card", "payment", 50000, "completed", datetime.datetime.now()),
+            ("stock", "trade", 150000, "completed", datetime.datetime.now()),
+            ("netflix", "subscription", 14500, "completed", datetime.datetime.now()),
+            ("chatgpt", "subscription", 25000, "completed", datetime.datetime.now()),
+          ]
+
+          c.executemany("INSERT INTO ledger (service, type, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)", data)
+          conn.commit()
+          conn.close()
+          EOF
+
+      - name: 🐳 Docker 이미지 빌드
+        run: |
+          docker build -t $IMAGE_NAME:$IMAGE_TAG ./app
+
+      - name: 📦 Docker 컨테이너 실행 및 DB 생성
+        run: |
+          docker run --rm -v $BACKUP_DIR:/data $IMAGE_NAME:$IMAGE_TAG
+          cp ${{ env.DB_FILE }} $BACKUP_DIR/
+
+      - name: 🧾 결과 확인 (ledger 테이블)
+        run: |
+          sqlite3 $BACKUP_DIR/${{ env.DB_FILE }} "SELECT * FROM ledger;"
+
+      - name: 🗃️ 백업 압축
+        run: |
+          cd $BACKUP_DIR
+          tar -czf finance-ledger-${{ github.run_id }}.tar.gz *.db
+
+      - name: 📤 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: finance-ledger-${{ github.run_id }}
+          path: $BACKUP_DIR/finance-ledger-${{ github.run_id }}.tar.gz
