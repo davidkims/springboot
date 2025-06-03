@@ -1,76 +1,113 @@
-name: 💳 금융 거래 + 시만텍 넷백업 + Oracle CLI 백업
+name: 🏦 카드사 거래 백업 + OCI + NetBackup
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 jobs:
-  finance-netbackup:
+  finance-backup:
     runs-on: ubuntu-latest
+
+    env:
+      OCI_BUCKET_NAME: your-bucket-name
+      OCI_NAMESPACE: your-namespace
+      OCI_COMPARTMENT_ID: your-compartment-ocid
+      OCI_REGION: ap-seoul-1  # 원하는 리전으로 변경
 
     steps:
       - name: 📁 저장소 체크아웃
         uses: actions/checkout@v4
 
-      - name: 🧰 Swift CLI 설치
+      - name: 🧰 Swift 설치
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libicu-dev libpython3-dev
+          sudo apt-get install -y clang libicu-dev libpython3-dev zip
           curl -fsSL https://download.swift.org/swift-5.9-release/ubuntu2204/swift-5.9-RELEASE/swift-5.9-RELEASE-ubuntu22.04.tar.gz -o swift.tar.gz
           sudo mkdir -p /opt/swift
           sudo tar -xzf swift.tar.gz -C /opt/swift --strip-components=1
           echo "/opt/swift/usr/bin" >> $GITHUB_PATH
-          swift --version
 
-      - name: 🛠️ Swift 거래 백업 생성
+      - name: 🧾 카드사별 거래 JSON 파일 생성
         run: |
-          mkdir -p swiftapp
-          echo 'import Foundation' > swiftapp/main.swift
-          echo 'let companies = ["삼성", "현대", "롯데"]' >> swiftapp/main.swift
-          echo 'let cards = ["신용카드", "법인카드", "체크카드"]' >> swiftapp/main.swift
-          echo 'var transactions: [[String: String]] = []' >> swiftapp/main.swift
-          echo 'for company in companies {' >> swiftapp/main.swift
-          echo '  for card in cards {' >> swiftapp/main.swift
-          echo '    let entry = ["company": company, "card": card, "amount": "\(Int.random(in: 10000...1000000))", "timestamp": ISO8601DateFormatter().string(from: Date())]' >> swiftapp/main.swift
-          echo '    transactions.append(entry)' >> swiftapp/main.swift
-          echo '  }' >> swiftapp/main.swift
-          echo '}' >> swiftapp/main.swift
-          echo 'let jsonData = try! JSONSerialization.data(withJSONObject: transactions, options: .prettyPrinted)' >> swiftapp/main.swift
-          echo 'let path = "/opt/backup/transactions.json"' >> swiftapp/main.swift
-          echo 'FileManager.default.createFile(atPath: path, contents: jsonData)' >> swiftapp/main.swift
-          /opt/swift/usr/bin/swiftc swiftapp/main.swift -o swiftapp/Program
-          sudo mkdir -p /opt/backup
-          sudo ./swiftapp/Program
+          mkdir -p /opt/backup /opt/reports
+          companies=("삼성" "현대" "롯데")
+          for company in "${companies[@]}"; do
+            cat <<EOF > /opt/backup/transactions_${company}.json
+[
+  {
+    "company": "${company}",
+    "card": "신용카드",
+    "amount": "$((RANDOM % 500000 + 50000))",
+    "timestamp": "$(date -Iseconds)"
+  },
+  {
+    "company": "${company}",
+    "card": "법인카드",
+    "amount": "$((RANDOM % 500000 + 50000))",
+    "timestamp": "$(date -Iseconds)"
+  },
+  {
+    "company": "${company}",
+    "card": "체크카드",
+    "amount": "$((RANDOM % 500000 + 50000))",
+    "timestamp": "$(date -Iseconds)"
+  }
+]
+EOF
 
-      - name: 🗜️ 거래 내역 ZIP 압축
+            echo "# 💳 거래 보고서 (${company})" > /opt/reports/report_${company}.md
+            echo "- 생성 시간: $(date)" >> /opt/reports/report_${company}.md
+            echo "- 저장 위치: /opt/backup/transactions_${company}.json" >> /opt/reports/report_${company}.md
+          done
+
+      - name: 🗜️ 전체 JSON 파일 압축
         run: |
           mkdir -p output
-          zip -j output/transactions_$(date +%Y%m%d%H%M).zip /opt/backup/transactions.json
-          echo "📦 압축 완료: output/*.zip"
+          zip -j output/all_transactions_$(date +%Y%m%d%H%M).zip /opt/backup/transactions_*.json
 
       - name: ☁️ Oracle OCI CLI 설치
         run: |
           curl -sL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
           echo "$HOME/bin" >> $GITHUB_PATH
+          source ~/.bashrc
           oci --version || echo "✅ OCI CLI 설치됨"
 
-      - name: 🧱 NetBackup 디렉토리 및 시뮬레이션
+      - name: ☁️ OCI 업로드 - 카드사별 JSON 파일
         run: |
-          echo "📦 NetBackup 디렉토리 구성"
-          mkdir -p /opt/netbackup/logs /opt/netbackup/data /opt/netbackup/scripts
-          cp /opt/backup/transactions.json /opt/netbackup/data/
+          for jsonfile in /opt/backup/transactions_*.json; do
+            filename=$(basename $jsonfile)
+            echo "☁️ Uploading $filename to OCI Bucket..."
+            oci os object put \
+              --bucket-name $OCI_BUCKET_NAME \
+              --namespace $OCI_NAMESPACE \
+              --file "$jsonfile" \
+              --name "backups/$filename" \
+              --region $OCI_REGION \
+              --force || echo "❌ 업로드 실패: $filename"
+          done
 
-          echo "🔧 NetBackup 실행 스크립트 시뮬레이션 생성"
-          cat << 'EOF' > /opt/netbackup/scripts/run_backup.sh
-          chmod +x /opt/netbackup/scripts/run_backup.sh
-          /opt/netbackup/scripts/run_backup.sh
-
-      - name: 📊 백업 로그 출력
+      - name: 🧱 NetBackup 구성 및 bpbackup 호출 (시뮬레이션)
         run: |
-          echo "# 백업 최종 보고서" > netbackup-report.md
-          echo "- 실행 시간: $(date)" >> netbackup-report.md
-          echo "- 거래 백업 파일: /opt/backup/transactions.json" >> netbackup-report.md
-          echo "- NetBackup 데이터 경로: /opt/netbackup/data" >> netbackup-report.md
-          echo "- ZIP 파일: output/*.zip" >> netbackup-report.md
-          cat netbackup-report.md
+          mkdir -p /opt/netbackup/data
+          cp /opt/backup/transactions_*.json /opt/netbackup/data/
+
+          echo "🔧 NetBackup bpbackup 명령 시뮬레이션 시작"
+          for file in /opt/netbackup/data/*.json; do
+            echo "🗂️ 백업 실행: bpbackup -f $file"
+            echo "[bpbackup] 백업됨: $(basename $file)"
+          done
+
+      - name: 📊 전체 요약 보고서 생성
+        run: |
+          echo "# ✅ 전체 백업 및 업로드 보고서" > final-report.md
+          echo "- 실행 시간: $(date)" >> final-report.md
+          echo "- 카드사 파일 수: $(ls /opt/backup/transactions_*.json | wc -l)" >> final-report.md
+          echo "- 압축 파일: output/*.zip" >> final-report.md
+          echo "- NetBackup 디렉토리: /opt/netbackup/data" >> final-report.md
+          echo "- 보고서 목록:" >> final-report.md
+          ls /opt/reports/report_*.md >> final-report.md
+          cat final-report.md
