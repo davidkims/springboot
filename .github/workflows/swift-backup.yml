@@ -1,22 +1,19 @@
-name: 🏦 카드사 거래 백업 + OCI + NetBackup
+name: 💳 카드사별 거래 백업 + NetBackup + OCI 업로드
 
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
-
-permissions:
-  contents: read
+    branches: 
+      - main
 
 jobs:
-  finance-backup:
+  finance-netbackup:
     runs-on: ubuntu-latest
 
     env:
       OCI_BUCKET_NAME: your-bucket-name
       OCI_NAMESPACE: your-namespace
-      OCI_COMPARTMENT_ID: your-compartment-ocid
-      OCI_REGION: ap-seoul-1  # 원하는 리전으로 변경
+      OCI_REGION: ap-seoul-1
 
     steps:
       - name: 📁 저장소 체크아웃
@@ -31,40 +28,35 @@ jobs:
           sudo tar -xzf swift.tar.gz -C /opt/swift --strip-components=1
           echo "/opt/swift/usr/bin" >> $GITHUB_PATH
 
-      - name: 🧾 카드사별 거래 JSON 파일 생성
+      - name: 🧾 카드사별 거래 JSON 생성
         run: |
           mkdir -p /opt/backup /opt/reports
-          companies=("삼성" "현대" "롯데")
-          for company in "${companies[@]}"; do
-            cat <<EOF > /opt/backup/transactions_${company}.json
-[
-  {
+          for company in 삼성 현대 롯데; do
+            cat > /opt/backup/transactions_${company}.json <<EOF
+
+
     "company": "${company}",
     "card": "신용카드",
     "amount": "$((RANDOM % 500000 + 50000))",
     "timestamp": "$(date -Iseconds)"
-  },
-  {
+
     "company": "${company}",
     "card": "법인카드",
     "amount": "$((RANDOM % 500000 + 50000))",
     "timestamp": "$(date -Iseconds)"
-  },
-  {
+
     "company": "${company}",
     "card": "체크카드",
     "amount": "$((RANDOM % 500000 + 50000))",
     "timestamp": "$(date -Iseconds)"
-  }
-]
-EOF
+
 
             echo "# 💳 거래 보고서 (${company})" > /opt/reports/report_${company}.md
             echo "- 생성 시간: $(date)" >> /opt/reports/report_${company}.md
-            echo "- 저장 위치: /opt/backup/transactions_${company}.json" >> /opt/reports/report_${company}.md
+            echo "- 파일: /opt/backup/transactions_${company}.json" >> /opt/reports/report_${company}.md
           done
 
-      - name: 🗜️ 전체 JSON 파일 압축
+      - name: 🗜️ ZIP 압축
         run: |
           mkdir -p output
           zip -j output/all_transactions_$(date +%Y%m%d%H%M).zip /opt/backup/transactions_*.json
@@ -73,41 +65,44 @@ EOF
         run: |
           curl -sL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
           echo "$HOME/bin" >> $GITHUB_PATH
-          source ~/.bashrc
           oci --version || echo "✅ OCI CLI 설치됨"
 
-      - name: ☁️ OCI 업로드 - 카드사별 JSON 파일
+      - name: ☁️ 카드사별 JSON을 OCI에 업로드
         run: |
           for jsonfile in /opt/backup/transactions_*.json; do
             filename=$(basename $jsonfile)
-            echo "☁️ Uploading $filename to OCI Bucket..."
+            echo "☁️ Uploading $filename to OCI..."
             oci os object put \
               --bucket-name $OCI_BUCKET_NAME \
               --namespace $OCI_NAMESPACE \
               --file "$jsonfile" \
               --name "backups/$filename" \
               --region $OCI_REGION \
-              --force || echo "❌ 업로드 실패: $filename"
+              --force || echo "❌ 실패: $filename"
           done
 
-      - name: 🧱 NetBackup 구성 및 bpbackup 호출 (시뮬레이션)
+      - name: 🧱 NetBackup CLI 설치 및 bpbackup 실행
         run: |
+          echo "📦 NetBackup CLI 설치 시뮬레이션"
+          sudo mkdir -p /usr/openv/netbackup/bin
+          echo -e '#!/bin/bash\necho \"[bpbackup] 백업 실행: \$1\"' | sudo tee /usr/openv/netbackup/bin/bpbackup
+          sudo chmod +x /usr/openv/netbackup/bin/bpbackup
+
           mkdir -p /opt/netbackup/data
-          cp /opt/backup/transactions_*.json /opt/netbackup/data/
+          cp /opt/backup/*.json /opt/netbackup/data/
 
-          echo "🔧 NetBackup bpbackup 명령 시뮬레이션 시작"
           for file in /opt/netbackup/data/*.json; do
-            echo "🗂️ 백업 실행: bpbackup -f $file"
-            echo "[bpbackup] 백업됨: $(basename $file)"
+            /usr/openv/netbackup/bin/bpbackup -f "$file"
           done
 
-      - name: 📊 전체 요약 보고서 생성
+      - name: 📊 최종 보고서 생성
         run: |
-          echo "# ✅ 전체 백업 및 업로드 보고서" > final-report.md
-          echo "- 실행 시간: $(date)" >> final-report.md
-          echo "- 카드사 파일 수: $(ls /opt/backup/transactions_*.json | wc -l)" >> final-report.md
-          echo "- 압축 파일: output/*.zip" >> final-report.md
-          echo "- NetBackup 디렉토리: /opt/netbackup/data" >> final-report.md
-          echo "- 보고서 목록:" >> final-report.md
-          ls /opt/reports/report_*.md >> final-report.md
+          echo "# ✅ 백업 및 업로드 요약 보고서" > final-report.md
+          echo "- 시간: $(date)" >> final-report.md
+          echo "- JSON 백업 파일 수: $(ls /opt/backup/transactions_*.json | wc -l)" >> final-report.md
+          echo "- 압축 파일: $(ls output/*.zip)" >> final-report.md
+          echo "- NetBackup 결과:" >> final-report.md
+          for file in /opt/netbackup/data/*.json; do
+            echo "- 백업됨: $(basename $file)" >> final-report.md
+          done
           cat final-report.md
