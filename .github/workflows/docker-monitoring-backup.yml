@@ -1,0 +1,73 @@
+name: 🔄 Docker Finance Realtime Monitor + Backup
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/finance-app
+  IMAGE_TAG: latest
+  BACKUP_VOLUME: finance_backup_vol
+  BACKUP_DIR_IN_CONTAINER: /backup
+  KAFKA_LOG: kafka.log
+
+jobs:
+  docker-monitoring:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📁 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Dockerfile 생성 (가상 거래 로그 포함)
+        run: |
+          echo 'FROM alpine:latest' > Dockerfile
+          echo 'RUN mkdir -p /app' >> Dockerfile
+          echo 'RUN echo "$(date) 계좌이체 상태: 완료" > /app/transactions.log' >> Dockerfile
+          echo 'RUN echo "$(date) 신용카드 상태: 완료" >> /app/transactions.log' >> Dockerfile
+          echo 'RUN echo "$(date) 비트코인 상태: 진행중" >> /app/transactions.log' >> Dockerfile
+          echo 'CMD ["sleep", "30"]' >> Dockerfile
+
+      - name: 🔐 Docker 로그인 (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏗️ Docker 이미지 빌드 및 푸시
+        run: |
+          docker build -t $IMAGE_NAME:$IMAGE_TAG .
+          docker push $IMAGE_NAME:$IMAGE_TAG
+
+      - name: 📦 Docker 볼륨 생성
+        run: docker volume create $BACKUP_VOLUME
+
+      - name: 🚀 컨테이너 실행 및 실시간 상태 모니터링
+        run: |
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          docker run --rm \
+            --name finance-monitor \
+            -v $BACKUP_VOLUME:$BACKUP_DIR_IN_CONTAINER \
+            $IMAGE_NAME:$IMAGE_TAG \
+            sh -c "
+              cp /app/transactions.log $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
+              grep '상태' /app/transactions.log | while read LINE; do
+                echo \"🔎 거래 감지됨: \$LINE\";
+                echo \"$TIMESTAMP [monitor] \$LINE\" >> $BACKUP_DIR_IN_CONTAINER/kafka-monitor.log;
+              done;
+              echo '✅ 상태 모니터링 및 백업 완료' >> $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
+            "
+          echo "$TIMESTAMP [monitor] 거래 상태 모니터링 및 백업 수행 완료" >> $KAFKA_LOG
+
+      - name: 📂 백업 파일 및 상태 로그 확인
+        run: |
+          docker run --rm \
+            -v $BACKUP_VOLUME:$BACKUP_DIR_IN_CONTAINER \
+            alpine sh -c "ls -lh $BACKUP_DIR_IN_CONTAINER; echo '📄 Kafka Monitor Log:'; cat $BACKUP_DIR_IN_CONTAINER/kafka-monitor.log"
+
+      - name: 📄 워크플로우 Kafka-style 로그 출력
+        run: |
+          echo "🪵 Kafka-style 로그:"
+          cat $KAFKA_LOG || echo "⚠️ 로그 없음"
