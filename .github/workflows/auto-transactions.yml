@@ -8,20 +8,20 @@ on:
 jobs:
   auto-transactions:
     runs-on: ubuntu-latest
+
     env:
       PG_DB: finance
       PG_USER: postgres
       PG_PASS: pgpass
-      MYSQL_ROOT_PASS: rootpass
-      LEDGER_PATH: ledger
       SQL_DIR: sql
-      TIMESTAMP: 20250603020857
+      LEDGER_PATH: ledger
+      TIMESTAMP: 20250603021045
 
     steps:
-      - name: 📁 디렉토리 생성
+      - name: 📁 디렉토리 및 SQL 파일 생성
         run: |
-          sudo mkdir -p $LEDGER_PATH $SQL_DIR
-          sudo chmod -R 777 $LEDGER_PATH $SQL_DIR
+          sudo mkdir -p $SQL_DIR $LEDGER_PATH
+          sudo chmod -R 777 $SQL_DIR $LEDGER_PATH
           echo "CREATE TABLE IF NOT EXISTS transactions (
             id SERIAL PRIMARY KEY,
             type VARCHAR(20),
@@ -31,36 +31,42 @@ jobs:
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           );" > $SQL_DIR/init.sql
 
-      - name: 🐘 PostgreSQL 설치 및 초기화
+      - name: 🐘 PostgreSQL 설치 및 사용자 패스워드 설정
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql
-          sudo systemctl start postgresql
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD '$PG_PASS';"
+
+          # PostgreSQL 인증 방식 md5로 변경
+          sudo sed -i "s/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/" /etc/postgresql/*/main/pg_hba.conf
+          sudo systemctl restart postgresql
+
+          # postgres 사용자 비밀번호 설정
+          sudo -u postgres psql -c "ALTER USER $PG_USER PASSWORD '$PG_PASS';"
+
           echo "127.0.0.1:5432:$PG_DB:$PG_USER:$PG_PASS" > ~/.pgpass
           chmod 600 ~/.pgpass
 
-      - name: 🐘 PostgreSQL 데이터베이스 생성 및 테이블 구축
+      - name: 🐘 DB 생성 및 테이블 초기화
         run: |
-          sudo -u postgres createdb $PG_DB || echo "✅ 이미 존재"
-          PGPASSFILE=$HOME/.pgpass psql -U $PG_USER -d $PG_DB -f $SQL_DIR/init.sql
+          PGPASSFILE=$HOME/.pgpass createdb -h 127.0.0.1 -U $PG_USER $PG_DB || echo "✅ 이미 존재"
+          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -f $SQL_DIR/init.sql
 
-      - name: 💳 가상 자동이체 거래 입력
+      - name: 💳 가상 거래 내역 추가
         run: |
-          PGPASSFILE=$HOME/.pgpass psql -U $PG_USER -d $PG_DB -c "
-            INSERT INTO transactions (type, amount, currency, status)
-            VALUES
+          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "
+            INSERT INTO transactions (type, amount, currency, status) VALUES
               ('credit_card', 150000, 'KRW', 'completed'),
               ('check_card', 35000, 'KRW', 'completed'),
               ('stock', 300000, 'KRW', 'completed'),
               ('forex', 1000, 'USD', 'completed');
           "
 
-      - name: 📜 거래 원장 생성
+      - name: 📜 거래 원장 파일로 출력
         run: |
-          PGPASSFILE=$HOME/.pgpass psql -U $PG_USER -d $PG_DB -c "\copy transactions TO '$LEDGER_PATH/ledger-${{ env.TIMESTAMP }}.csv' CSV HEADER"
+          FILE=$LEDGER_PATH/ledger-${{ env.TIMESTAMP }}.csv
+          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "\copy transactions TO '$FILE' CSV HEADER"
           ls -lh $LEDGER_PATH
 
-      - name: 📄 출력 로그 확인
+      - name: 🧾 거래 원장 확인
         run: |
           cat $LEDGER_PATH/ledger-${{ env.TIMESTAMP }}.csv
