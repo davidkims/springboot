@@ -1,0 +1,129 @@
+name: Build Finance Simulation with Reports
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  simulate-finance:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+
+    - name: 📁 Set up disk slot and folders
+      run: |
+        sudo mkdir -p /opt/finance/{credit,check,stock,forex,logs,reports}
+        sudo fallocate -l 10G /opt/finance/.disk_slot || sudo dd if=/dev/zero of=/opt/finance/.disk_slot bs=1M count=10240
+        sudo chmod -R 777 /opt/finance
+
+    - name: 🛠️ Create source files
+      run: |
+        mkdir -p project/init-db
+        mkdir -p project/src
+        mkdir -p output
+        echo "${SCHEMA_SQL}" > project/init-db/schema.sql
+        echo "${JAVA_CODE}" > project/src/FinanceApp.java
+        echo "${DOCKERFILE_CONTENT}" > project/Dockerfile
+
+    - name: 🐳 Build Docker image
+      run: docker build -t finance-app:latest ./project
+
+    - name: 🚀 Run simulation and capture output
+      run: |
+        docker run --rm finance-app:latest > output/transactions.log
+        cat output/transactions.log
+
+    - name: 📊 Generate CSV, Markdown and SARIF reports
+      run: |
+        mkdir -p reports
+
+        echo "type,user,detail" > reports/transactions.csv
+        grep "CreditCard" output/transactions.log | sed 's/💳 CreditCard:/credit,1,/g' >> reports/transactions.csv
+        grep "CheckCard" output/transactions.log | sed 's/💳 CheckCard:/check,2,/g' >> reports/transactions.csv
+        grep "Stock" output/transactions.log | sed 's/📈 Stock:/stock,3,/g' >> reports/transactions.csv
+        grep "Forex" output/transactions.log | sed 's/💱 Forex:/forex,4,/g' >> reports/transactions.csv
+
+        echo "## 💰 거래 시뮬레이션 요약 보고서" > reports/transactions.md
+        cat output/transactions.log >> reports/transactions.md
+
+        # SARIF 생성
+        cat <<EOF > reports/transactions.sarif
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "FinanceSimulation",
+          "version": "1.0.0",
+          "informationUri": "https://github.com/davidkims/my_real_study",
+          "rules": []
+        }
+      },
+      "results": [
+        $(awk '/CreditCard|CheckCard|Stock|Forex/ {
+          gsub(/"/, "\\\"", $0);
+          printf("{\"ruleId\":\"finance-log\",\"level\":\"note\",\"message\":{\"text\":\"%s\"}},", $0);
+        }' output/transactions.log | sed 's/,$//')
+      ]
+    }
+  ]
+}
+EOF
+
+    - name: 📤 Upload reports to artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: finance-reports
+        path: reports/
+        retention-days: 7
+
+    env:
+      SCHEMA_SQL: |
+        -- (same as previous schema)
+
+      JAVA_CODE: |
+        import java.util.Random;
+        public class FinanceApp {
+            public static void main(String[] args) {
+                System.out.println("🚀 Starting Finance Transaction Simulation...");
+                simulateCreditTransaction();
+                simulateCheckTransaction();
+                simulateStockTrade();
+                simulateForexTrade();
+            }
+            static void simulateCreditTransaction() {
+                Random r = new Random();
+                System.out.println("💳 CreditCard: User#1 spent $" + (r.nextInt(9000) + 100) + " USD");
+            }
+            static void simulateCheckTransaction() {
+                Random r = new Random();
+                System.out.println("💳 CheckCard: User#2 spent $" + (r.nextInt(5000) + 50) + " KRW");
+            }
+            static void simulateStockTrade() {
+                Random r = new Random();
+                System.out.println("📈 Stock: User#3 bought " + r.nextInt(50) + " shares of AAPL at $" + (r.nextDouble() * 100 + 100));
+            }
+            static void simulateForexTrade() {
+                Random r = new Random();
+                double amount = r.nextInt(500) + 50;
+                double rate = 1.13;
+                System.out.println("💱 Forex: User#4 exchanged $" + amount + " USD to EUR at rate " + rate);
+            }
+        }
+
+      DOCKERFILE_CONTENT: |
+        FROM openjdk:17
+        WORKDIR /app
+        COPY ./src ./src
+        COPY ./init-db /docker-entrypoint-initdb.d
+        RUN javac ./src/FinanceApp.java
+        CMD ["java", "-cp", "./src", "FinanceApp"]
