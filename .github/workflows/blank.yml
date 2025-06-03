@@ -1,71 +1,152 @@
-name: 📘 README에 워크플로우 자동 요약 (echo 기반)
+name: Ledger Pipeline
 
 on:
   push:
-    paths:
-      - ".github/workflows/*.yml"
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  summarize-workflows:
+  ledger:
     runs-on: ubuntu-latest
 
     steps:
-    - name: 📥 Checkout
-      uses: actions/checkout@v4
+      - name: 📅 Checkout
+        uses: actions/checkout@v4
 
-    - name: 🐍 Python 설치 및 스크립트 생성 (echo 기반)
-      run: |
-        pip install pyyaml
+      - name: 🛠️ Generate Dockerfile
+        run: |
+          echo 'FROM mysql:8.0' > Dockerfile
+          echo 'ENV MYSQL_ROOT_PASSWORD=root' >> Dockerfile
+          echo 'ENV MYSQL_DATABASE=finance_db' >> Dockerfile
+          echo 'COPY init.sql /docker-entrypoint-initdb.d/' >> Dockerfile
+          echo 'COPY transactions.sql /docker-entrypoint-initdb.d/' >> Dockerfile
+          cat Dockerfile
 
-        echo "import os, yaml
+      - name: 📋 Generate SQL Init Scripts
+        run: |
+          echo 'CREATE DATABASE IF NOT EXISTS finance_db;' > init.sql
+          echo 'USE finance_db;' >> init.sql
+          echo 'CREATE TABLE IF NOT EXISTS customer_ledger (' >> init.sql
+          echo '  id INT AUTO_INCREMENT PRIMARY KEY,' >> init.sql
+          echo '  customer_id VARCHAR(50),' >> init.sql
+          echo '  transaction_type VARCHAR(20),' >> init.sql
+          echo '  transaction_amount DECIMAL(18, 2),' >> init.sql
+          echo '  currency VARCHAR(10),' >> init.sql
+          echo '  status VARCHAR(20),' >> init.sql
+          echo '  transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP' >> init.sql
+          echo ');' >> init.sql
+          cat init.sql
 
-workflow_dir = '.github/workflows'
-rows = []
+          echo 'USE finance_db;' > transactions.sql
+          echo "INSERT INTO customer_ledger (customer_id, transaction_type, transaction_amount, currency, status) VALUES" >> transactions.sql
+          echo "('CUST1001', 'credit_card', 10200.50, 'KRW', 'approved')," >> transactions.sql
+          echo "('CUST1002', 'check_card', 2300.00, 'KRW', 'pending')," >> transactions.sql
+          echo "('CUST1003', 'forex', 153000.00, 'USD', 'completed');" >> transactions.sql
+          cat transactions.sql
 
-for file in os.listdir(workflow_dir):
-    if file.endswith('.yml') or file.endswith('.yaml'):
-        path = os.path.join(workflow_dir, file)
-        with open(path, encoding='utf-8') as f:
-            try:
-                data = yaml.safe_load(f)
-                name = data.get('name', 'N/A')
-                trigger = ', '.join(data.get('on', {}).keys()) if isinstance(data.get('on'), dict) else str(data.get('on'))
-                jobs = ', '.join(data.get('jobs', {}).keys()) if 'jobs' in data else 'N/A'
-                rows.append((file, name, trigger, jobs))
-            except Exception as e:
-                rows.append((file, '⚠️ 오류', 'N/A', 'N/A'))
+      - name: 🐋 Build Docker Image
+        run: docker build -t finance-ledger-db .
 
-table = '| 워크플로우 파일 | 워크플로우 이름 | 트리거 | 주요 작업 |\\n'
-table += '|----------------|----------------|--------|-----------|\\n'
-for r in rows:
-    table += f'| {r[0]} | {r[1]} | {r[2]} | {r[3]} |\\n'
+      - name: 🚀 Run MySQL Container
+        run: |
+          docker run -d --name finance-db -e MYSQL_ROOT_PASSWORD=root -p 3307:3306 finance-ledger-db
+          sleep 30
 
-readme_path = 'README.md'
-if not os.path.exists(readme_path):
-    with open(readme_path, 'w', encoding='utf-8') as f:
-        f.write('# 프로젝트 설명\\n\\n')
+      - name: 📆 Backup DB with --databases
+        run: |
+          docker exec finance-db mysqldump -uroot -proot --databases finance_db > backup.sql
+          cat backup.sql
 
-with open(readme_path, 'r', encoding='utf-8') as rf:
-    original = rf.read()
+      - name: 🔄 Restore DB to New Container
+        run: |
+          docker run -d --name restore-db -e MYSQL_ROOT_PASSWORD=root -p 3308:3306 mysql:8.0
+          sleep 30
+          docker cp backup.sql restore-db:/tmp/backup.sql
+          docker exec restore-db bash -c "mysql -uroot -proot < /tmp/backup.sql"
 
-if '## 🔧 GitHub Actions 워크플로우 요약' in original:
-    head = original.split('## 🔧 GitHub Actions 워크플로우 요약')[0].strip()
-else:
-    head = original.strip()
+      - name: 🐇 Install Python3 & pip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip
+          pip3 install mysql-connector-python pillow
 
-with open(readme_path, 'w', encoding='utf-8') as wf:
-    wf.write(head + '\\n\\n## 🔧 GitHub Actions 워크플로우 요약\\n\\n' + table)
+      - name: 📈 Generate analyze_logs.py
+        run: |
+          cat << 'EOF' > analyze_logs.py
+import mysql.connector
+import csv
 
-print('✅ README.md 업데이트 완료')
-" > summarize_workflows.py
+conn = mysql.connector.connect(host='127.0.0.1', user='root', password='root', database='finance_db')
+cursor = conn.cursor()
+cursor.execute('SELECT status, COUNT(*), SUM(transaction_amount) FROM customer_ledger GROUP BY status')
+status_stats = cursor.fetchall()
+cursor.execute('SELECT transaction_type, COUNT(*), SUM(transaction_amount) FROM customer_ledger GROUP BY transaction_type')
+type_stats = cursor.fetchall()
+with open('status_stats.csv', 'w') as f:
+    writer = csv.writer(f)
+    writer.writerow(['Status', 'Count', 'Total Amount'])
+    writer.writerows(status_stats)
+with open('type_stats.csv', 'w') as f:
+    writer = csv.writer(f)
+    writer.writerow(['Transaction Type', 'Count', 'Total Amount'])
+    writer.writerows(type_stats)
+with open('ledger_analysis.md', 'w') as f:
+    f.write('## Ledger Status Summary\n\n')
+    f.write('| Status | Count | Total Amount |\n|--------|-------|---------------|\n')
+    for row in status_stats:
+        f.write(f"| {row[0]} | {row[1]} | {row[2]:,.2f} |\n")
+    f.write('\n## Transaction Type Summary\n\n')
+    f.write('| Type | Count | Total Amount |\n|------|-------|---------------|\n')
+    for row in type_stats:
+        f.write(f"| {row[0]} | {row[1]} | {row[2]:,.2f} |\n")
+cursor.close()
+conn.close()
+EOF
+          cat analyze_logs.py
 
-        python3 summarize_workflows.py
+      - name: 🎨 Generate generate_customer_images.py
+        run: |
+          cat << 'EOF' > generate_customer_images.py
+import mysql.connector
+from PIL import Image, ImageDraw, ImageFont
+import os
 
-    - name: ✅ 변경 커밋 및 푸시
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add README.md
-        git commit -m "📘 README 워크플로우 요약 자동 업데이트" || echo "변경 사항 없음"
-        git push
+conn = mysql.connector.connect(host='127.0.0.1', user='root', password='root', database='finance_db')
+cursor = conn.cursor()
+cursor.execute("SELECT customer_id, transaction_type, transaction_amount, currency, status FROM customer_ledger")
+records = cursor.fetchall()
+
+os.makedirs("customer_images", exist_ok=True)
+try:
+    font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18)
+except:
+    font = ImageFont.load_default()
+
+for idx, row in enumerate(records):
+    customer_id, tx_type, amount, currency, status = row
+    img = Image.new("RGB", (500, 200), color="white")
+    draw = ImageDraw.Draw(img)
+    draw.text((20, 20), f"Customer ID: {customer_id}", font=font, fill="black")
+    draw.text((20, 60), f"Transaction Type: {tx_type}", font=font, fill="black")
+    draw.text((20, 100), f"Amount: {amount:.2f} {currency}", font=font, fill="black")
+    draw.text((20, 140), f"Status: {status}", font=font, fill="blue" if status == "approved" else "red")
+    img.save(f"customer_images/customer_{idx+1}.png")
+
+cursor.close()
+conn.close()
+EOF
+          cat generate_customer_images.py
+
+      - name: 📁 Copy scripts to restore-db
+        run: |
+          docker cp analyze_logs.py restore-db:/analyze_logs.py
+          docker cp generate_customer_images.py restore-db:/generate_customer_images.py
+
+      - name: 📊 Run Analysis + Image Gen in restore-db
+        run: |
+          docker exec restore-db bash -c "apt-get update && apt-get install -y python3 python3-pip && pip3 install mysql-connector-python pillow && mkdir -p /output && python3 /analyze_logs.py && python3 /generate_customer_images.py && mv *.csv *.md /output/ && cp -r customer_images /output/"
+          docker cp restore-db:/output ./output
+
+      - name: ☁️ Upload Results
+        uses: actions/upload-artifact@v4
+        with:
