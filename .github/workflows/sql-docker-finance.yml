@@ -1,75 +1,94 @@
-name: 🧾 SQL + Docker Finance Ledger
+name: 🧾 Finance Ledger with Echo-Compatible Safe Writes
 
 on:
-  schedule:
-    - cron: "0 * * * *"  # 매 시간마다 실행
+  push:
+    branches: [main]
   workflow_dispatch:
 
+env:
+  IMAGE_NAME: ghcr.io/davidkims/finance-ledger
+  IMAGE_TAG: latest
+  BACKUP_DIR: /tmp/finance-backup
+  DB_FILE: finance.db
+
 jobs:
-  ledger-pipeline:
+  ledger-backup:
     runs-on: ubuntu-latest
-    env:
-      IMAGE_NAME: ghcr.io/davidkims/finance-ledger
-      IMAGE_TAG: latest
-      BACKUP_DIR: /tmp/finance-backup
-      DB_FILE: finance.db
 
     steps:
-      - name: 📁 프로젝트 디렉토리 및 파일 준비
-        run: |
-          mkdir -p app
-          mkdir -p $BACKUP_DIR
+    - name: 📦 Checkout Repository
+      uses: actions/checkout@v4
 
-          cat <<EOF > app/Dockerfile
-          FROM python:3.10-slim
-          WORKDIR /app
-          COPY . .
-          RUN pip install --no-cache-dir sqlite-utils
-          CMD ["python3", "ledger.py"]
-          EOF
+    - name: 📁 Safe File Generation with Echo-compatible Style
+      run: |
+        mkdir -p app
 
-          cat <<EOF > app/ledger.py
-          import sqlite3
-          import datetime
+        # Dockerfile 작성
+        cat <<EOF > Dockerfile
+FROM python:3.10-alpine
+WORKDIR /app
+COPY ledger.py .
+CMD ["python", "ledger.py"]
+EOF
 
-          conn = sqlite3.connect("${{ env.DB_FILE }}")
-          c = conn.cursor()
+        # ledger.py 파일 작성
+        cat <<EOF > app/ledger.py
+import sqlite3
+import datetime
+import os
 
-          c.execute("CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT, type TEXT, amount REAL, status TEXT, timestamp TEXT)")
+db_path = '/data/finance.db'
+os.makedirs('/data', exist_ok=True)
 
-          data = [
-            ("check_card", "payment", 20000, "completed", datetime.datetime.now()),
-            ("credit_card", "payment", 50000, "completed", datetime.datetime.now()),
-            ("stock", "trade", 150000, "completed", datetime.datetime.now()),
-            ("netflix", "subscription", 14500, "completed", datetime.datetime.now()),
-            ("chatgpt", "subscription", 25000, "completed", datetime.datetime.now()),
-          ]
+conn = sqlite3.connect(db_path)
+c = conn.cursor()
 
-          c.executemany("INSERT INTO ledger (service, type, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)", data)
-          conn.commit()
-          conn.close()
-          EOF
+c.execute('''
+CREATE TABLE IF NOT EXISTS ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service TEXT,
+    type TEXT,
+    amount REAL,
+    status TEXT,
+    timestamp TEXT
+)
+''')
 
-      - name: 🐳 Docker 이미지 빌드
-        run: |
-          docker build -t $IMAGE_NAME:$IMAGE_TAG ./app
+data = [
+    ('check_card', 'payment', 20000, 'completed', datetime.datetime.now()),
+    ('credit_card', 'payment', 50000, 'completed', datetime.datetime.now()),
+    ('stock', 'trade', 150000, 'completed', datetime.datetime.now()),
+    ('netflix', 'subscription', 14500, 'completed', datetime.datetime.now()),
+    ('chatgpt', 'subscription', 25000, 'completed', datetime.datetime.now()),
+]
 
-      - name: 📦 Docker 컨테이너 실행 및 DB 생성
-        run: |
-          docker run --rm -v $BACKUP_DIR:/data $IMAGE_NAME:$IMAGE_TAG
-          cp ${{ env.DB_FILE }} $BACKUP_DIR/
+c.executemany('INSERT INTO ledger (service, type, amount, status, timestamp) VALUES (?, ?, ?, ?, ?)', data)
+conn.commit()
+conn.close()
+EOF
 
-      - name: 🧾 결과 확인 (ledger 테이블)
-        run: |
-          sqlite3 $BACKUP_DIR/${{ env.DB_FILE }} "SELECT * FROM ledger;"
+    - name: 🐳 Build Docker Image
+      run: docker build -t $IMAGE_NAME:$IMAGE_TAG .
 
-      - name: 🗃️ 백업 압축
-        run: |
-          cd $BACKUP_DIR
-          tar -czf finance-ledger-${{ github.run_id }}.tar.gz *.db
+    - name: 📁 Prepare Backup Directory
+      run: |
+        sudo mkdir -p $BACKUP_DIR
+        sudo chmod -R 777 $BACKUP_DIR
 
-      - name: 📤 아티팩트 업로드
-        uses: actions/upload-artifact@v4
-        with:
-          name: finance-ledger-${{ github.run_id }}
-          path: $BACKUP_DIR/finance-ledger-${{ github.run_id }}.tar.gz
+    - name: 🐳 Run Container to Generate Ledger
+      run: docker run --rm -v $BACKUP_DIR:/data $IMAGE_NAME:$IMAGE_TAG
+
+    - name: 📄 Show Ledger Contents
+      run: |
+        if [ -f "$BACKUP_DIR/$DB_FILE" ]; then
+          sudo apt-get update && sudo apt-get install -y sqlite3
+          sqlite3 $BACKUP_DIR/$DB_FILE "SELECT * FROM ledger;"
+        else
+          echo "❌ DB not found: $BACKUP_DIR/$DB_FILE"
+          exit 1
+        fi
+
+    - name: 💾 Compress Ledger
+      run: |
+        cd $BACKUP_DIR
+        tar -czf finance-ledger-${{ github.run_id }}.tar.gz $DB_FILE
