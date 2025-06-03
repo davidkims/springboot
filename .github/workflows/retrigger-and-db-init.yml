@@ -1,96 +1,59 @@
-name: ♻️ 워크플로우 재실행 & 거래용 테이블 자동 생성
+name: 🐘 PostgreSQL 초기화 및 거래 테이블 생성
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  actions: write
-  id-token: write
-
 jobs:
-  retrigger-and-init:
+  init-postgres:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 저장소 체크아웃
+      - name: 📂 저장소 체크아웃
         uses: actions/checkout@v4
 
-      - name: 📁 echo 기반 SQL 초기화 스크립트 생성
+      - name: 📁 SQL 초기화 디렉토리 생성 및 테이블 스크립트 작성
         run: |
           mkdir -p db/init
-
-          echo "📄 PostgreSQL 테이블 생성 스크립트 생성"
-          cat << 'EOF' > db/init/init-postgres.sql
-          CREATE TABLE IF NOT EXISTS workflow_audit_log (
-            id SERIAL PRIMARY KEY,
-            workflow_name TEXT,
-            triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT
-          );
-
-          CREATE TABLE IF NOT EXISTS ledger_transactions (
-            id SERIAL PRIMARY KEY,
-            tx_time TEXT,
-            tx_type TEXT,
-            company TEXT,
-            amount NUMERIC,
-            currency TEXT,
-            status TEXT,
-            description TEXT
-          );
-          EOF
-
-          echo "📄 MySQL 테이블 생성 스크립트 생성"
-          cat << 'EOF' > db/init/init-mysql.sql
-          CREATE TABLE IF NOT EXISTS workflow_audit_log (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            workflow_name VARCHAR(255),
-            triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status VARCHAR(50)
-          );
-
-          CREATE TABLE IF NOT EXISTS ledger_transactions (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            tx_time VARCHAR(100),
-            tx_type VARCHAR(50),
-            company VARCHAR(50),
-            amount FLOAT,
-            currency VARCHAR(10),
-            status VARCHAR(50),
-            description TEXT
+          cat << 'EOF' > db/init/create_ledger_tables.sql
+          CREATE TABLE IF NOT EXISTS tx_pg (
+            시간 TEXT,
+            유형 TEXT,
+            기업구분 TEXT,
+            금액 REAL,
+            통화 TEXT,
+            상태 TEXT,
+            설명 TEXT
           );
           EOF
 
       - name: 🐘 PostgreSQL 컨테이너 시작 및 테이블 적용
         run: |
           echo "🐘 PostgreSQL 시작"
-          docker run --rm --name pg-init -e POSTGRES_PASSWORD=pass -e POSTGRES_DB=ledger -v ${{ github.workspace }}/db/init:/docker-entrypoint-initdb.d -d postgres:14
+          docker run --name pg-init \
+            -e POSTGRES_PASSWORD=pass \
+            -e POSTGRES_DB=ledger \
+            -v ${{ github.workspace }}/db/init:/docker-entrypoint-initdb.d \
+            -d --health-cmd="pg_isready -U postgres" \
+            --health-interval=5s --health-retries=10 \
+            postgres:14
 
           echo "⏱️ PostgreSQL 초기화 대기"
-          sleep 10
-
-          echo "✅ PostgreSQL 초기화 완료 후 종료"
-          docker stop pg-init
-
-      - name: 🐬 MySQL 컨테이너 시작 및 테이블 적용
-        run: |
-          echo "🐬 MySQL 시작"
-          docker run --rm --name mysql-init -e MYSQL_ROOT_PASSWORD=pass -e MYSQL_DATABASE=ledger -v ${{ github.workspace }}/db/init:/docker-entrypoint-initdb.d -d mysql:8
-
-          echo "⏱️ MySQL 초기화 대기"
-          sleep 25
-
-          echo "✅ MySQL 초기화 완료 후 종료"
-          docker stop mysql-init
-
-      - name: ♻️ .github/workflows/*.yml 워크플로우 재실행 요청
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "🔍 모든 워크플로우 YAML 목록 수집"
-          for file in .github/workflows/*.yml; do
-            name=$(basename "$file" .yml)
-            echo "🔁 워크플로우 [$name] 강제 재트리거"
-            gh workflow run "$name.yml" || echo "⚠️ $name 재실행 실패"
+          for i in {1..20}; do
+            status=$(docker inspect --format='{{.State.Health.Status}}' pg-init || echo "no-container")
+            echo "📊 상태: $status"
+            if [ "$status" = "healthy" ]; then
+              echo "✅ PostgreSQL 컨테이너 정상 실행됨"
+              break
+            fi
+            sleep 5
           done
+
+          echo "🗒️ PostgreSQL 로그 요약"
+          docker logs pg-init | tail -n 20
+
+          echo "📥 테이블 생성 확인"
+          docker exec pg-init psql -U postgres -d ledger -c '\dt'
+
+          echo "🧹 PostgreSQL 컨테이너 중지 및 삭제"
+          docker stop pg-init
+          docker rm pg-init
