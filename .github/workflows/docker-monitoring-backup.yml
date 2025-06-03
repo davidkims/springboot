@@ -1,73 +1,60 @@
-name: 🔄 Docker Finance Realtime Monitor + Backup
+name: 🐳 Docker Finance Backup & GHCR Push
 
 on:
+  push:
+    branches: [main]
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/10 * * * *'  # 10분마다 실행
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}/finance-app
+  IMAGE_NAME: ghcr.io/davidkims/springboot/finance-app
   IMAGE_TAG: latest
   BACKUP_VOLUME: finance_backup_vol
   BACKUP_DIR_IN_CONTAINER: /backup
   KAFKA_LOG: kafka.log
 
 jobs:
-  docker-monitoring:
+  build-and-push:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📁 Checkout Repository
+      - name: 📦 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🛠️ Dockerfile 생성 (가상 거래 로그 포함)
-        run: |
-          echo 'FROM alpine:latest' > Dockerfile
-          echo 'RUN mkdir -p /app' >> Dockerfile
-          echo 'RUN echo "$(date) 계좌이체 상태: 완료" > /app/transactions.log' >> Dockerfile
-          echo 'RUN echo "$(date) 신용카드 상태: 완료" >> /app/transactions.log' >> Dockerfile
-          echo 'RUN echo "$(date) 비트코인 상태: 진행중" >> /app/transactions.log' >> Dockerfile
-          echo 'CMD ["sleep", "30"]' >> Dockerfile
+      - name: 🔐 Docker Login to GitHub Container Registry
+        run: echo "${{ secrets.GH_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: 🔐 Docker 로그인 (GHCR)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 🏗️ Docker 이미지 빌드 및 푸시
+      - name: 🛠️ Build Docker Image
         run: |
           docker build -t $IMAGE_NAME:$IMAGE_TAG .
+
+      - name: 🚀 Push Docker Image to GHCR
+        run: |
           docker push $IMAGE_NAME:$IMAGE_TAG
 
-      - name: 📦 Docker 볼륨 생성
-        run: docker volume create $BACKUP_VOLUME
-
-      - name: 🚀 컨테이너 실행 및 실시간 상태 모니터링
+      - name: 🗃️ Create Backup Volume
         run: |
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
-          docker run --rm \
-            --name finance-monitor \
+          docker volume create $BACKUP_VOLUME || true
+
+      - name: 🏃 Run Container for Backup
+        run: |
+          docker run --rm -d --name finance-backup-runner \
             -v $BACKUP_VOLUME:$BACKUP_DIR_IN_CONTAINER \
-            $IMAGE_NAME:$IMAGE_TAG \
-            sh -c "
-              cp /app/transactions.log $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
-              grep '상태' /app/transactions.log | while read LINE; do
-                echo \"🔎 거래 감지됨: \$LINE\";
-                echo \"$TIMESTAMP [monitor] \$LINE\" >> $BACKUP_DIR_IN_CONTAINER/kafka-monitor.log;
-              done;
-              echo '✅ 상태 모니터링 및 백업 완료' >> $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
-            "
-          echo "$TIMESTAMP [monitor] 거래 상태 모니터링 및 백업 수행 완료" >> $KAFKA_LOG
+            $IMAGE_NAME:$IMAGE_TAG
 
-      - name: 📂 백업 파일 및 상태 로그 확인
-        run: |
-          docker run --rm \
-            -v $BACKUP_VOLUME:$BACKUP_DIR_IN_CONTAINER \
-            alpine sh -c "ls -lh $BACKUP_DIR_IN_CONTAINER; echo '📄 Kafka Monitor Log:'; cat $BACKUP_DIR_IN_CONTAINER/kafka-monitor.log"
+          echo "⏳ 컨테이너 초기화 대기 중..."
+          sleep 10
 
-      - name: 📄 워크플로우 Kafka-style 로그 출력
+      - name: 💾 Simulate Transaction Log Backup
         run: |
-          echo "🪵 Kafka-style 로그:"
-          cat $KAFKA_LOG || echo "⚠️ 로그 없음"
+          docker exec finance-backup-runner sh -c "cp /app/transactions.log $BACKUP_DIR_IN_CONTAINER/transactions-$(date +%Y%m%d%H%M%S).log"
+          echo "📝 백업 생성 시간: $(date +%Y%m%d%H%M%S)" >> $KAFKA_LOG
+
+      - name: 📤 Stop Container After Backup
+        run: |
+          docker stop finance-backup-runner || echo "이미 종료됨"
+
+      - name: 📑 View Kafka-style Logs
+        run: |
+          cat $KAFKA_LOG || echo "⚠️ Kafka-style 로그 없음"
