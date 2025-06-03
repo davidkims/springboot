@@ -1,4 +1,4 @@
-name: SQL Ledger Pipeline
+name: Ledger Pipeline
 
 on:
   push:
@@ -6,24 +6,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  finance-ledger:
+  ledger:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🐳 Build MySQL Docker Image
-        run: docker build -t finance-ledger-db ./docker
+      - name: 🐳 Build Docker Image
+        run: docker build -t finance-ledger-db .
 
-      - name: 🏃 Run MySQL Container
+      - name: 🚀 Run MySQL Container
         run: |
           docker run -d --name finance-db -e MYSQL_ROOT_PASSWORD=root -p 3307:3306 finance-ledger-db
+          sleep 30
 
-      - name: 💤 Wait for Initialization
-        run: sleep 30
-
-      - name: 🧾 Export Ledger to CSV
+      - name: 📄 Export Ledger CSV
         run: |
           docker exec finance-db \
             mysql -uroot -proot -e "USE finance_db; \
@@ -32,47 +30,41 @@ jobs:
             FIELDS TERMINATED BY ',' ENCLOSED BY '\"' LINES TERMINATED BY '\n';"
           docker cp finance-db:/var/lib/mysql-files/ledger.csv ./ledger.csv
 
-      - name: 💾 SQL Backup
+      - name: 💾 Dump SQL Backup
         run: |
           docker exec finance-db \
             mysqldump -uroot -proot finance_db > backup.sql
 
-      - name: 📤 Upload CSV & SQL Backup
-        uses: actions/upload-artifact@v4
-        with:
-          name: ledger-data
-          path: |
-            ledger.csv
-            backup.sql
-
-      - name: 🔁 Restore DB to New Container
+      - name: 🔁 Restore to New Container
         run: |
           docker run -d --name restore-db -e MYSQL_ROOT_PASSWORD=root -p 3308:3306 mysql:8.0
           sleep 30
           docker cp backup.sql restore-db:/backup.sql
-          docker exec restore-db \
-            bash -c "mysql -uroot -proot < /backup.sql"
+          docker exec restore-db mysql -uroot -proot < /backup.sql
 
-      - name: 🐍 Install Python & MySQL Connector
+      - name: 🐍 Setup Python for Stats
         run: |
-          sudo apt update
-          sudo apt install -y python3 python3-pip
+          sudo apt-get update && sudo apt-get install -y python3 python3-pip
           pip3 install mysql-connector-python
 
-      - name: 📊 Run Log Analyzer
+      - name: 📊 Run Transaction Analysis
         run: |
-          docker cp scripts/analyze_logs.py restore-db:/analyze_logs.py
-          docker exec restore-db \
-            bash -c "apt update && apt install -y python3 python3-pip && pip3 install mysql-connector-python && python3 /analyze_logs.py"
+          docker cp analyze_logs.py restore-db:/analyze_logs.py
+          docker exec restore-db bash -c "
+            apt-get update && apt-get install -y python3 python3-pip &&
+            pip3 install mysql-connector-python &&
+            python3 /analyze_logs.py"
           docker cp restore-db:/status_stats.csv ./status_stats.csv
           docker cp restore-db:/type_stats.csv ./type_stats.csv
           docker cp restore-db:/ledger_analysis.md ./ledger_analysis.md
 
-      - name: 📤 Upload Log Analysis
+      - name: ☁️ Upload All Results
         uses: actions/upload-artifact@v4
         with:
-          name: ledger-analysis
+          name: ledger-results
           path: |
+            ledger.csv
+            backup.sql
             status_stats.csv
             type_stats.csv
             ledger_analysis.md
