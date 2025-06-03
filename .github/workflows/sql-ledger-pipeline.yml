@@ -13,11 +13,42 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🛠️ Ensure Dockerfile Exists or Create/Download
+      - name: 🛠️ Ensure Dockerfile Exists or Create
         run: |
           if [ ! -f Dockerfile ]; then
-            echo "⚠️ Dockerfile이 없습니다. 생성 또는 다운로드를 시도합니다."
-            curl -fsSL https://raw.githubusercontent.com/davidkims/assets/main/finance-ledger/Dockerfile -o Dockerfile || cat << 'EOF' > Dockerfile
+            echo "⚠️ Dockerfile이 없습니다. echo로 생성합니다."
+            echo 'FROM mysql:8.0' > Dockerfile
+            echo 'ENV MYSQL_ROOT_PASSWORD=root' >> Dockerfile
+            echo 'ENV MYSQL_DATABASE=finance_db' >> Dockerfile
+            echo 'COPY init.sql /docker-entrypoint-initdb.d/' >> Dockerfile
+            echo 'COPY transactions.sql /docker-entrypoint-initdb.d/' >> Dockerfile
+          fi
+
+      - name: 🧾 Ensure SQL Files Exist
+        run: |
+          if [ ! -f init.sql ]; then
+            echo "📄 init.sql 생성"
+            echo 'CREATE DATABASE IF NOT EXISTS finance_db;' > init.sql
+            echo 'USE finance_db;' >> init.sql
+            echo 'CREATE TABLE IF NOT EXISTS customer_ledger (' >> init.sql
+            echo '  id INT AUTO_INCREMENT PRIMARY KEY,' >> init.sql
+            echo '  customer_id VARCHAR(50),' >> init.sql
+            echo '  transaction_type VARCHAR(20),' >> init.sql
+            echo '  transaction_amount DECIMAL(18, 2),' >> init.sql
+            echo '  currency VARCHAR(10),' >> init.sql
+            echo '  status VARCHAR(20),' >> init.sql
+            echo '  transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP' >> init.sql
+            echo ');' >> init.sql
+          fi
+
+          if [ ! -f transactions.sql ]; then
+            echo "📄 transactions.sql 생성"
+            echo 'USE finance_db;' > transactions.sql
+            echo "INSERT INTO customer_ledger (customer_id, transaction_type, transaction_amount, currency, status) VALUES" >> transactions.sql
+            echo "('CUST1001', 'credit_card', 10200.50, 'KRW', 'approved')," >> transactions.sql
+            echo "('CUST1002', 'check_card', 2300.00, 'KRW', 'pending')," >> transactions.sql
+            echo "('CUST1003', 'forex', 153000.00, 'USD', 'completed');" >> transactions.sql
+          fi
 
       - name: 🐳 Build Docker Image
         run: docker build -t finance-ledger-db .
@@ -53,16 +84,49 @@ jobs:
           sudo apt-get update && sudo apt-get install -y python3 python3-pip
           pip3 install mysql-connector-python
 
+      - name: 📊 Generate analyze_logs.py
+        run: |
+          echo "📄 analyze_logs.py 생성"
+          echo 'import mysql.connector' > analyze_logs.py
+          echo 'import csv' >> analyze_logs.py
+          echo 'try:' >> analyze_logs.py
+          echo '  conn = mysql.connector.connect(' >> analyze_logs.py
+          echo '    host="127.0.0.1",' >> analyze_logs.py
+          echo '    user="root",' >> analyze_logs.py
+          echo '    password="root",' >> analyze_logs.py
+          echo '    database="finance_db"' >> analyze_logs.py
+          echo '  )' >> analyze_logs.py
+          echo 'except mysql.connector.Error as err:' >> analyze_logs.py
+          echo '  print(f"❌ DB 연결 실패: {err}")' >> analyze_logs.py
+          echo '  exit(1)' >> analyze_logs.py
+          echo 'cursor = conn.cursor()' >> analyze_logs.py
+          echo 'cursor.execute("SELECT status, COUNT(*), SUM(transaction_amount) FROM customer_ledger GROUP BY status")' >> analyze_logs.py
+          echo 'status_stats = cursor.fetchall()' >> analyze_logs.py
+          echo 'cursor.execute("SELECT transaction_type, COUNT(*), SUM(transaction_amount) FROM customer_ledger GROUP BY transaction_type")' >> analyze_logs.py
+          echo 'type_stats = cursor.fetchall()' >> analyze_logs.py
+          echo 'with open("status_stats.csv", "w") as f:' >> analyze_logs.py
+          echo '  writer = csv.writer(f)' >> analyze_logs.py
+          echo '  writer.writerow(["Status", "Count", "Total Amount"])' >> analyze_logs.py
+          echo '  writer.writerows(status_stats)' >> analyze_logs.py
+          echo 'with open("type_stats.csv", "w") as f:' >> analyze_logs.py
+          echo '  writer = csv.writer(f)' >> analyze_logs.py
+          echo '  writer.writerow(["Transaction Type", "Count", "Total Amount"])' >> analyze_logs.py
+          echo '  writer.writerows(type_stats)' >> analyze_logs.py
+          echo 'with open("ledger_analysis.md", "w") as f:' >> analyze_logs.py
+          echo '  f.write("## Ledger Status Summary\\n\\n")' >> analyze_logs.py
+          echo '  f.write("| Status | Count | Total Amount |\\n|--------|-------|---------------|\\n")' >> analyze_logs.py
+          echo '  for row in status_stats:' >> analyze_logs.py
+          echo '    f.write(f"| {row[0]} | {row[1]} | {row[2]:,.2f} |\\n")' >> analyze_logs.py
+          echo '  f.write("\\n## Transaction Type Summary\\n\\n")' >> analyze_logs.py
+          echo '  f.write("| Type | Count | Total Amount |\\n|------|-------|---------------|\\n")' >> analyze_logs.py
+          echo '  for row in type_stats:' >> analyze_logs.py
+          echo '    f.write(f"| {row[0]} | {row[1]} | {row[2]:,.2f} |\\n")' >> analyze_logs.py
+          echo 'cursor.close()' >> analyze_logs.py
+          echo 'conn.close()' >> analyze_logs.py
+
       - name: 📊 Run Log Analysis
         run: |
-          docker cp analyze_logs.py restore-db:/analyze_logs.py
-          docker exec restore-db bash -c "
-            apt-get update && apt-get install -y python3 python3-pip &&
-            pip3 install mysql-connector-python &&
-            python3 /analyze_logs.py"
-          docker cp restore-db:/status_stats.csv ./status_stats.csv
-          docker cp restore-db:/type_stats.csv ./type_stats.csv
-          docker cp restore-db:/ledger_analysis.md ./ledger_analysis.md
+          python3 analyze_logs.py
 
       - name: ☁️ Upload All Results
         uses: actions/upload-artifact@v4
