@@ -1,0 +1,62 @@
+name: SQL Ledger Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  setup-sql-ledger:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🧱 Build MySQL Docker image with SQL
+        run: |
+          docker build -t finance-ledger-db .
+
+      - name: 🏗️ Run Docker container with MySQL
+        run: |
+          docker run -d --name finance-db -e MYSQL_ROOT_PASSWORD=root -p 3307:3306 finance-ledger-db
+
+      - name: ⏱️ Wait for DB to initialize
+        run: sleep 30
+
+      - name: 📄 Export Ledger to CSV
+        run: |
+          docker exec finance-db \
+            bash -c "mysql -uroot -proot -e 'USE finance_db; SELECT * FROM customer_ledger INTO OUTFILE \"/var/lib/mysql-files/ledger.csv\" FIELDS TERMINATED BY \",\" ENCLOSED BY '\"' LINES TERMINATED BY '\n';'"
+          docker cp finance-db:/var/lib/mysql-files/ledger.csv ./ledger.csv
+
+      - name: 💾 Upload Ledger CSV as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-csv
+          path: ./ledger.csv
+
+      - name: 📦 Backup Ledger SQL
+        run: |
+          docker exec finance-db \
+            bash -c "mysqldump -uroot -proot finance_db > /tmp/backup.sql"
+          docker cp finance-db:/tmp/backup.sql ./backup.sql
+
+      - name: 💾 Upload SQL Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-sql-backup
+          path: ./backup.sql
