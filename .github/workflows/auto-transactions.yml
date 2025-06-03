@@ -1,4 +1,4 @@
-name: 💳 Auto Transaction Ledger Backup
+name: 🧾 Finance Auto Ledger with PostgreSQL & MySQL
 
 on:
   schedule:
@@ -6,22 +6,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  auto-transactions:
+  ledger-setup:
     runs-on: ubuntu-latest
 
     env:
       PG_DB: finance
       PG_USER: postgres
       PG_PASS: pgpass
-      SQL_DIR: sql
+      MYSQL_ROOT_PASS: rootpass
       LEDGER_PATH: ledger
-      TIMESTAMP: 20250603021045
+      SQL_DIR: sql
+      TIMESTAMP: 20250603021601
 
     steps:
-      - name: 📁 디렉토리 및 SQL 파일 생성
+      - name: 📁 디렉토리 생성
         run: |
-          sudo mkdir -p $SQL_DIR $LEDGER_PATH
-          sudo chmod -R 777 $SQL_DIR $LEDGER_PATH
+          mkdir -p $LEDGER_PATH $SQL_DIR
           echo "CREATE TABLE IF NOT EXISTS transactions (
             id SERIAL PRIMARY KEY,
             type VARCHAR(20),
@@ -30,43 +30,55 @@ jobs:
             status VARCHAR(20),
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           );" > $SQL_DIR/init.sql
+          echo "INSERT INTO transactions(type, amount, currency, status) VALUES
+            ('credit_card', 30000, 'KRW', 'completed'),
+            ('check_card', 25000, 'KRW', 'completed'),
+            ('stock', 1200000, 'KRW', 'pending'),
+            ('forex', 500, 'USD', 'completed');" >> $SQL_DIR/init.sql
 
-      - name: 🐘 PostgreSQL 설치 및 사용자 패스워드 설정
+      - name: 🐘 PostgreSQL 설치 및 설정
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql
-
-          # PostgreSQL 인증 방식 md5로 변경
-          sudo sed -i "s/^local\s\+all\s\+postgres\s\+peer/local all postgres md5/" /etc/postgresql/*/main/pg_hba.conf
-          sudo systemctl restart postgresql
-
-          # postgres 사용자 비밀번호 설정
-          sudo -u postgres psql -c "ALTER USER $PG_USER PASSWORD '$PG_PASS';"
-
-          echo "127.0.0.1:5432:$PG_DB:$PG_USER:$PG_PASS" > ~/.pgpass
+          sudo systemctl start postgresql
+          sudo systemctl enable postgresql
+          sudo -u postgres psql -c "ALTER USER $PG_USER WITH PASSWORD '$PG_PASS';"
+          echo "localhost:5432:$PG_DB:$PG_USER:$PG_PASS" > ~/.pgpass
           chmod 600 ~/.pgpass
 
-      - name: 🐘 DB 생성 및 테이블 초기화
+      - name: 🐘 PostgreSQL DB 및 테이블 생성
         run: |
-          PGPASSFILE=$HOME/.pgpass createdb -h 127.0.0.1 -U $PG_USER $PG_DB || echo "✅ 이미 존재"
-          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -f $SQL_DIR/init.sql
+          sudo -u postgres createdb $PG_DB || echo "✅ 이미 존재"
+          PGPASSFILE=$HOME/.pgpass psql -h localhost -U $PG_USER -d $PG_DB -f $SQL_DIR/init.sql
 
-      - name: 💳 가상 거래 내역 추가
+      - name: 🐬 MySQL 설치 및 원장용 DB 초기화
         run: |
-          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "
-            INSERT INTO transactions (type, amount, currency, status) VALUES
-              ('credit_card', 150000, 'KRW', 'completed'),
-              ('check_card', 35000, 'KRW', 'completed'),
-              ('stock', 300000, 'KRW', 'completed'),
-              ('forex', 1000, 'USD', 'completed');
+          sudo apt-get install -y mysql-server
+          sudo systemctl start mysql
+          sudo systemctl enable mysql
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASS'; FLUSH PRIVILEGES;"
+          sudo mysql -uroot -p$MYSQL_ROOT_PASS -e "
+            CREATE DATABASE IF NOT EXISTS ledger_db;
+            USE ledger_db;
+            CREATE TABLE IF NOT EXISTS ledger (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              transaction_type VARCHAR(30),
+              detail TEXT,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO ledger(transaction_type, detail) VALUES
+              ('credit_card', '신용카드 결제 완료'),
+              ('check_card', '체크카드 결제 완료'),
+              ('stock', '주식 매수 대기'),
+              ('forex', '환전 완료');
           "
 
-      - name: 📜 거래 원장 파일로 출력
+      - name: 📄 PostgreSQL 원장 출력
         run: |
-          FILE=$LEDGER_PATH/ledger-${{ env.TIMESTAMP }}.csv
-          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U $PG_USER -d $PG_DB -c "\copy transactions TO '$FILE' CSV HEADER"
-          ls -lh $LEDGER_PATH
+          echo "🔎 PostgreSQL 거래 내용:"
+          PGPASSFILE=$HOME/.pgpass psql -h localhost -U $PG_USER -d $PG_DB -c "SELECT * FROM transactions;"
 
-      - name: 🧾 거래 원장 확인
+      - name: 📄 MySQL 원장 출력
         run: |
-          cat $LEDGER_PATH/ledger-${{ env.TIMESTAMP }}.csv
+          echo "🔎 MySQL Ledger 내용:"
+          sudo mysql -uroot -p$MYSQL_ROOT_PASS -e "USE ledger_db; SELECT * FROM ledger;"
