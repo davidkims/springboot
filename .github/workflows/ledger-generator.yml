@@ -1,4 +1,4 @@
-name: 🧾 거래 시뮬레이션 Docker 자동화
+name: 🗃️ 거래 데이터 - PostgreSQL & MySQL 저장 자동화
 
 on:
   workflow_dispatch:
@@ -6,23 +6,48 @@ on:
     branches: ["main"]
 
 jobs:
-  generate-transactions:
+  db-ledger:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        ports: [5432:5432]
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledgerpass
+          POSTGRES_DB: ledgerdb
+        options: >-
+          --health-cmd="pg_isready"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      mysql:
+        image: mysql:8
+        ports: [3306:3306]
+        env:
+          MYSQL_ROOT_PASSWORD: ledgerpass
+          MYSQL_DATABASE: ledgerdb
+          MYSQL_USER: ledger
+          MYSQL_PASSWORD: ledgerpass
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
-      - name: 📂 1. 저장소 체크아웃
-        uses: actions/checkout@v4
-
-      - name: 📁 2. 디렉토리 및 echo 기반 파일 생성
+      - name: 📂 디렉토리 및 코드 생성
         run: |
-          echo "📁 디렉토리 생성"
+          echo "📁 디렉토리 준비"
           mkdir -p app/output
-          mkdir -p output
 
-          echo "📄 ledger.py 생성 중..."
+          echo "📄 ledger.py 생성"
           echo 'import csv' > app/ledger.py
           echo 'import datetime' >> app/ledger.py
           echo 'import random' >> app/ledger.py
+          echo 'import psycopg2' >> app/ledger.py
+          echo 'import mysql.connector' >> app/ledger.py
           echo '' >> app/ledger.py
           echo 'def generate_transaction(transaction_type):' >> app/ledger.py
           echo '    company = random.choice(["중소기업", "대기업"])' >> app/ledger.py
@@ -31,47 +56,61 @@ jobs:
           echo '    status = random.choice(["승인", "거절", "보류"])' >> app/ledger.py
           echo '    time = datetime.datetime.now().isoformat()' >> app/ledger.py
           echo '    description = f"{company} {transaction_type} 거래"' >> app/ledger.py
-          echo '    return {"시간": time, "유형": transaction_type, "기업구분": company, "금액": amount, "통화": currency, "상태": status, "설명": description}' >> app/ledger.py
+          echo '    return [time, transaction_type, company, amount, currency, status, description]' >> app/ledger.py
           echo '' >> app/ledger.py
-          echo 'def generate_all_transactions():' >> app/ledger.py
+          echo 'def write_csv(transactions):' >> app/ledger.py
+          echo '    with open("output/transactions.csv", mode="w", newline="", encoding="utf-8") as f:' >> app/ledger.py
+          echo '        writer = csv.writer(f)' >> app/ledger.py
+          echo '        writer.writerow(["시간", "유형", "기업구분", "금액", "통화", "상태", "설명"])' >> app/ledger.py
+          echo '        writer.writerows(transactions)' >> app/ledger.py
+          echo '' >> app/ledger.py
+          echo 'def insert_postgresql(transactions):' >> app/ledger.py
+          echo '    conn = psycopg2.connect(host="localhost", dbname="ledgerdb", user="ledger", password="ledgerpass")' >> app/ledger.py
+          echo '    cur = conn.cursor()' >> app/ledger.py
+          echo '    cur.execute("""CREATE TABLE IF NOT EXISTS transactions_pg (' >> app/ledger.py
+          echo '        시간 TEXT, 유형 TEXT, 기업구분 TEXT, 금액 REAL, 통화 TEXT, 상태 TEXT, 설명 TEXT)""")' >> app/ledger.py
+          echo '    cur.executemany("INSERT INTO transactions_pg VALUES (%s, %s, %s, %s, %s, %s, %s)", transactions)' >> app/ledger.py
+          echo '    conn.commit(); cur.close(); conn.close()' >> app/ledger.py
+          echo '' >> app/ledger.py
+          echo 'def insert_mysql(transactions):' >> app/ledger.py
+          echo '    conn = mysql.connector.connect(host="localhost", database="ledgerdb", user="ledger", password="ledgerpass")' >> app/ledger.py
+          echo '    cur = conn.cursor()' >> app/ledger.py
+          echo '    cur.execute("""CREATE TABLE IF NOT EXISTS transactions_my (' >> app/ledger.py
+          echo '        시간 TEXT, 유형 TEXT, 기업구분 TEXT, 금액 FLOAT, 통화 TEXT, 상태 TEXT, 설명 TEXT)""")' >> app/ledger.py
+          echo '    cur.executemany("INSERT INTO transactions_my VALUES (%s, %s, %s, %s, %s, %s, %s)", transactions)' >> app/ledger.py
+          echo '    conn.commit(); cur.close(); conn.close()' >> app/ledger.py
+          echo '' >> app/ledger.py
+          echo 'if __name__ == "__main__":' >> app/ledger.py
           echo '    transactions = []' >> app/ledger.py
           echo '    for _ in range(50):' >> app/ledger.py
           echo '        transactions.append(generate_transaction("신용카드"))' >> app/ledger.py
           echo '        transactions.append(generate_transaction("체크카드"))' >> app/ledger.py
           echo '        transactions.append(generate_transaction("FX"))' >> app/ledger.py
-          echo '    with open("output/transactions.csv", mode="w", newline="", encoding="utf-8") as f:' >> app/ledger.py
-          echo '        writer = csv.DictWriter(f, fieldnames=transactions[0].keys())' >> app/ledger.py
-          echo '        writer.writeheader()' >> app/ledger.py
-          echo '        writer.writerows(transactions)' >> app/ledger.py
-          echo '    print("✅ 거래 데이터가 output/transactions.csv 에 저장되었습니다.")' >> app/ledger.py
-          echo '' >> app/ledger.py
-          echo 'if __name__ == "__main__":' >> app/ledger.py
-          echo '    generate_all_transactions()' >> app/ledger.py
+          echo '    write_csv(transactions)' >> app/ledger.py
+          echo '    insert_postgresql(transactions)' >> app/ledger.py
+          echo '    insert_mysql(transactions)' >> app/ledger.py
+          echo '    print("✅ 모든 거래가 DB와 CSV에 저장되었습니다.")' >> app/ledger.py
 
-          echo "📄 Dockerfile 생성 중..."
+          echo "📄 Dockerfile 생성"
           echo 'FROM python:3.10-slim' > app/Dockerfile
           echo 'WORKDIR /app' >> app/Dockerfile
           echo 'COPY ledger.py .' >> app/Dockerfile
-          echo 'RUN pip install --no-cache-dir --upgrade pip' >> app/Dockerfile
+          echo 'RUN apt-get update && apt-get install -y gcc libpq-dev default-libmysqlclient-dev' >> app/Dockerfile
+          echo 'RUN pip install --no-cache-dir psycopg2 mysql-connector-python' >> app/Dockerfile
           echo 'CMD ["python", "ledger.py"]' >> app/Dockerfile
 
-          echo "📄 README.md 생성 중..."
-          echo "# 거래 시뮬레이션 앱" > app/README.md
-          echo "신용카드, 체크카드, FX 거래 데이터를 생성하는 Python 앱입니다." >> app/README.md
-
-      - name: 🛠️ 3. Docker 이미지 빌드
+      - name: 🛠️ Docker 이미지 빌드
         run: |
-          echo "🐳 Docker 이미지 빌드 시작"
-          docker build -t virtual-ledger ./app
-          echo "✅ Docker 이미지 빌드 완료"
+          echo "🐳 Docker 이미지 빌드"
+          docker build -t ledger-db ./app
 
-      - name: 🚀 4. Docker 컨테이너 실행 (output 마운트 분리)
+      - name: 🚀 컨테이너 실행 (DB 연결 포함)
         run: |
-          echo "🚀 Docker 컨테이너 실행 시작"
-          docker run --rm -v ${{ github.workspace }}/output:/app/output virtual-ledger
-          echo "✅ 거래 CSV 파일 output/transactions.csv 로 저장 완료"
+          echo "🚀 컨테이너 실행 중..."
+          docker run --rm --network=host -v ${{ github.workspace }}/output:/app/output ledger-db
+          echo "✅ 실행 완료: CSV 및 DB 저장"
 
-      - name: 📤 5. 거래 CSV 업로드 (아티팩트)
+      - name: 📤 결과 CSV 업로드
         uses: actions/upload-artifact@v4
         with:
           name: 거래데이터
