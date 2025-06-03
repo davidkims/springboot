@@ -1,4 +1,4 @@
-name: 🧾 Docker 명함 이미지 생성 및 보안 디버깅 (echo 기반)
+name: 🧾 다중 고객 명함 생성 + 암호화/복호화
 
 on:
   push:
@@ -6,13 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-customer-cards:
+  build-encrypted-cards:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      packages: read
-      security-events: write
 
     steps:
     - name: 📥 코드 체크아웃
@@ -20,43 +15,63 @@ jobs:
 
     - name: 📁 디렉토리 생성
       run: |
-        mkdir -p cards
+        mkdir -p cards_encrypted cards_decrypted
 
-    - name: 🐳 generate_card.py 및 Dockerfile 생성 (echo 기반)
+    - name: 🐍 generate_multi_cards.py 및 Dockerfile 생성
       run: |
-        echo "from PIL import Image, ImageDraw" > generate_card.py
-        echo "img = Image.new('RGB', (400, 200), color=(73, 109, 137))" >> generate_card.py
-        echo "d = ImageDraw.Draw(img)" >> generate_card.py
-        echo "d.text((10,10), '고객 거래 명함', fill=(255,255,0))" >> generate_card.py
-        echo "img.save('/data/cards/customer_card.png')" >> generate_card.py
+        echo "from PIL import Image, ImageDraw" > generate_multi_cards.py
+        echo "from cryptography.fernet import Fernet" >> generate_multi_cards.py
+        echo "import os" >> generate_multi_cards.py
+        echo "key = Fernet.generate_key()" >> generate_multi_cards.py
+        echo "fernet = Fernet(key)" >> generate_multi_cards.py
+        echo "os.makedirs('/data/encrypted', exist_ok=True)" >> generate_multi_cards.py
+        echo "os.makedirs('/data/decrypted', exist_ok=True)" >> generate_multi_cards.py
+        echo "customer_ids = ['CUST001', 'CUST002', 'CUST003']" >> generate_multi_cards.py
+        echo "with open('/data/encrypted/key.key', 'wb') as kf: kf.write(key)" >> generate_multi_cards.py
+        echo "for cid in customer_ids:" >> generate_multi_cards.py
+        echo "  img = Image.new('RGB', (400, 200), color=(200, 120, 120))" >> generate_multi_cards.py
+        echo "  d = ImageDraw.Draw(img)" >> generate_multi_cards.py
+        echo "  d.text((10, 80), f'고객 ID: {cid}', fill=(0, 0, 0))" >> generate_multi_cards.py
+        echo "  img_path = f'/data/tmp_{cid}.png'" >> generate_multi_cards.py
+        echo "  img.save(img_path)" >> generate_multi_cards.py
+        echo "  with open(img_path, 'rb') as f: enc = fernet.encrypt(f.read())" >> generate_multi_cards.py
+        echo "  with open(f'/data/encrypted/{cid}.enc', 'wb') as ef: ef.write(enc)" >> generate_multi_cards.py
+        echo "  dec = fernet.decrypt(enc)" >> generate_multi_cards.py
+        echo "  with open(f'/data/decrypted/{cid}.decrypted.png', 'wb') as df: df.write(dec)" >> generate_multi_cards.py
+        echo "  os.remove(img_path)" >> generate_multi_cards.py
+        echo "print('✅ 다중 명함 생성 및 암호화/복호화 완료')" >> generate_multi_cards.py
 
         echo "FROM python:3.10-slim" > Dockerfile
         echo "WORKDIR /app" >> Dockerfile
-        echo "COPY generate_card.py /app/" >> Dockerfile
-        echo "RUN pip install pillow" >> Dockerfile
-        echo "CMD [\"python\", \"generate_card.py\"]" >> Dockerfile
+        echo "COPY generate_multi_cards.py /app/" >> Dockerfile
+        echo "RUN pip install pillow cryptography" >> Dockerfile
+        echo "CMD [\"python\", \"generate_multi_cards.py\"]" >> Dockerfile
 
     - name: 🛠️ Docker 이미지 빌드
-      run: docker build -t customer-card-generator .
+      run: docker build -t customer-card-multi-encrypt .
 
-    - name: 🏃 Docker 컨테이너 실행 및 이미지 생성
+    - name: 🏃 Docker 컨테이너 실행
       run: |
-        docker run --rm -v $(pwd)/cards:/data/cards customer-card-generator
+        docker run --rm \
+          -v $(pwd)/cards_encrypted:/data/encrypted \
+          -v $(pwd)/cards_decrypted:/data/decrypted \
+          customer-card-multi-encrypt
 
-    - name: 📷 생성된 명함 이미지 확인
+    - name: 📂 결과 확인
       run: |
-        ls -al cards
-        file cards/customer_card.png || echo "❌ 이미지 생성 실패"
+        echo "📦 암호화된 명함:"
+        ls -lh cards_encrypted
+        echo "🖼️ 복호화된 명함:"
+        ls -lh cards_decrypted
 
-    - name: 🔐 .github/workflows 권한 문제 디버그
-      run: |
-        echo "🛡️ .github/workflows 권한 검사"
-        ls -ld .github .github/workflows || echo "❌ 접근 실패"
-        stat .github/workflows || true
-        sudo chmod -R 755 .github || true
-
-    - name: 📤 생성 이미지 아티팩트 업로드
+    - name: 📤 아티팩트 업로드 (암호화된 명함)
       uses: actions/upload-artifact@v4
       with:
-        name: customer-card-image
-        path: cards/
+        name: encrypted-customer-cards
+        path: cards_encrypted/
+
+    - name: 📤 아티팩트 업로드 (복호화된 명함)
+      uses: actions/upload-artifact@v4
+      with:
+        name: decrypted-customer-cards
+        path: cards_decrypted/
