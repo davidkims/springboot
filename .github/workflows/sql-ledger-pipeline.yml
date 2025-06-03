@@ -6,57 +6,73 @@ on:
   workflow_dispatch:
 
 jobs:
-  setup-sql-ledger:
+  finance-ledger:
     runs-on: ubuntu-latest
-
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: root
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping --silent"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
 
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧱 Build MySQL Docker image with SQL
-        run: |
-          docker build -t finance-ledger-db .
+      - name: 🐳 Build MySQL Docker Image
+        run: docker build -t finance-ledger-db ./docker
 
-      - name: 🏗️ Run Docker container with MySQL
+      - name: 🏃 Run MySQL Container
         run: |
           docker run -d --name finance-db -e MYSQL_ROOT_PASSWORD=root -p 3307:3306 finance-ledger-db
 
-      - name: ⏱️ Wait for DB to initialize
+      - name: 💤 Wait for Initialization
         run: sleep 30
 
-      - name: 📄 Export Ledger to CSV
+      - name: 🧾 Export Ledger to CSV
         run: |
           docker exec finance-db \
-            bash -c "mysql -uroot -proot -e 'USE finance_db; SELECT * FROM customer_ledger INTO OUTFILE \"/var/lib/mysql-files/ledger.csv\" FIELDS TERMINATED BY \",\" ENCLOSED BY '\"' LINES TERMINATED BY '\n';'"
+            mysql -uroot -proot -e "USE finance_db; \
+            SELECT * FROM customer_ledger \
+            INTO OUTFILE '/var/lib/mysql-files/ledger.csv' \
+            FIELDS TERMINATED BY ',' ENCLOSED BY '\"' LINES TERMINATED BY '\n';"
           docker cp finance-db:/var/lib/mysql-files/ledger.csv ./ledger.csv
 
-      - name: 💾 Upload Ledger CSV as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ledger-csv
-          path: ./ledger.csv
-
-      - name: 📦 Backup Ledger SQL
+      - name: 💾 SQL Backup
         run: |
           docker exec finance-db \
-            bash -c "mysqldump -uroot -proot finance_db > /tmp/backup.sql"
-          docker cp finance-db:/tmp/backup.sql ./backup.sql
+            mysqldump -uroot -proot finance_db > backup.sql
 
-      - name: 💾 Upload SQL Backup
+      - name: 📤 Upload CSV & SQL Backup
         uses: actions/upload-artifact@v4
         with:
-          name: ledger-sql-backup
-          path: ./backup.sql
+          name: ledger-data
+          path: |
+            ledger.csv
+            backup.sql
+
+      - name: 🔁 Restore DB to New Container
+        run: |
+          docker run -d --name restore-db -e MYSQL_ROOT_PASSWORD=root -p 3308:3306 mysql:8.0
+          sleep 30
+          docker cp backup.sql restore-db:/backup.sql
+          docker exec restore-db \
+            bash -c "mysql -uroot -proot < /backup.sql"
+
+      - name: 🐍 Install Python & MySQL Connector
+        run: |
+          sudo apt update
+          sudo apt install -y python3 python3-pip
+          pip3 install mysql-connector-python
+
+      - name: 📊 Run Log Analyzer
+        run: |
+          docker cp scripts/analyze_logs.py restore-db:/analyze_logs.py
+          docker exec restore-db \
+            bash -c "apt update && apt install -y python3 python3-pip && pip3 install mysql-connector-python && python3 /analyze_logs.py"
+          docker cp restore-db:/status_stats.csv ./status_stats.csv
+          docker cp restore-db:/type_stats.csv ./type_stats.csv
+          docker cp restore-db:/ledger_analysis.md ./ledger_analysis.md
+
+      - name: 📤 Upload Log Analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-analysis
+          path: |
+            status_stats.csv
+            type_stats.csv
+            ledger_analysis.md
