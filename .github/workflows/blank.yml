@@ -10,72 +10,70 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📅 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🛠️ Generate Dockerfile
+      - name: 🐳 Generate Dockerfile safely
         run: |
-          echo 'FROM mysql:8.0' > Dockerfile
-          echo 'ENV MYSQL_ROOT_PASSWORD=root' >> Dockerfile
-          echo 'ENV MYSQL_DATABASE=finance_db' >> Dockerfile
-          echo 'COPY init.sql /docker-entrypoint-initdb.d/' >> Dockerfile
-          echo 'COPY transactions.sql /docker-entrypoint-initdb.d/' >> Dockerfile
+          cat << 'EOF' > Dockerfile
+FROM mysql:8.0
+ENV MYSQL_ROOT_PASSWORD=root
+ENV MYSQL_DATABASE=finance_db
+COPY init.sql /docker-entrypoint-initdb.d/
+COPY transactions.sql /docker-entrypoint-initdb.d/
+EOF
+          echo "✅ Dockerfile 생성 완료:"
           cat Dockerfile
 
-      - name: 📋 Generate SQL Init Scripts
+      - name: Generate SQL Scripts
         run: |
-          echo 'CREATE DATABASE IF NOT EXISTS finance_db;' > init.sql
-          echo 'USE finance_db;' >> init.sql
-          echo 'CREATE TABLE IF NOT EXISTS customer_ledger (' >> init.sql
-          echo '  id INT AUTO_INCREMENT PRIMARY KEY,' >> init.sql
-          echo '  customer_id VARCHAR(50),' >> init.sql
-          echo '  transaction_type VARCHAR(20),' >> init.sql
-          echo '  transaction_amount DECIMAL(18, 2),' >> init.sql
-          echo '  currency VARCHAR(10),' >> init.sql
-          echo '  status VARCHAR(20),' >> init.sql
-          echo '  transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP' >> init.sql
-          echo ');' >> init.sql
-          cat init.sql
+          echo 'CREATE DATABASE IF NOT EXISTS finance_db;
+USE finance_db;
+CREATE TABLE IF NOT EXISTS customer_ledger (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  customer_id VARCHAR(50),
+  transaction_type VARCHAR(20),
+  transaction_amount DECIMAL(18, 2),
+  currency VARCHAR(10),
+  status VARCHAR(20),
+  transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);' > init.sql
 
-          echo 'USE finance_db;' > transactions.sql
-          echo "INSERT INTO customer_ledger (customer_id, transaction_type, transaction_amount, currency, status) VALUES" >> transactions.sql
-          echo "('CUST1001', 'credit_card', 10200.50, 'KRW', 'approved')," >> transactions.sql
-          echo "('CUST1002', 'check_card', 2300.00, 'KRW', 'pending')," >> transactions.sql
-          echo "('CUST1003', 'forex', 153000.00, 'USD', 'completed');" >> transactions.sql
-          cat transactions.sql
+          echo 'USE finance_db;
+INSERT INTO customer_ledger (customer_id, transaction_type, transaction_amount, currency, status) VALUES
+("CUST1001", "credit_card", 10200.50, "KRW", "approved"),
+("CUST1002", "check_card", 2300.00, "KRW", "pending"),
+("CUST1003", "forex", 153000.00, "USD", "completed");' > transactions.sql
 
-      - name: 🐋 Build Docker Image
+      - name: Build Docker Image
         run: docker build -t finance-ledger-db .
 
-      - name: 🚀 Run MySQL Container
+      - name: Run MySQL Container
         run: |
           docker run -d --name finance-db -e MYSQL_ROOT_PASSWORD=root -p 3307:3306 finance-ledger-db
           sleep 30
 
-      - name: 📆 Backup DB with --databases
-        run: |
-          docker exec finance-db mysqldump -uroot -proot --databases finance_db > backup.sql
-          cat backup.sql
+      - name: Backup DB
+        run: docker exec finance-db mysqldump -uroot -proot --databases finance_db > backup.sql
 
-      - name: 🔄 Restore DB to New Container
+      - name: Restore DB
         run: |
           docker run -d --name restore-db -e MYSQL_ROOT_PASSWORD=root -p 3308:3306 mysql:8.0
           sleep 30
           docker cp backup.sql restore-db:/tmp/backup.sql
           docker exec restore-db bash -c "mysql -uroot -proot < /tmp/backup.sql"
 
-      - name: 🐇 Install Python3 & pip
+      - name: Setup Python
         run: |
           sudo apt-get update
           sudo apt-get install -y python3 python3-pip
           pip3 install mysql-connector-python pillow
 
-      - name: 📈 Generate analyze_logs.py
+      - name: Create analyze_logs.py
         run: |
           cat << 'EOF' > analyze_logs.py
 import mysql.connector
 import csv
-
 conn = mysql.connector.connect(host='127.0.0.1', user='root', password='root', database='finance_db')
 cursor = conn.cursor()
 cursor.execute('SELECT status, COUNT(*), SUM(transaction_amount) FROM customer_ledger GROUP BY status')
@@ -102,26 +100,22 @@ with open('ledger_analysis.md', 'w') as f:
 cursor.close()
 conn.close()
 EOF
-          cat analyze_logs.py
 
-      - name: 🎨 Generate generate_customer_images.py
+      - name: Create generate_customer_images.py
         run: |
           cat << 'EOF' > generate_customer_images.py
 import mysql.connector
 from PIL import Image, ImageDraw, ImageFont
 import os
-
 conn = mysql.connector.connect(host='127.0.0.1', user='root', password='root', database='finance_db')
 cursor = conn.cursor()
 cursor.execute("SELECT customer_id, transaction_type, transaction_amount, currency, status FROM customer_ledger")
 records = cursor.fetchall()
-
 os.makedirs("customer_images", exist_ok=True)
 try:
     font = ImageFont.truetype("DejaVuSans-Bold.ttf", 18)
 except:
     font = ImageFont.load_default()
-
 for idx, row in enumerate(records):
     customer_id, tx_type, amount, currency, status = row
     img = Image.new("RGB", (500, 200), color="white")
@@ -131,22 +125,22 @@ for idx, row in enumerate(records):
     draw.text((20, 100), f"Amount: {amount:.2f} {currency}", font=font, fill="black")
     draw.text((20, 140), f"Status: {status}", font=font, fill="blue" if status == "approved" else "red")
     img.save(f"customer_images/customer_{idx+1}.png")
-
 cursor.close()
 conn.close()
 EOF
-          cat generate_customer_images.py
 
-      - name: 📁 Copy scripts to restore-db
+      - name: Copy Scripts to Container
         run: |
           docker cp analyze_logs.py restore-db:/analyze_logs.py
           docker cp generate_customer_images.py restore-db:/generate_customer_images.py
 
-      - name: 📊 Run Analysis + Image Gen in restore-db
+      - name: Run Analysis and Image Generation
         run: |
           docker exec restore-db bash -c "apt-get update && apt-get install -y python3 python3-pip && pip3 install mysql-connector-python pillow && mkdir -p /output && python3 /analyze_logs.py && python3 /generate_customer_images.py && mv *.csv *.md /output/ && cp -r customer_images /output/"
           docker cp restore-db:/output ./output
 
-      - name: ☁️ Upload Results
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
+          name: ledger-assets
+          path: output/
