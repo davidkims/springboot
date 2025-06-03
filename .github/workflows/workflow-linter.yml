@@ -1,47 +1,56 @@
-name: 🛠️ Workflow Syntax & Event Monitor
+name: 🔐 고객 거래 워크플로우 자동 암호화
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'  # 매 시간마다 실행
+    - cron: '0 3 * * *' # 매일 03:00 자동 실행 (UTC)
 
 jobs:
-  validate-workflows:
-    name: 🔍 Validate all workflows in .github/workflows
+  detect-and-encrypt:
     runs-on: ubuntu-latest
+    env:
+      ENCRYPTION_KEY: ${{ secrets.CUSTOMER_AES_KEY }} # AES 키는 GitHub Secrets에 등록 필수
 
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📁 Find all workflow files
-        id: find_workflows
+      - name: 📁 .github/workflows 내 전체 파일 검색
+        id: find_files
         run: |
-          echo "files=$(find .github/workflows -type f \( -iname '*.yml' -o -iname '*.yaml' \) -print0 | xargs -0)" >> $GITHUB_OUTPUT
+          mkdir -p .encrypted
+          files=$(find .github/workflows -type f \( -iname '*.yml' -o -iname '*.yaml' \))
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$files" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: 🔎 Validate each workflow file
+      - name: 🔎 고객 거래 포함된 파일 탐색 및 암호화
         run: |
-          echo "🔍 GitHub Workflow Lint 시작"
-          success=true
-          for file in ${{ steps.find_workflows.outputs.files }}; do
-            echo "⚙️ 파일 검사 중: $file"
-            if ! act -j dummy -W "$file" --dryrun 2>&1 | tee tmp_result | grep -q 'Error'; then
-              echo "✅ $file: 유효한 YAML"
+          echo "🔍 '고객 거래' 키워드 포함 파일 암호화 시작"
+          for file in ${{ steps.find_files.outputs.files }}; do
+            if grep -q '고객 거래' "$file"; then
+              echo "🔐 암호화 대상: $file"
+
+              # 암호화된 출력 파일명
+              encrypted_file=".encrypted/$(basename $file).enc"
+
+              # AES256 암호화 수행
+              openssl enc -aes-256-cbc -pbkdf2 -salt -in "$file" -out "$encrypted_file" -pass pass:"$ENCRYPTION_KEY"
+
+              echo "✅ 암호화 완료 → $encrypted_file"
             else
-              echo "❌ $file: 오류 발생"
-              success=false
-              cat tmp_result
+              echo "⏭️ '고객 거래' 키워드 없음: $file"
             fi
           done
-          $success || exit 1
-        env:
-          ACT_LOG_LEVEL: debug
 
-      - name: ✅ 보고서 출력
-        if: success()
-        run: echo "✅ 모든 워크플로우 파일이 유효합니다."
-
-      - name: ⚠️ 오류 발생 시 경고
-        if: failure()
+      - name: 📤 암호화된 파일 아카이브 (선택)
+        if: always()
         run: |
-          echo "❌ 오류가 있는 워크플로우 파일이 존재합니다. 수정이 필요합니다."
+          zip -r customer-encrypted.zip .encrypted
+          echo "✅ 암호화된 워크플로우 ZIP 생성 완료"
+
+      - name: 📦 업로드: 암호화 ZIP 아카이브 (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: customer-encrypted-workflows
+          path: customer-encrypted.zip
