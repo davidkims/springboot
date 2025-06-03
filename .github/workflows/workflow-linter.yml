@@ -1,12 +1,12 @@
-name: 🔐 고객 거래 워크플로우 자동 암호화
+name: 🔓 고객 거래 워크플로우 복호화 및 보고서 생성
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '30 3 * * *'  # 매일 오전 03:30 실행
 
 jobs:
-  detect-and-encrypt:
+  decrypt-and-report:
     runs-on: ubuntu-latest
     env:
       ENCRYPTION_KEY: ${{ secrets.CUSTOMER_AES_KEY }}
@@ -15,33 +15,58 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📁 .github/workflows 내 전체 파일 검색
-        id: find_files
+      - name: 📦 복호화 대상 압축 해제
         run: |
-          mkdir -p .encrypted
-          find .github/workflows -type f \( -iname '*.yml' -o -iname '*.yaml' \) > workflow_list.txt
+          mkdir -p .decrypted .reports
+          if [ -f customer-encrypted.zip ]; then
+            unzip customer-encrypted.zip -d .encrypted
+          elif [ -d .encrypted ]; then
+            echo "✅ .encrypted 폴더 존재함"
+          else
+            echo "❌ .encrypted 존재하지 않음"
+            exit 1
+          fi
 
-      - name: 🔎 고객 거래 포함된 파일 탐색 및 암호화
+      - name: 🔓 복호화 및 Markdown 리포트 생성
         run: |
-          echo "🔍 '고객 거래' 키워드 포함 파일 암호화 시작"
-          while IFS= read -r file; do
-            if grep -q '고객 거래' "$file"; then
-              echo "🔐 암호화 대상: $file"
-              encrypted_file=".encrypted/$(basename "$file").enc"
-              openssl enc -aes-256-cbc -pbkdf2 -salt -in "$file" -out "$encrypted_file" -pass pass:"$ENCRYPTION_KEY"
-              echo "✅ 암호화 완료 → $encrypted_file"
+          for encfile in .encrypted/*.enc; do
+            orig_name=$(basename "$encfile" .yml.enc | sed 's/.yaml.enc$/.yaml/' | sed 's/.yml.enc$/.yml/')
+            decfile=".decrypted/$orig_name"
+            echo "🔓 복호화 대상: $encfile → $decfile"
+
+            # 복호화
+            openssl enc -d -aes-256-cbc -pbkdf2 -in "$encfile" -out "$decfile" -pass pass:"$ENCRYPTION_KEY"
+
+            # 복호화 성공 리포트 생성
+            report_file=".reports/${orig_name}.md"
+            echo "## 🔍 복호화 보고서: ${orig_name}" > "$report_file"
+            echo "- 복호화된 파일 경로: \`$decfile\`" >> "$report_file"
+            echo "- 원본 암호화 파일: \`$encfile\`" >> "$report_file"
+            echo "- 복호화 시각: \`$(date '+%Y-%m-%d %H:%M:%S')\`" >> "$report_file"
+
+            # '고객 거래' 키워드 포함 여부 검사
+            if grep -q '고객 거래' "$decfile"; then
+              echo "- 상태: ✅ 고객 거래 키워드 포함됨" >> "$report_file"
             else
-              echo "⏭️ 키워드 없음: $file"
+              echo "- 상태: ⚠️ 고객 거래 키워드 없음" >> "$report_file"
             fi
-          done < workflow_list.txt
 
-      - name: 📦 암호화 ZIP 아카이브 생성
+            echo "📄 보고서 생성 완료: $report_file"
+          done
+
+      - name: 📦 복호화 파일 ZIP 생성
         run: |
-          zip -r customer-encrypted.zip .encrypted
-          echo "✅ ZIP 생성 완료"
+          zip -r decrypted-workflows.zip .decrypted
+          zip -r transaction-reports.zip .reports
 
-      - name: 📤 암호화된 ZIP 파일 업로드
+      - name: 📤 업로드: 복호화 파일 아카이브
         uses: actions/upload-artifact@v4
         with:
-          name: customer-encrypted-workflows
-          path: customer-encrypted.zip
+          name: decrypted-workflows
+          path: decrypted-workflows.zip
+
+      - name: 📤 업로드: Markdown 리포트
+        uses: actions/upload-artifact@v4
+        with:
+          name: transaction-markdown-reports
+          path: transaction-reports.zip
