@@ -44,3 +44,13 @@
 
 `.github/WORKFLOW_LOG.md` 파일을 사용하여 각 워크플로우 실행 시 발생한 문제점과 특이사항 그리고 결과를 기록할 수 있습니다. 새로운 항목은 표의 맨 위에 추가하여 최신 내용을 유지하세요.
 
+
+## 🐬 Manual MySQL & PostgreSQL Setup
+
+`scripts/db_setup_and_backup.sh` 스크립트는 MySQL과 PostgreSQL 설치 후
+디스크 용량 확보용 파일을 만들고 `/opt/db_backups` 아래에 백업 디렉터리를
+생성한 뒤 두 데이터베이스를 모두 백업합니다.
+
+```bash
+sudo bash scripts/db_setup_and_backup.sh
+```
