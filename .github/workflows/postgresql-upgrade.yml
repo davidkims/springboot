@@ -1,104 +1,126 @@
 name: Database Backup (MySQL & PostgreSQL)
 
 on:
-  workflow_dispatch: # 수동으로 워크플로우 실행 가능
+  workflow_dispatch: # 수동으로 워크플로우 실행 가능 (GitHub Actions UI에서 'Run workflow' 버튼 클릭)
   schedule:
-    - cron: '0 2 * * *' # 매일 새벽 2시 (UTC)에 실행
+    - cron: '0 2 * * *' # 매일 새벽 2시 (UTC)에 실행 (KST는 +9시간이므로, KST 오전 11시)
 
 permissions:
-  contents: write # 백업 파일을 아티팩트로 업로드하기 위해 필요
+  contents: write # 백업 파일을 GitHub Actions 아티팩트로 업로드하기 위해 필요
 
 jobs:
   backup-databases:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # GitHub Actions 러너 운영체제
 
     env:
-      # --- MySQL 설정 (필요에 따라 수정) ---
-      MYSQL_HOST: localhost
+      # --- MySQL 설정 (사용자 환경에 맞게 수정) ---
+      # 백업 대상 MySQL 서버의 호스트, 포트, 사용자명
+      MYSQL_HOST: localhost # 원격 DB인 경우 IP 주소 또는 도메인
       MYSQL_PORT: 3306
-      MYSQL_USER: root
-      # MYSQL_DATABASE: your_database_name # 특정 DB만 백업 시 주석 해제
+      MYSQL_USER: root # 백업 권한이 있는 사용자 (일반적으로 'root' 또는 특정 백업용 사용자)
+      # MYSQL_DATABASE: your_specific_mysql_database # 특정 MySQL DB만 백업 시 주석 해제하고 DB 이름 지정
 
-      # --- PostgreSQL 설정 (필요에 따라 수정) ---
-      PG_HOST: localhost
+      # --- PostgreSQL 설정 (사용자 환경에 맞게 수정) ---
+      # 백업 대상 PostgreSQL 서버의 호스트, 포트, 사용자명
+      PG_HOST: localhost # 원격 DB인 경우 IP 주소 또는 도메인
       PG_PORT: 5432
-      PG_USER: postgres
-      # PG_DATABASE: your_database_name # 특정 DB만 백업 시 주석 해제
+      PG_USER: postgres # 백업 권한이 있는 사용자 (일반적으로 'postgres' 또는 특정 백업용 사용자)
+      # PG_DATABASE: your_specific_postgresql_database # 특정 PostgreSQL DB만 백업 시 주석 해제하고 DB 이름 지정
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4 # GitHub 저장소 코드 체크아웃
 
     - name: Set up Environment (Install MySQL Client, PostgreSQL Client)
+      # DB 백업 도구 설치 (mysqldump, pg_dump)
       run: |
         sudo apt-get update
-        # MySQL 클라이언트 설치
-        sudo apt-get install -y mysql-client
-        # PostgreSQL 클라이언트 설치
-        sudo apt-get install -y postgresql-client
+        sudo apt-get install -y mysql-client # MySQL 클라이언트 (mysqldump 포함)
+        sudo apt-get install -y postgresql-client # PostgreSQL 클라이언트 (pg_dump, pg_dumpall 포함)
 
+    # --- 아래 두 'Install Server' 단계는 백업 대상 DB가 GitHub Actions Runner에 직접 설치되어 있는 경우에만 필요합니다. ---
+    # --- 원격 DB를 백업하는 경우 이 단계들을 제거하거나 주석 처리하세요. ---
     - name: Install MySQL Server (for local testing/setup if not already present)
-      # 실제 운영 DB를 백업하는 경우, 이 단계는 필요 없을 수 있습니다.
-      # 백업 대상 DB가 GitHub Actions Runner에 직접 설치되어 있지 않다면 건너뛰세요.
       run: |
-        # MySQL apt 저장소 설정 (필요 시)
+        # MySQL APT 저장소 추가 (최신 버전 확보)
         wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
         sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
-        sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure mysql-apt-config || true
+        sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure mysql-apt-config || true # 프롬프트 자동 응답
         sudo apt-get update
-        sudo apt-get install -y mysql-server || true # 이미 설치되어 있을 수 있으므로 오류 무시
+        sudo apt-get install -y mysql-server || true # 이미 설치되어 있어도 오류 무시하고 진행
 
-        # MySQL 서비스 시작 (기본 비밀번호 없이 설치되는 경우)
+        # MySQL 서비스 시작 확인
         sudo systemctl start mysql || true
         sudo systemctl status mysql || true
+      if: ${{ env.MYSQL_HOST == 'localhost' }} # 로컬 MySQL 서버에만 실행
 
     - name: Install PostgreSQL Server (for local testing/setup if not already present)
-      # 실제 운영 DB를 백업하는 경우, 이 단계는 필요 없을 수 있습니다.
-      # 백업 대상 DB가 GitHub Actions Runner에 직접 설치되어 있지 않다면 건너뛰세요.
       run: |
-        # PostgreSQL apt 저장소 설정 (필요 시)
+        # PostgreSQL APT 저장소 추가
         sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
         wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
         sudo apt-get update
-        sudo apt-get install -y postgresql || true # 이미 설치되어 있을 수 있으므로 오류 무시
+        sudo apt-get install -y postgresql || true # 이미 설치되어 있어도 오류 무시하고 진행
 
-        # PostgreSQL 서비스 시작
+        # PostgreSQL 서비스 시작 확인
         sudo systemctl start postgresql || true
         sudo systemctl status postgresql || true
+      if: ${{ env.PG_HOST == 'localhost' }} # 로컬 PostgreSQL 서버에만 실행
+
+    # --- MySQL 비밀번호 설정 (GitHub Actions 러너 내부에 MySQL을 설치하고 'root' 비밀번호가 필요한 경우) ---
+    # --- 주의: 이 단계는 운영 환경의 DB 비밀번호를 변경하는 데 절대 사용하지 마세요. ---
+    # --- 일반적으로 이 단계는 필요 없으며, GitHub Secrets에 올바른 MYSQL_PASSWORD를 설정하는 것으로 충분합니다. ---
+    # - name: Set MySQL Root Password (if needed for local setup)
+    #   if: ${{ env.MYSQL_HOST == 'localhost' }}
+    #   run: |
+    #     echo "Attempting to set root password for local MySQL..."
+    #     # Ubuntu 기본 설치 시 root는 auth_socket으로 인증됩니다.
+    #     # 이 명령은 외부 접속을 위해 mysql_native_password로 변경하고 비밀번호를 설정합니다.
+    #     # 반드시 GitHub Secret: MYSQL_ROOT_PASSWORD 에 비밀번호를 설정해야 합니다.
+    #     sudo mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH 'mysql_native_password' BY '${{ secrets.MYSQL_ROOT_PASSWORD }}';"
+    #     sudo mysql -u root -e "FLUSH PRIVILEGES;"
+    #     echo "Root password for local MySQL set."
+    #   env:
+    #     MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }} # GitHub Secret으로 관리
 
     - name: Perform MySQL Backup
-      # MySQL 백업: 특정 DB 또는 모든 DB 백업
+      # MySQL 백업 실행
       run: |
         BACKUP_FILENAME="mysql_backup_$(date +%Y%m%d_%H%M%S).sql"
-        if [ -z "$MYSQL_DATABASE" ]; then
+        
+        # MYSQL_PWD 환경 변수 사용: mysqldump에 비밀번호를 안전하게 전달하는 표준 방법
+        # 명령줄에 비밀번호를 직접 노출하지 않아 보안 경고를 피할 수 있습니다.
+        export MYSQL_PWD="${{ secrets.MYSQL_PASSWORD }}" 
+
+        if [ -z "${{ env.MYSQL_DATABASE }}" ]; then
           # 모든 데이터베이스 백업
           echo "Dumping all MySQL databases..."
           mysqldump --all-databases \
                     --host="${{ env.MYSQL_HOST }}" \
                     --port="${{ env.MYSQL_PORT }}" \
-                    --user="${{ env.MYSQL_USER }}" \
-                    --password="${{ secrets.MYSQL_ROOT_PASSWORD }}" > "$BACKUP_FILENAME"
+                    --user="${{ env.MYSQL_USER }}" > "$BACKUP_FILENAME"
         else
           # 특정 데이터베이스 백업
           echo "Dumping MySQL database: ${{ env.MYSQL_DATABASE }}"
           mysqldump --host="${{ env.MYSQL_HOST }}" \
                     --port="${{ env.MYSQL_PORT }}" \
                     --user="${{ env.MYSQL_USER }}" \
-                    --password="${{ secrets.MYSQL_PASSWORD }}" \
                     "${{ env.MYSQL_DATABASE }}" > "$BACKUP_FILENAME"
         fi
         echo "MySQL backup created: $BACKUP_FILENAME"
       env:
-        # 이 단계에서만 MYSQL_PASSWORD를 사용하도록 제한
-        MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }} # MySQL 사용자 비밀번호 (예: root 또는 특정 사용자)
+        # 이 단계에서만 MYSQL_PASSWORD를 사용하도록 제한 (MYSQL_PWD로 전달)
+        MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }} # GitHub Secret에서 가져온 비밀번호
 
     - name: Perform PostgreSQL Backup
-      # PostgreSQL 백업: 모든 DB 또는 특정 DB 백업
+      # PostgreSQL 백업 실행
       run: |
         BACKUP_FILENAME="postgresql_backup_$(date +%Y%m%d_%H%M%S).sql"
-        export PGPASSWORD="${{ secrets.PG_PASSWORD }}" # PGPASSWORD 환경 변수 설정
+        
+        # PGPASSWORD 환경 변수 사용: pg_dump/pg_dumpall에 비밀번호를 안전하게 전달
+        export PGPASSWORD="${{ secrets.PG_PASSWORD }}" 
 
-        if [ -z "$PG_DATABASE" ]; then
+        if [ -z "${{ env.PG_DATABASE }}" ]; then
           # 모든 데이터베이스 및 전역 객체 백업
           echo "Dumping all PostgreSQL databases and global objects..."
           pg_dumpall --host="${{ env.PG_HOST }}" \
@@ -115,12 +137,13 @@ jobs:
         echo "PostgreSQL backup created: $BACKUP_FILENAME"
       env:
         # 이 단계에서만 PG_PASSWORD를 사용하도록 제한
-        PG_PASSWORD: ${{ secrets.PG_PASSWORD }} # PostgreSQL 사용자 비밀번호 (예: postgres)
+        PG_PASSWORD: ${{ secrets.PG_PASSWORD }} # GitHub Secret에서 가져온 비밀번호
 
     - name: Upload Backup Files as Artifacts
+      # 생성된 백업 파일을 GitHub Actions 아티팩트로 업로드
       uses: actions/upload-artifact@v4
       with:
-        name: db-backups-${{ github.run_id }}
+        name: db-backups-${{ github.run_id }} # 아티팩트 이름 (고유 ID 포함)
         path: |
-          *.sql # 현재 디렉토리의 모든 .sql 파일 업로드
-        retention-days: 7 # 아티팩트를 7일 동안 보존합니다. (필요에 따라 변경)
+          *.sql # 현재 워크플로 디렉토리의 모든 .sql 파일 업로드
+        retention-days: 7 # 아티팩트를 7일 동안 보존 (필요에 따라 변경 가능)
