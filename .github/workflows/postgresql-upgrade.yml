@@ -1,97 +1,126 @@
-name: PostgreSQL Latest Version Upgrade
+name: Database Backup (MySQL & PostgreSQL)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 수동으로 워크플로우 실행 가능
+  schedule:
+    - cron: '0 2 * * *' # 매일 새벽 2시 (UTC)에 실행
+
+permissions:
+  contents: write # 백업 파일을 아티팩트로 업로드하기 위해 필요
 
 jobs:
-  upgrade-postgresql:
+  backup-databases:
     runs-on: ubuntu-latest
+
+    env:
+      # --- MySQL 설정 (필요에 따라 수정) ---
+      MYSQL_HOST: localhost
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      # MYSQL_DATABASE: your_database_name # 특정 DB만 백업 시 주석 해제
+
+      # --- PostgreSQL 설정 (필요에 따라 수정) ---
+      PG_HOST: localhost
+      PG_PORT: 5432
+      PG_USER: postgres
+      # PG_DATABASE: your_database_name # 특정 DB만 백업 시 주석 해제
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install necessary tools and add PostgreSQL APT repository
+    - name: Set up Environment (Install MySQL Client, PostgreSQL Client)
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget apt-transport-https ca-certificates lsb-release
+        # MySQL 클라이언트 설치
+        sudo apt-get install -y mysql-client
+        # PostgreSQL 클라이언트 설치
+        sudo apt-get install -y postgresql-client
+
+    - name: Install MySQL Server (for local testing/setup if not already present)
+      # 실제 운영 DB를 백업하는 경우, 이 단계는 필요 없을 수 있습니다.
+      # 백업 대상 DB가 GitHub Actions Runner에 직접 설치되어 있지 않다면 건너뛰세요.
+      run: |
+        # MySQL apt 저장소 설정 (필요 시)
+        wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
+        sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
+        sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure mysql-apt-config || true
+        sudo apt-get update
+        sudo apt-get install -y mysql-server || true # 이미 설치되어 있을 수 있으므로 오류 무시
+
+        # MySQL 서비스 시작 (기본 비밀번호 없이 설치되는 경우)
+        sudo systemctl start mysql || true
+        sudo systemctl status mysql || true
+
+    - name: Install PostgreSQL Server (for local testing/setup if not already present)
+      # 실제 운영 DB를 백업하는 경우, 이 단계는 필요 없을 수 있습니다.
+      # 백업 대상 DB가 GitHub Actions Runner에 직접 설치되어 있지 않다면 건너뛰세요.
+      run: |
+        # PostgreSQL apt 저장소 설정 (필요 시)
         sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
         wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
         sudo apt-get update
+        sudo apt-get install -y postgresql || true # 이미 설치되어 있을 수 있으므로 오류 무시
 
-    - name: Get installed PostgreSQL version (if any)
-      id: get_current_pg_version
+        # PostgreSQL 서비스 시작
+        sudo systemctl start postgresql || true
+        sudo systemctl status postgresql || true
+
+    - name: Perform MySQL Backup
+      # MySQL 백업: 특정 DB 또는 모든 DB 백업
       run: |
-        if dpkg -s postgresql > /dev/null 2>&1; then
-          CURRENT_PG_VERSION=$(dpkg -s postgresql | grep Version | awk '{print $2}' | cut -d'.' -f1)
-          echo "CURRENT_PG_VERSION=$CURRENT_PG_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Currently installed PostgreSQL version: $CURRENT_PG_VERSION"
+        BACKUP_FILENAME="mysql_backup_$(date +%Y%m%d_%H%M%S).sql"
+        if [ -z "$MYSQL_DATABASE" ]; then
+          # 모든 데이터베이스 백업
+          echo "Dumping all MySQL databases..."
+          mysqldump --all-databases \
+                    --host="${{ env.MYSQL_HOST }}" \
+                    --port="${{ env.MYSQL_PORT }}" \
+                    --user="${{ env.MYSQL_USER }}" \
+                    --password="${{ secrets.MYSQL_ROOT_PASSWORD }}" > "$BACKUP_FILENAME"
         else
-          echo "No PostgreSQL server currently installed."
-          echo "CURRENT_PG_VERSION=none" >> "$GITHUB_OUTPUT"
+          # 특정 데이터베이스 백업
+          echo "Dumping MySQL database: ${{ env.MYSQL_DATABASE }}"
+          mysqldump --host="${{ env.MYSQL_HOST }}" \
+                    --port="${{ env.MYSQL_PORT }}" \
+                    --user="${{ env.MYSQL_USER }}" \
+                    --password="${{ secrets.MYSQL_PASSWORD }}" \
+                    "${{ env.MYSQL_DATABASE }}" > "$BACKUP_FILENAME"
         fi
-
-    - name: Stop PostgreSQL service (if running) and clean up
-      run: |
-        sudo systemctl stop postgresql || true
-
-    - name: Install/Upgrade PostgreSQL Server to latest version
-      run: |
-        sudo apt-get install -f -y
-        sudo dpkg --configure -a
-        sudo apt-get install -y postgresql postgresql-client
-
-    - name: Set PostgreSQL data directory permissions (ensure correct ownership)
-      run: |
-        sudo chown -R postgres:postgres /var/lib/postgresql
-        sudo chmod -R 700 /var/lib/postgresql
-
-    - name: Start PostgreSQL service
-      run: |
-        sudo systemctl start postgresql
-        sudo systemctl status postgresql
-
-    - name: Perform pg_upgrade (if major version upgrade)
+        echo "MySQL backup created: $BACKUP_FILENAME"
       env:
-        OLD_PG_VERSION: ${{ steps.get_current_pg_version.outputs.CURRENT_PG_VERSION }}
-        NEW_PG_VERSION: 16
+        # 이 단계에서만 MYSQL_PASSWORD를 사용하도록 제한
+        MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }} # MySQL 사용자 비밀번호 (예: root 또는 특정 사용자)
+
+    - name: Perform PostgreSQL Backup
+      # PostgreSQL 백업: 모든 DB 또는 특정 DB 백업
       run: |
-        echo "Old PG Version: $OLD_PG_VERSION"
-        echo "New PG Version: $NEW_PG_VERSION"
+        BACKUP_FILENAME="postgresql_backup_$(date +%Y%m%d_%H%M%S).sql"
+        export PGPASSWORD="${{ secrets.PG_PASSWORD }}" # PGPASSWORD 환경 변수 설정
 
-        if [ "$OLD_PG_VERSION" != "none" ] && [ "$OLD_PG_VERSION" -ne "$NEW_PG_VERSION" ]; then
-          echo "Performing major version upgrade from $OLD_PG_VERSION to $NEW_PG_VERSION using pg_upgrade..."
-          OLD_CLUSTER_DIR="/var/lib/postgresql/$OLD_PG_VERSION/main"
-          NEW_CLUSTER_DIR="/var/lib/postgresql/$NEW_PG_VERSION/main"
-          sudo rm -rf $NEW_CLUSTER_DIR
-          sudo -u postgres /usr/lib/postgresql/$NEW_PG_VERSION/bin/initdb -D $NEW_CLUSTER_DIR
-          sudo -u postgres /usr/lib/postgresql/$NEW_PG_VERSION/bin/pg_upgrade \
-            -b /usr/lib/postgresql/$OLD_PG_VERSION/bin \
-            -B /usr/lib/postgresql/$NEW_PG_VERSION/bin \
-            -d $OLD_CLUSTER_DIR \
-            -D $NEW_CLUSTER_DIR \
-            --check
-
-          echo "PostgreSQL major version upgrade check completed. For actual upgrade, uncomment the pg_upgrade command."
+        if [ -z "$PG_DATABASE" ]; then
+          # 모든 데이터베이스 및 전역 객체 백업
+          echo "Dumping all PostgreSQL databases and global objects..."
+          pg_dumpall --host="${{ env.PG_HOST }}" \
+                     --port="${{ env.PG_PORT }}" \
+                     --username="${{ env.PG_USER }}" > "$BACKUP_FILENAME"
         else
-          echo "No major version upgrade needed or no previous PostgreSQL installation found."
+          # 특정 데이터베이스 백업
+          echo "Dumping PostgreSQL database: ${{ env.PG_DATABASE }}"
+          pg_dump --host="${{ env.PG_HOST }}" \
+                  --port="${{ env.PG_PORT }}" \
+                  --username="${{ env.PG_USER }}" \
+                  "${{ env.PG_DATABASE }}" > "$BACKUP_FILENAME"
         fi
+        echo "PostgreSQL backup created: $BACKUP_FILENAME"
+      env:
+        # 이 단계에서만 PG_PASSWORD를 사용하도록 제한
+        PG_PASSWORD: ${{ secrets.PG_PASSWORD }} # PostgreSQL 사용자 비밀번호 (예: postgres)
 
-    - name: Configure PostgreSQL service to use the new cluster
-      run: |
-        sudo systemctl start postgresql
-        sudo systemctl status postgresql
-
-    - name: Verify PostgreSQL version and cluster status
-      run: |
-        psql --version
-        sudo -u postgres psql -c "SELECT version();"
-        sudo pg_lsclusters
-        echo "PostgreSQL upgrade process completed successfully!"
-
-    - name: Check PostgreSQL logs for errors
-      if: always()
-      run: |
-        echo "Attempting to get PostgreSQL error logs:"
-        sudo cat /var/log/postgresql/postgresql-*.log || true
-        sudo journalctl -u postgresql.service --no-pager -n 100
+    - name: Upload Backup Files as Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: db-backups-${{ github.run_id }}
+        path: |
+          *.sql # 현재 디렉토리의 모든 .sql 파일 업로드
+        retention-days: 7 # 아티팩트를 7일 동안 보존합니다. (필요에 따라 변경)
