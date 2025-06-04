@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+# Ensure the script runs as root
+if [[ $EUID -ne 0 ]]; then
+  echo "Please run this script with sudo or as root." >&2
+  exit 1
+fi
+
 # Variables for MySQL
 MYSQL_ROOT_PASSWORD="rootpass123"
 MYSQL_DB="finance_db"
@@ -52,6 +58,7 @@ mkdir -p "$BACKUP_DIR/mysql" "$BACKUP_DIR/postgres"
 
 # Backup databases
 mysqldump -u "$MYSQL_USER" -p"$MYSQL_PASS" "$MYSQL_DB" > "$BACKUP_DIR/mysql/${MYSQL_DB}.sql"
-sudo -u postgres pg_dump "$PG_DB" > "$BACKUP_DIR/postgres/${PG_DB}.sql"
+# Use tee so that sudo also applies to file creation
+sudo -u postgres pg_dump "$PG_DB" | sudo tee "$BACKUP_DIR/postgres/${PG_DB}.sql" >/dev/null
 
 echo "Backups stored in $BACKUP_DIR"

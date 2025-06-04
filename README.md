@@ -47,9 +47,12 @@
 
 ## 🐬 Manual MySQL & PostgreSQL Setup
 
-`scripts/db_setup_and_backup.sh` 스크립트는 MySQL과 PostgreSQL 설치 후
-디스크 용량 확보용 파일을 만들고 `/opt/db_backups` 아래에 백업 디렉터리를
-생성한 뒤 두 데이터베이스를 모두 백업합니다.
+`scripts/db_setup_and_backup.sh` 스크립트는 MySQL과 PostgreSQL을 설치한
+다음, `/opt/db_backups` 경로에 5GB 크기의 파일을 생성하여 디스크 공간을
+확보하고 백업용 디렉터리를 만든 뒤 두 데이터베이스 모두를 백업합니다.
+
+스크립트는 루트 권한으로 실행해야 하며, 필요 시 스크립트 상단의 데이터베이스
+이름과 비밀번호 값을 수정하면 됩니다.
 
 ```bash
 sudo bash scripts/db_setup_and_backup.sh
