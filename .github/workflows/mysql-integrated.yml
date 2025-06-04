@@ -1,0 +1,107 @@
+name: 🐬 MySQL Setup, Migration & Backup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mysql_setup_and_backup:
+    runs-on: ubuntu-latest
+
+    env:
+      MYSQL_IMAGE: mysql:8.0
+      DB_NAME: example_db
+      DB_USER: root
+      DB_PASS: rootpass123
+      ROOT_PASS: rootpass123
+      MIGRATION_DIR: /opt/mysql/migrations
+      BACKUP_DIR: /opt/backup/sql
+
+    steps:
+      - name: 📁 마이그레이션 디렉토리 및 SQL 생성
+        run: |
+          sudo mkdir -p $MIGRATION_DIR
+          echo "CREATE TABLE IF NOT EXISTS accounts (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), balance DECIMAL(12,2));" > $MIGRATION_DIR/migrate.sql
+          echo "INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);" >> $MIGRATION_DIR/migrate.sql
+          sudo chmod -R 777 /opt/mysql
+
+      - name: 🧪 MySQL 설치
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+
+      - name: 🧼 MySQL 초기화 및 root 패스워드 설정
+        run: |
+          sudo systemctl stop mysql
+          sudo mkdir -p /var/run/mysqld
+          sudo chown mysql:mysql /var/run/mysqld
+          sudo mysqld_safe --skip-networking --skip-grant-tables &
+          sleep 10
+
+          echo "FLUSH PRIVILEGES;\nALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${ROOT_PASS}';\nFLUSH PRIVILEGES;" | sudo mysql -u root
+
+          sudo killall mysqld
+          sleep 5
+          sudo systemctl start mysql
+
+      - name: 🛠️ DB 및 사용자 생성
+        run: |
+          mysql -u root -p$ROOT_PASS -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+          mysql -u root -p$ROOT_PASS -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+          mysql -u root -p$ROOT_PASS -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+          mysql -u root -p$ROOT_PASS -e "FLUSH PRIVILEGES;"
+
+      - name: 📥 마이그레이션 실행
+        run: |
+          mysql -u $DB_USER -p$DB_PASS $DB_NAME < $MIGRATION_DIR/migrate.sql
+
+      - name: ✅ 데이터 확인
+        run: |
+          mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME; SHOW TABLES; SELECT * FROM accounts;"
+
+      - name: 🕒 Generate Timestamp and Dynamic Port
+        id: vars
+        run: |
+          TS=$(date +%Y%m%d%H%M%S)
+          PORT=$((RANDOM%1000+3307))
+          echo "timestamp=$TS" >> $GITHUB_OUTPUT
+          echo "container=backup-mysql-$TS" >> $GITHUB_OUTPUT
+          echo "host_port=$PORT" >> $GITHUB_OUTPUT
+
+      - name: 🐳 Launch MySQL Backup Container
+        run: |
+          docker run -d \
+            --name ${{ steps.vars.outputs.container }} \
+            -e MYSQL_ROOT_PASSWORD=$DB_PASS \
+            -e MYSQL_DATABASE=$DB_NAME \
+            -p ${{ steps.vars.outputs.host_port }}:3306 \
+            $MYSQL_IMAGE
+          echo "⏳ 컨테이너 초기화 대기 중..."
+          sleep 30
+
+      - name: 🔐 Generate Secure MySQL Login File (.my.cnf)
+        run: |
+          echo "[client]" > ~/.my.cnf
+          echo "user=$DB_USER" >> ~/.my.cnf
+          echo "password=$DB_PASS" >> ~/.my.cnf
+          echo "host=127.0.0.1" >> ~/.my.cnf
+          echo "port=${{ steps.vars.outputs.host_port }}" >> ~/.my.cnf
+          chmod 600 ~/.my.cnf
+
+      - name: 📁 Create Backup Directory
+        run: |
+          sudo mkdir -p $BACKUP_DIR
+          sudo chmod -R 777 $BACKUP_DIR
+
+      - name: 💾 Run mysqldump Backup
+        run: |
+          TIMESTAMP=${{ steps.vars.outputs.timestamp }}
+          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
+          echo "🔁 백업 시작: $BACKUP_FILE"
+          mysqldump $DB_NAME > $BACKUP_FILE || { echo "❌ 백업 실패"; exit 1; }
+          echo "✅ 백업 완료: $BACKUP_FILE"
+          ls -lh $BACKUP_DIR
+
+      - name: 🔍 Print Container Info
+        run: |
+          echo "📦 컨테이너 이름: ${{ steps.vars.outputs.container }}"
+          echo "🔌 연결된 포트: ${{ steps.vars.outputs.host_port }}"
