@@ -26,6 +26,7 @@
 | transfer-log-backup.yml | 💸 Transfer Log Backup (Resident Batch) | workflow_dispatch | Transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup.yml) |
 | transfer-log-backup1.yml | ♾️ Transfer Log Backup - Infinite Resident Container | workflow_dispatch | Continuous transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup1.yml) |
 | transfer-log-infinite-backup.yml | ♾️ Infinite Transfer Log Backup (Resident) | workflow_dispatch | Infinite transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-infinite-backup.yml) |
+| encrypt-decrypt-tag-label.yml | 🔐 Encrypt, Decrypt & Tag | workflow_dispatch | Encrypts data, tags repo and creates label | [실행](https://github.com/davidkims/springboot/actions/workflows/encrypt-decrypt-tag-label.yml) |
 
 
 ## 📦 Release 워크플로우
