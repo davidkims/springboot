@@ -1,37 +1,27 @@
 name: PostgreSQL Latest Version Upgrade
 
 on:
-  workflow_dispatch: # 수동으로 워크플로우 실행 가능
+  workflow_dispatch:
 
 jobs:
   upgrade-postgresql:
-    runs-on: ubuntu-latest # GitHub Actions 러너 운영체제 (Ubuntu 최신 버전)
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4 # 저장소 코드 체크아웃
+      uses: actions/checkout@v4
 
     - name: Install necessary tools and add PostgreSQL APT repository
       run: |
         sudo apt-get update
         sudo apt-get install -y wget apt-transport-https ca-certificates lsb-release
-        
-        # PostgreSQL APT 저장소 추가
-        # 현재 LSB_RELEASE는 '22.04' 또는 '24.04' (예: 'jammy', 'noble')와 같이 운영체제 코드네임을 반환합니다.
-        # https://apt.postgresql.org/pub/repos/apt/
         sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-        
-        # PostgreSQL GPG 키 추가
         wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-        
         sudo apt-get update
 
     - name: Get installed PostgreSQL version (if any)
       id: get_current_pg_version
       run: |
-        # 현재 설치된 PostgreSQL 버전을 확인합니다.
-        # 이 정보는 이후 pg_upgrade에 사용될 수 있습니다.
-        # Ubuntu 기본 설치 버전은 14 또는 16일 수 있습니다.
         if dpkg -s postgresql > /dev/null 2>&1; then
           CURRENT_PG_VERSION=$(dpkg -s postgresql | grep Version | awk '{print $2}' | cut -d'.' -f1)
           echo "CURRENT_PG_VERSION=$CURRENT_PG_VERSION" >> "$GITHUB_OUTPUT"
@@ -41,115 +31,67 @@ jobs:
           echo "CURRENT_PG_VERSION=none" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Stop PostgreSQL service (if running)
+    - name: Stop PostgreSQL service (if running) and clean up
       run: |
-        # 기존 PostgreSQL 서비스 중지
         sudo systemctl stop postgresql || true
 
     - name: Install/Upgrade PostgreSQL Server to latest version
       run: |
-        # 깨진 종속성 수정 및 구성되지 않은 패키지 처리
         sudo apt-get install -f -y
         sudo dpkg --configure -a
-        
-        # PostgreSQL 서버 및 클라이언트 최신 버전 설치/업그레이드
-        # 'postgresql' 패키지는 최신 버전을 설치합니다.
         sudo apt-get install -y postgresql postgresql-client
-        
-        # 설치 후 서비스 상태 확인
+
+    - name: Set PostgreSQL data directory permissions (ensure correct ownership)
+      run: |
+        sudo chown -R postgres:postgres /var/lib/postgresql
+        sudo chmod -R 700 /var/lib/postgresql
+
+    - name: Start PostgreSQL service
+      run: |
+        sudo systemctl start postgresql
         sudo systemctl status postgresql
 
     - name: Perform pg_upgrade (if major version upgrade)
       env:
         OLD_PG_VERSION: ${{ steps.get_current_pg_version.outputs.CURRENT_PG_VERSION }}
-        # 새 버전은 'postgresql' 패키지 설치 시 자동으로 결정됩니다.
-        # GitHub Actions 러너에 설치되는 최신 PostgreSQL 버전이 16이라고 가정합니다.
-        # 실제 버전은 설치 로그에서 확인하거나, 다른 방법으로 동적으로 가져와야 할 수 있습니다.
-        NEW_PG_VERSION: 16 # 예시: 업그레이드할 목표 PostgreSQL 주요 버전
-                           # 이 값은 apt-get install postgresql 명령 후 실제로 설치된 버전에 따라 달라질 수 있습니다.
-                           # 정확한 버전을 동적으로 가져오려면 추가 스크립트 필요
+        NEW_PG_VERSION: 16
       run: |
-        # pg_upgrade는 이전 데이터 클러스터를 새 데이터 클러스터로 마이그레이션합니다.
-        # 이는 주요 버전 업그레이드 (예: 14 -> 16)에서 필수적입니다.
-        # 동일한 주요 버전 내에서의 업그레이드(예: 16.1 -> 16.2)는 필요하지 않습니다.
-
         echo "Old PG Version: $OLD_PG_VERSION"
         echo "New PG Version: $NEW_PG_VERSION"
 
         if [ "$OLD_PG_VERSION" != "none" ] && [ "$OLD_PG_VERSION" -ne "$NEW_PG_VERSION" ]; then
           echo "Performing major version upgrade from $OLD_PG_VERSION to $NEW_PG_VERSION using pg_upgrade..."
-          
-          # 이전 데이터 클러스터 디렉토리 (기본값)
           OLD_CLUSTER_DIR="/var/lib/postgresql/$OLD_PG_VERSION/main"
-          # 새 데이터 클러스터 디렉토리 (기본값)
           NEW_CLUSTER_DIR="/var/lib/postgresql/$NEW_PG_VERSION/main"
-
-          # 새 클러스터 초기화 (기존 데이터가 있다면 초기화하지 마세요!)
-          # 이 단계는 주로 새 PostgreSQL 버전이 처음 설치될 때 자동으로 수행됩니다.
-          # 이미 데이터가 있는 경우 이 명령을 실행하면 데이터가 손실됩니다.
-          # sudo /usr/lib/postgresql/$NEW_PG_VERSION/bin/pg_ctl -D $NEW_CLUSTER_DIR initdb
-
-          # 기존 클러스터에서 새로운 클러스터로 업그레이드 (pg_upgrade 실행)
-          # pg_upgrade는 두 버전의 바이너리와 데이터 디렉토리가 필요합니다.
-          # 안전을 위해 새 클러스터를 비워야 합니다.
-          # 이 시나리오에서는 새로 설치된 최신 버전의 'main' 클러스터를 비워야 할 수 있습니다.
-          # Warning: pg_upgrade는 데이터가 손실될 수 있으므로, 반드시 백업 후 신중하게 사용해야 합니다.
-          
-          # 새 데이터 디렉토리 초기화 (기존 데이터가 있다면 반드시 백업 후 수행!)
           sudo rm -rf $NEW_CLUSTER_DIR
           sudo -u postgres /usr/lib/postgresql/$NEW_PG_VERSION/bin/initdb -D $NEW_CLUSTER_DIR
-
-          # pg_upgrade 명령 실행
-          # -b: 이전 버전 바이너리 경로
-          # -B: 새 버전 바이너리 경로
-          # -d: 이전 버전 데이터 디렉토리
-          # -D: 새 버전 데이터 디렉토리
-          # -o: 이전 버전 옵션
-          # -O: 새 버전 옵션
           sudo -u postgres /usr/lib/postgresql/$NEW_PG_VERSION/bin/pg_upgrade \
             -b /usr/lib/postgresql/$OLD_PG_VERSION/bin \
             -B /usr/lib/postgresql/$NEW_PG_VERSION/bin \
             -d $OLD_CLUSTER_DIR \
             -D $NEW_CLUSTER_DIR \
-            --check # 먼저 --check 옵션으로 호환성 검사
-
-          # --check가 성공하면, 실제 업그레이드 실행 (주의: 이 단계는 실제 데이터 마이그레이션이 발생합니다)
-          # sudo -u postgres /usr/lib/postgresql/$NEW_PG_VERSION/bin/pg_upgrade \
-          #   -b /usr/lib/postgresql/$OLD_PG_VERSION/bin \
-          #   -B /usr/lib/postgresql/$NEW_PG_VERSION/bin \
-          #   -d $OLD_CLUSTER_DIR \
-          #   -D $NEW_CLUSTER_DIR
+            --check
 
           echo "PostgreSQL major version upgrade check completed. For actual upgrade, uncomment the pg_upgrade command."
-          # 업그레이드 성공 시, 이전 클러스터 제거 (선택 사항)
-          # sudo rm -rf $OLD_CLUSTER_DIR
-          
         else
           echo "No major version upgrade needed or no previous PostgreSQL installation found."
         fi
 
     - name: Configure PostgreSQL service to use the new cluster
       run: |
-        # PostgreSQL 서비스가 새 버전의 클러스터를 사용하도록 구성
-        # 보통 apt 설치 시 자동으로 가장 높은 버전의 클러스터가 활성화됩니다.
-        # 여러 클러스터가 있다면 `pg_lsclusters`로 확인 후 `pg_dropcluster` 등으로 관리.
-        # sudo pg_dropcluster 14 main # 예시: 이전 버전의 클러스터 제거 (주의: 데이터 손실)
-        sudo systemctl start postgresql # 새 버전 서비스 시작
+        sudo systemctl start postgresql
         sudo systemctl status postgresql
 
     - name: Verify PostgreSQL version and cluster status
       run: |
         psql --version
         sudo -u postgres psql -c "SELECT version();"
-        sudo pg_lsclusters # 현재 활성화된 PostgreSQL 클러스터 목록 확인
+        sudo pg_lsclusters
         echo "PostgreSQL upgrade process completed successfully!"
 
     - name: Check PostgreSQL logs for errors
-      if: always() # 항상 실행하여 업그레이드 성공 여부와 관계없이 로그 확인
+      if: always()
       run: |
         echo "Attempting to get PostgreSQL error logs:"
-        # PostgreSQL 로그 파일 경로는 설정에 따라 다릅니다.
-        # Ubuntu 기본 설정: /var/log/postgresql/
         sudo cat /var/log/postgresql/postgresql-*.log || true
-        # journalctl을 통해서도 확인 가능
         sudo journalctl -u postgresql.service --no-pager -n 100
