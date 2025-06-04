@@ -27,3 +27,15 @@
 | transfer-log-backup1.yml | ♾️ Transfer Log Backup - Infinite Resident Container | workflow_dispatch | Continuous transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup1.yml) |
 | transfer-log-infinite-backup.yml | ♾️ Infinite Transfer Log Backup (Resident) | workflow_dispatch | Infinite transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-infinite-backup.yml) |
 
+
+## 📦 Release 워크플로우
+
+레포지토리의 태그가 `v*.*.*` 형식으로 푸시되면 `.github/workflows/release.yml`이 실행되어 자동으로 GitHub Release가 생성됩니다. 이 워크플로우는 `GITHUB_TOKEN` 또는 개인 액세스 토큰을 사용합니다.
+
+### Personal Access Token 발행 및 설정
+
+1. GitHub 웹사이트에서 **Settings > Developer settings > Personal access tokens** 로 이동합니다.
+2. "Generate new token"을 선택하고 권한으로 **repo** 스코프를 부여합니다.
+3. 토큰 값을 복사한 뒤 레포지토리의 **Settings > Secrets and variables > Actions** 메뉴에서 `GITHUB_TOKEN` 또는 `GH_TOKEN` 이름으로 저장합니다.
+4. 이후 `git tag v1.0.0 && git push origin v1.0.0` 과 같이 태그를 푸시하면 자동으로 Release가 생성됩니다.
+
