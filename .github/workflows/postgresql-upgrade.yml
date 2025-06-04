@@ -1,80 +1,103 @@
-# This YAML defines a step or job for performing a MySQL database backup.
-# It's designed to be easily integrated into CI/CD pipelines (e.g., GitHub Actions).
+# 이 YAML 파일은 MySQL 데이터베이스 백업을 수행하는 CI/CD 작업을 정의합니다.
+# 'Access denied' 오류를 포함한 일반적인 문제를 해결하도록 설계되었습니다.
 
-name: MySQL Database Backup
+name: MySQL Database Backup and Upload
 
 on:
-  # Define when this job should run, e.g., on a schedule or manual trigger
-  workflow_dispatch: # Allows manual triggering
+  # 이 워크플로우가 언제 실행될지 정의합니다.
+  workflow_dispatch: # 수동으로 워크플로우를 실행할 수 있도록 합니다.
   # schedule:
-  #   - cron: '0 2 * * *' # Runs daily at 2 AM UTC
+  #   - cron: '0 2 * * *' # 매일 UTC 2시에 실행되도록 예약하려면 이 주석을 해제하세요.
 
 jobs:
   backup_mysql:
-    runs-on: ubuntu-latest # Or your preferred runner environment
+    runs-on: ubuntu-latest # 작업을 실행할 환경을 지정합니다. (예: GitHub Actions의 Ubuntu 러너)
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4 # Action to checkout your code
+    - name: 저장소 체크아웃
+      uses: actions/checkout@v4 # 현재 저장소 코드를 러너로 가져옵니다.
 
-    - name: Perform MySQL Backup
+    - name: MySQL 백업 수행
       env:
         # MySQL 연결 상세 정보
-        MYSQL_HOST: localhost # MySQL 호스트 (기본값: localhost)
-        MYSQL_PORT: 3306      # MySQL 포트 (기본값: 3306)
-        MYSQL_USER: root      # MySQL 사용자 (기본값: root)
-        # 중요: MySQL 비밀번호를 여기에 직접 입력하거나,
-        # CI/CD 환경의 비밀(secrets)로 설정하는 것이 좋습니다.
-        # 예: MYSQL_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-        MYSQL_PASSWORD: YOUR_MYSQL_ROOT_PASSWORD # 실제 비밀번호로 교체하거나 secrets 사용
-        # MYSQL_DATABASE를 설정하면 특정 데이터베이스만 백업합니다.
-        # 비워두면 모든 데이터베이스를 백업합니다.
+        MYSQL_HOST: localhost # MySQL 호스트 이름 (기본값: localhost)
+        MYSQL_PORT: 3306      # MySQL 포트 번호 (기본값: 3306)
+        MYSQL_USER: root      # MySQL 사용자 이름 (기본값: root)
+
+        # 중요: MySQL 비밀번호 설정
+        # 보안을 위해 CI/CD 환경의 '비밀(secrets)'을 사용하는 것을 강력히 권장합니다.
+        # 예: GitHub Actions에서는 'Secrets' 탭에서 MYSQL_ROOT_PASSWORD라는 비밀을 생성합니다.
+        # 테스트 목적으로만 여기에 직접 비밀번호를 입력할 수 있지만, 프로덕션에서는 권장하지 않습니다.
+        MYSQL_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }} # 이 부분을 실제 비밀번호로 교체하거나 secrets 사용
+
+        # 백업할 특정 데이터베이스 이름 (선택 사항)
+        # 이 변수를 비워두면 모든 데이터베이스를 백업합니다.
         # 예: MYSQL_DATABASE: your_specific_database_name
-        MYSQL_DATABASE: ""
+        MYSQL_DATABASE: "" # 특정 데이터베이스를 백업하려면 여기에 이름을 입력하세요.
+
       run: |
         #!/bin/bash
 
         # 타임스탬프를 포함한 백업 파일명 정의
         BACKUP_FILENAME="mysql_backup_$(date +%Y%m%d_%H%M%S).sql"
 
-        # IMPORTANT: MYSQL_PWD 환경 변수를 사용하여 mysqldump에 비밀번호를 안전하게 전달합니다.
-        # 이렇게 하면 명령줄 기록에 비밀번호가 직접 노출되는 것을 방지할 수 있습니다.
-        export MYSQL_PWD="${MYSQL_PASSWORD}"
-
-        # 비밀번호가 플레이스홀더인지 확인
-        if [ "$MYSQL_PWD" == "YOUR_MYSQL_ROOT_PASSWORD" ]; then
-          echo "오류: MySQL 비밀번호가 설정되지 않았습니다. 'YOUR_MYSQL_ROOT_PASSWORD'를 실제 비밀번호로 교체하거나 MYSQL_PASSWORD 환경 변수를 설정하십시오."
-          exit 1
+        echo "--- MySQL 백업 스크립트 시작 ---"
+        echo "백업 파일명: $BACKUP_FILENAME"
+        echo "MySQL 호스트: $MYSQL_HOST"
+        echo "MySQL 포트: $MYSQL_PORT"
+        echo "MySQL 사용자: $MYSQL_USER"
+        if [ -n "$MYSQL_DATABASE" ]; then
+          echo "백업할 데이터베이스: $MYSQL_DATABASE"
+        else
+          echo "모든 데이터베이스를 백업합니다."
         fi
+
+        # MYSQL_PASSWORD 환경 변수가 비어 있는지 확인
+        if [ -z "$MYSQL_PASSWORD" ]; then
+          echo "오류: MYSQL_PASSWORD 환경 변수가 설정되지 않았습니다."
+          echo "비밀번호를 환경 변수로 설정하거나, CI/CD 환경의 비밀(secrets) 기능을 사용해야 합니다."
+          exit 1 # 스크립트 종료
+        fi
+
+        # MYSQL_PWD 환경 변수 사용: mysqldump에 비밀번호를 안전하게 전달하는 표준 방법
+        # 이렇게 하면 명령줄 기록에 비밀번호가 직접 노출되는 것을 방지할 수 있습니다.
+        export MYSQL_PWD="$MYSQL_PASSWORD"
 
         # 백업 수행
         if [ -z "$MYSQL_DATABASE" ]; then
-          # MYSQL_DATABASE가 설정되지 않은 경우 모든 데이터베이스 백업
-          echo "모든 MySQL 데이터베이스를 덤프합니다 (호스트: $MYSQL_HOST, 포트: $MYSQL_PORT, 사용자: $MYSQL_USER)..."
+          echo "mysqldump --all-databases --host=\"$MYSQL_HOST\" --port=\"$MYSQL_PORT\" --user=\"$MYSQL_USER\" > \"$BACKUP_FILENAME\""
           mysqldump --all-databases \
                     --host="$MYSQL_HOST" \
                     --port="$MYSQL_PORT" \
                     --user="$MYSQL_USER" > "$BACKUP_FILENAME"
         else
-          # MYSQL_DATABASE가 설정된 경우 특정 데이터베이스 백업
-          echo "MySQL 데이터베이스 '$MYSQL_DATABASE'를 덤프합니다 (호스트: $MYSQL_HOST, 포트: $MYSQL_PORT, 사용자: $MYSQL_USER)..."
+          echo "mysqldump --host=\"$MYSQL_HOST\" --port=\"$MYSQL_PORT\" --user=\"$MYSQL_USER\" \"$MYSQL_DATABASE\" > \"$BACKUP_FILENAME\""
           mysqldump --host="$MYSQL_HOST" \
                     --port="$MYSQL_PORT" \
                     --user="$MYSQL_USER" \
                     "$MYSQL_DATABASE" > "$BACKUP_FILENAME"
         fi
 
-        # mysqldump 성공 여부 확인
+        # mysqldump 명령의 종료 코드 확인
         if [ $? -eq 0 ]; then
           echo "MySQL 백업이 성공적으로 생성되었습니다: $BACKUP_FILENAME"
+          # 백업 파일이 생성되었는지 확인
+          if [ -f "$BACKUP_FILENAME" ]; then
+            echo "백업 파일 크기: $(du -h "$BACKUP_FILENAME" | awk '{print $1}')"
+          else
+            echo "경고: 백업 파일($BACKUP_FILENAME)이 생성되지 않았거나 찾을 수 없습니다."
+            exit 1 # 파일이 없으면 오류로 처리
+          fi
         else
-          echo "오류: MySQL 백업에 실패했습니다. 위의 오류 메시지를 확인하십시오."
-          exit 1
+          echo "오류: MySQL 백업에 실패했습니다."
+          echo "위의 mysqldump 오류 메시지를 확인하십시오. (예: 'Access denied' 또는 'Unknown database')"
+          exit 1 # 스크립트 종료
         fi
+        echo "--- MySQL 백업 스크립트 종료 ---"
 
-    # 선택 사항: 백업 파일을 아티팩트로 업로드
-    - name: Upload Backup File as Artifact
+    - name: 백업 파일을 아티팩트로 업로드
       uses: actions/upload-artifact@v4
       with:
         name: mysql-backup
-        path: "*.sql" # 백업 파일명 패턴에 맞게 조정
+        path: "*.sql" # 현재 디렉토리의 모든 .sql 파일을 아티팩트로 업로드합니다.
+        retention-days: 7 # 아티팩트를 7일 동안 보존합니다.
