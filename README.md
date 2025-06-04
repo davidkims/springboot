@@ -40,3 +40,7 @@
 3. 토큰 값을 복사한 뒤 레포지토리의 **Settings > Secrets and variables > Actions** 메뉴에서 `GITHUB_TOKEN` 또는 `GH_TOKEN` 이름으로 저장합니다.
 4. 이후 `git tag v1.0.0 && git push origin v1.0.0` 과 같이 태그를 푸시하면 자동으로 Release가 생성됩니다.
 
+## 📝 Workflow Issue & Result Log
+
+`.github/WORKFLOW_LOG.md` 파일을 사용하여 각 워크플로우 실행 시 발생한 문제점과 특이사항 그리고 결과를 기록할 수 있습니다. 새로운 항목은 표의 맨 위에 추가하여 최신 내용을 유지하세요.
+
