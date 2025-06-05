@@ -1,4 +1,4 @@
-name: Generate and Backup Corporate Banking Data with Transaction Images
+name: Generate and Backup Corporate Banking Data with Secure ZIP and OCI Upload
 
 on:
   workflow_dispatch:
@@ -46,16 +46,25 @@ jobs:
           echo '-- SQL Dump Placeholder' > output/corporate_banking_backup.sql
           echo "INFO: 데이터 추출 완료: output/corporate_banking_backup.sql"
 
-      - name: 🔐 Encrypt Backup File (비밀번호가 비어 있으면 -P 없이 실행)
+      - name: 🔐 Generate or Use Backup Password & Encrypt Backup File
+        id: encrypt
         run: |
+          # 비밀번호가 GitHub Secret에 있다면 사용, 그렇지 않으면 랜덤 생성
           if [ -n "${{ secrets.BACKUP_PASSWORD }}" ]; then
-            echo "🔒 비밀번호 적용: ${BACKUP_PASSWORD}"
-            zip -j -P "${{ secrets.BACKUP_PASSWORD }}" output/corporate_banking_backup.zip output/corporate_banking_backup.sql
+            BACKUP_PASSWORD="${{ secrets.BACKUP_PASSWORD }}"
+            echo "🔒 사용 중인 BACKUP_PASSWORD: (secret에 정의된 값)"
           else
-            echo "⚠️ BACKUP_PASSWORD가 비어 있습니다. -P 없이 압축합니다."
-            zip -j output/corporate_banking_backup.zip output/corporate_banking_backup.sql
+            # 랜덤 비밀번호 생성 (영숫자 16자)
+            BACKUP_PASSWORD=$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
+            echo "🔑 새로 생성된 BACKUP_PASSWORD: ${BACKUP_PASSWORD}"
           fi
+
+          # ZIP 암호화: -P 옵션으로 비밀번호 적용
+          zip -j -P "$BACKUP_PASSWORD" output/corporate_banking_backup.zip output/corporate_banking_backup.sql
           echo "✅ 백업 파일 암호화/압축 완료: output/corporate_banking_backup.zip"
+
+          # 다음 단계에서 사용할 수 있도록 출력
+          echo "::set-output name=password::$BACKUP_PASSWORD"
 
       - name: 🖼️ Generate Credit & Debit Card Transaction Images via echo-generated script
         run: |
@@ -87,6 +96,13 @@ jobs:
 
           python scripts/gen_images.py
 
+      - name: ☁ Install OCI CLI
+        run: |
+          # OCI CLI 설치 스크립트 다운로드 및 실행
+          curl -sL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults --install-dir $HOME/oci-cli
+          echo "$HOME/oci-cli/bin" >> $GITHUB_PATH
+          echo "✅ OCI CLI 설치 완료: $(oci --version)"
+
       - name: ☁ Upload to OCI Object Storage (CLI)
         env:
           OCI_CLI_AUTH: "api_key"
@@ -100,6 +116,7 @@ jobs:
           echo "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
+          # ZIP 파일 업로드
           oci os object put \
             --bucket-name backups \
             --file output/corporate_banking_backup.zip \
@@ -107,6 +124,7 @@ jobs:
             --force \
             --region $OCI_CLI_REGION
 
+          # 신용카드 이미지 업로드
           for img in output/credit_card_images/*.png; do
             filename=$(basename $img)
             oci os object put \
@@ -117,6 +135,7 @@ jobs:
               --region $OCI_CLI_REGION
           done
 
+          # 체크카드 이미지 업로드
           for img in output/debit_card_images/*.png; do
             filename=$(basename $img)
             oci os object put \
