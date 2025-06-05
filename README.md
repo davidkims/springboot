@@ -1,56 +1,225 @@
-## 🔧 GitHub Actions 워크플로우 요약
+## 🚀 davidkims/springboot 저장소 분석 보고서
 
-아래 표에는 각 워크플로우의 설명과 실행 페이지 링크가 포함되어 있습니다.
+이 보고서는 GitHub Actions 워크플로우에 의해 자동으로 생성되었습니다. 각 파일의 기본적인 정보와 자동 분석된 특이사항을 포함합니다.
 
-| 워크플로우 파일 | 워크플로우 이름 | 트리거 | 주요 작업 | 실행 링크 |
-|----------------|----------------|--------|-----------|-----------|
-| auto-backup.yml | 🔁 Auto Finance Backup (Manual + Cron) | schedule, workflow_dispatch | Finance MySQL backup | [실행](https://github.com/davidkims/springboot/actions/workflows/auto-backup.yml) |
-| auto-transactions.yml | 🧱 Maven Build (echo 버전) | push, workflow_dispatch | Maven project build | [실행](https://github.com/davidkims/springboot/actions/workflows/auto-transactions.yml) |
-| bankbackup.yml | 🔄 Finance Smart Backup with PostgreSQL & Kafka | workflow_dispatch | PostgreSQL backup & Kafka log | [실행](https://github.com/davidkims/springboot/actions/workflows/bankbackup.yml) |
-| billing.yml | 키 가가이드 - PDF 영수증 포함 | push, workflow_dispatch | Generate transactions & receipts | [실행](https://github.com/davidkims/springboot/actions/workflows/billing.yml) |
-| cash.yml | 🧾 결제 자동화 - PDF 영수증 포함 | push, workflow_dispatch | Ledger generation & artifact upload | [실행](https://github.com/davidkims/springboot/actions/workflows/cash.yml) |
-| customer-image-docker.yml | 🧾 고객 명함 생성 + 암호화 + 복호화 + 비교 자동화 (echo 완전 적용) | push, workflow_dispatch | Build customer card images with encryption | [실행](https://github.com/davidkims/springboot/actions/workflows/customer-image-docker.yml) |
-| docker-backup-workflow.yml | 🐳 Docker Finance Backup with GHCR + Kafka-style Logging | schedule, workflow_dispatch | Docker backup image & push | [실행](https://github.com/davidkims/springboot/actions/workflows/docker-backup-workflow.yml) |
-| docker-finance-build.yml | 🔐 금융 거래 자동 백업 | push, schedule, workflow_dispatch | MySQL container build & backup | [실행](https://github.com/davidkims/springboot/actions/workflows/docker-finance-build.yml) |
-| finance-backup-multi.yml | 🧾 Multi-Transaction Backup (Per-Type Containers) | workflow_dispatch | Multi-container backups | [실행](https://github.com/davidkims/springboot/actions/workflows/finance-backup-multi.yml) |
-| finance-docker.yml | Build & Simulate Finance Transactions | push, workflow_dispatch | Build Docker image & simulate finance | [실행](https://github.com/davidkims/springboot/actions/workflows/finance-docker.yml) |
-| finance-smart-backup.yml | 🔄 Finance Smart Backup without OTP | schedule, workflow_dispatch | Scheduled finance backup | [실행](https://github.com/davidkims/springboot/actions/workflows/finance-smart-backup.yml) |
-| label.yml | 🔁 Auto Finance Backup (No Manual Trigger) | schedule | Scheduled MySQL backup | [실행](https://github.com/davidkims/springboot/actions/workflows/label.yml) |
-| ledger-generator.yml | 🦾 거래 자동화 - PDF 영수증 포함 | push, workflow_dispatch | Ledger and receipt generation | [실행](https://github.com/davidkims/springboot/actions/workflows/ledger-generator.yml) |
-| log-backup-container.yml | 🌀 Resident Batch Log Backup | workflow_dispatch | Resident container log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/log-backup-container.yml) |
-| mysql-setup.yml | 🐬 MySQL Setup & Migration | workflow_dispatch | Setup MySQL and apply migrations | [실행](https://github.com/davidkims/springboot/actions/workflows/mysql-setup.yml) |
-| retrigger-and-db-init.yml | 🧾 금융 거래 자동화 (PDF 영수증 포함) | push, workflow_dispatch | Auto finance transactions with receipts | [실행](https://github.com/davidkims/springboot/actions/workflows/retrigger-and-db-init.yml) |
-| sql-backup-and-migrate.yml | 🐬 MySQL Backup with Dynamic Port & Persistent Containers | workflow_dispatch | Backup & migrate MySQL | [실행](https://github.com/davidkims/springboot/actions/workflows/sql-backup-and-migrate.yml) |
-| swift-backup.yml | 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 | push, workflow_dispatch | NetBackup and OCI upload | [실행](https://github.com/davidkims/springboot/actions/workflows/swift-backup.yml) |
-| test.yml | 🐳 Docker Build & Run with Echo | push, workflow_dispatch | Docker build test | [실행](https://github.com/davidkims/springboot/actions/workflows/test.yml) |
-| transfer-log-backup.yml | 💸 Transfer Log Backup (Resident Batch) | workflow_dispatch | Transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup.yml) |
-| transfer-log-backup1.yml | ♾️ Transfer Log Backup - Infinite Resident Container | workflow_dispatch | Continuous transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup1.yml) |
-| transfer-log-infinite-backup.yml | ♾️ Infinite Transfer Log Backup (Resident) | workflow_dispatch | Infinite transfer log backup | [실행](https://github.com/davidkims/springboot/actions/workflows/transfer-log-infinite-backup.yml) |
-| encrypt-decrypt-tag-label.yml | 🔐 Encrypt, Decrypt & Tag | workflow_dispatch | Encrypts data, tags repo and creates label | [실행](https://github.com/davidkims/springboot/actions/workflows/encrypt-decrypt-tag-label.yml) |
+### 📂 파일 목록 및 특이사항
 
+#### 📄 .github/WORKFLOW_LOG.md
+- **파일 경로:** `.github/WORKFLOW_LOG.md`
+- **파일 크기:** 653 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 파일은 마크다운 문서입니다.
 
-## 📦 Release 워크플로우
+#### 📄 .github/labeler.yml
+- **파일 경로:** `.github/labeler.yml`
+- **파일 크기:** 15 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
 
-레포지토리의 태그가 `v*.*.*` 형식으로 푸시되면 `.github/workflows/release.yml`이 실행되어 자동으로 GitHub Release가 생성됩니다. 이 워크플로우는 `GITHUB_TOKEN` 또는 개인 액세스 토큰을 사용합니다.
+#### 📄 .github/workflows/Release.yml
+- **파일 경로:** `.github/workflows/Release.yml`
+- **파일 크기:** 406 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
 
-### Personal Access Token 발행 및 설정
+#### 📄 .github/workflows/auto-backup.yml
+- **파일 경로:** `.github/workflows/auto-backup.yml`
+- **파일 크기:** 1873 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
 
-1. GitHub 웹사이트에서 **Settings > Developer settings > Personal access tokens** 로 이동합니다.
-2. "Generate new token"을 선택하고 권한으로 **repo** 스코프를 부여합니다.
-3. 토큰 값을 복사한 뒤 레포지토리의 **Settings > Secrets and variables > Actions** 메뉴에서 `GITHUB_TOKEN` 또는 `GH_TOKEN` 이름으로 저장합니다.
-4. 이후 `git tag v1.0.0 && git push origin v1.0.0` 과 같이 태그를 푸시하면 자동으로 Release가 생성됩니다.
+#### 📄 .github/workflows/auto-transactions.yml
+- **파일 경로:** `.github/workflows/auto-transactions.yml`
+- **파일 크기:** 2672 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
 
-## 📝 Workflow Issue & Result Log
+#### 📄 .github/workflows/bankbackup.yml
+- **파일 경로:** `.github/workflows/bankbackup.yml`
+- **파일 크기:** 6154 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
 
-`.github/WORKFLOW_LOG.md` 파일을 사용하여 각 워크플로우 실행 시 발생한 문제점과 특이사항 그리고 결과를 기록할 수 있습니다. 새로운 항목은 표의 맨 위에 추가하여 최신 내용을 유지하세요.
+#### 📄 .github/workflows/billing.yml
+- **파일 경로:** `.github/workflows/billing.yml`
+- **파일 크기:** 4330 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
 
+#### 📄 .github/workflows/cash.yml
+- **파일 경로:** `.github/workflows/cash.yml`
+- **파일 크기:** 1516 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
 
-## 🐬 Manual MySQL & PostgreSQL Setup
+#### 📄 .github/workflows/customer-image-docker.yml
+- **파일 경로:** `.github/workflows/customer-image-docker.yml`
+- **파일 크기:** 4929 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
 
-`scripts/db_setup_and_backup.sh` 스크립트는 MySQL과 PostgreSQL 설치 후
-디스크 용량 확보용 파일을 만들고 `/opt/db_backups` 아래에 백업 디렉터리를
-생성한 뒤 두 데이터베이스를 모두 백업합니다.
+#### 📄 .github/workflows/db.yml
+- **파일 경로:** `.github/workflows/db.yml`
+- **파일 크기:** 7297 바이트
+- **파일 타입:** `text/x-script.python`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
 
-```bash
-sudo bash scripts/db_setup_and_backup.sh
-```
+#### 📄 .github/workflows/docker-backup-workflow.yml
+- **파일 경로:** `.github/workflows/docker-backup-workflow.yml`
+- **파일 크기:** 2963 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/docker-finance-build.yml
+- **파일 경로:** `.github/workflows/docker-finance-build.yml`
+- **파일 크기:** 3218 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/encrypt-decrypt-tag-label.yml
+- **파일 경로:** `.github/workflows/encrypt-decrypt-tag-label.yml`
+- **파일 크기:** 2167 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/finance-backup-multi.yml
+- **파일 경로:** `.github/workflows/finance-backup-multi.yml`
+- **파일 크기:** 2881 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/finance-docker.yml
+- **파일 경로:** `.github/workflows/finance-docker.yml`
+- **파일 크기:** 3791 바이트
+- **파일 타입:** `text/x-java`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/finance-smart-backup.yml
+- **파일 경로:** `.github/workflows/finance-smart-backup.yml`
+- **파일 크기:** 4621 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/label.yml
+- **파일 경로:** `.github/workflows/label.yml`
+- **파일 크기:** 1803 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/ledger-generator.yml
+- **파일 경로:** `.github/workflows/ledger-generator.yml`
+- **파일 크기:** 3302 바이트
+- **파일 타입:** `text/x-script.python`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/log-backup-container.yml
+- **파일 경로:** `.github/workflows/log-backup-container.yml`
+- **파일 크기:** 1630 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/mysql-integrated.yml
+- **파일 경로:** `.github/workflows/mysql-integrated.yml`
+- **파일 크기:** 3998 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/mysql-setup.yml
+- **파일 경로:** `.github/workflows/mysql-setup.yml`
+- **파일 크기:** 2129 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/mysql-upgrade.yml
+- **파일 경로:** `.github/workflows/mysql-upgrade.yml`
+- **파일 크기:** 2486 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/postgresql-upgrade.yml
+- **파일 경로:** `.github/workflows/postgresql-upgrade.yml`
+- **파일 크기:** 8089 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/release.yml
+- **파일 경로:** `.github/workflows/release.yml`
+- **파일 크기:** 406 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/retrigger-and-db-init.yml
+- **파일 경로:** `.github/workflows/retrigger-and-db-init.yml`
+- **파일 크기:** 7326 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/sql-backup-and-migrate.yml
+- **파일 경로:** `.github/workflows/sql-backup-and-migrate.yml`
+- **파일 크기:** 2230 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/swift-backup.yml
+- **파일 경로:** `.github/workflows/swift-backup.yml`
+- **파일 크기:** 3691 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/test.yml
+- **파일 경로:** `.github/workflows/test.yml`
+- **파일 크기:** 2021 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/tokencheck.yml
+- **파일 경로:** `.github/workflows/tokencheck.yml`
+- **파일 크기:** 2985 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .github/workflows/transfer-log-backup.yml
+- **파일 경로:** `.github/workflows/transfer-log-backup.yml`
+- **파일 크기:** 1547 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/transfer-log-backup1.yml
+- **파일 경로:** `.github/workflows/transfer-log-backup1.yml`
+- **파일 크기:** 1561 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/transfer-log-infinite-backup.yml
+- **파일 경로:** `.github/workflows/transfer-log-infinite-backup.yml`
+- **파일 크기:** 1525 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 .github/workflows/update_readme.yml
+- **파일 경로:** `.github/workflows/update_readme.yml`
+- **파일 크기:** 6750 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망.
+
+#### 📄 .gitignore
+- **파일 경로:** `.gitignore`
+- **파일 크기:** 270 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 LICENSE
+- **파일 경로:** `LICENSE`
+- **파일 크기:** 1301 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+#### 📄 scripts/db_setup_and_backup.sh
+- **파일 경로:** `scripts/db_setup_and_backup.sh`
+- **파일 크기:** 2170 바이트
+- **파일 타입:** `text/x-shellscript`
+- **특이사항:** 이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다.
+
+## 📅 생성 날짜
+2025년 06월 05일 13시 47분 54초 KST
+
