@@ -1,0 +1,152 @@
+name: Update README with Blog Info and Repo Analysis
+
+on:
+  workflow_dispatch: # GitHub UI에서 수동 실행 허용
+  push:
+    branches: ["main"] # 'main' 브랜치에 코드가 푸시될 때 실행
+    paths-ignore:
+      - 'README.md' # README.md 변경으로 인한 무한 루프 방지
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+
+    # GITHUB_TOKEN에 쓰기 권한을 부여합니다.
+    # 이 권한이 없으면 github-actions[bot]이 변경 사항을 푸시할 수 없습니다.
+    permissions:
+      contents: write # 이 라인이 git push를 가능하게 합니다.
+
+    steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐍 Set up Python (Optional:for more complex scripting)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 📝 Generate Analysis Report and Update README.md
+        id: generate_report
+        run: |
+          README_PATH="README.md"
+          TEMP_README_PATH="README_temp.md"
+          ANALYSIS_REPORT_START_TAG=""
+          ANALYSIS_REPORT_END_TAG=""
+          BLOG_INFO_START_TAG=""
+          BLOG_INFO_END_TAG=""
+          REPO_NAME="davidkims/springboot"
+
+          # 1. 블로그 정보 섹션 생성
+          BLOG_INFO_CONTENT="\
+          ${BLOG_INFO_START_TAG}\n\n\
+          ## 👨‍💻 김병권의 프로그래밍 블로그 소개\n\n\
+          안녕하세요! 김병권의 프로그래밍 블로그는 다양한 프로그래밍 주제와 기술 스택에 대한 깊이 있는 통찰과 실용적인 예제를 공유하는 공간입니다. 특히 스프링 부트(Spring Boot), 클라우드 네이티브 개발, 마이크로서비스 아키텍처 등 최신 기술 트렌드에 대한 유용한 정보를 얻을 수 있습니다. 직접 경험하고 학습한 내용을 바탕으로 작성된 글들은 개발자 여러분의 문제 해결과 성장에 큰 도움이 될 것입니다.\n\n\
+          👉 [블로그 방문하기](https://example.com/davidkims-blog) \n\n\
+          ${BLOG_INFO_END_TAG}"
+
+          # 2. 분석 보고서 내용 생성
+          ANALYSIS_CONTENT="\
+          ${ANALYSIS_REPORT_START_TAG}\n\n\
+          ## 🚀 ${REPO_NAME} 저장소 분석 보고서\n\n\
+          이 보고서는 GitHub Actions 워크플로우에 의해 자동으로 생성되었습니다. 각 파일의 기본적인 정보와 자동 분석된 특이사항을 포함합니다.\n\n\
+          ### 📂 파일 목록 및 특이사항\n\n"
+
+          # git ls-files를 사용하여 모든 파일을 나열하고 분석 보고서에 추가
+          git ls-files | while IFS= read -r file; do
+              if [[ "$file" == ".git/"* || "$file" == "target/"* || "$file" == "build/"* || "$file" == "src/main/resources/static/"* || "$file" == "node_modules/"* || "$file" == ".idea/"* || "$file" == "logs/"* ]]; then
+                  continue
+              fi
+              if [[ "$file" == "README.md" ]]; then # README.md 자체는 분석 대상에서 제외
+                  continue
+              fi
+              if [ ! -f "$file" ]; then # 파일이 실제로 존재하지 않으면 건너뛰기
+                  continue
+              fi
+
+              FILE_SIZE=$(du -b "$file" | cut -f1)
+              FILE_TYPE=$(file -b --mime-type "$file" 2>/dev/null || echo "unknown/type")
+
+              ANALYSIS_CONTENT+="#### 📄 $file\n"
+              ANALYSIS_CONTENT+="- **파일 경로:** \`$file\`\n"
+              ANALYSIS_CONTENT+="- **파일 크기:** $FILE_SIZE 바이트\n"
+              ANALYSIS_CONTENT+="- **파일 타입:** \`$FILE_TYPE\`\n"
+
+              SPECIAL_NOTE="이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다."
+              if [[ "$file" == *.java ]]; then
+                  if grep -q "TODO" "$file" 2>/dev/null; then
+                      SPECIAL_NOTE="TODO 주석이 발견되었습니다."
+                  fi
+              elif [[ "$file" == *.xml || "$file" == *.properties || "$file" == *.yml || "$file" == *.yaml ]]; then
+                  if grep -qE "password|secret|api_key" "$file" 2>/dev/null; then
+                      SPECIAL_NOTE="민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망."
+                  fi
+              elif [[ "$file" == *.md ]]; then
+                  SPECIAL_NOTE="이 파일은 마크다운 문서입니다."
+              fi
+              ANALYSIS_CONTENT+="- **특이사항:** $SPECIAL_NOTE\n\n"
+          done
+
+          ANALYSIS_CONTENT+="## 📅 생성 날짜\n$(date '+%Y년 %m월 %d일 %H시 %M분 %S초 KST')\n\n"
+          ANALYSIS_CONTENT+="${ANALYSIS_REPORT_END_TAG}"
+
+          # 3. README.md 업데이트
+          # 기존 README.md 내용을 읽어와서 특정 태그 사이에 새로운 내용을 삽입/교체
+          if [ -f "$README_PATH" ]; then
+              # 블로그 정보 섹션 업데이트/삽입
+              if grep -q "$BLOG_INFO_START_TAG" "$README_PATH"; then
+                  # 시작 태그와 끝 태그 사이의 내용을 교체
+                  awk -v start="$BLOG_INFO_START_TAG" -v end="$BLOG_INFO_END_TAG" -v content="$BLOG_INFO_CONTENT" '
+                  $0 == start { print content; in_block = 1; next }
+                  $0 == end { in_block = 0; next }
+                  !in_block { print }
+                  ' "$README_PATH" > "$TEMP_README_PATH"
+              else
+                  # 파일 시작 부분에 블로그 정보 추가
+                  echo -e "$BLOG_INFO_CONTENT\n\n$(cat "$README_PATH")" > "$TEMP_README_PATH"
+              fi
+              mv "$TEMP_README_PATH" "$README_PATH" # 임시 파일 원본으로 이동
+
+              # 분석 보고서 섹션 업데이트/삽입
+              if grep -q "$ANALYSIS_REPORT_START_TAG" "$README_PATH"; then
+                  # 시작 태그와 끝 태그 사이의 내용을 교체
+                  awk -v start="$ANALYSIS_REPORT_START_TAG" -v end="$ANALYSIS_REPORT_END_TAG" -v content="$ANALYSIS_CONTENT" '
+                  $0 == start { print content; in_block = 1; next }
+                  $0 == end { in_block = 0; next }
+                  !in_block { print }
+                  ' "$README_PATH" > "$TEMP_README_PATH"
+              else
+                  # 파일 끝 부분에 분석 보고서 추가
+                  echo -e "$(cat "$README_PATH")\n\n$ANALYSIS_CONTENT" > "$TEMP_README_PATH"
+              fi
+              mv "$TEMP_README_PATH" "$README_PATH" # 임시 파일 원본으로 이동
+
+          else
+              # README.md 파일이 없는 경우 새로 생성
+              echo -e "$BLOG_INFO_CONTENT\n\n$ANALYSIS_CONTENT" > "$README_PATH"
+          fi
+
+          # 변경 사항이 있는지 확인
+          if git diff --exit-code --quiet "$README_PATH"; then
+              echo "✅ README.md에 변경 사항이 없습니다. 업데이트를 건너뜀."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+              echo "🔄 README.md가 업데이트되었습니다. 커밋 및 푸시 준비 중..."
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ⚙️ Configure Git
+        if: steps.generate_report.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: ⬆️ Commit and Push Changes
+        if: steps.generate_report.outputs.has_changes == 'true'
+        run: |
+          git add README.md
+          git commit -m "Docs: Update README with blog info and repo analysis"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
