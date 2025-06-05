@@ -1,0 +1,120 @@
+name: Analyze Repo and Update README
+
+on:
+  workflow_dispatch: # GitHub UI에서 수동 실행 허용
+  push:
+    branches: ["main"] # main 브랜치에 푸시될 때 실행 (필요에 따라 변경)
+    paths-ignore:
+      - 'README.md' # README.md 변경으로 인한 무한 루프 방지
+
+jobs:
+  analyze-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # README.md를 업데이트하고 다시 푸시하려면 토큰에 쓰기 권한이 필요합니다.
+          # 기본 GITHUB_TOKEN은 읽기 전용이므로, 쓰기 권한을 부여해야 합니다.
+          # jobs.<job_id>.permissions.contents: write 로 설정하거나,
+          # 개인 액세스 토큰(PAT)을 사용해야 할 수 있습니다.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐍 Set up Python (Optional:for more complex scripting)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' # 필요에 따라 3.9, 3.10 등으로 지정
+
+      - name: 📝 Generate Analysis Report and Update README.md
+        id: generate_report
+        run: |
+          REPORT_FILE="temp_analysis_report.md"
+          README_PATH="README.md"
+          REPO_NAME="davidkims/springboot" # 분석할 저장소 이름
+
+          echo "## 🚀 ${REPO_NAME} 저장소 분석 보고서" > $REPORT_FILE
+          echo "" >> $REPORT_FILE
+          echo "이 보고서는 GitHub Actions 워크플로우에 의해 자동으로 생성되었습니다. 각 파일의 기본적인 정보와 자동 분석된 특이사항을 포함합니다." >> $REPORT_FILE
+          echo "" >> $REPORT_FILE
+          echo "### 📂 파일 목록 및 특이사항" >> $REPORT_FILE
+          echo "" >> $REPORT_FILE
+
+          # git ls-files 명령을 사용하여 모든 파일을 나열합니다.
+          # .git/ 디렉토리와 같은 제외할 필요가 있는 디렉토리는 별도로 처리할 수 있습니다.
+          git ls-files | while IFS= read -r file; do
+              # 숨김 파일 및 특정 디렉토리 제외 (예: .git/, target/, build/)
+              if [[ "$file" == ".git/"* || "$file" == "target/"* || "$file" == "build/"* || "$file" == "src/main/resources/static/"* ]]; then
+                  continue
+              fi
+
+              FILE_SIZE=$(du -b "$file" | cut -f1) # 파일 크기 (바이트)
+              FILE_TYPE=$(file -b --mime-type "$file") # 파일 MIME 타입
+
+              echo "#### 📄 $file" >> $REPORT_FILE
+              echo "- **파일 경로:** \`$file\`" >> $REPORT_FILE
+              echo "- **파일 크기:** $FILE_SIZE 바이트" >> $REPORT_FILE
+              echo "- **파일 타입:** \`$FILE_TYPE\`" >> $REPORT_FILE
+
+              # --- 자동 분석 로직 Placeholder ---
+              # 여기에 각 파일 또는 코드 블록에 대한 구체적인 "특이사항"을
+              # 자동 분석하여 추가하는 로직이 들어가야 합니다.
+              # 예: 특정 키워드 검색, 파일 내용 기반의 간단한 분석.
+              # 복잡한 분석은 Python 스크립트나 외부 도구 통합이 필요합니다.
+
+              SPECIAL_NOTE="이 부분은 자동화된 코드 분석으로는 특이사항을 식별하지 못했습니다. 수동 검토가 필요합니다."
+              if [[ "$file" == *.java ]]; then
+                  # Java 파일에 대한 간단한 예시 특이사항: 'TODO' 주석 확인
+                  if grep -q "TODO" "$file"; then
+                      SPECIAL_NOTE="TODO 주석이 발견되었습니다."
+                  fi
+                  # 더 복잡한 Java 코드 분석은 외부 도구(예: Checkstyle, PMD)가 필요합니다.
+              elif [[ "$file" == *.xml || "$file" == *.properties || "$file" == *.yml || "$file" == *.yaml ]]; then
+                  # 설정 파일에 대한 예시 특이사항: 민감 정보 가능성 경고
+                  if grep -qE "password|secret|api_key" "$file"; then
+                      SPECIAL_NOTE="민감 정보(password, secret 등) 키워드 발견 가능성. 주의 요망."
+                  fi
+              elif [[ "$file" == *.md ]]; then
+                  SPECIAL_NOTE="이 파일은 마크다운 문서입니다."
+              fi
+
+              echo "- **특이사항:** $SPECIAL_NOTE" >> $REPORT_FILE
+              echo "" >> $REPORT_FILE
+          done
+
+          echo "## 📅 생성 날짜" >> $REPORT_FILE
+          echo "$(date '+%Y년 %m월 %d일 %H시 %M분 %S초')" >> $REPORT_FILE
+          echo "" >> $REPORT_FILE
+
+          # 기존 README.md 내용을 백업 (만약을 대비)
+          # mv $README_PATH ${README_PATH}.bak
+
+          # REPORT_FILE 내용을 README.md에 덮어씁니다.
+          # 기존 README.md 내용에 추가하고 싶다면 'cat $REPORT_FILE >> $README_PATH' 또는
+          # 특정 섹션만 업데이트하는 더 복잡한 스크립트가 필요합니다.
+          cat $REPORT_FILE > $README_PATH
+          rm $REPORT_FILE # 임시 파일 삭제
+
+          # 변경 사항이 있는지 확인
+          if git diff --exit-code --quiet $README_PATH; then
+              echo "✅ README.md에 변경 사항이 없습니다. 업데이트를 건너뜀."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+              echo "🔄 README.md가 업데이트되었습니다. 커밋 및 푸시 준비 중..."
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ⚙️ Configure Git
+        if: steps.generate_report.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: ⬆️ Commit and Push Changes
+        if: steps.generate_report.outputs.has_changes == 'true'
+        run: |
+          git add README.md
+          git commit -m "Docs: Auto-generate repository analysis report in README.md"
+          git push
+        env:
+          # GITHUB_TOKEN은 기본적으로 제공되며, 'contents: write' 권한이 있다면 사용 가능
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
