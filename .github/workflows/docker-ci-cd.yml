@@ -1,4 +1,4 @@
-name: Generate and Backup Corporate Banking Data with Secure ZIP and OCI Upload
+name: Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload
 
 on:
   workflow_dispatch:
@@ -49,6 +49,7 @@ jobs:
       - name: 🔐 Generate or Use Backup Password & Encrypt Backup File
         id: encrypt
         run: |
+          # GitHub Secret 에 BACKUP_PASSWORD가 설정되어 있으면 사용, 그렇지 않으면 랜덤 생성
           if [ -n "${{ secrets.BACKUP_PASSWORD }}" ]; then
             BACKUP_PASSWORD="${{ secrets.BACKUP_PASSWORD }}"
             echo "🔒 사용 중인 BACKUP_PASSWORD: (secret에 정의된 값)"
@@ -96,7 +97,7 @@ jobs:
           echo "$HOME/oci-cli/bin" >> $GITHUB_PATH
           echo "✅ OCI CLI 설치 완료: $(oci --version)"
 
-      - name: ☁ Configure OCI CLI and Upload to Object Storage
+      - name: ☁ Configure & Upload to OCI Object Storage (Conditional)
         env:
           OCI_CLI_AUTH: "api_key"
           OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
@@ -105,12 +106,21 @@ jobs:
           OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_API_KEY }}
           OCI_CLI_REGION: "ap-seoul-1"
         run: |
-          # 디렉토리 및 키 파일 생성
+          # 필수 OCID/키 정보가 모두 존재하는지 확인
+          if [ -z "${OCI_CLI_USER}" ] || [ -z "${OCI_CLI_TENANCY}" ] || [ -z "${OCI_CLI_FINGERPRINT}" ] || [ -z "${OCI_CLI_KEY_CONTENT}" ]; then
+            echo "⚠️ OCI 업로드에 필요한 인증 정보가 부족합니다. 업로드를 건너뜁니다."
+            exit 0
+          fi
+
+          # 레이블 경고 억제
+          export SUPPRESS_LABEL_WARNING=True
+
+          # ~/.oci 디렉토리 및 key 파일 생성
           mkdir -p ~/.oci
           echo "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          # config 파일 작성
+          # ~/.oci/config 파일 작성
           echo "[DEFAULT]" > ~/.oci/config
           echo "user=${OCI_CLI_USER}" >> ~/.oci/config
           echo "fingerprint=${OCI_CLI_FINGERPRINT}" >> ~/.oci/config
@@ -121,7 +131,7 @@ jobs:
 
           echo "✅ OCI CLI 구성 완료"
 
-          # ZIP 파일 업로드
+          # 백업 ZIP 업로드
           oci os object put \
             --bucket-name backups \
             --file output/corporate_banking_backup.zip \
@@ -131,7 +141,7 @@ jobs:
 
           # 신용카드 이미지 업로드
           for img in output/credit_card_images/*.png; do
-            filename=$(basename $img)
+            filename=$(basename "$img")
             oci os object put \
               --bucket-name backups \
               --file "$img" \
@@ -142,7 +152,7 @@ jobs:
 
           # 체크카드 이미지 업로드
           for img in output/debit_card_images/*.png; do
-            filename=$(basename $img)
+            filename=$(basename "$img")
             oci os object put \
               --bucket-name backups \
               --file "$img" \
