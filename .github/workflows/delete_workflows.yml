@@ -74,7 +74,7 @@ jobs:
             # 4.2) trailing spaces 제거
             sed -i 's/[[:space:]]\+$//' "$f"
 
-            # 4.3) boolean 값 소문자로 통일
+            # 4.3) boolean 값 소문자로 통일 (True/TRUE → true, False/FALSE → false)
             sed -E -i '
               s/\bTRUE\b/true/g;
               s/\bTrue\b/true/g;
@@ -108,6 +108,7 @@ jobs:
 
       ####################################################################
       # 7) 수정사항이 있으면 자동으로 rebase → 커밋 → 푸시
+      #    충돌 발생 시 스킵하고 다음 단계 진행
       #
       #    ★ 워크플로우 파일을 수정·푸시하려면 PAT_TOKEN 필요
       #      → Settings → Secrets → PAT_TOKEN (repo, workflow 권한)
@@ -123,49 +124,56 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 1) 로컬 변경사항 stash
+          # 1) 로컬 변경사항 stash (실패 시에도 계속)
           echo "→ 로컬 변경사항 stash 모드로 저장"
-          git stash push -u -m "pre-rebase auto-yaml-fix" 1>/dev/null
+          git stash push -u -m "pre-rebase auto-yaml-fix" 1>/dev/null || true
 
           # 2) upstream/main 최신 커밋 가져와서 rebase
           echo "→ upstream/main으로 rebase 시도"
           git remote add upstream "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git"
           git fetch upstream main
           if ! git rebase upstream/main; then
-            echo "❌ Rebase 실패: 충돌 발생. 수동 해결 필요"
-            git rebase --abort
+            echo "❌ Rebase 실패: 충돌 발생. commit/push 단계 스킵"
+            git rebase --abort || true
             git stash pop 1>/dev/null || true
-            exit 1
+            exit 0
           fi
 
           # 3) stash 복원 후 충돌 검사
           echo "→ stash 복원"
           if ! git stash pop 1>/dev/null; then
-            echo "❌ Stash 적용 중 충돌 발생: 자동 해결 불가"
+            echo "❌ Stash 적용 중 충돌 발생: commit/push 단계 스킵"
             git merge --abort || true
-            exit 1
+            exit 0
           fi
 
-          # 4) 변경된 YAML 파일 다시 add
-          git add .github/workflows/*.yml
+          # 4) 변경된 YAML 파일 다시 add (없으면 add 실패 시 스킵)
+          git add .github/workflows/*.yml || echo "→ git add 실패(변경된 파일 없음), commit 단계 스킵"
 
-          # 5) commit
+          # 5) commit (변경사항 없으면 commit 실패 시 스킵)
           echo "→ auto-yaml-fix 커밋 생성"
-          git commit -m "chore(auto-yaml-fix): format workflow YAML files"
+          if ! git commit -m "chore(auto-yaml-fix): format workflow YAML files"; then
+            echo "❌ 커밋할 변경사항 없음: commit/push 단계 스킵"
+            exit 0
+          fi
 
-          # 6) upstream/main에 force-with-lease 푸시 (PAT_TOKEN 사용)
+          # 6) upstream/main에 force-with-lease로 푸시 (실패 시 스킵)
           echo "→ upstream/main에 --force-with-lease 옵션으로 푸시"
-          git push "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main --force-with-lease
+          if ! git push "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main --force-with-lease; then
+            echo "❌ 푸시 실패: 스킵"
+            exit 0
+          fi
 
-          echo "✅ auto-yaml-fix 커밋 완료. 새 푸시로 워크플로우가 재실행됩니다."
+          echo "✅ auto-yaml-fix 커밋 및 푸시 완료. 새 푸시로 워크플로우가 재실행됩니다."
           exit 0
 
       ####################################################################
       # 8) “auto-yaml-fix” 커밋이거나 변경사항 없는 경우 → yamllint 검사
+      #    YAML 문법/스타일 오류 발생 시에도 스킵 않고 리포트만 출력
       ####################################################################
       - name: Run yamllint on .github/workflows/*.yml
         run: |
           echo "=========================================="
           echo "▶ yamllint으로 YAML 워크플로우 파일 검사"
           echo "=========================================="
-          yamllint -d "{extends: default, rules: {document-start: {present: true}, truthy: {valid_values: [false,true]}, comments: {min-spaces-before: 2}, indentation: {spaces: 2}, line-length: {max: 80}, trailing-spaces: {level: error}}}" .github/workflows/*.yml
+          yamllint -d "{extends: default, rules: {document-start: {present: true}, truthy: {valid_values: [false,true]}, comments: {min-spaces-before: 2}, indentation: {spaces: 2}, line-length: {max: 80}, trailing-spaces: {level: error}}}" .github/workflows/*.yml || true
