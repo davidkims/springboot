@@ -49,8 +49,8 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Auto YAML Workflow Fix & Re-run (`.github/workflows/delete_workflows.yml`)
-- **용량:** 7564 바이트
-- **최신 갱신:** 2025년 06월 06일 17시 29분 53초 KST
+- **용량:** 7354 바이트
+- **최신 갱신:** 2025년 06월 06일 17시 33분 50초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -377,7 +377,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/delete_workflows.yml`
-- **파일 크기:** 7564 바이트
+- **파일 크기:** 7354 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
@@ -542,5 +542,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 08시 30분 06초 KST
+2025년 06월 06일 08시 34분 03초 KST
 
