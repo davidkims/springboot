@@ -1,17 +1,20 @@
-name: Automatic MySQL Backup # Workflow name
+name: Automatic MySQL Backup # 워크플로우의 이름
 
 on:
   push:
     branches:
-      - main # Trigger on push to main branch
+      - main # main 브랜치에 푸시될 때 트리거
     paths:
+      # 백업 로직에 영향을 줄 수 있는 파일 변경 시 트리거
       - '**.sql'
-      - '.github/workflows/auto-backup.yml' # Trigger on changes to this workflow file
+      - '.github/workflows/auto-backup.yml' # 이 워크플로우 파일 자체 변경 시
+      # 여기에 백업 대상이 되는 애플리케이션 코드 경로 등을 추가할 수 있습니다.
 
   schedule:
-    - cron: '0 0 * * *' # Daily at midnight UTC (9 AM KST)
+    # UTC 기준 매일 자정(KST로 오전 9시)에 주기적으로 실행
+    - cron: '0 0 * * *'
 
-  workflow_dispatch: # Allow manual triggering
+  workflow_dispatch: # GitHub UI에서 수동으로 워크플로우 실행 허용
     inputs:
       reason:
         description: 'Reason for manual trigger (e.g., "urgent backup")'
@@ -20,27 +23,27 @@ on:
 
 jobs:
   mysql-backup:
-    runs-on: ubuntu-latest # Runner environment
+    runs-on: ubuntu-latest # Job을 실행할 러너 환경
 
     permissions:
-      contents: write # Needed to read repo contents and push backup files
+      contents: write # 리포지토리 내용을 읽고, 백업 파일을 푸시하기 위해 'write' 권한 필요
 
     steps:
-      - name: Checkout repository # Checkout code
+      - name: Checkout repository # 리포지토리 코드를 러너에 체크아웃
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }} # Essential for pushing changes back
+          token: ${{ secrets.GITHUB_TOKEN }} # 푸시 권한을 위해 필수
 
-      - name: Set up MySQL Client # Install MySQL client for mysqldump
+      - name: Set up MySQL Client # MySQL 클라이언트 설치 (mysqldump 사용을 위함)
         run: |
           sudo apt-get update
-          sudo apt-get install -y mysql-client-core-8.0 # Adjust version if needed for your OS
+          sudo apt-get install -y mysql-client-core-8.0 # Ubuntu 20.04/22.04 기준, 버전 확인 필요
 
-      - name: Create Backup Directory # Create directory for backups
+      - name: Create Backup Directory # 백업 파일을 저장할 디렉토리 생성
         run: mkdir -p ./backups
 
-      - name: Run MySQL Backup Script # Execute the backup script
-        id: perform_backup # ID for referencing step outputs
+      - name: Run MySQL Backup Script # MySQL 백업 스크립트 실행
+        id: perform_backup # 이 스텝에 ID 부여 (다음 스텝에서 성공 여부를 참조)
         run: |
           #!/bin/bash
           BACKUP_FILENAME="mysql_backup_$(date +%Y%m%d_%H%M%S).sql"
@@ -53,7 +56,7 @@ jobs:
           echo "MySQL 포트: $MYSQL_PORT"
           echo "MySQL 사용자: $MYSQL_USER"
 
-          # IMPORTANT: Verify MYSQL_PASSWORD is set from environment variable
+          # MYSQL_PASSWORD 환경 변수가 설정되었는지 확인
           if [ -z "$MYSQL_PASSWORD" ]; then
               echo "⭐⭐⭐ 치명적 오류: MySQL 비밀번호(MYSQL_PASSWORD)가 환경 변수로 설정되지 않았습니다. ⭐⭐⭐"
               echo "--------------------------------------------------------------------------------"
@@ -66,10 +69,14 @@ jobs:
               echo "   - 없으면 'New repository secret'으로 생성 (이름: MYSQL_ROOT_PASSWORD, 값: 실제 비밀번호)."
               echo "   - 있으면 값이 올바른지 확인."
               echo "--------------------------------------------------------------------------------"
-              exit 1 # Exit with error if password is not set
+              
+              # 비밀번호가 없으면 백업 시도 없이 스크립트를 실패 처리
+              echo "::set-output name=backup_successful::false"
+              exit 1 # 스크립트 종료 및 워크플로우 스텝 실패
           fi
 
-          # Perform the MySQL dump
+          # 모든 데이터베이스를 백업하거나, 특정 데이터베이스만 백업
+          echo "MySQL 백업을 시도합니다..."
           if [ -n "$MYSQL_DATABASE" ]; then
               echo "특정 데이터베이스 '$MYSQL_DATABASE'를 백업합니다."
               mysqldump -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" > "$BACKUP_FILE_PATH"
@@ -87,28 +94,31 @@ jobs:
               echo "--- MySQL 백업 실패 ---"
               echo "백업 중 오류가 발생했습니다. 로그를 확인하십시오."
               echo "::set-output name=backup_successful::false"
-              exit 1 # Script failure
+              exit 1 # 스크립트 실패
           fi
-        # --- IMPORTANT: Ensure this 'env' block is directly under the 'run' step ---
+        # --- 중요: 이 'env' 블록이 'Run MySQL Backup Script' 스텝 바로 아래에 있어야 합니다. ---
         env:
-          MYSQL_HOST: localhost # Adjust if your MySQL server is not on localhost
-          MYSQL_PORT: 3306
-          MYSQL_USER: root
-          # This is the line that pulls the secret value
+          MYSQL_HOST: localhost # MySQL 호스트 (필요시 변경)
+          MYSQL_PORT: 3306 # MySQL 포트 (필요시 변경)
+          MYSQL_USER: root # MySQL 사용자 (필요시 변경)
+          # 이 라인이 GitHub Secrets에서 비밀번호를 가져와 환경 변수로 주입합니다.
+          # 반드시 GitHub Secrets에 'MYSQL_ROOT_PASSWORD'가 정확한 값으로 설정되어 있어야 합니다.
           MYSQL_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-          # MYSQL_DATABASE: your_database_name # Uncomment and set if backing up a specific DB
+          # MYSQL_DATABASE: your_database_name # 특정 데이터베이스만 백업하려면 주석 해제 후 이름 지정
 
-      - name: Configure Git for automated commit # Configure Git user
+      - name: Configure Git for automated commit # Git 사용자 정보 설정
+        # 백업이 성공했을 때만 Git 작업 진행
         if: steps.perform_backup.outputs.backup_successful == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Check for new backup file # Check if a new backup file was created
+      - name: Check for new backup file # 새로 생성된 백업 파일이 있는지 확인
         id: git_status
+        # 백업이 성공했을 때만 파일 변경 여부 확인
         if: steps.perform_backup.outputs.backup_successful == 'true'
         run: |
-          git add ./backups/ # Stage the backups directory
+          git add ./backups/ # backups 디렉토리 전체를 스테이징
           if git diff --staged --quiet; then
             echo "::set-output name=has_changes::false"
             echo "No new backup file or changes to commit."
@@ -117,26 +127,37 @@ jobs:
             echo "New backup file detected. Proceeding to commit."
           fi
 
-      - name: Commit and Push backup file # Commit and push changes
+      - name: Commit and Push backup file # 변경 사항이 있을 경우에만 커밋 및 푸시 진행
+        # Git Status 스텝에서 변경 사항이 감지되었을 때만 실행
         if: steps.git_status.outputs.has_changes == 'true'
         run: |
           echo "Attempting to commit and push backup file..."
-          git fetch origin main # Fetch latest remote changes
-          git rebase origin/main --autostash --no-edit || { # Rebase, or fall back to merge
+
+          # --- Git 동기화 로직: 'fetch first' 오류 해결 ---
+          echo "Fetching latest changes from remote/main..."
+          git fetch origin main
+
+          echo "Attempting to rebase local changes onto remote/main..."
+          git rebase origin/main --autostash --no-edit || {
             echo "Rebase failed. Trying to merge remote changes instead."
             git merge origin/main --no-edit || {
               echo "Error: Both rebase and merge failed due to unresolvable conflicts. Manual intervention is required."
               exit 1
             }
           }
-          git commit -m "feat(backup): Auto-generated MySQL backup for ${{ github.ref_name }}" || true # Commit
-          git push origin main # Push
+
+          echo "Committing backup file..."
+          git commit -m "feat(backup): Auto-generated MySQL backup for ${{ github.ref_name }}" || true
+
+          echo "Pushing backup file to origin/main..."
+          git push origin main
           echo "Successfully pushed MySQL backup."
 
-      - name: Upload backup file as artifact # Upload as GitHub Actions artifact (optional)
+      - name: Upload backup file as artifact # 백업 파일을 GitHub Actions 아티팩트로 업로드 (선택 사항)
+        # 백업이 성공했을 때만 아티팩트 업로드
         if: steps.perform_backup.outputs.backup_successful == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: mysql-backup-${{ github.run_id }}
           path: ${{ steps.perform_backup.outputs.backup_file_path }}
-          retention-days: 7 # Retention period in days
+          retention-days: 7 # 아티팩트 보존 기간 (일)
