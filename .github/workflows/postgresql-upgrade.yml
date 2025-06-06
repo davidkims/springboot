@@ -1,4 +1,4 @@
-name: Apply MySQL SQL Scripts
+name: MySQL Full Pipeline (with File Download & Migration Tool)
 
 on:
   push:
@@ -8,15 +8,18 @@ on:
 env:
   # GitHub Secrets에서 MySQL 접속 정보를 불러옵니다.
   # 이 값들은 절대로 코드에 직접 노출해서는 안 됩니다.
-  # 먼저 GitHub 리포지토리 설정에서 이 시크릿들을 생성해야 합니다.
   MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
   MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
   MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
   MYSQL_USER: ${{ secrets.MYSQL_USER }}
   MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
 
+  # (예시) 추가적으로 다운로드할 파일의 URL을 환경 변수로 설정 (선택 사항)
+  # MY_CONFIG_FILE_URL: "https://example.com/configs/prod-app-config.json"
+  # FLYWAY_VERSION: "9.22.0" # 사용할 Flyway 버전
+
 jobs:
-  apply_sql:
+  prepare_and_apply_sql:
     runs-on: ubuntu-latest # 최신 Ubuntu 환경에서 실행
 
     steps:
@@ -28,40 +31,57 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mysql-client # MySQL 클라이언트 도구(mysql 명령어)를 설치합니다.
 
+      # --- 파일 다운로드 예시 ---
+      # 1. 특정 URL에서 설정 파일 다운로드 (예시)
+      # 이 스텝은 `env.MY_CONFIG_FILE_URL` 변수가 설정되어 있을 때만 실행됩니다.
+      - name: Download application configuration file
+        if: ${{ env.MY_CONFIG_FILE_URL != '' }}
+        run: |
+          echo "Downloading configuration file from ${{ env.MY_CONFIG_FILE_URL }}..."
+          curl -sSLo application-config.json ${{ env.MY_CONFIG_FILE_URL }}
+          echo "Configuration file downloaded to $(pwd)/application-config.json"
+          ls -l application-config.json # 다운로드 확인
+        # 다운로드된 파일을 이후 스텝에서 사용하려면, 적절한 경로에 저장하거나
+        # artifacts로 업로드/다운로드하여 다음 job에서 사용할 수 있습니다.
+
+      # 2. (추가 예시) Flyway 같은 데이터베이스 마이그레이션 도구 다운로드
+      # 여기서는 Flyway를 다운로드하고 압축 해제하는 예시입니다.
+      - name: Download and Setup Flyway (Database Migration Tool)
+        # 이 스텝은 `env.FLYWAY_VERSION` 변수가 설정되어 있을 때만 실행됩니다.
+        if: ${{ env.FLYWAY_VERSION != '' }}
+        run: |
+          FLYWAY_URL="https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/${{ env.FLYWAY_VERSION }}/flyway-commandline-${{ env.FLYWAY_VERSION }}-linux-x64.tar.gz"
+          echo "Downloading Flyway from $FLYWAY_URL..."
+          wget -qO - "$FLYWAY_URL" | tar -xz -C /tmp/
+          echo "Flyway downloaded to /tmp/flyway-${{ env.FLYWAY_VERSION }}/"
+          chmod +x /tmp/flyway-${{ env.FLYWAY_VERSION }}/flyway
+          echo "/tmp/flyway-${{ env.FLYWAY_VERSION }}/" >> $GITHUB_PATH # PATH에 추가하여 flyway 명령 사용 가능하게 함
+          # 여기서 FLYWAY_VERSION이 비어있으면 이 스텝은 실행되지 않습니다.
+          # FLYWAY_VERSION: ${{ env.FLYWAY_VERSION }} # 주석 처리해도 상위 env에서 자동 상속
+
+      # --- MySQL 연결 대기 (이전 코드와 동일) ---
       - name: Wait for MySQL to be ready (recommended for stability)
-        # MySQL 서버가 완전히 시작되고 연결을 받을 준비가 될 때까지 기다립니다.
-        # 이 단계는 네트워크 지연이나 서버 시작 시간에 따라 필요하며, 연결 오류를 방지합니다.
         run: |
           echo "Attempting to connect to MySQL at ${MYSQL_HOST}:${MYSQL_PORT}..."
-          for i in {1..30}; do # 최대 30번 시도 (총 60초 대기)
-            # MySQL 서버에 단순 쿼리(SELECT 1)를 실행하여 연결 가능 여부 확인
-            # 성공하면 $?는 0, 실패하면 0이 아닌 값
+          for i in {1..30}; do
             mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" &> /dev/null
             if [ $? -eq 0 ]; then
               echo "MySQL is ready after $((i*2)) seconds!"
-              break # 연결 성공 시 루프 종료
+              break
             fi
             echo "Waiting for MySQL... attempt $i/30 (sleeping 2s)"
-            sleep 2 # 2초 대기 후 재시도
+            sleep 2
           done
-          # 루프가 끝난 후에도 연결이 되지 않으면 에러 메시지를 출력하고 워크플로우 종료
           mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" || \
-            { echo "ERROR: MySQL not ready after timeout! Please verify:"; \
-              echo "- MySQL Host, Port, User, Password in GitHub Secrets are correct."; \
-              echo "- MySQL server is running and accessible from GitHub Actions runners."; \
-              echo "- Firewall rules allow connections on port ${MYSQL_PORT}."; \
-              exit 1; }
+            { echo "ERROR: MySQL not ready after timeout! Please verify MySQL configuration and network access."; exit 1; }
         env:
-          # `env` 블록을 통해 해당 step에서 사용할 환경 변수를 명시적으로 전달합니다.
-          # 이는 보안상 좋은 관행이며, 특히 비밀번호가 노출되지 않도록 합니다.
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
-          # MYSQL_DATABASE는 연결 대기 단계에서는 필요 없으므로 생략 가능하나, 일관성을 위해 유지 가능.
 
+      # --- SQL 스크립트 실행 (이전 코드와 동일) ---
       - name: Execute schema.sql if exists
-        # 리포지토리의 'sql/schema.sql' 파일이 존재하면 MySQL에 실행합니다.
         run: |
           SQL_FILE="./sql/schema.sql"
           if [ -f "$SQL_FILE" ]; then
@@ -79,7 +99,6 @@ jobs:
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
 
       - name: Execute data.sql if exists
-        # 리포지토리의 'sql/data.sql' 파일이 존재하면 MySQL에 실행합니다.
         run: |
           SQL_FILE="./sql/data.sql"
           if [ -f "$SQL_FILE" ]; then
@@ -96,26 +115,22 @@ jobs:
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
 
-      - name: Run any additional SQL scripts (optional)
-        # 필요하다면 추가적인 SQL 스크립트를 여기서 실행할 수 있습니다.
-        # 예시: './sql/migrations/*.sql' 등
+      # --- Flyway 마이그레이션 실행 (다운로드 스텝과 함께 사용) ---
+      - name: Run Flyway Migrations
+        if: ${{ env.FLYWAY_VERSION != '' }} # Flyway가 다운로드되었을 때만 실행
         run: |
-          echo "Checking for additional SQL scripts in sql/migrations/..."
-          # `ls` 명령을 사용하여 파일이 있는지 먼저 확인하고, 없으면 메시지 출력
-          shopt -s nullglob # 매칭되는 파일이 없으면 패턴을 그대로 두지 않고 빈 리스트로 만듭니다.
-          files=(./sql/migrations/*.sql)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No additional SQL migration scripts found in sql/migrations/."
-          else
-            for file in "${files[@]}"; do
-              echo "Executing $file..."
-              mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$file"
-              echo "$file executed successfully."
-            done
-          fi
+          echo "Running Flyway migrations..."
+          flyway -url="jdbc:mysql://${{ env.MYSQL_HOST }}:${{ env.MYSQL_PORT }}/${{ env.MYSQL_DATABASE }}" \
+                 -user="${{ env.MYSQL_USER }}" \
+                 -password="${{ env.MYSQL_PASSWORD }}" \
+                 -locations="filesystem:./sql/migrations" \
+                 migrate
+          echo "Flyway migrations completed."
         env:
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
+          # Flyway는 JAVA_HOME이 필요할 수 있습니다.
+          # JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64 # 필요시 주석 해제 및 경로 확인
