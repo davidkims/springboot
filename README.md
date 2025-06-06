@@ -48,6 +48,12 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
+### ✨ Delete Specific Workflow Files (`.github/workflows/delete_workflows.yml`)
+- **용량:** 3100 바이트
+- **최신 갱신:** 2025년 06월 06일 14시 45분 40초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
 ### ✨ 🔄 Finance Smart Backup without OTP (`.github/workflows/finance-smart-backup.yml`)
 - **용량:** 4621 바이트
 - **최신 갱신:** 2025년 06월 03일 09시 47분 39초 KST
@@ -183,12 +189,6 @@
 ### ✨ 🦾 거래 자동화 - PDF 영수증 포함 (`.github/workflows/ledger-generator.yml`)
 - **용량:** 3302 바이트
 - **최신 갱신:** 2025년 06월 03일 21시 43분 56초 KST
-- **설명:**
-  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
-
-### ✨ Check Cloud Costs (`.github/workflows/main.yml`)
-- **용량:** 2030 바이트
-- **최신 갱신:** 2025년 06월 06일 14시 42분 18초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -376,6 +376,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/x-script.python`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
+#### 📄 `.github/workflows/delete_workflows.yml`
+- **파일 크기:** 3100 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
+
 #### 📄 `.github/workflows/docker-backup-workflow.yml`
 - **파일 크기:** 2963 바이트
 - **파일 타입:** `text/plain`
@@ -440,11 +445,6 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 크기:** 1630 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
-
-#### 📄 `.github/workflows/main.yml`
-- **파일 크기:** 2030 바이트
-- **파일 타입:** `text/plain`
-- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/mysql-integrated.yml`
 - **파일 크기:** 3998 바이트
@@ -542,5 +542,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 05시 42분 28초 KST
+2025년 06월 06일 05시 45분 51초 KST
 
