@@ -1,75 +1,127 @@
-name: Delete Specific Workflow Files
+name: Archive & Delete Old Workflow Files
 
 on:
+  schedule:
+    # 매주 월요일 0시 30분 (UTC) 실행 → 한국 시간(KST)으로 월요일 오전 9시 30분
+    - cron: '30 0 * * 1'
   workflow_dispatch:
     inputs:
-      workflow_files_to_delete:
-        description: '삭제할 워크플로우 파일 이름 (쉼표로 구분, 예: old_workflow.yml, temp_test.yml)'
-        required: true
-        type: string
-        default: '' # 기본값은 비워두거나, 자주 삭제하는 파일 목록을 넣을 수 있습니다.
+      dry_run:
+        description: 'Dry Run (실제 삭제 없이 로그만 확인) - true/false'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
-  delete_files:
+  archive_and_delete_old_files:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 파일 삭제를 위해 쓰기 권한 필요
-      pull-requests: write # (선택 사항) PR 생성 및 머지 시 필요. 직접 머지하지 않고 PR만 생성하려면 필요.
+      contents: write
 
     steps:
+      # 1) 전체 히스토리를 내려받아야 최종 수정 일자를 정확히 비교할 수 있습니다.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # 워크플로우가 Git 기록에 영향을 미치므로 전체 기록이 필요할 수 있습니다.
-          # fetch-depth: 0 # 전체 기록을 가져오려면 주석 해제 (큰 저장소에서는 시간 소요)
-          ref: ${{ github.ref }} # 현재 브랜치를 checkout
+          fetch-depth: 0
 
-      - name: Parse workflow files to delete
-        id: parse_files
+      # 2) Git 사용자 정보
+      - name: Configure Git User
         run: |
-          # 입력받은 문자열을 쉼표로 분리하고 공백 제거 후 배열로 변환
-          IFS=',' read -ra ADDR <<< "$(( inputs.workflow_files_to_delete ))"
-          FILE_LIST=""
-          for i in "${ADDR[@]}"; do
-            CLEAN_FILE=$(echo "$i" | xargs) # 공백 제거
-            if [[ -n "$CLEAN_FILE" ]]; then # 빈 문자열이 아니면 추가
-              FILE_LIST+="$CLEAN_FILE "
-            fi
-          done
-          echo "FILES_TO_DELETE=$FILE_LIST" >> $GITHUB_OUTPUT
-        shell: bash
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check and delete workflow files
+      # 3) 오래된 워크플로우 파일을 아카이브(이동)하고, 삭제 여부를 결정하는 스크립트
+      - name: Archive and Delete old workflow files
         env:
-          FILES_TO_DELETE: ${{ steps.parse_files.outputs.FILES_TO_DELETE }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          ARCHIVE_DIR: .github/archived_workflows
+          WORKFLOW_DIR: .github/workflows
         run: |
-          DELETED_ANY=false
-          COMMIT_MESSAGE="feat(workflow): Delete unused workflow files"
+          echo "=========================================="
+          echo "DRY_RUN 모드 설정: $DRY_RUN"
+          echo "아카이브 디렉토리: $ARCHIVE_DIR"
+          echo "워크플로우 디렉토리: $WORKFLOW_DIR"
+          echo "=========================================="
 
-          echo "삭제 대상 워크플로우 파일: $FILES_TO_DELETE"
+          # 1) .github/workflows 디렉토리가 존재하는지 확인
+          if [ ! -d "$WORKFLOW_DIR" ]; then
+            echo "❌ 워크플로우 디렉토리($WORKFLOW_DIR)를 찾을 수 없습니다. 종료합니다."
+            exit 0
+          fi
 
-          # 각 파일에 대해 삭제 시도
-          for file_name in $FILES_TO_DELETE; do
-            FILE_PATH=".github/workflows/$file_name"
-            if [ -f "$FILE_PATH" ]; then
-              echo "Deleting $FILE_PATH..."
-              rm "$FILE_PATH"
-              COMMIT_MESSAGE+="\n- Deleted $file_name"
-              DELETED_ANY=true
+          # 2) 1년 전 기준 날짜 계산 (YYYY-MM-DD)
+          ONE_YEAR_AGO=$(date -d "1 year ago" +%Y-%m-%d)
+          echo "기준 날짜 (1년 전): $ONE_YEAR_AGO"
+
+          ARCHIVED_ANY=false
+          FILES_TO_DELETE=()
+
+          # 3) .yml 파일 순회
+          for file_path in "$WORKFLOW_DIR"/*.yml; do
+            # 파일이 없으면 건너뜀
+            if [ ! -e "$file_path" ]; then
+              echo "— 해당 경로에 .yml 파일이 없습니다: $file_path"
+              continue
+            fi
+
+            file_name=$(basename "$file_path")
+            echo ""
+            echo "파일 검사 중: $file_name"
+
+            # 4) Git 로그에서 최종 수정 날짜 가져오기 (YYYY-MM-DD)
+            last_modified_date=$(git log -1 --format="%ci" "$file_path" | cut -d ' ' -f1)
+            echo "  • 최종 수정 날짜: $last_modified_date"
+
+            # 5) 비교: YYYY-MM-DD 형식이므로 문자열 비교로 가능
+            if [[ "$last_modified_date" < "$ONE_YEAR_AGO" ]]; then
+              echo "  ⚠️ $file_name 은(는) 기준 날짜 이전(1년 이상)으로 수정됨 → 아카이브 대상"
+              if [ "$DRY_RUN" = "true" ] || [ -z "$DRY_RUN" ]; then
+                echo "    [DRY RUN] 아카이브 예정: $file_name"
+              else
+                # 6) 실제 아카이브(이동)
+                if [ ! -d "$ARCHIVE_DIR" ]; then
+                  echo "    ▶ 아카이브 디렉토리 생성: $ARCHIVE_DIR"
+                  mkdir -p "$ARCHIVE_DIR"
+                  git add "$ARCHIVE_DIR"
+                fi
+
+                echo "    ▶ 아카이브 실행: $file_name → $ARCHIVE_DIR/$file_name"
+                mv "$file_path" "$ARCHIVE_DIR/$file_name"
+                ARCHIVED_ANY=true
+                FILES_TO_DELETE+=("$file_name")
+              fi
             else
-              echo "Warning: $FILE_PATH not found. Skipping."
+              echo "  ⏩ $file_name 은(는) 1년 이내에 수정됨 → 건너뜀"
             fi
           done
 
-          if [ "$DELETED_ANY" = true ]; then
-            git config user.name github-actions[bot]
-            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git add .github/workflows/
-            git commit -m "$COMMIT_MESSAGE" || echo "No changes to commit (e.g., files already deleted)."
-            git push # 변경 사항을 원격 저장소에 푸시
-
-            echo "✅ 워크플로우 파일 삭제 및 커밋 푸시 완료."
-          else
-            echo "ℹ️ 삭제할 워크플로우 파일을 찾지 못했습니다. 아무런 변경도 이루어지지 않았습니다."
+          echo ""
+          # 7) Dry Run 상태에서는 실제 삭제와 커밋을 수행하지 않음
+          if [ "$DRY_RUN" = "true" ] || [ -z "$DRY_RUN" ]; then
+            echo "⭐ [DRY RUN 모드] 실제 파일 삭제 및 커밋을 수행하지 않습니다."
+            exit 0
           fi
-        shell: bash
+
+          # 8) 실제 아카이브가 발생했는지 확인
+          if [ "$ARCHIVED_ANY" = true ]; then
+            echo "=========================================="
+            echo "🗑️ 아카이브된 파일이 존재하므로 삭제 및 커밋을 진행합니다."
+            for fname in "${FILES_TO_DELETE[@]}"; do
+              echo "    • 삭제: $WORKFLOW_DIR/$fname"
+              git rm "$WORKFLOW_DIR/$fname"
+            done
+
+            COMMIT_MESSAGE="chore(workflow): Auto-archive and delete old workflow files"
+            echo "▶ 커밋 메시지: $COMMIT_MESSAGE"
+            git commit -m "$COMMIT_MESSAGE"
+
+            echo "▶ 원격 저장소에 푸시"
+            # 현재 브랜치를 추출 (예: refs/heads/main → main)
+            CURRENT_BRANCH="${GITHUB_REF#refs/heads/}"
+            git push origin "HEAD:${CURRENT_BRANCH}"
+            echo "✅ 푸시 완료"
+          else
+            echo "=========================================="
+            echo "ℹ️ 아카이브 대상 파일이 없습니다. 삭제 및 커밋을 건너뜁니다."
+          fi
