@@ -109,8 +109,8 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ 워크플로 실행 로그 생성 (`.github/workflows/generate-workflow-log06.yml`)
-- **용량:** 4929 바이트
-- **최신 갱신:** 2025년 06월 06일 11시 53분 37초 KST
+- **용량:** 6711 바이트
+- **최신 갱신:** 2025년 06월 06일 11시 55분 50초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -290,7 +290,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflow_run_log.md`
-- **파일 크기:** 248 바이트
+- **파일 크기:** 342 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 마크다운 문서입니다.
 
@@ -395,7 +395,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/generate-workflow-log06.yml`
-- **파일 크기:** 4929 바이트
+- **파일 크기:** 6711 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
@@ -515,5 +515,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 02시 53분 50초 KST
+2025년 06월 06일 02시 56분 02초 KST
 
