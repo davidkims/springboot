@@ -84,6 +84,12 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
+### ✨ Swift CLI Build and Test (`.github/workflows/build_and_test.yml`)
+- **용량:** 776 바이트
+- **최신 갱신:** 2025년 06월 06일 11시 21분 50초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
 ### ✨ 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 (`.github/workflows/swift-backup.yml`)
 - **용량:** 3691 바이트
 - **최신 갱신:** 2025년 06월 03일 22시 49분 42초 KST
@@ -301,6 +307,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
+#### 📄 `.github/workflows/build_and_test.yml`
+- **파일 크기:** 776 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
+
 #### 📄 `.github/workflows/cash.yml`
 - **파일 크기:** 1516 바이트
 - **파일 타입:** `text/plain`
@@ -477,5 +488,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 01시 48분 39초 KST
+2025년 06월 06일 02시 22분 03초 KST
 
