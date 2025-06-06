@@ -1,93 +1,108 @@
-name: Workflow Health Monitor and Alerting # 워크플로우의 이름
-description: Monitor recent workflow failures and notify via Slack
+name: Repo Analysis and README Update # 워크플로우의 이름 (기존 이름 유지)
 
 on:
-  workflow_run:
-    # 'on.workflow_run does not reference any workflows' 오류를 해결하기 위해 'workflows: []'를 명시적으로 추가합니다.
-    # 이는 리포지토리의 모든 워크플로우 실행을 감시하겠다는 의미입니다.
-    workflows: [] # 'workflow_run' 하위에서 2칸 들여쓰기
-    types: [completed] # 'workflow_run' 하위에서 2칸 들여쓰기
+  push:
+    branches:
+      - main # main 브랜치에 푸시될 때 (직접 푸시 또는 PR merge 시) 트리거
+    paths:
+      - '**.py' # Python 파일 변경 시
+      - '**.java' # Java 파일 변경 시
+      - '**.css' # CSS 파일 변경 시
+      - '**.md' # Markdown 파일 변경 시 (README.md 자체 변경은 피할 수 있음)
+      # 여기에 README.md 업데이트를 트리거해야 하는 다른 파일 패턴 추가
+      # (만약 README.md만 변경되어도 트리거되게 하려면 paths 섹션에서 README.md 제외)
 
   schedule:
-    # UTC 기준 매 시간 0분(정시)에 워크플로우를 주기적으로 실행합니다.
-    # 이는 'workflow_run' 트리거가 놓칠 수 있는 경우를 대비하여 백업 역할을 합니다.
-    - cron: '0 * * * *' # 'schedule' 하위에서 2칸 들여쓰기, 목록 아이템은 하이픈(-)으로 시작
+    - cron: '0 0 * * *' # 매일 자정 (UTC)에 주기적으로 실행하여 README 업데이트 (선택 사항)
 
-  workflow_dispatch: {} # GitHub UI에서 수동으로 이 워크플로우를 실행할 수 있도록 허용합니다.
+  workflow_dispatch: {} # 수동으로 워크플로우 실행 허용
 
 jobs:
-  monitor-and-alert:
-    runs-on: ubuntu-latest # 이 Job을 실행할 GitHub 호스팅 러너 환경을 지정합니다.
+  update-readme:
+    runs-on: ubuntu-latest # Job을 실행할 러너 환경
 
-    # 이 워크플로우가 다른 워크플로우 실행 기록을 읽고, 리포지토리 코드를 체크아웃할 수 있도록 필요한 권한을 명시적으로 부여합니다.
     permissions:
-      actions: read # 'permissions' 하위에서 2칸 들여쓰기
-      contents: read # 'permissions' 하위에서 2칸 들여쓰기
+      contents: write # 리포지토리 내용을 읽고, README.md를 수정 후 푸시하기 위해 'write' 권한 필요
 
-    steps: # 'monitor-and-alert' Job 하위에서 2칸 들여쓰기, 목록 아이템은 하이픈(-)으로 시작
-      - name: Checkout repository code # 'steps'의 첫 번째 아이템. 'name'은 4칸 들여쓰기
-        uses: actions/checkout@v4 # 'uses'는 'name'과 같은 수준 (4칸) 들여쓰기
+    steps:
+      - name: Checkout repository # 리포지토리 코드를 러너에 체크아웃
+        uses: actions/checkout@v4
+        with:
+          # GITHUB_TOKEN은 푸시 권한이 있으므로 사용.
+          # 이는 Secrets에 SLACK_WEBHOOK을 추가하는 것과는 다릅니다.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fetch recent workflow runs # 'steps'의 두 번째 아이템
-        id: get_workflow_runs # 'Fetch recent workflow runs' 스텝 하위에서 2칸 (총 6칸) 들여쓰기
-        run: | # 'run'은 'id'와 같은 수준 (6칸) 들여쓰기. 여러 줄 스크립트는 '|' 뒤에 새 줄로 시작하며 들여쓰기 유지
-          # GitHub API를 사용하여 최근 24시간 내에 생성된 실패한 워크플로우 실행 목록을 쿼리합니다.
-          # 'jq'는 JSON 응답을 파싱하는 도구이며, GitHub Actions 러너에 기본으로 설치되어 있습니다.
-          FAILED_RUNS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=failure&created=>$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')" | \
-            jq -r '.workflow_runs[] | "- \(.name) (\(.html_url)) (ID: \(.id), Event: \(.event))"')
+      - name: Set up Python (Optional:for more complex scripting) # Python 환경 설정 (README 생성 스크립트가 Python인 경우)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x' # 또는 '3.13.3' 등 특정 버전 지정
+          # cache: 'pip' # 종속성 캐싱 활성화 (선택 사항)
 
-          # 실패한 워크플로우가 있는지 확인하고, 결과를 출력으로 설정합니다.
-          if [ -n "$FAILED_RUNS" ]; then
-            echo "::set-output name=failed_runs::$FAILED_RUNS"
-            echo "🚨 Failed workflows detected:"
-            echo "$FAILED_RUNS"
-          else
-            echo "✅ No failed workflows detected in the last 24 hours."
-            echo "::set-output name=failed_runs::" # 실패가 없으면 빈 문자열로 설정
-          fi
-        env: # 'env'는 'run'과 같은 수준 (6칸) 들여쓰기
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 'env' 하위에서 2칸 (총 8칸) 들여쓰기
-
-      - name: Send Alert if workflows failed (Slack Example) # 'steps'의 세 번째 아이템
-        if: steps.get_workflow_runs.outputs.failed_runs != '' # 'if'는 'name'과 같은 수준 (4칸) 들여쓰기
-        uses: rtCamp/action-slack-notify@v2 # 'uses'는 'name'과 같은 수준 (4칸) 들여쓰기
-        env: # 'env'는 'uses'와 같은 수준 (4칸) 들여쓰기
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }} # 'env' 하위에서 2칸 (총 6칸) 들여쓰기
-          SLACK_MESSAGE: | # 'env' 하위에서 2칸 (총 6칸) 들여쓰기. 여러 줄 메시지는 '|' 뒤에 새 줄로 시작하며 들여쓰기 유지
-            *GitHub Actions Workflow Failure Alert*
-            Repository: `${{ github.repository }}`
-            Failed Workflows (Last 24h):
-            ${{ steps.get_workflow_runs.outputs.failed_runs }}
-
-            Please investigate immediately.
-          SLACK_USERNAME: GitHub Actions Bot # 'SLACK_MESSAGE'와 같은 수준 (6칸) 들여쓰기
-          SLACK_CHANNEL: '#github-alerts' # 'SLACK_USERNAME'와 같은 수준 (6칸) 들여쓰기
-          SLACK_ICON_EMOJI: ':octocat:' # 'SLACK_CHANNEL'와 같은 수준 (6칸) 들여쓰기
-
-      # 선택 사항: 워크플로우 파일 설명 누락 검사
-      - name: Install yq # 'steps'의 네 번째 아이템
-        uses: mikefarah/yq@v4 # 'uses'는 'name'과 같은 수준 (4칸) 들여쓰기
-
-      - name: Check for missing workflow descriptions # 'steps'의 다섯 번째 아이템
+      # --- README.md 내용을 생성 또는 수정하는 실제 로직 ---
+      # 이 부분은 여러분의 README 업데이트 스크립트에 따라 달라집니다.
+      # 예시: 파이썬 스크립트 실행
+      - name: Install dependencies (if any Python script is used)
         run: |
-          MISSING_DESCRIPTIONS_COUNT=0
-          MISSING_DESCRIPTIONS_LIST=""
-          # .github/workflows 디렉토리 내의 모든 .yml 워크플로우 파일을 순회합니다.
-          for workflow_file in .github/workflows/*.yml; do
-            if [ -f "$workflow_file" ]; then
-              description=$(yq e '.description // ""' "$workflow_file")
-              if [ -z "$description" ]; then
-                echo "::warning file=$workflow_file::Workflow '$workflow_file' is missing a 'description' field. Please add one for better documentation."
-                MISSING_DESCRIPTIONS_COUNT=$((MISSING_DESCRIPTIONS_COUNT + 1))
-                MISSING_DESCRIPTIONS_LIST+="\n- $workflow_file"
-              fi
-            fi
-          done
+          # pip install some-library # README 생성에 필요한 라이브러리 설치
 
-          # 누락된 설명이 있어도 워크플로우를 실패시키지 않고 경고만 출력합니다.
-          if [ "$MISSING_DESCRIPTIONS_COUNT" -gt 0 ]; then
-            echo "::warning::Found $MISSING_DESCRIPTIONS_COUNT workflow(s) with missing 'description' field(s):$MISSING_DESCRIPTIONS_LIST"
+      - name: Generate updated README.md content # README.md 내용을 생성하는 스텝
+        run: |
+          echo "## Updated README at $(date)" > README.md
+          echo "" >> README.md
+          echo "This README was last updated by a GitHub Actions workflow." >> README.md
+          echo "" >> README.md
+          echo "### Repository Analysis" >> README.md
+          echo "Current Python version: $(python --version)" >> README.md
+          echo "Number of Python files: $(find . -name '*.py' | wc -l)" >> README.md
+          echo "Number of Java files: $(find . -name '*.java' | wc -l)" >> README.md
+          # 여기에 블로그 정보, 링크플로우, CSS 파일 분석 등 기존 로직 추가
+          # 예: python your_readme_generator.py >> README.md
+          # or: your_repo_analysis_script.sh >> README.md
+
+      # --- Git 설정 및 푸시 로직 (핵심 부분) ---
+      - name: Configure Git for automated commit # Git 사용자 정보 설정
+        run: |
+          git config user.name "github-actions[bot]" # GitHub Actions 봇 사용자 이름
+          git config user.email "github-actions[bot]@users.noreply.github.com" # GitHub Actions 봇 이메일
+
+      - name: Check for changes to commit # README.md에 실제 변경 사항이 있는지 확인
+        id: git_status # 스텝 ID를 부여하여 출력 값 참조
+        run: |
+          git add README.md # README.md 파일 스테이징
+          # 스테이징된 변경 사항이 없으면 'has_changes'를 'false'로 설정
+          if git diff --staged --quiet; then
+            echo "::set-output name=has_changes::false"
           else
-            echo "✅ All workflow files have descriptions. Good for documentation!"
+            echo "::set-output name=has_changes::true"
           fi
+
+      - name: Commit and Push changes if any # 변경 사항이 있을 경우에만 커밋 및 푸시 진행
+        if: steps.git_status.outputs.has_changes == 'true' # 이전 스텝에서 변경 사항이 감지되었을 때만 실행
+        run: |
+          echo "Attempting to commit and push changes to README.md..."
+
+          # 1. 원격 'main' 브랜치의 최신 변경 사항 가져오기 (로컬에는 적용 안 함)
+          git fetch origin main
+
+          # 2. 로컬 변경 사항을 원격 'main'의 최신 상태 위에 리베이스 (재적용) 시도
+          #    --autostash: 임시 변경사항을 스태시했다가 리베이스 후 다시 적용
+          #    --no-edit: 인터랙티브 리베이스 에디터 열지 않음
+          #    || { ... }: rebase 실패 시 대체 명령 실행
+          git rebase origin/main --autostash --no-edit || {
+            echo "Rebase failed. Attempting to merge remote changes instead."
+            # 3. 리베이스 실패 시, 원격 'main' 브랜치와 병합 시도
+            #    --no-edit: 병합 커밋 메시지 에디터 열지 않음
+            git merge origin/main --no-edit || {
+              echo "Error: Both rebase and merge failed due to conflicts. Manual intervention required."
+              exit 1 # 병합도 실패하면 워크플로우를 실패시킴
+            }
+          }
+
+          # 4. 변경 사항 커밋
+          #    '--allow-empty'는 변경 사항이 없더라도 커밋 허용 (거의 필요 없음)
+          #    'git commit'이 실패할 경우 (예: 커밋할 변경 사항이 없는 경우), 오류를 무시하고 진행
+          git commit -m "Docs: Update README with analysis and blog info" || echo "No new changes to commit after sync, or changes already committed."
+
+          # 5. 최종적으로 변경 사항을 원격 리포지토리로 푸시
+          git push origin main
+          echo "Successfully pushed README.md updates."
