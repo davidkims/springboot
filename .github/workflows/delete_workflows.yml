@@ -1,127 +1,139 @@
-name: Archive & Delete Old Workflow Files
+name: Auto Code Fix & Re-run
 
 on:
-  schedule:
-    # 매주 월요일 0시 30분 (UTC) 실행 → 한국 시간(KST)으로 월요일 오전 9시 30분
-    - cron: '30 0 * * 1'
+  push:
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry Run (실제 삭제 없이 로그만 확인) - true/false'
-        required: false
-        type: boolean
-        default: true
 
 jobs:
-  archive_and_delete_old_files:
+  auto_fix_and_test:
+    name: "Auto-Fix 코드 문제 감지 → 수정 → 재실행"
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      # 1) 전체 히스토리를 내려받아야 최종 수정 일자를 정확히 비교할 수 있습니다.
-      - name: Checkout repository
+      ####################################################################
+      # 1) 전체 히스토리 체크아웃
+      ####################################################################
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2) Git 사용자 정보
-      - name: Configure Git User
+      ####################################################################
+      # 2) 이미 “auto-fix” 커밋인 경우, 수정 단계 스킵
+      ####################################################################
+      - name: Check if this commit is auto-fix
+        id: is_autofix
         run: |
+          echo "HEAD commit message: ${{ github.event.head_commit.message }}"
+          if [[ "${{ github.event.head_commit.message }}" == *"chore(auto-fix)"* ]]; then
+            echo "is_autofix=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_autofix=false" >> $GITHUB_OUTPUT
+          fi
+
+      ####################################################################
+      # 3) 필요한 도구 설치
+      ####################################################################
+      - name: Set up Python & Node, install linters/formatters
+        if: steps.is_autofix.outputs.is_autofix == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck shfmt
+          
+          # Python 관련: black, isort, flake8, yamllint
+          python3 -m pip install --upgrade pip
+          pip3 install black isort flake8 yamllint
+          
+          # Node.js/JavaScript 관련: eslint
+          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          npm install -g eslint
+
+      ####################################################################
+      # 4) “auto-fix”가 아닌 경우, 자동 코드 수정 수행
+      ####################################################################
+      - name: Run auto-fix tools
+        if: steps.is_autofix.outputs.is_autofix == 'false'
+        run: |
+          set -eux
+
+          echo "▶ 4.1 Shell 스크립트 포맷팅 (shfmt)"
+          find . -type f -name "*.sh" -print0 | xargs -0 shfmt -w
+
+          echo "▶ 4.2 Python 코드 포맷팅 (black + isort)"
+          black . || true
+          isort . || true
+
+          echo "▶ 4.3 JavaScript/TypeScript 포맷팅 (eslint --fix)"
+          # 프로젝트 내 .js/.jsx/.ts/.tsx 파일 대상
+          eslint . --ext .js,.jsx,.ts,.tsx --fix || true
+
+          echo "▶ 4.4 YAML 문법 검사 (yamllint)"
+          yamllint -c "{extends: default}" -f parsable .
+
+      ####################################################################
+      # 5) 자동 수정 후 변경사항 감지
+      ####################################################################
+      - name: Check for unstaged changes
+        if: steps.is_autofix.outputs.is_autofix == 'false'
+        id: check_changes
+        run: |
+          # 수정이 발생했는지 확인
+          if git diff --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      ####################################################################
+      # 6) 수정사항이 있으면 커밋 & 푸시 후 워크플로우 종료
+      ####################################################################
+      - name: Commit & push auto-fix changes
+        if: steps.is_autofix.outputs.is_autofix == 'false' && steps.check_changes.outputs.no_changes == 'false'
+        run: |
+          echo "▶ 변경사항 감지됨 → 자동 수정 커밋 후 푸시"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # 3) 오래된 워크플로우 파일을 아카이브(이동)하고, 삭제 여부를 결정하는 스크립트
-      - name: Archive and Delete old workflow files
-        env:
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
-          ARCHIVE_DIR: .github/archived_workflows
-          WORKFLOW_DIR: .github/workflows
+          git add -A
+          git commit -m "chore(auto-fix): apply automatic code style and lint fixes"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+          echo "✅ auto-fix 커밋 및 푸시 완료. 새 푸시에 의해 워크플로우가 재실행됩니다."
+          # 수정사항이 생겼으므로, 이 워크플로우는 여기서 종료
+          exit 0
+
+      ####################################################################
+      # 7) “auto-fix” 커밋이거나, 변경사항이 없는 경우 → 실제 테스트/빌드 수행
+      ####################################################################
+      - name: Run build & tests
+        if: steps.is_autofix.outputs.is_autofix == 'true' || steps.check_changes.outputs.no_changes == 'true'
         run: |
           echo "=========================================="
-          echo "DRY_RUN 모드 설정: $DRY_RUN"
-          echo "아카이브 디렉토리: $ARCHIVE_DIR"
-          echo "워크플로우 디렉토리: $WORKFLOW_DIR"
+          echo "▶ 실제 CI 단계: 빌드 및 테스트 실행"
           echo "=========================================="
-
-          # 1) .github/workflows 디렉토리가 존재하는지 확인
-          if [ ! -d "$WORKFLOW_DIR" ]; then
-            echo "❌ 워크플로우 디렉토리($WORKFLOW_DIR)를 찾을 수 없습니다. 종료합니다."
-            exit 0
+          # 예시: Python 테스트
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f "setup.py" ]; then
+            python3 setup.py check
+          fi
+          if [ -d "tests" ]; then
+            pytest --maxfail=1 --disable-warnings -q
           fi
 
-          # 2) 1년 전 기준 날짜 계산 (YYYY-MM-DD)
-          ONE_YEAR_AGO=$(date -d "1 year ago" +%Y-%m-%d)
-          echo "기준 날짜 (1년 전): $ONE_YEAR_AGO"
-
-          ARCHIVED_ANY=false
-          FILES_TO_DELETE=()
-
-          # 3) .yml 파일 순회
-          for file_path in "$WORKFLOW_DIR"/*.yml; do
-            # 파일이 없으면 건너뜀
-            if [ ! -e "$file_path" ]; then
-              echo "— 해당 경로에 .yml 파일이 없습니다: $file_path"
-              continue
-            fi
-
-            file_name=$(basename "$file_path")
-            echo ""
-            echo "파일 검사 중: $file_name"
-
-            # 4) Git 로그에서 최종 수정 날짜 가져오기 (YYYY-MM-DD)
-            last_modified_date=$(git log -1 --format="%ci" "$file_path" | cut -d ' ' -f1)
-            echo "  • 최종 수정 날짜: $last_modified_date"
-
-            # 5) 비교: YYYY-MM-DD 형식이므로 문자열 비교로 가능
-            if [[ "$last_modified_date" < "$ONE_YEAR_AGO" ]]; then
-              echo "  ⚠️ $file_name 은(는) 기준 날짜 이전(1년 이상)으로 수정됨 → 아카이브 대상"
-              if [ "$DRY_RUN" = "true" ] || [ -z "$DRY_RUN" ]; then
-                echo "    [DRY RUN] 아카이브 예정: $file_name"
-              else
-                # 6) 실제 아카이브(이동)
-                if [ ! -d "$ARCHIVE_DIR" ]; then
-                  echo "    ▶ 아카이브 디렉토리 생성: $ARCHIVE_DIR"
-                  mkdir -p "$ARCHIVE_DIR"
-                  git add "$ARCHIVE_DIR"
-                fi
-
-                echo "    ▶ 아카이브 실행: $file_name → $ARCHIVE_DIR/$file_name"
-                mv "$file_path" "$ARCHIVE_DIR/$file_name"
-                ARCHIVED_ANY=true
-                FILES_TO_DELETE+=("$file_name")
-              fi
-            else
-              echo "  ⏩ $file_name 은(는) 1년 이내에 수정됨 → 건너뜀"
-            fi
-          done
-
-          echo ""
-          # 7) Dry Run 상태에서는 실제 삭제와 커밋을 수행하지 않음
-          if [ "$DRY_RUN" = "true" ] || [ -z "$DRY_RUN" ]; then
-            echo "⭐ [DRY RUN 모드] 실제 파일 삭제 및 커밋을 수행하지 않습니다."
-            exit 0
+          # 예시: Node.js 테스트
+          if [ -f "package.json" ]; then
+            npm install
+            npm test || echo "Node.js 테스트 종료"
           fi
 
-          # 8) 실제 아카이브가 발생했는지 확인
-          if [ "$ARCHIVED_ANY" = true ]; then
-            echo "=========================================="
-            echo "🗑️ 아카이브된 파일이 존재하므로 삭제 및 커밋을 진행합니다."
-            for fname in "${FILES_TO_DELETE[@]}"; do
-              echo "    • 삭제: $WORKFLOW_DIR/$fname"
-              git rm "$WORKFLOW_DIR/$fname"
-            done
+          # 예시: 추가적인 빌드/배포 스크립트
+          # ./build.sh || true
 
-            COMMIT_MESSAGE="chore(workflow): Auto-archive and delete old workflow files"
-            echo "▶ 커밋 메시지: $COMMIT_MESSAGE"
-            git commit -m "$COMMIT_MESSAGE"
-
-            echo "▶ 원격 저장소에 푸시"
-            # 현재 브랜치를 추출 (예: refs/heads/main → main)
-            CURRENT_BRANCH="${GITHUB_REF#refs/heads/}"
-            git push origin "HEAD:${CURRENT_BRANCH}"
-            echo "✅ 푸시 완료"
-          else
-            echo "=========================================="
-            echo "ℹ️ 아카이브 대상 파일이 없습니다. 삭제 및 커밋을 건너뜁니다."
-          fi
+          echo "✅ 빌드 및 테스트 완료"
