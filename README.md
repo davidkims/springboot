@@ -36,12 +36,6 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
-### ✨ MySQL Pipeline with Custom Script (`.github/workflows/postgresql-upgrade.yml`)
-- **용량:** 3446 바이트
-- **최신 갱신:** 2025년 06월 06일 10시 39분 16초 KST
-- **설명:**
-  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
-
 ### ✨ 🔄 Finance Smart Backup without OTP (`.github/workflows/finance-smart-backup.yml`)
 - **용량:** 4621 바이트
 - **최신 갱신:** 2025년 06월 03일 09시 47분 39초 KST
@@ -93,6 +87,12 @@
 ### ✨ 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 (`.github/workflows/swift-backup.yml`)
 - **용량:** 3691 바이트
 - **최신 갱신:** 2025년 06월 03일 22시 49분 42초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
+### ✨ Generate Workflow Run Log (`.github/workflows/generate-workflow-log06.yml`)
+- **용량:** 4172 바이트
+- **최신 갱신:** 2025년 06월 06일 10시 42분 25초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -361,6 +361,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
+#### 📄 `.github/workflows/generate-workflow-log06.yml`
+- **파일 크기:** 4172 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
+
 #### 📄 `.github/workflows/generate_full_readme.yml`
 - **파일 크기:** 13883 바이트
 - **파일 타입:** `text/plain`
@@ -395,11 +400,6 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 크기:** 2486 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
-
-#### 📄 `.github/workflows/postgresql-upgrade.yml`
-- **파일 크기:** 3446 바이트
-- **파일 타입:** `text/plain`
-- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/release.yml`
 - **파일 크기:** 406 바이트
@@ -477,5 +477,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 01시 39분 29초 KST
+2025년 06월 06일 01시 42분 35초 KST
 
