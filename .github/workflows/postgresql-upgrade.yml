@@ -6,6 +6,8 @@ on:
       - main # main 브랜치에 푸시될 때 워크플로우 실행
 
 env:
+  # GitHub Secrets에서 MySQL 접속 정보를 불러옵니다.
+  # 이 값들은 절대로 코드에 직접 노출해서는 안 됩니다.
   MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
   MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
   MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
@@ -18,52 +20,95 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # Git 리포지토리 체크아웃
+        uses: actions/checkout@v4 # Git 리포지토리의 코드를 워크플로우 실행 환경으로 가져옵니다.
 
       - name: Install MySQL client
         run: |
           sudo apt-get update
-          sudo apt-get install -y mysql-client # MySQL 클라이언트 설치
+          sudo apt-get install -y mysql-client # MySQL 클라이언트 도구(mysql 명령어)를 설치합니다.
 
-      - name: Wait for MySQL to be ready (optional, but recommended)
+      - name: Wait for MySQL to be ready (optional, but highly recommended)
+        # MySQL 서버가 완전히 시작되고 연결을 받을 준비가 될 때까지 기다립니다.
+        # 이 단계는 네트워크 지연이나 서버 시작 시간에 따라 필요합니다.
         run: |
-          for i in {1..30}; do
+          echo "Attempting to connect to MySQL at ${MYSQL_HOST}:${MYSQL_PORT}..."
+          for i in {1..30}; do # 최대 30번 (총 60초) 시도
+            # MySQL 서버에 단순 쿼리(SELECT 1)를 실행하여 연결 가능 여부 확인
+            # 성공하면 $?는 0, 실패하면 0이 아닌 값
             mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" &> /dev/null
             if [ $? -eq 0 ]; then
-              echo "MySQL is ready!"
-              break
+              echo "MySQL is ready after $((i*2)) seconds!"
+              break # 연결 성공 시 루프 종료
             fi
-            echo "Waiting for MySQL... ($i/30)"
-            sleep 2
+            echo "Waiting for MySQL... attempt $i/30 (sleeping 2s)"
+            sleep 2 # 2초 대기 후 재시도
           done
-          mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" || { echo "MySQL not ready after timeout!"; exit 1; }
+          # 루프가 끝난 후에도 연결이 되지 않으면 에러 발생
+          mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" || \
+            { echo "ERROR: MySQL not ready after timeout! Check host, port, user, password, and firewall."; exit 1; }
+        env:
+          # `env` 블록을 통해 해당 step에서 사용할 환경 변수를 명시적으로 전달합니다.
+          # 이는 보안상 좋은 관행이며, 특히 비밀번호가 노출되지 않도록 합니다.
+          MYSQL_HOST: ${{ env.MYSQL_HOST }}
+          MYSQL_PORT: ${{ env.MYSQL_PORT }}
+          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }} # 이 단계에서는 실제로 사용되지 않지만, 일관성을 위해 포함
+          MYSQL_USER: ${{ env.USER }}
+          MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
 
-      - name: Execute schema.sql
+      - name: Execute schema.sql if exists
+        # 리포지토리의 'sql/schema.sql' 파일이 존재하면 MySQL에 실행합니다.
         run: |
-          if [ -f ./sql/schema.sql ]; then # sql/schema.sql 파일이 존재하는지 확인
-            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < ./sql/schema.sql
-            echo "schema.sql executed successfully."
+          SQL_FILE="./sql/schema.sql"
+          if [ -f "$SQL_FILE" ]; then
+            echo "Executing $SQL_FILE..."
+            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$SQL_FILE"
+            echo "$SQL_FILE executed successfully."
           else
-            echo "sql/schema.sql not found, skipping."
+            echo "$SQL_FILE not found, skipping."
           fi
         env:
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
-          MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }} # 비밀번호는 직접 노출되지 않도록 env에 명시적으로 전달
+          MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
 
-      - name: Execute data.sql
+      - name: Execute data.sql if exists
+        # 리포지토리의 'sql/data.sql' 파일이 존재하면 MySQL에 실행합니다.
         run: |
-          if [ -f ./sql/data.sql ]; then # sql/data.sql 파일이 존재하는지 확인
-            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < ./sql/data.sql
-            echo "data.sql executed successfully."
+          SQL_FILE="./sql/data.sql"
+          if [ -f "$SQL_FILE" ]; then
+            echo "Executing $SQL_FILE..."
+            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$SQL_FILE"
+            echo "$SQL_FILE executed successfully."
           else
-            echo "sql/data.sql not found, skipping."
+            echo "$SQL_FILE not found, skipping."
           fi
         env:
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
+          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
+          MYSQL_USER: ${{ env.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
+
+      - name: Run any other SQL scripts (optional)
+        # 필요하다면 추가적인 SQL 스크립트를 여기서 실행할 수 있습니다.
+        # 예시: './sql/migrations/*.sql' 등
+        run: |
+          echo "Checking for additional SQL scripts in sql/migrations/..."
+          for file in ./sql/migrations/*.sql; do
+            if [ -f "$file" ]; then
+              echo "Executing $file..."
+              mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$file"
+              echo "$file executed successfully."
+            else
+              echo "No additional SQL migration scripts found in sql/migrations/."
+              break # 파일이 없으면 루프 종료
+            fi
+          done
+        env:
+          MYSQL_HOST: ${{ env.MYSQL_HOST }}
+          MYSQL_PORT: ${{ env.PORT }}
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
