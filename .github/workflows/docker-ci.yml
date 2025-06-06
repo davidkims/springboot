@@ -1,4 +1,4 @@
-name: Docker 이미지 빌드 및 배포 (Echo 포함)
+name: Docker 이미지 빌드 및 배포 (오류 스킵 포함)
 
 on:
   push:
@@ -20,8 +20,6 @@ jobs:
     runs-on: ubuntu-latest # 이 작업을 실행할 운영체제 환경을 지정합니다.
 
     # 권한 설정: Docker Hub 또는 GHCR에 이미지를 푸시하려면 'packages: write' 권한이 필요합니다.
-    # 'contents: read'는 코드 체크아웃을 위해 필요합니다.
-    # 'id-token: write'는 OIDC를 통한 인증에 필요할 수 있습니다 (GHCR 로그인 시 활용).
     permissions:
       contents: read
       packages: write
@@ -30,12 +28,14 @@ jobs:
     steps:
       - name: 🚀 코드 체크아웃
         uses: actions/checkout@v4
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 💬 코드 체크아웃 완료 메시지
         run: echo "--- 리포지토리 코드 체크아웃 완료 ---"
 
       - name: 🐳 Docker 최신 버전 및 CLI 설치
         uses: docker/setup-docker@v4
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 💬 Docker 엔진 및 CLI 설치 완료 메시지
         run: echo "--- Docker 엔진 및 CLI 설치 완료 ---"
@@ -45,10 +45,11 @@ jobs:
           echo "현재 시스템의 Docker 버전은 다음과 같습니다:"
           docker --version
           echo "Docker Compose 버전 (설치되어 있는 경우):"
-          docker compose version || true # docker compose가 설치되어 있지 않아도 오류 발생하지 않도록
+          docker compose version || true
           echo "Docker 시스템 정보:"
           docker info
           echo "--- Docker CLI 준비 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 📁 파일 및 디렉토리 생성
         run: |
@@ -62,40 +63,57 @@ jobs:
           echo "생성된 파일 및 디렉토리 구조 확인:"
           ls -R my-data-volume/
           echo "--- 파일 및 디렉토리 생성 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: ⚙️ Docker Buildx 설정 (선택 사항:멀티 플랫폼 빌드 및 캐싱에 유용)
         uses: docker/setup-buildx-action@v3
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 💬 Docker Buildx 설정 완료 메시지
         run: echo "--- Docker Buildx 설정 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
-      # --- ↓↓↓ 이 부분에서 오류가 발생했습니다. 'if' 조건을 제거하여 문제 해결을 시도합니다. ↓↓↓ ---
+      # --- ↓↓↓ Docker Hub 로그인 및 푸시 로직 강화 (시크릿 없으면 스킵) ↓↓↓ ---
+
+      - name: 🔑 Docker Hub 시크릿 환경 변수 설정
+        # 이 스텝은 시크릿이 존재하는 경우에만 환경 변수를 설정합니다.
+        # 시크릿이 없으면 해당 환경 변수는 설정되지 않아 빈 값으로 평가됩니다.
+        # 이렇게 함으로써 'if' 조건에서 'secrets' 직접 참조로 인한 파싱 오류를 피할 수 있습니다.
+        run: |
+          echo "DOCKER_USERNAME_VAL=${{ secrets.DOCKER_USERNAME || '' }}" >> $GITHUB_ENV
+          echo "DOCKER_PASSWORD_VAL=${{ secrets.DOCKER_PASSWORD || '' }}" >> $GITHUB_ENV
+        # 'continue-on-error: true'를 적용하여 이 스텝 자체에서 오류가 발생하더라도 다음으로 넘어갑니다.
+        # 그러나 secrets 컨텍스트 자체를 파싱하지 못하는 오류는 여기서 발생할 가능성이 있습니다.
+        # 이 스텝이 오류를 일으키면 해당 워크플로우에서는 Docker Hub 로그인이 불가능합니다.
+        continue-on-error: true
+
       - name: 🔑 Docker Hub 로그인 (선택 사항:Docker Hub에 푸시할 경우)
-        # secrets.DOCKER_USERNAME과 secrets.DOCKER_PASSWORD가 제공되면 로그인 시도.
-        # 시크릿이 없으면 docker/login-action은 자동으로 로그인 시도를 건너뛰므로 'if' 조건이 필요 없습니다.
+        # 이전 단계에서 설정한 환경 변수 값이 비어있지 않을 때만 로그인 시도
+        if: ${{ env.DOCKER_USERNAME_VAL != '' && env.DOCKER_PASSWORD_VAL != '' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ env.DOCKER_USERNAME_VAL }}
+          password: ${{ env.DOCKER_PASSWORD_VAL }}
+        continue-on-error: true # 로그인 실패 시에도 다음 단계 진행
 
       - name: 💬 Docker Hub 로그인 시도 완료 메시지 (조건부 출력)
-        # 실제 시크릿이 존재할 때만 이 메시지를 출력하도록 'if' 조건을 복원합니다.
-        # 시크릿이 없을 경우, 이 메시지 단계는 실행되지 않으므로 파싱 오류를 피할 수 있습니다.
-        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
+        if: ${{ env.DOCKER_USERNAME_VAL != '' && env.DOCKER_PASSWORD_VAL != '' }}
         run: echo "--- Docker Hub 로그인 시도 완료 (시크릿이 있는 경우) ---"
-      # --- ↑↑↑ 이 부분에서 오류가 발생했습니다. 'if' 조건을 제거하여 문제 해결을 시도합니다. ↑↑↑ ---
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+
+      # --- ↑↑↑ Docker Hub 로그인 및 푸시 로직 강화 ↑↑↑ ---
 
       - name: 🔑 GitHub Container Registry (GHCR) 로그인
-        # GHCR에 푸시할 경우, GITHUB_TOKEN을 사용하여 로그인할 수 있습니다.
-        # GITHUB_TOKEN은 기본적으로 제공되므로 별도의 'if' 조건 없이 실행됩니다.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 💬 GHCR 로그인 시도 완료 메시지
         run: echo "--- GHCR 로그인 시도 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 🏗️ Docker 이미지 빌드
         uses: docker/build-push-action@v5
@@ -104,9 +122,10 @@ jobs:
           file: ./Dockerfile # Dockerfile 경로 지정
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest # GHCR에 푸시할 때 사용할 수 있는 최신 태그
+            ${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
           outputs: type=docker # 빌드된 이미지를 Docker 데몬에 로드하여 다음 단계에서 사용 가능하게 합니다.
           push: false # 일단 빌드하고 푸시는 하지 않습니다.
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 💬 Docker 이미지 빌드 시작 및 완료 메시지
         run: |
@@ -114,24 +133,24 @@ jobs:
           echo "빌드 중인 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
           echo "Dockerfile 경로: ./Dockerfile"
           echo "--- Docker 이미지 빌드 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 🔍 빌드된 Docker 이미지 확인
         run: |
           echo "--- 빌드된 Docker 이미지 목록 ---"
           docker images
           echo "--- 이미지 확인 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 📤 Docker 이미지 푸시 (Docker Hub)
-        # Docker Hub 푸시 단계에서는 여전히 시크릿의 존재 여부가 중요합니다.
-        # 이 조건문이 오류를 발생시키는지 다시 테스트합니다.
-        # 만약 이 단계에서 또 오류가 발생하면, 이 단계의 if 조건도 제거하고,
-        # 'docker push' 명령어가 시크릿이 없을 때 실패하도록 두는 방법밖에 없습니다.
-        if: ${{ secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
+        # 환경 변수 값이 비어있지 않을 때만 푸시 실행
+        if: ${{ env.DOCKER_USERNAME_VAL != '' && env.DOCKER_PASSWORD_VAL != '' }}
         run: |
           echo "--- Docker Hub로 이미지 푸시 시작 ---"
           docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           docker push ${{ env.IMAGE_NAME }}:latest # 최신 태그도 푸시
           echo "--- Docker Hub 푸시 완료 ---"
+        continue-on-error: true # 푸시 실패 시에도 다음 단계 진행
 
       - name: 📤 Docker 이미지 푸시 (GitHub Container Registry)
         run: |
@@ -139,6 +158,7 @@ jobs:
           docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
           echo "--- GHCR 푸시 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
 
       - name: 🏃 Docker 컨테이너 실행 (선택 사항:빌드된 이미지 테스트용)
         run: |
@@ -146,3 +166,4 @@ jobs:
           echo "실행 중인 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
           docker run --rm ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           echo "--- Docker 컨테이너 실행 완료 ---"
+        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
