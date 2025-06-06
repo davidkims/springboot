@@ -19,15 +19,21 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest # 이 작업을 실행할 운영체제 환경을 지정합니다.
 
+    # 권한 설정: Docker Hub 또는 GHCR에 푸시하려면 'packages: write' 권한이 필요할 수 있습니다.
+    # 일반적으로 GITHUB_TOKEN은 기본적으로 'contents: write'와 'packages: write' 권한을 가집니다.
+    permissions:
+      contents: read
+      packages: write # Docker 이미지 푸시를 위해 필요
+      id-token: write # OIDC를 통한 인증에 필요 (GHCR 로그인 시 활용될 수 있음)
+
     steps:
       - name: 🚀 코드 체크아웃
-        uses: actions/checkout@v4 # 리포지토리 코드를 워크플로우 러너로 가져옵니다.
+        uses: actions/checkout@v4
 
       - name: 💬 코드 체크아웃 완료 메시지
         run: echo "--- 리포지토리 코드 체크아웃 완료 ---"
 
       - name: 🐳 Docker 최신 버전 및 CLI 설치
-        # Docker 공식 setup-docker-action을 사용하여 Docker 엔진 및 CLI를 설치합니다.
         uses: docker/setup-docker@v4
 
       - name: 💬 Docker 엔진 및 CLI 설치 완료 메시지
@@ -38,7 +44,7 @@ jobs:
           echo "현재 시스템의 Docker 버전은 다음과 같습니다:"
           docker --version
           echo "Docker Compose 버전 (설치되어 있는 경우):"
-          docker compose version || true # docker compose가 설치되어 있지 않아도 오류 발생하지 않도록
+          docker compose version || true
           echo "Docker 시스템 정보:"
           docker info
           echo "--- Docker CLI 준비 완료 ---"
@@ -57,26 +63,24 @@ jobs:
           echo "--- 파일 및 디렉토리 생성 완료 ---"
 
       - name: ⚙️ Docker Buildx 설정 (선택 사항:멀티 플랫폼 빌드 및 캐싱에 유용)
-        # 멀티 플랫폼 이미지를 구축하거나 구축 캐싱을 사용하려면 필요합니다.
-        # 빌드 속도 향상에 기여할 수 있습니다.
         uses: docker/setup-buildx-action@v3
 
       - name: 💬 Docker Buildx 설정 완료 메시지
         run: echo "--- Docker Buildx 설정 완료 ---"
 
       - name: 🔑 Docker Hub 로그인 (선택 사항:Docker Hub에 푸시할 경우)
-        if: ${{ secrets.DOCKER_USERNAME && secrets.DOCKER_PASSWORD }} # 시크릿이 설정되어 있을 때만 실행
+        # secrets.DOCKER_USERNAME이 존재하고 비어있지 않을 때만 실행
+        if: ${{ env.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: 💬 Docker Hub 로그인 시도 완료 메시지
-        if: ${{ secrets.DOCKER_USERNAME && secrets.DOCKER_PASSWORD }}
+        if: ${{ env.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
         run: echo "--- Docker Hub 로그인 시도 완료 (시크릿이 있는 경우) ---"
 
       - name: 🔑 GitHub Container Registry (GHCR) 로그인 (선택 사항:GHCR에 푸시할 경우)
-        # GHCR에 푸시할 경우, GITHUB_TOKEN을 사용하여 로그인할 수 있습니다.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -87,9 +91,6 @@ jobs:
         run: echo "--- GHCR 로그인 시도 완료 ---"
 
       - name: 🏗️ Docker 이미지 빌드
-        # Dockerfile을 사용하여 이미지를 만들고 태그를 지정합니다.
-        # `context: .`은 현재 리포지토리를 작성 범위로 사용함을 의미합니다.
-        # `push: false`로 설정하여 빌드만 하고 푸시는 하지 않습니다. (아래 단계에서 푸시)
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -103,7 +104,7 @@ jobs:
       - name: 💬 Docker 이미지 빌드 시작 및 완료 메시지
         run: |
           echo "--- Docker 이미지 빌드 시작 ---"
-          echo "빌드 중 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "빌드 중인 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
           echo "Dockerfile 경로: ./Dockerfile"
           echo "--- Docker 이미지 빌드 완료 ---"
 
@@ -114,7 +115,8 @@ jobs:
           echo "--- 이미지 확인 완료 ---"
 
       - name: 📤 Docker 이미지 푸시 (Docker Hub)
-        if: ${{ secrets.DOCKER_USERNAME && secrets.DOCKER_PASSWORD }}
+        # secrets.DOCKER_USERNAME이 존재하고 비어있지 않을 때만 푸시 실행
+        if: ${{ env.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '' }}
         run: |
           echo "--- Docker Hub로 이미지 푸시 시작 ---"
           docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
@@ -122,7 +124,6 @@ jobs:
           echo "--- Docker Hub 푸시 완료 ---"
 
       - name: 📤 Docker 이미지 푸시 (GitHub Container Registry)
-        # GHCR에 푸시하는 경우, 이미지 앞에 ghcr.io/OWNER/REPO를 붙여야 합니다.
         run: |
           echo "--- GHCR로 이미지 푸시 시작 ---"
           docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
@@ -130,7 +131,6 @@ jobs:
           echo "--- GHCR 푸시 완료 ---"
 
       - name: 🏃 Docker 컨테이너 실행 (선택 사항:빌드된 이미지 테스트용)
-        # 빌드된 이미지를 사용하여 실행하여 간단한 테스트를 수행할 수 있습니다.
         run: |
           echo "--- Docker 컨테이너 실행 시작 (테스트용) ---"
           echo "실행 중인 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
