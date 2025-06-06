@@ -126,6 +126,12 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
+### ✨ 실패한 워크플로 자동 재시도 # 이 워크플로우의 이름입니다. (`.github/workflows/rerun.yml`)
+- **용량:** 6225 바이트
+- **최신 갱신:** 2025년 06월 06일 23시 16분 47초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
 ### ✨ ♾️ Infinite Transfer Log Backup (Resident) (`.github/workflows/transfer-log-infinite-backup.yml`)
 - **용량:** 1525 바이트
 - **최신 갱신:** 2025년 06월 02일 23시 05분 11초 KST
@@ -482,6 +488,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
+#### 📄 `.github/workflows/rerun.yml`
+- **파일 크기:** 6225 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
+
 #### 📄 `.github/workflows/retrigger-and-db-init.yml`
 - **파일 크기:** 7326 바이트
 - **파일 타입:** `text/plain`
@@ -553,5 +564,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 14시 13분 06초 KST
+2025년 06월 06일 14시 16분 59초 KST
 
