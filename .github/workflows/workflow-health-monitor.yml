@@ -2,6 +2,10 @@ name: Workflow Health Monitor and Alerting # 워크플로우의 이름
 
 on:
   workflow_run:
+    # 이 부분이 수정되었습니다.
+    # 'workflows: []'를 추가하여 리포지토리의 모든 워크플로우 실행을 감시하도록 명시적으로 지정합니다.
+    # 이렇게 하면 'on.workflow_run does not reference any workflows' 오류를 해결할 수 있습니다.
+    workflows: [] # 리포지토리의 모든 워크플로우를 감시합니다.
     types: [completed] # 다른 워크플로우가 완료될 때마다 이 워크플로우를 트리거합니다.
   schedule:
     - cron: '0 * * * *' # 매 시간 0분에 주기적으로 실행하여 전체 워크플로우 상태를 확인합니다. (UTC 기준)
@@ -10,8 +14,11 @@ on:
 jobs:
   monitor-and-alert:
     runs-on: ubuntu-latest
+    permissions: # 필요한 권한을 명시적으로 부여합니다.
+      actions: read # 다른 워크플로우 실행 기록을 읽기 위해 필요합니다.
+      contents: read # 리포지토리 코드를 체크아웃하고 워크플로우 파일을 읽기 위해 필요합니다.
     steps:
-      - name: Checkout repository code # 리포지토리 코드를 체크아웃합니다.
+      - name: Checkout repository code # 리포지토리 코드를 러너에 체크아웃합니다.
         uses: actions/checkout@v4
 
       - name: Fetch recent workflow runs # 최근 24시간 내의 모든 워크플로우 실행 기록을 가져옵니다.
@@ -20,6 +27,7 @@ jobs:
           # GitHub API를 사용하여 최근 워크플로우 실행 목록을 가져옵니다.
           # 이 예시에서는 실패한 워크플로우를 찾습니다.
           # 실제 환경에서는 더 정교한 필터링이 필요할 수 있습니다.
+          # 'jq'는 GitHub Actions 러너에 기본으로 설치되어 있습니다.
           FAILED_RUNS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=failure&created=>$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')" | \
             jq -r '.workflow_runs[] | "\(.html_url) (Workflow: \(.name), Event: \(.event), ID: \(.id))"')
@@ -45,17 +53,21 @@ jobs:
             Repository: ${{ github.repository }}
             Failed Workflows (Last 24h):
             ${{ steps.get_workflow_runs.outputs.failed_runs }}
-            
+
             Please investigate immediately.
           SLACK_USERNAME: GitHub Actions Bot
           SLACK_CHANNEL: '#github-alerts' # 알림을 보낼 Slack 채널 지정
 
+      ---
       # --- Optional: 워크플로우 설명을 확인하는 Job ---
-      # 이 부분은 제공해주신 "설명이 필요합니다" 문제에 대한 해결책입니다.
+      - name: Install yq # YAML 파일을 파싱하기 위해 'yq'를 설치합니다.
+        uses: mikefarah/yq@v4
+
       - name: Check for missing workflow descriptions # 모든 워크플로우 파일에 설명이 있는지 확인합니다.
         run: |
           missing_descriptions=""
           for workflow_file in .github/workflows/*.yml; do
+            # 'description' 필드를 읽습니다. 없으면 빈 문자열입니다.
             description=$(yq e '.description // ""' "$workflow_file")
             if [ -z "$description" ]; then
               echo "::warning file=$workflow_file::Workflow '$workflow_file' is missing a 'description' field."
@@ -67,6 +79,3 @@ jobs:
             echo "::error::The following workflows are missing descriptions:$missing_descriptions"
             exit 1 # 설명이 없는 워크플로우가 있으면 워크플로우를 실패시킵니다.
           fi
-        # yq 설치 (GitHub Actions 러너에는 기본적으로 설치되어 있지 않을 수 있습니다.)
-      - name: Install yq
-        uses: mikefarah/yq@v4
