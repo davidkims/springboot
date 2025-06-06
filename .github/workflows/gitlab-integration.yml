@@ -1,7 +1,6 @@
-# 파일 위치: .github/workflows/gitlab-integration.yml
-name: GitLab 연동 워크플로우
+name: GitLab 연동 (토큰 자동 생성 + 푸시 + 파이프라인 트리거)
 
-# main 브랜치에 푸시되거나, 수동 실행도 허용
+# main 브랜치에 푸시되거나, 수동 실행 가능
 on:
   push:
     branches:
@@ -9,48 +8,131 @@ on:
   workflow_dispatch:
 
 jobs:
-  push-to-gitlab:
-    name: "GitLab 저장소로 푸시 및 파이프라인 트리거"
+  gitlab-sync:
+    name: "1) GitLab용 토큰 생성 → 2) GitLab Push → 3) 파이프라인 트리거 → 4) 토큰 삭제"
     runs-on: ubuntu-latest
     env:
-      # GitLab 개인 엑세스 토큰 (GitHub Secrets에 미리 등록해야 함)
-      GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      # GitLab 프로젝트 ID (GitHub Secrets 또는 하드코딩)
+      # GitHub Secrets에서 미리 세팅해둔 값
+      GITLAB_ADMIN_TOKEN: ${{ secrets.GITLAB_ADMIN_TOKEN }}
       GITLAB_PROJECT_ID: ${{ secrets.GITLAB_PROJECT_ID }}
-      # GitLab 리모트 URL. oauth2 방식으로 인증하여 푸시.
-      GITLAB_REMOTE_URL: https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/<namespace>/<project>.git
+      # 실제 GitLab 네임스페이스/프로젝트 경로로 아래 값을 변경하세요.
+      # 예: namespace 가 "mygroup", 프로젝트명이 "myrepo"라면 mygroup/myrepo
+      GITLAB_NAMESPACE_PROJECT: mygroup/myrepo
+
     steps:
+      ########################################################################
       # 1) GitHub 저장소의 코드를 체크아웃
-      - name: '1. Checkout GitHub 코드'
+      ########################################################################
+      - name: "1. Checkout GitHub 코드"
         uses: actions/checkout@v4
 
-      # 2) Git 사용자 정보 설정 (GitLab 커밋 주체로 올리기 위함)
-      - name: '2. Git 사용자 정보 설정'
+      ########################################################################
+      # 2) jq 설치 (JSON 파싱을 위해)
+      ########################################################################
+      - name: "2. jq 설치"
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      ########################################################################
+      # 3) GitLab Project Access Token 생성
+      #
+      #    - scopes: api, write_repository
+      #    - expires_at: 워크플로우 실행 시점 기준 1일 뒤(원한다면 날짜 조정 가능)
+      #    - 생성된 토큰은 stepOutputs.token 에 저장
+      ########################################################################
+      - id: create_token
+        name: "3. GitLab Project Access Token 생성"
         run: |
+          echo "▶ GitLab 프로젝트 액세스 토큰 생성 요청 중..."
+          RESPONSE=$(curl -s --request POST \
+            --header "PRIVATE-TOKEN: $GITLAB_ADMIN_TOKEN" \
+            --form "name=gha-token-$(date +%s)" \
+            --form "scopes[]=api" \
+            --form "scopes[]=write_repository" \
+            --form "expires_at=$(date -d '+1 day' +%Y-%m-%d)" \
+            "https://gitlab.com/api/v4/projects/${GITLAB_PROJECT_ID}/access_tokens")
+
+          # 생성 응답을 출력(디버깅용)
+          echo "GitLab 응답: $RESPONSE"
+
+          # 생성된 토큰만 추출
+          TOKEN=$(echo "$RESPONSE" | jq -r .token)
+
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "❌ 토큰 생성 실패. 응답을 확인하세요: $RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ 새로운 토큰 생성 성공"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      ########################################################################
+      # 4) GitLab 리모트(remote) 설정 및 Git 사용자 정보 세팅
+      ########################################################################
+      - name: "4. GitLab 원격(remote) 등록 및 Git 사용자 설정"
+        run: |
+          # Git 사용자 정보(커밋 주체) 설정
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 3) GitLab 원격 저장소 리모트로 추가
-      - name: '3. GitLab 원격(remote) 추가'
-        run: |
-          # 기존 origin 이외에 gitlab-origin이라는 이름으로 리모트 추가
-          git remote add gitlab-origin "${{ env.GITLAB_REMOTE_URL }}"
-          # 원격 리모트가 제대로 등록되었는지 확인
+          # 생성된 토큰을 사용한 GitLab 리모트 URL 구성
+          REMOTE_URL="https://oauth2:${{ steps.create_token.outputs.token }}@gitlab.com/${GITLAB_NAMESPACE_PROJECT}.git"
+
+          # 기존 origin 외에 gitlab-origin 별칭으로 추가
+          git remote add gitlab-origin "$REMOTE_URL"
+          echo "▶ 등록된 remote 목록:"
           git remote -v
 
-      # 4) 원하는 브랜치(예: main)를 GitLab으로 강제 푸시 (포스 푸시금지에 유의)
-      - name: '4. GitLab으로 코드 푸시'
+      ########################################################################
+      # 5) GitLab에 현재 HEAD(main) 브랜치 푸시
+      #    - 충돌이 날 가능성이 있으면 --force 옵션을 검토하세요.
+      ########################################################################
+      - name: "5. GitLab으로 코드 푸시"
         run: |
-          # main 브랜치를 gitlab-origin의 main 브랜치로 푸시
+          echo "▶ GitLab 프로젝트로 푸시 중..."
           git push gitlab-origin HEAD:main
+        # push 실패 시 바로 워크플로우 종료
+        # (옵션: 만약 병합 전략이 필요하면 강제 푸시(--force-with-lease) 등을 검토)
+        continue-on-error: false
 
-      # 5) (선택) GitLab 파이프라인을 수동 트리거
-      #    GitLab 프로젝트 설정에 “Trigger Tokens”를 사용하지 않고,
-      #    REST API로 직접 파이프라인을 트리거하는 예시입니다.
-      #    GitLab 개인 토큰(PAT)에 api 권한이 있어야 합니다.
-      - name: '5. GitLab 파이프라인 트리거'
+      ########################################################################
+      # 6) GitLab 파이프라인 트리거
+      #    - REST API: POST /projects/:id/pipeline
+      ########################################################################
+      - name: "6. GitLab 파이프라인 트리거"
+        if: ${{ success() }}
         run: |
-          curl --request POST \
-            --header "PRIVATE-TOKEN: ${{ env.GITLAB_TOKEN }}" \
+          echo "▶ GitLab CI 파이프라인 실행 요청 중..."
+          curl --silent --show-error --request POST \
+            --header "PRIVATE-TOKEN: $GITLAB_ADMIN_TOKEN" \
             --form "ref=main" \
-            "https://gitlab.com/api/v4/projects/${{ env.GITLAB_PROJECT_ID }}/pipeline"
+            "https://gitlab.com/api/v4/projects/${GITLAB_PROJECT_ID}/pipeline" \
+            | jq .
+
+      ########################################################################
+      # 7) (선택) 생성된 Project Access Token 삭제
+      #    - 매 실행마다 토큰이 누적되지 않도록 권장
+      ########################################################################
+      - name: "7. 생성된 토큰 삭제 (권장)"
+        if: ${{ success() }}
+        run: |
+          echo "▶ 생성된 토큰 ID 조회 및 삭제 요청 중..."
+          
+          # 1) 현재 프로젝트에 발급된 access_tokens 목록 불러오기
+          TOKENS_LIST=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_ADMIN_TOKEN" \
+            "https://gitlab.com/api/v4/projects/${GITLAB_PROJECT_ID}/access_tokens")
+
+          # 2) 생성 직후 토큰(token 값)과 일치하는 레코드를 찾아 id를 추출
+          TARGET_ID=$(echo "$TOKENS_LIST" \
+            | jq -r '.[] | select(.token=="'"${{ steps.create_token.outputs.token }}"'") | .id')
+
+          if [ -z "$TARGET_ID" ]; then
+            echo "⚠️ 삭제할 토큰 ID를 찾을 수 없음. (이미 삭제되었거나 권한 부족)"
+            exit 0
+          fi
+
+          # 3) 해당 토큰 ID로 삭제 요청
+          curl --silent --show-error --request DELETE \
+            --header "PRIVATE-TOKEN: $GITLAB_ADMIN_TOKEN" \
+            "https://gitlab.com/api/v4/projects/${GITLAB_PROJECT_ID}/access_tokens/${TARGET_ID}"
+
+          echo "✅ 토큰(ID: $TARGET_ID) 삭제 성공"
