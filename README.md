@@ -541,6 +541,18 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/x-shellscript`
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
+## 📝 워크플로우 사용 예시
+다음 명령을 실행하여 `my_new_directory` 디렉토리를 생성했습니다.
+
+```bash
+mkdir -p my_new_directory
+```
+
+이 명령은 상위 경로가 없더라도 디렉토리를 한 번에 만들어 줍니다.
+
+### ⟳ 자동 재시도 기능
+워크플로우 실행 중 오류가 발생하면 `.github/workflows/auto-rerun.yml` 워크플로우가 실패한 작업을 자동으로 재실행합니다. 현재 `Project Source Code Backup`과 `Create GitHub Release` 워크플로우를 감시하여 필요 시 재시도합니다.
+
 ## 📅 보고서 생성 날짜
 2025년 06월 06일 13시 58분 25초 KST
 
