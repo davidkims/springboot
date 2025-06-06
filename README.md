@@ -210,9 +210,9 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
-### ✨ Generate and Backup Corporate Banking Data (`.github/workflows/db.yml`)
-- **용량:** 7297 바이트
-- **최신 갱신:** 2025년 06월 05일 22시 43분 23초 KST
+### ✨ 실패한 워크플로 자동 재시도 # 이 워크플로우의 이름입니다. (`.github/workflows/db.yml`)
+- **용량:** 2215 바이트
+- **최신 갱신:** 2025년 06월 06일 23시 12분 11초 KST
 - **설명:**
   - 이 워크플로우는 기업 금융 데이터를 시뮬레이션하고 백업합니다. 데이터 추출, 암호화, OCI Object Storage 업로드 및 NetBackup CLI 실행 시뮬레이션을 포함합니다.
 
@@ -383,9 +383,9 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/db.yml`
-- **파일 크기:** 7297 바이트
-- **파일 타입:** `text/x-script.python`
-- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
+- **파일 크기:** 2215 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/delete_workflows.yml`
 - **파일 크기:** 7998 바이트
@@ -553,5 +553,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 14시 09분 09초 KST
+2025년 06월 06일 14시 12분 24초 KST
 
