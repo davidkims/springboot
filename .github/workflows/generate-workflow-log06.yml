@@ -2,40 +2,43 @@
 name: 워크플로 실행 로그 생성
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # GitHub Actions 탭에서 수동 트리거 허용
   schedule:
-    - cron: '*/5 * * * 0' # 매주 일요일, 매 5분마다 실행 (UTC 기준)
+    # 매주 일요일, 매 5분마다 실행 (UTC 기준)
+    # * 중요: GitHub Actions의 최소 cron 간격은 5분입니다.
+    #        만약 매일 5분마다를 원한다면 '*/5 * * * *'로 변경할 수 있습니다.
+    - cron: '*/5 * * * 0'
+
   push:
     branches:
       - main
     paths:
-      - '.github/workflows/**'
+      - '.github/workflows/**' # 워크플로우 파일 변경 시에도 트리거
 
 jobs:
   create_log:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # 리포지토리 콘텐츠에 쓰기 권한 부여 (로그 파일 커밋을 위해 필요)
 
     steps:
       - name: 체크아웃 저장소 (전체 기록 포함)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 모든 기록을 가져옵니다.
-
-      # --- REMOVE the previous "원격과 동기화 및 브랜치 리베이스" step ---
-      # This logic will be handled more robustly by the git-auto-commit-action itself,
-      # or by an explicit pull just before it.
+          fetch-depth: 0 # 모든 기록을 가져와 git 작업(특히 pull --ff-only)에 필요합니다.
 
       - name: 워크플로 실행을 가져오고 로그를 생성합니다.
         id: fetch_runs
         env:
+          # GITHUB_TOKEN은 자동으로 제공되며, 리포지토리 콘텐츠에 대한 읽기/쓰기 권한을 가집니다.
+          # (위에서 permissions: contents: write가 설정되어 있어야 합니다.)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           #!/bin/bash
-          REPO="${{ github.repository }}"
+          REPO="${{ github.repository }}" # 예: 'your-username/your-repo-name'
           LOG_FILE=".github/workflow_run_log.md"
 
+          # 로그 파일 헤더 생성 (매번 새로 생성)
           echo "# GitHub 워크플로 실행 로그" > "$LOG_FILE"
           echo "" >> "$LOG_FILE"
           echo "이 파일은 \`워크플로 실행 로그 생성\` 워크플로에 의해 자동으로 생성됩니다." >> "$LOG_FILE"
@@ -45,22 +48,29 @@ jobs:
           echo "| 워크플로 이름 | 실행 ID | 상태 | 결론 | 실행 시간(UTC) | 브랜치 | 커미터 | 커밋 메시지 |" >> "$LOG_FILE"
           echo "|---|---|---|---|---|---|---|---|" >> "$LOG_FILE"
 
+          # 리포지토리 내 모든 워크플로우 ID 가져오기
           WORKFLOWS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/$REPO/actions/workflows" | jq -r '.workflows[] | .id')
 
+          # 각 워크플로우에 대해 실행 로그 가져오기
           for WORKFLOW_ID in $WORKFLOWS; do
             WORKFLOW_NAME=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID" | jq -r '.name')
 
+            # 해당 워크플로우의 최근 100개 완료/진행/큐잉 상태의 실행 로그 가져오기
+            # event 필터링을 통해 push, workflow_dispatch, schedule, pull_request 이벤트만 포함
             RUNS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?per_page=100&status=completed,in_progress,queued&event=push,workflow_dispatch,schedule,pull_request" \
               | jq -r '.workflow_runs[] | "\(.name) \(.id) \(.status) \(.conclusion) \(.created_at) \(.head_branch) \(.head_commit.committer.name) \(.head_commit.message | gsub("[\r\n]"; " "))"')
 
+            # 실행 로그가 없는 경우 건너뛰기
             if [ -z "$RUNS" ]; then
               continue
             fi
 
+            # 각 실행 로그를 파싱하여 Markdown 테이블에 추가
             while IFS= read -r RUN; do
+              # 필드를 공백으로 분리하고 배열에 저장
               RUN_ARRAY=($RUN)
               RUN_NAME="${RUN_ARRAY[0]}"
               RUN_ID="${RUN_ARRAY[1]}"
@@ -70,39 +80,45 @@ jobs:
               RUN_BRANCH="${RUN_ARRAY[5]}"
               RUN_COMMITTER="${RUN_ARRAY[6]}"
 
+              # 커밋 메시지는 여러 단어일 수 있으므로 나머지를 모두 가져옵니다.
               RUN_COMMIT_MESSAGE=""
               for ((i=7; i<${#RUN_ARRAY[@]}; i++)); do
                   RUN_COMMIT_MESSAGE+="${RUN_ARRAY[i]} "
               done
-              RUN_COMMIT_MESSAGE=$(echo "$RUN_COMMIT_MESSAGE" | sed 's/ $//')
+              RUN_COMMIT_MESSAGE=$(echo "$RUN_COMMIT_MESSAGE" | sed 's/ $//') # 마지막 공백 제거
 
+              # conclusion이 null인 경우 "N/A"로 표시
               if [ "$RUN_CONCLUSION" == "null" ]; then
                 RUN_CONCLUSION="N/A"
               fi
 
+              # Markdown 테이블 형식으로 로그 파일에 추가
               echo "| $RUN_NAME | $RUN_ID | $RUN_STATUS | $RUN_CONCLUSION | $RUN_CREATED_AT | $RUN_BRANCH | $RUN_COMMITTER | $RUN_COMMIT_MESSAGE |" >> "$LOG_FILE"
             done <<< "$RUNS"
           done
 
-      # --- NEW STEP: Explicitly pull remote changes before auto-committing ---
       - name: 원격 브랜치와 최종 동기화
+        # 이 단계는 git-auto-commit-action이 푸시하기 전에
+        # 로컬 브랜치가 원격의 최신 상태와 완벽하게 일치하도록 합니다.
         run: |
           LOCAL_BRANCH="${{ github.ref_name }}"
           echo "최종 동기화를 위해 원격 브랜치 '$LOCAL_BRANCH'를 풀합니다."
-          # --ff-only: fast-forward 병합만 시도합니다. 실패 시 워크플로우를 중단합니다.
+          # --ff-only: fast-forward 병합만 시도합니다. diverged 상태에서는 실패하고 워크플로를 중단합니다.
           # 이는 diverged 상태를 발생시키지 않고 원격의 최신 커밋을 가져옵니다.
           git pull --ff-only origin "$LOCAL_BRANCH"
           if [ $? -ne 0 ]; then
             echo "오류: 최종 'git pull --ff-only'에 실패했습니다. 원격 브랜치가 diverged되었을 수 있습니다."
             echo "워크플로우를 중단합니다. 수동으로 'git pull' 또는 'git rebase'가 필요할 수 있습니다."
-            exit 1
+            exit 1 # 푸시 거부 방지를 위해 워크플로우를 즉시 종료
           fi
 
       - name: 변경 사항 커밋 및 푸시
+        # 이 액션은 이전 스텝에서 생성된 로그 파일을 자동으로 커밋하고 푸시합니다.
+        # 이전의 'git pull --ff-only' 스텝이 성공했다면, 충돌 없이 푸시될 것입니다.
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "워크플로 실행 로그 업데이트"
-          file_pattern: ".github/workflow_run_log.md"
+          file_pattern: ".github/workflow_run_log.md" # 변경 사항을 추적할 파일 지정
           commit_user_name: "GitHub Actions Bot"
           commit_user_email: "actions@github.com"
           commit_author: "GitHub Actions Bot <actions@github.com>"
