@@ -1,136 +1,75 @@
-name: MySQL Full Pipeline (with File Download & Migration Tool)
+name: MySQL Pipeline with Custom Script
 
 on:
   push:
     branches:
-      - main # main 브랜치에 푸시될 때 워크플로우 실행
+      - main # This workflow runs on pushes to the 'main' branch
 
 env:
-  # GitHub Secrets에서 MySQL 접속 정보를 불러옵니다.
-  # 이 값들은 절대로 코드에 직접 노출해서는 안 됩니다.
+  # Your MySQL connection details, retrieved securely from GitHub Secrets.
+  # Make sure these secrets are set up in your repository settings!
   MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
   MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
   MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
   MYSQL_USER: ${{ secrets.MYSQL_USER }}
   MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
 
-  # (예시) 추가적으로 다운로드할 파일의 URL을 환경 변수로 설정 (선택 사항)
-  # MY_CONFIG_FILE_URL: "https://example.com/configs/prod-app-config.json"
-  # FLYWAY_VERSION: "9.22.0" # 사용할 Flyway 버전
-
 jobs:
-  prepare_and_apply_sql:
-    runs-on: ubuntu-latest # 최신 Ubuntu 환경에서 실행
+  db_operations:
+    runs-on: ubuntu-latest # Runs on the latest Ubuntu runner
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # Git 리포지토리의 코드를 워크플로우 실행 환경으로 가져옵니다.
+        uses: actions/checkout@v4 # Clones your repository into the runner environment.
 
       - name: Install MySQL client
         run: |
           sudo apt-get update
-          sudo apt-get install -y mysql-client # MySQL 클라이언트 도구(mysql 명령어)를 설치합니다.
+          sudo apt-get install -y mysql-client # Installs the MySQL client tools (e.g., 'mysql' command).
 
-      # --- 파일 다운로드 예시 ---
-      # 1. 특정 URL에서 설정 파일 다운로드 (예시)
-      # 이 스텝은 `env.MY_CONFIG_FILE_URL` 변수가 설정되어 있을 때만 실행됩니다.
-      - name: Download application configuration file
-        if: ${{ env.MY_CONFIG_FILE_URL != '' }}
-        run: |
-          echo "Downloading configuration file from ${{ env.MY_CONFIG_FILE_URL }}..."
-          curl -sSLo application-config.json ${{ env.MY_CONFIG_FILE_URL }}
-          echo "Configuration file downloaded to $(pwd)/application-config.json"
-          ls -l application-config.json # 다운로드 확인
-        # 다운로드된 파일을 이후 스텝에서 사용하려면, 적절한 경로에 저장하거나
-        # artifacts로 업로드/다운로드하여 다음 job에서 사용할 수 있습니다.
+      - name: Make custom script executable
+        run: chmod +x ./scripts/db_setup_and_backup.sh # Ensures your script can be executed.
 
-      # 2. (추가 예시) Flyway 같은 데이터베이스 마이그레이션 도구 다운로드
-      # 여기서는 Flyway를 다운로드하고 압축 해제하는 예시입니다.
-      - name: Download and Setup Flyway (Database Migration Tool)
-        # 이 스텝은 `env.FLYWAY_VERSION` 변수가 설정되어 있을 때만 실행됩니다.
-        if: ${{ env.FLYWAY_VERSION != '' }}
-        run: |
-          FLYWAY_URL="https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/${{ env.FLYWAY_VERSION }}/flyway-commandline-${{ env.FLYWAY_VERSION }}-linux-x64.tar.gz"
-          echo "Downloading Flyway from $FLYWAY_URL..."
-          wget -qO - "$FLYWAY_URL" | tar -xz -C /tmp/
-          echo "Flyway downloaded to /tmp/flyway-${{ env.FLYWAY_VERSION }}/"
-          chmod +x /tmp/flyway-${{ env.FLYWAY_VERSION }}/flyway
-          echo "/tmp/flyway-${{ env.FLYWAY_VERSION }}/" >> $GITHUB_PATH # PATH에 추가하여 flyway 명령 사용 가능하게 함
-          # 여기서 FLYWAY_VERSION이 비어있으면 이 스텝은 실행되지 않습니다.
-          # FLYWAY_VERSION: ${{ env.FLYWAY_VERSION }} # 주석 처리해도 상위 env에서 자동 상속
-
-      # --- MySQL 연결 대기 (이전 코드와 동일) ---
-      - name: Wait for MySQL to be ready (recommended for stability)
+      - name: Wait for MySQL to be ready
+        # This step ensures the MySQL server is up and accessible before proceeding.
+        # It retries connection attempts for up to 60 seconds.
         run: |
           echo "Attempting to connect to MySQL at ${MYSQL_HOST}:${MYSQL_PORT}..."
           for i in {1..30}; do
-            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" &> /dev/null
+            # Attempts a simple SELECT 1 query to check connectivity.
+            mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "SELECT 1" &> /dev/null
             if [ $? -eq 0 ]; then
               echo "MySQL is ready after $((i*2)) seconds!"
-              break
+              break # Exit loop on successful connection.
             fi
             echo "Waiting for MySQL... attempt $i/30 (sleeping 2s)"
             sleep 2
           done
-          mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" || \
-            { echo "ERROR: MySQL not ready after timeout! Please verify MySQL configuration and network access."; exit 1; }
+          # If still not connected after all retries, print an error and exit the workflow.
+          mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" -e "SELECT 1" || \
+            { echo "ERROR: MySQL not ready after timeout! Please verify:"; \
+              echo "- MySQL Host, Port, User, Password in GitHub Secrets are correct."; \
+              echo "- MySQL server is running and accessible from GitHub Actions runners."; \
+              echo "- Firewall rules allow connections on port ${MYSQL_PORT}."; \
+              exit 1; }
         env:
+          # Pass MySQL credentials to this step's environment explicitly for security.
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
 
-      # --- SQL 스크립트 실행 (이전 코드와 동일) ---
-      - name: Execute schema.sql if exists
-        run: |
-          SQL_FILE="./sql/schema.sql"
-          if [ -f "$SQL_FILE" ]; then
-            echo "Executing $SQL_FILE..."
-            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$SQL_FILE"
-            echo "$SQL_FILE executed successfully."
-          else
-            echo "$SQL_FILE not found, skipping."
-          fi
+      - name: Run Database Setup and Backup Script
+        # Executes your custom shell script.
+        # It's crucial that this script handles its own logging and error checking.
+        run: ./scripts/db_setup_and_backup.sh # Execute the script directly.
         env:
+          # Pass all necessary MySQL credentials as environment variables to your script.
+          # Your script (db_setup_and_backup.sh) should then use these variables.
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
-
-      - name: Execute data.sql if exists
-        run: |
-          SQL_FILE="./sql/data.sql"
-          if [ -f "$SQL_FILE" ]; then
-            echo "Executing $SQL_FILE..."
-            mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$SQL_FILE"
-            echo "$SQL_FILE executed successfully."
-          else
-            echo "$SQL_FILE not found, skipping."
-          fi
-        env:
-          MYSQL_HOST: ${{ env.MYSQL_HOST }}
-          MYSQL_PORT: ${{ env.MYSQL_PORT }}
-          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
-          MYSQL_USER: ${{ env.MYSQL_USER }}
-          MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
-
-      # --- Flyway 마이그레이션 실행 (다운로드 스텝과 함께 사용) ---
-      - name: Run Flyway Migrations
-        if: ${{ env.FLYWAY_VERSION != '' }} # Flyway가 다운로드되었을 때만 실행
-        run: |
-          echo "Running Flyway migrations..."
-          flyway -url="jdbc:mysql://${{ env.MYSQL_HOST }}:${{ env.MYSQL_PORT }}/${{ env.MYSQL_DATABASE }}" \
-                 -user="${{ env.MYSQL_USER }}" \
-                 -password="${{ env.MYSQL_PASSWORD }}" \
-                 -locations="filesystem:./sql/migrations" \
-                 migrate
-          echo "Flyway migrations completed."
-        env:
-          MYSQL_HOST: ${{ env.MYSQL_HOST }}
-          MYSQL_PORT: ${{ env.MYSQL_PORT }}
-          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
-          MYSQL_USER: ${{ env.MYSQL_USER }}
-          MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
-          # Flyway는 JAVA_HOME이 필요할 수 있습니다.
-          # JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64 # 필요시 주석 해제 및 경로 확인
+        # Add a timeout for the script if it might run for a long time
+        # timeout-minutes: 10
