@@ -20,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch workflow runs
+      - name: Fetch workflow runs and generate log
         id: fetch_runs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Automatically provided token
@@ -37,9 +37,7 @@ jobs:
           echo "| Workflow Name | Run ID | Status | Conclusion | Run Time (UTC) | Branch | Committer | Commit Message |" >> "$LOG_FILE"
           echo "|---|---|---|---|---|---|---|---|" >> "$LOG_FILE"
 
-          # Fetch workflow runs for all workflows
-          # We'll fetch the last 100 runs for simplicity, you can adjust 'per_page' if needed.
-          # The GitHub API has a rate limit, so fetching too many at once might cause issues.
+          # Use a higher per_page limit to fetch more runs, max is 100
           # We iterate through all workflows to get their runs.
 
           WORKFLOWS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
@@ -50,8 +48,9 @@ jobs:
               "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID" | jq -r '.name')
 
             # Fetch runs for the current workflow, sorted by created_at in descending order
+            # Filter for completed, in_progress, or queued runs for a comprehensive log
             RUNS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?per_page=50&status=completed&event=push,workflow_dispatch,schedule" | jq -r '.workflow_runs[] | select(.status == "completed" or .status == "queued" or .status == "in_progress") | "\(.name) \(.id) \(.status) \(.conclusion) \(.created_at) \(.head_branch) \(.head_commit.committer.name) \(.head_commit.message | gsub("[\r\n]"; " "))"') # Replace newlines in commit message
+              "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?per_page=100&status=completed,in_progress,queued&event=push,workflow_dispatch,schedule,pull_request" | jq -r '.workflow_runs[] | "\(.name) \(.id) \(.status) \(.conclusion) \(.created_at) \(.head_branch) \(.head_commit.committer.name) \(.head_commit.message | gsub("[\r\n]"; " "))"') # Replace newlines in commit message
 
             if [ -z "$RUNS" ]; then
               continue # Skip if no runs found for this workflow
@@ -59,14 +58,24 @@ jobs:
 
             while IFS= read -r RUN; do
               # Parse the run data
-              RUN_NAME=$(echo "$RUN" | awk '{print $1}')
-              RUN_ID=$(echo "$RUN" | awk '{print $2}')
-              RUN_STATUS=$(echo "$RUN" | awk '{print $3}')
-              RUN_CONCLUSION=$(echo "$RUN" | awk '{print $4}')
-              RUN_CREATED_AT=$(echo "$RUN" | awk '{print $5}')
-              RUN_BRANCH=$(echo "$RUN" | awk '{print $6}')
-              RUN_COMMITTER=$(echo "$RUN" | awk '{print $7}')
-              RUN_COMMIT_MESSAGE=$(echo "$RUN" | awk '{$1=$2=$3=$4=$5=$6=$7=""; print $0}' | sed 's/^ *//') # Extract the rest as commit message
+              # Note: awk tokenization might split names with spaces. 
+              # A more robust parsing might involve sed or splitting by a delimiter if `jq` supported it directly.
+              # For simplicity, we'll try to handle it here.
+              RUN_ARRAY=($RUN)
+              RUN_NAME="${RUN_ARRAY[0]}" # Assuming first word is name
+              RUN_ID="${RUN_ARRAY[1]}"
+              RUN_STATUS="${RUN_ARRAY[2]}"
+              RUN_CONCLUSION="${RUN_ARRAY[3]}"
+              RUN_CREATED_AT="${RUN_ARRAY[4]}"
+              RUN_BRANCH="${RUN_ARRAY[5]}"
+              RUN_COMMITTER="${RUN_ARRAY[6]}"
+              
+              # Reconstruct commit message (all remaining parts)
+              RUN_COMMIT_MESSAGE=""
+              for ((i=7; i<${#RUN_ARRAY[@]}; i++)); do
+                  RUN_COMMIT_MESSAGE+="${RUN_ARRAY[i]} "
+              done
+              RUN_COMMIT_MESSAGE=$(echo "$RUN_COMMIT_MESSAGE" | sed 's/ $//') # Trim trailing space
 
               # Handle cases where conclusion might be null for in-progress or queued runs
               if [ "$RUN_CONCLUSION" == "null" ]; then
@@ -83,7 +92,9 @@ jobs:
         with:
           commit_message: "Update workflow run log"
           file_pattern: ".github/workflow_run_log.md"
-          # Optional: Configure the committer and author
           commit_user_name: "GitHub Actions Bot"
           commit_user_email: "actions@github.com"
           commit_author: "GitHub Actions Bot <actions@github.com>"
+          # --- Crucial addition to handle diverged branches ---
+          pull_strategy: "rebase_merge" 
+          # --- End of crucial addition ---
