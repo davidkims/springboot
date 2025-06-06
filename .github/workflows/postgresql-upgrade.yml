@@ -8,6 +8,7 @@ on:
 env:
   # GitHub Secrets에서 MySQL 접속 정보를 불러옵니다.
   # 이 값들은 절대로 코드에 직접 노출해서는 안 됩니다.
+  # 먼저 GitHub 리포지토리 설정에서 이 시크릿들을 생성해야 합니다.
   MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
   MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
   MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
@@ -27,12 +28,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mysql-client # MySQL 클라이언트 도구(mysql 명령어)를 설치합니다.
 
-      - name: Wait for MySQL to be ready (optional, but highly recommended)
+      - name: Wait for MySQL to be ready (recommended for stability)
         # MySQL 서버가 완전히 시작되고 연결을 받을 준비가 될 때까지 기다립니다.
-        # 이 단계는 네트워크 지연이나 서버 시작 시간에 따라 필요합니다.
+        # 이 단계는 네트워크 지연이나 서버 시작 시간에 따라 필요하며, 연결 오류를 방지합니다.
         run: |
           echo "Attempting to connect to MySQL at ${MYSQL_HOST}:${MYSQL_PORT}..."
-          for i in {1..30}; do # 최대 30번 (총 60초) 시도
+          for i in {1..30}; do # 최대 30번 시도 (총 60초 대기)
             # MySQL 서버에 단순 쿼리(SELECT 1)를 실행하여 연결 가능 여부 확인
             # 성공하면 $?는 0, 실패하면 0이 아닌 값
             mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" &> /dev/null
@@ -43,17 +44,21 @@ jobs:
             echo "Waiting for MySQL... attempt $i/30 (sleeping 2s)"
             sleep 2 # 2초 대기 후 재시도
           done
-          # 루프가 끝난 후에도 연결이 되지 않으면 에러 발생
+          # 루프가 끝난 후에도 연결이 되지 않으면 에러 메시지를 출력하고 워크플로우 종료
           mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD -e "SELECT 1" || \
-            { echo "ERROR: MySQL not ready after timeout! Check host, port, user, password, and firewall."; exit 1; }
+            { echo "ERROR: MySQL not ready after timeout! Please verify:"; \
+              echo "- MySQL Host, Port, User, Password in GitHub Secrets are correct."; \
+              echo "- MySQL server is running and accessible from GitHub Actions runners."; \
+              echo "- Firewall rules allow connections on port ${MYSQL_PORT}."; \
+              exit 1; }
         env:
           # `env` 블록을 통해 해당 step에서 사용할 환경 변수를 명시적으로 전달합니다.
           # 이는 보안상 좋은 관행이며, 특히 비밀번호가 노출되지 않도록 합니다.
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
           MYSQL_PORT: ${{ env.MYSQL_PORT }}
-          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }} # 이 단계에서는 실제로 사용되지 않지만, 일관성을 위해 포함
-          MYSQL_USER: ${{ env.USER }}
+          MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
+          # MYSQL_DATABASE는 연결 대기 단계에서는 필요 없으므로 생략 가능하나, 일관성을 위해 유지 가능.
 
       - name: Execute schema.sql if exists
         # 리포지토리의 'sql/schema.sql' 파일이 존재하면 MySQL에 실행합니다.
@@ -91,24 +96,26 @@ jobs:
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
 
-      - name: Run any other SQL scripts (optional)
+      - name: Run any additional SQL scripts (optional)
         # 필요하다면 추가적인 SQL 스크립트를 여기서 실행할 수 있습니다.
         # 예시: './sql/migrations/*.sql' 등
         run: |
           echo "Checking for additional SQL scripts in sql/migrations/..."
-          for file in ./sql/migrations/*.sql; do
-            if [ -f "$file" ]; then
+          # `ls` 명령을 사용하여 파일이 있는지 먼저 확인하고, 없으면 메시지 출력
+          shopt -s nullglob # 매칭되는 파일이 없으면 패턴을 그대로 두지 않고 빈 리스트로 만듭니다.
+          files=(./sql/migrations/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No additional SQL migration scripts found in sql/migrations/."
+          else
+            for file in "${files[@]}"; do
               echo "Executing $file..."
               mysql -h $MYSQL_HOST -P $MYSQL_PORT -u $MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE < "$file"
               echo "$file executed successfully."
-            else
-              echo "No additional SQL migration scripts found in sql/migrations/."
-              break # 파일이 없으면 루프 종료
-            fi
-          done
+            done
+          fi
         env:
           MYSQL_HOST: ${{ env.MYSQL_HOST }}
-          MYSQL_PORT: ${{ env.PORT }}
+          MYSQL_PORT: ${{ env.MYSQL_PORT }}
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_USER: ${{ env.MYSQL_USER }}
           MYSQL_PASSWORD: ${{ env.MYSQL_PASSWORD }}
