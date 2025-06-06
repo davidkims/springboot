@@ -90,6 +90,12 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
+### ✨ Project Source Code Backup (`.github/workflows/backup.yml`)
+- **용량:** 1259 바이트
+- **최신 갱신:** 2025년 06월 06일 11시 23분 21초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
 ### ✨ Swift CLI Build and Test (`.github/workflows/build_and_test.yml`)
 - **용량:** 776 바이트
 - **최신 갱신:** 2025년 06월 06일 11시 21분 50초 KST
@@ -283,6 +289,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
+#### 📄 `.github/workflow_run_log.md`
+- **파일 크기:** 248 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 마크다운 문서입니다.
+
 #### 📄 `.github/workflows/Release.yml`
 - **파일 크기:** 406 바이트
 - **파일 타입:** `text/plain`
@@ -300,6 +311,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 
 #### 📄 `.github/workflows/auto-transactions.yml`
 - **파일 크기:** 2672 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
+
+#### 📄 `.github/workflows/backup.yml`
+- **파일 크기:** 1259 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
@@ -499,5 +515,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 02시 22분 59초 KST
+2025년 06월 06일 02시 23분 34초 KST
 
