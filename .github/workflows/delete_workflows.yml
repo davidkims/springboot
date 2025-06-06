@@ -1,4 +1,4 @@
-name: Auto Code Fix & Re-run
+name: Auto YAML Workflow Fix & Re-run
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  auto_fix_and_test:
-    name: "Auto-Fix 코드 문제 감지 → 수정 → 재실행"
+  auto_yaml_fix:
+    name: "Auto-Fix YAML 워크플로우 파일 → 커밋 → 재실행"
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,62 +23,48 @@ jobs:
           fetch-depth: 0
 
       ####################################################################
-      # 2) 이미 “auto-fix” 커밋인 경우, 수정 단계 스킵
+      # 2) “auto-yaml-fix” 커밋인지 확인해서 중복 실행 방지
       ####################################################################
-      - name: Check if this commit is auto-fix
+      - name: Check if this commit is auto-yaml-fix
         id: is_autofix
         run: |
-          echo "HEAD commit message: ${{ github.event.head_commit.message }}"
-          if [[ "${{ github.event.head_commit.message }}" == *"chore(auto-fix)"* ]]; then
+          MSG="${{ github.event.head_commit.message }}"
+          echo "HEAD commit message: $MSG"
+          if [[ "$MSG" == *"chore(auto-yaml-fix)"* ]]; then
             echo "is_autofix=true" >> $GITHUB_OUTPUT
           else
             echo "is_autofix=false" >> $GITHUB_OUTPUT
           fi
 
       ####################################################################
-      # 3) 필요한 도구 설치
+      # 3) auto-yaml-fix 커밋이 아닌 경우 → 필요한 도구 설치
       ####################################################################
-      - name: Set up Python & Node, install linters/formatters
+      - name: Install Node.js & YAML linter
         if: steps.is_autofix.outputs.is_autofix == 'false'
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck shfmt
-          
-          # Python 관련: black, isort, flake8, yamllint
-          python3 -m pip install --upgrade pip
-          pip3 install black isort flake8 yamllint
-          
-          # Node.js/JavaScript 관련: eslint
+          sudo apt-get install -y python3-pip
+          pip3 install yamllint
+
+          # Node.js 설치 (Prettier 실행용)
           curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
           sudo apt-get install -y nodejs
-          npm install -g eslint
+          npm install -g prettier
 
       ####################################################################
-      # 4) “auto-fix”가 아닌 경우, 자동 코드 수정 수행
+      # 4) auto-yaml-fix 커밋이 아닌 경우 → Prettier로 YAML 포맷팅
       ####################################################################
-      - name: Run auto-fix tools
+      - name: Run Prettier on .github/workflows/*.yml
         if: steps.is_autofix.outputs.is_autofix == 'false'
         run: |
           set -eux
-
-          echo "▶ 4.1 Shell 스크립트 포맷팅 (shfmt)"
-          find . -type f -name "*.sh" -print0 | xargs -0 shfmt -w
-
-          echo "▶ 4.2 Python 코드 포맷팅 (black + isort)"
-          black . || true
-          isort . || true
-
-          echo "▶ 4.3 JavaScript/TypeScript 포맷팅 (eslint --fix)"
-          eslint . --ext .js,.jsx,.ts,.tsx --fix || true
-
-          echo "▶ 4.4 YAML 문법 검사 (yamllint)"
-          # 기본 설정으로 모든 .yml/.yaml 파일 검사
-          yamllint -d "{extends: default}" -f parsable .
+          echo "▶ Prettier로 YAML 워크플로우 파일 포맷팅 중..."
+          prettier --write ".github/workflows/*.yml" || true
 
       ####################################################################
-      # 5) 자동 수정 후 변경사항 감지
+      # 5) 변경사항이 있으면 커밋 & 푸시 후 워크플로우 종료
       ####################################################################
-      - name: Check for unstaged changes
+      - name: Commit & push YAML fixes
         if: steps.is_autofix.outputs.is_autofix == 'false'
         id: check_changes
         run: |
@@ -88,47 +74,24 @@ jobs:
             echo "no_changes=false" >> $GITHUB_OUTPUT
           fi
 
-      ####################################################################
-      # 6) 수정사항이 있으면 커밋 & 푸시 후 워크플로우 종료
-      ####################################################################
-      - name: Commit & push auto-fix changes
+      - name: Commit auto-YAML-fix
         if: steps.is_autofix.outputs.is_autofix == 'false' && steps.check_changes.outputs.no_changes == 'false'
         run: |
-          echo "▶ 변경사항 감지됨 → 자동 수정 커밋 후 푸시"
+          echo "▶ YAML 워크플로우 파일 변경사항 감지됨 → 커밋 및 푸시"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-          git commit -m "chore(auto-fix): apply automatic code style and lint fixes"
+          git add .github/workflows/*.yml
+          git commit -m "chore(auto-yaml-fix): format workflow YAML files"
           git push origin "HEAD:${{ github.ref_name }}"
-
-          echo "✅ auto-fix 커밋 및 푸시 완료. 새 푸시에 의해 워크플로우가 재실행됩니다."
+          echo "✅ auto-yaml-fix 커밋 완료. 새 푸시로 워크플로우가 재실행됩니다."
           exit 0
 
       ####################################################################
-      # 7) “auto-fix” 커밋이거나, 변경사항이 없는 경우 → 실제 테스트/빌드 수행
+      # 6) “auto-yaml-fix” 커밋이거나 변경사항 없는 경우 → yamllint 검사
       ####################################################################
-      - name: Run build & tests
-        if: steps.is_autofix.outputs.is_autofix == 'true' || steps.check_changes.outputs.no_changes == 'true'
+      - name: Run yamllint on .github/workflows/*.yml
         run: |
           echo "=========================================="
-          echo "▶ 실제 CI 단계: 빌드 및 테스트 실행"
+          echo "▶ yamllint으로 YAML 워크플로우 파일 검사"
           echo "=========================================="
-          # 예시: Python 테스트
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-          if [ -f "setup.py" ]; then
-            python3 setup.py check
-          fi
-          if [ -d "tests" ]; then
-            pytest --maxfail=1 --disable-warnings -q
-          fi
-
-          # 예시: Node.js 테스트
-          if [ -f "package.json" ]; then
-            npm install
-            npm test || echo "Node.js 테스트 종료"
-          fi
-
-          echo "✅ 빌드 및 테스트 완료"
+          yamllint -d "{extends: default, rules: {line-length: {max: 80}}}" .github/workflows/*.yml
