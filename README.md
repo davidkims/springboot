@@ -48,9 +48,9 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
-### ✨ Codespace Security Configuration Check (`.github/workflows/codespace-security-check.yml`)
-- **용량:** 2798 바이트
-- **최신 갱신:** 2025년 06월 06일 09시 44분 48초 KST
+### ✨ Codespace Security Configuration Check # 워크플로우의 이름 (`.github/workflows/codespace-security-check.yml`)
+- **용량:** 3684 바이트
+- **최신 갱신:** 2025년 06월 06일 09시 46분 34초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -295,7 +295,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/codespace-security-check.yml`
-- **파일 크기:** 2798 바이트
+- **파일 크기:** 3684 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
@@ -455,5 +455,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 00시 45분 30초 KST
+2025년 06월 06일 00시 46분 59초 KST
 
