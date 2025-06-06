@@ -1,4 +1,4 @@
-name: Auto YAML Workflow Lint & Report
+name: Auto YAML Workflow Fix & Re-run
 
 on:
   push:
@@ -7,32 +7,52 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  yaml_lint:
-    name: "YAML 워크플로우 파일 검사 및 리포트"
+  auto_yaml_fix:
+    name: "Auto-Fix YAML 워크플로우 파일 → 커밋 → 재실행"
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       ####################################################################
-      # 1) 전체 히스토리 체크아웃
+      # 1) 전체 히스토리 체크아웃 (credentials 유지 X)
       ####################################################################
-      - name: Checkout repository (full history)
+      - name: Checkout repository (full history, no credentials)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       ####################################################################
-      # 2) 필요한 도구 설치: Node.js, Prettier, yamllint
+      # 2) “auto-yaml-fix” 커밋인지 확인해서 중복 실행 방지
       ####################################################################
-      - name: Install Node.js & YAML linter
+      - name: Check if this commit is auto-yaml-fix
+        id: is_autofix
+        run: |
+          MSG="${{ github.event.head_commit.message }}"
+          echo "HEAD commit message: $MSG"
+          if [[ "$MSG" == *"chore(auto-yaml-fix)"* ]]; then
+            echo "is_autofix=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_autofix=false" >> $GITHUB_OUTPUT
+          fi
+
+      ####################################################################
+      # 3) auto-yaml-fix 커밋이 아닌 경우 → 필요한 도구 설치
+      ####################################################################
+      - name: Install Node.js, yq & YAML linters/formatters
+        if: steps.is_autofix.outputs.is_autofix == 'false'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip
+          sudo apt-get install -y python3-pip wget
           pip3 install yamllint
+
+          # yq 설치 (YAML 파싱/수정용)
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
 
           # Node.js 설치 (Prettier 실행용)
           curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
@@ -40,20 +60,112 @@ jobs:
           npm install -g prettier
 
       ####################################################################
-      # 3) Prettier로 YAML workflow 파일 포맷팅 (Dry-run 모드로 포맷 제안만 출력)
+      # 4) auto-yaml-fix 커밋이 아닌 경우 → YAML 파일 전처리
+      #    4.1) '---' 문서 구분자 추가
+      #    4.2) trailing spaces 제거
+      #    4.3) boolean 값 소문자(true/false)로 통일
       ####################################################################
-      - name: Check Prettier formatting suggestions
+      - name: Preprocess .github/workflows/*.yml
+        if: steps.is_autofix.outputs.is_autofix == 'false'
         run: |
-          echo "▶ Prettier가 적용될 수 있는 부분이 있는지 확인 중..."
-          # --check 옵션: 실제 수정 없이, “포맷이 필요한 파일”만 보고
-          prettier --check ".github/workflows/*.yml" || true
+          set -eux
+          for f in .github/workflows/*.yml; do
+            # 4.1) 첫 줄에 '---' 추가 (이미 있으면 스킵)
+            if ! head -n1 "$f" | grep -q '^---'; then
+              sed -i '1i---' "$f"
+            fi
+
+            # 4.2) trailing spaces 제거
+            sed -i 's/[[:space:]]\+$//' "$f"
+
+            # 4.3) boolean 값 소문자로 통일 (True/TRUE → true, False/FALSE → false)
+            #     yq를 사용해 가장 일반적인 경우만 통일
+            yq -i '. |= (.. | select(tag == "!!bool") |= ( . | tostring | ascii_downcase | fromjson ))' "$f"
+          done
 
       ####################################################################
-      # 4) yamllint으로 YAML workflow 파일 검사
+      # 5) auto-yaml-fix 커밋이 아닌 경우 → Prettier로 YAML 포맷팅
+      ####################################################################
+      - name: Run Prettier on .github/workflows/*.yml
+        if: steps.is_autofix.outputs.is_autofix == 'false'
+        run: |
+          set -eux
+          echo "▶ Prettier로 YAML 워크플로우 파일 포맷팅 중..."
+          prettier --write ".github/workflows/*.yml" || true
+
+      ####################################################################
+      # 6) 변경사항이 있으면 커밋 준비
+      ####################################################################
+      - name: Check for unstaged changes
+        if: steps.is_autofix.outputs.is_autofix == 'false'
+        id: check_changes
+        run: |
+          if git diff --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      ####################################################################
+      # 7) 수정사항이 있으면 자동으로 rebase → 커밋 → 푸시
+      #
+      #    ★ 워크플로우 파일을 수정·푸시하려면 PAT_TOKEN 필요
+      #      → Settings → Secrets → PAT_TOKEN (repo, workflow 권한)
+      ####################################################################
+      - name: Commit & push YAML fixes
+        if: steps.is_autofix.outputs.is_autofix == 'false' && steps.check_changes.outputs.no_changes == 'false'
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          set -eux
+          echo "▶ YAML 워크플로우 파일 변경사항 감지됨 → 자동 rebase 및 커밋/푸시 시도"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1) 로컬 변경사항 stash
+          echo "→ 로컬 변경사항 stash 모드로 저장"
+          git stash push -u -m "pre-rebase auto-yaml-fix" 1>/dev/null
+
+          # 2) 'upstream' 리모트 설정 및 rebase
+          echo "→ upstream/main으로 rebase 시도"
+          git remote add upstream "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git"
+          git fetch upstream main
+          if ! git rebase upstream/main; then
+            echo "❌ Rebase 실패: 충돌 발생. 수동 해결 필요"
+            git rebase --abort
+            git stash pop 1>/dev/null || true
+            exit 1
+          fi
+
+          # 3) stash 복원 후 충돌 검사
+          echo "→ stash 복원"
+          if ! git stash pop 1>/dev/null; then
+            echo "❌ Stash 적용 중 충돌 발생: 자동 해결 불가"
+            git merge --abort || true
+            exit 1
+          fi
+
+          # 4) 변경된 YAML 파일 다시 add
+          git add .github/workflows/*.yml
+
+          # 5) commit
+          echo "→ auto-yaml-fix 커밋 생성"
+          git commit -m "chore(auto-yaml-fix): format workflow YAML files"
+
+          # 6) upstream/main으로 force-with-lease 푸시 (PAT_TOKEN 사용)
+          echo "→ upstream/main에 --force-with-lease 옵션으로 푸시"
+          git push "https://x-access-token:${PAT_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main --force-with-lease
+
+          echo "✅ auto-yaml-fix 커밋 완료. 새 푸시로 워크플로우가 재실행됩니다."
+          exit 0
+
+      ####################################################################
+      # 8) “auto-yaml-fix” 커밋이거나 변경사항 없는 경우 → yamllint 검사
       ####################################################################
       - name: Run yamllint on .github/workflows/*.yml
         run: |
           echo "=========================================="
           echo "▶ yamllint으로 YAML 워크플로우 파일 검사"
           echo "=========================================="
-          yamllint -d "{extends: default, rules: {line-length: {max: 80}}}" .github/workflows/*.yml
+          yamllint -d "{extends: default, rules: {document-start: {present: true}, truthy: {valid_values: [false,true]}, comments: {min-spaces-before: 2}, indentation: {spaces: 2}, line-length: {max: 80}, trailing-spaces: {level: error}}}" .github/workflows/*.yml
