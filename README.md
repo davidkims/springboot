@@ -36,9 +36,9 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
-### ✨ GitLab 연동 (토큰 자동 생성 + 푸시 + 파이프라인 트리거) (`.github/workflows/gitlab-integration.yml`)
-- **용량:** 6480 바이트
-- **최신 갱신:** 2025년 06월 06일 14시 38분 46초 KST
+### ✨ 실패한 워크플로 자동 재시도 # 이 워크플로우의 이름입니다. (`.github/workflows/gitlab-integration.yml`)
+- **용량:** 2215 바이트
+- **최신 갱신:** 2025년 06월 06일 23시 12분 55초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -438,9 +438,9 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/gitlab-integration.yml`
-- **파일 크기:** 6480 바이트
+- **파일 크기:** 2215 바이트
 - **파일 타입:** `text/plain`
-- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
+- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/label.yml`
 - **파일 크기:** 1803 바이트
@@ -553,5 +553,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 06일 14시 12분 24초 KST
+2025년 06월 06일 14시 13분 06초 KST
 
