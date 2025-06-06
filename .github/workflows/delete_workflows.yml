@@ -75,29 +75,49 @@ jobs:
           fi
 
       ####################################################################
-      # 6) 수정사항이 있으면 remote 최신화 후 커밋 & 푸시
+      # 6) 수정사항이 있으면 자동으로 rebase & 커밋 & 푸시
       ####################################################################
       - name: Commit & push YAML fixes
         if: steps.is_autofix.outputs.is_autofix == 'false' && steps.check_changes.outputs.no_changes == 'false'
-        env:
-          BRANCH: ${{ github.ref_name }}
         run: |
-          echo "▶ YAML 워크플로우 파일 변경사항 감지됨 → 로컬 변경 통합 및 커밋/푸시"
+          set -eux
+          echo "▶ YAML 워크플로우 파일 변경사항 감지됨 → 자동 rebase 및 커밋/푸시 시도"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 1) origin/main의 최신 커밋 가져와서 rebase
-          git fetch origin main
-          git checkout main
-          git rebase origin/main || { echo "Rebase 실패: 충돌 발생 시 수동 해결 필요"; exit 1; }
+          # 1) 임시로 로컬 변경 사항 stash
+          echo "→ 로컬 변경사항 stash 모드로 저장"
+          git stash push -u -m "pre-rebase auto-yaml-fix" 1>/dev/null
 
-          # 2) 수정된 워크플로우 파일 추가
+          # 2) origin/main 최신 커밋 가져온 뒤 rebase
+          git fetch origin main
+          echo "→ origin/main으로 rebase 시도"
+          if ! git rebase origin/main; then
+            echo "❌ Rebase 실패: 충돌 발생. 수동 해결이 필요합니다."
+            git rebase --abort
+            # stash 복원
+            git stash pop 1>/dev/null || true
+            exit 1
+          fi
+
+          # 3) stash 복원 후 충돌 검사
+          echo "→ stash 복원"
+          if ! git stash pop 1>/dev/null; then
+            echo "❌ Stash 적용 중 충돌 발생: 자동 해결 불가"
+            git merge --abort || true
+            exit 1
+          fi
+
+          # 4) 포맷팅 후 추가로 변경된 파일을 다시 추가
           git add .github/workflows/*.yml
 
-          # 3) 커밋
+          # 5) 커밋
+          echo "→ auto-yaml-fix 커밋 생성"
           git commit -m "chore(auto-yaml-fix): format workflow YAML files"
 
-          # 4) 리모트 브랜치와 충돌이 없도록 --force-with-lease 사용
+          # 6) 원격 브랜치에 푸시 (--force-with-lease)
+          echo "→ origin/main에 --force-with-lease 옵션으로 푸시"
           git push origin main --force-with-lease
 
           echo "✅ auto-yaml-fix 커밋 완료. 새 푸시로 워크플로우가 재실행됩니다."
