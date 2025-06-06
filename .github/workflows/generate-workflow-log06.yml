@@ -2,55 +2,30 @@
 name: 워크플로 실행 로그 생성
 
 on:
-  workflow_dispatch: # 수동 트리거 허용
+  workflow_dispatch:
   schedule:
     - cron: '*/5 * * * 0' # 매주 일요일, 매 5분마다 실행 (UTC 기준)
   push:
     branches:
       - main
     paths:
-      - '.github/workflows/**' # 워크플로우 파일 변경 시에도 트리거
+      - '.github/workflows/**'
 
 jobs:
   create_log:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 리포지토리 콘텐츠에 쓰기 권한 부여 (로그 파일 커밋을 위해 필요)
+      contents: write
 
     steps:
       - name: 체크아웃 저장소 (전체 기록 포함)
         uses: actions/checkout@v4
         with:
-          # fetch-depth: 0 은 모든 기록을 가져오므로, 이후 rebase나 pull에 필요합니다.
-          fetch-depth: 0
+          fetch-depth: 0 # 모든 기록을 가져옵니다.
 
-      - name: 원격과 동기화 및 브랜치 리베이스
-        # 이 단계는 로컬 브랜치를 원격의 최신 상태로 강제 동기화합니다.
-        # git pull --rebase는 로컬에서 변경사항이 있을 때 원격의 변경사항 위에
-        # 로컬 변경사항을 적용하려 시도하여 충돌을 줄입니다.
-        # 만약 충돌이 발생하면, 워크플로우는 실패합니다.
-        run: |
-          LOCAL_BRANCH="${{ github.ref_name }}"
-          echo "현재 로컬 브랜치: $LOCAL_BRANCH"
-
-          # 원격의 최신 변경 사항을 가져옵니다.
-          git fetch origin
-
-          # 현재 브랜치가 원격에 존재하는지 확인 (새 브랜치인 경우 pull 시도 방지)
-          if git ls-remote --exit-code origin "$LOCAL_BRANCH"; then
-            echo "원격 브랜치 '$LOCAL_BRANCH'가 존재합니다. 로컬을 동기화합니다."
-            # 원격 변경사항을 pull하고 로컬 변경사항을 그 위에 rebase합니다.
-            # --autostash: rebase 전에 커밋되지 않은 변경사항을 임시 저장하고, rebase 후 복원
-            git pull --rebase --autostash origin "$LOCAL_BRANCH"
-            if [ $? -ne 0 ]; then
-              echo "리베이스가 실패했습니다. 수동 해결이 필요한 충돌이 있을 수 있습니다."
-              echo "워크플로우를 중단합니다."
-              exit 1 # 리베이스 실패 시 워크플로우를 즉시 종료
-            fi
-            echo "지점이 성공적으로 동기화되었습니다."
-          else
-            echo "원격 브랜치 '$LOCAL_BRANCH'가 존재하지 않습니다. 새로운 브랜치라고 가정합니다. 동기화 건너뛰기."
-          fi
+      # --- REMOVE the previous "원격과 동기화 및 브랜치 리베이스" step ---
+      # This logic will be handled more robustly by the git-auto-commit-action itself,
+      # or by an explicit pull just before it.
 
       - name: 워크플로 실행을 가져오고 로그를 생성합니다.
         id: fetch_runs
@@ -109,9 +84,21 @@ jobs:
             done <<< "$RUNS"
           done
 
+      # --- NEW STEP: Explicitly pull remote changes before auto-committing ---
+      - name: 원격 브랜치와 최종 동기화
+        run: |
+          LOCAL_BRANCH="${{ github.ref_name }}"
+          echo "최종 동기화를 위해 원격 브랜치 '$LOCAL_BRANCH'를 풀합니다."
+          # --ff-only: fast-forward 병합만 시도합니다. 실패 시 워크플로우를 중단합니다.
+          # 이는 diverged 상태를 발생시키지 않고 원격의 최신 커밋을 가져옵니다.
+          git pull --ff-only origin "$LOCAL_BRANCH"
+          if [ $? -ne 0 ]; then
+            echo "오류: 최종 'git pull --ff-only'에 실패했습니다. 원격 브랜치가 diverged되었을 수 있습니다."
+            echo "워크플로우를 중단합니다. 수동으로 'git pull' 또는 'git rebase'가 필요할 수 있습니다."
+            exit 1
+          fi
+
       - name: 변경 사항 커밋 및 푸시
-        # 이 액션은 이전 스텝에서 생성된 로그 파일을 자동으로 커밋하고 푸시합니다.
-        # 이전의 'git pull --rebase' 스텝이 성공했다면, 충돌 없이 푸시될 것입니다.
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "워크플로 실행 로그 업데이트"
@@ -119,5 +106,4 @@ jobs:
           commit_user_name: "GitHub Actions Bot"
           commit_user_email: "actions@github.com"
           commit_author: "GitHub Actions Bot <actions@github.com>"
-          # 이 워크플로우는 `main` 브랜치에만 실행되므로, `branch: ${{ github.ref_name }}` 명시
-          branch: ${{ github.ref_name }}
+          branch: ${{ github.ref_name }} # 명시적으로 대상 브랜치 지정
