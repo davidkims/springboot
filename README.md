@@ -78,12 +78,6 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
-### ✨ Rust CI (`.github/workflows/rustci.yml`)
-- **용량:** 1517 바이트
-- **최신 갱신:** 2025년 06월 07일 16시 02분 57초 KST
-- **설명:**
-  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
-
 ### ✨ CI with OpenAI API Usage Logging via Echo (`.github/workflows/tokencheck.yml`)
 - **용량:** 2985 바이트
 - **최신 갱신:** 2025년 06월 05일 22시 21분 56초 KST
@@ -123,6 +117,12 @@
 ### ✨ 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 (`.github/workflows/swift-backup.yml`)
 - **용량:** 3691 바이트
 - **최신 갱신:** 2025년 06월 03일 22시 49분 42초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
+### ✨ Delete Erroneous Workflow File (`.github/workflows/delete_workflow_file.yml`)
+- **용량:** 2534 바이트
+- **최신 갱신:** 2025년 06월 07일 16시 08분 27초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -405,6 +405,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
+#### 📄 `.github/workflows/delete_workflow_file.yml`
+- **파일 크기:** 2534 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
+
 #### 📄 `.github/workflows/delete_workflows.yml`
 - **파일 크기:** 7308 바이트
 - **파일 타입:** `text/plain`
@@ -515,11 +520,6 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
-#### 📄 `.github/workflows/rustci.yml`
-- **파일 크기:** 1517 바이트
-- **파일 타입:** `text/plain`
-- **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
-
 #### 📄 `.github/workflows/sql-backup-and-migrate.yml`
 - **파일 크기:** 2230 바이트
 - **파일 타입:** `text/plain`
@@ -601,5 +601,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 07일 07시 03분 08초 KST
+2025년 06월 07일 07시 08분 39초 KST
 
