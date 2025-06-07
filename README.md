@@ -85,8 +85,8 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ 🔐 암호화/복호화 + Codex 요금 추적 (`.github/workflows/encrypt-decrypt-tag-label.yml`)
-- **용량:** 2167 바이트
-- **최신 갱신:** 2025년 06월 04일 23시 04분 43초 KST
+- **용량:** 2194 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -115,26 +115,26 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 (`.github/workflows/swift-backup.yml`)
-- **용량:** 3691 바이트
-- **최신 갱신:** 2025년 06월 03일 22시 49분 42초 KST
+- **용량:** 3745 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Delete Specific Workflow File (`.github/workflows/delete_workflow_file.yml`)
-- **용량:** 2575 바이트
-- **최신 갱신:** 2025년 06월 07일 16시 13분 44초 KST
+- **용량:** 2602 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ 워크플로 실행 로그 생성 (`.github/workflows/generate-workflow-log06.yml`)
-- **용량:** 6711 바이트
-- **최신 갱신:** 2025년 06월 06일 11시 55분 50초 KST
+- **용량:** 6792 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Download and Import Security Regulations (`.github/workflows/download-security-regulationowasp.yml`)
-- **용량:** 6605 바이트
-- **최신 갱신:** 2025년 06월 07일 23시 30분 10초 KST
+- **용량:** 6767 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -187,8 +187,8 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Docker 이미지 빌드 및 배포 (오류 스킵 포함) (`.github/workflows/docker-ci.yml`)
-- **용량:** 8451 바이트
-- **최신 갱신:** 2025년 06월 06일 23시 41분 37초 KST
+- **용량:** 8478 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -205,14 +205,14 @@
   - 이 워크플로우는 `README.md` 파일을 자동으로 생성하고 업데이트합니다. 저장소의 파일 분석, 블로그 소개, 워크플로우 정보 등 최신 내용을 반영합니다.
 
 ### ✨ 🧱 Maven Build (echo 버전) (`.github/workflows/auto-transactions.yml`)
-- **용량:** 2672 바이트
-- **최신 갱신:** 2025년 06월 03일 16시 15분 10초 KST
+- **용량:** 2711 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ MySQL Latest Version Upgrade (`.github/workflows/mysql-upgrade.yml`)
-- **용량:** 2486 바이트
-- **최신 갱신:** 2025년 06월 04일 23시 16분 55초 KST
+- **용량:** 2525 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -229,14 +229,14 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Download Security Regulations (`.github/workflows/python-ci.yml`)
-- **용량:** 2392 바이트
-- **최신 갱신:** 2025년 06월 07일 23시 20분 02초 KST
+- **용량:** 2473 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload (`.github/workflows/docker-ci-cd.yml`)
-- **용량:** 7710 바이트
-- **최신 갱신:** 2025년 06월 05일 23시 51분 22초 KST
+- **용량:** 7737 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -307,8 +307,8 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Download Security Regulations (`.github/workflows/download-security-regulations.yml`)
-- **용량:** 2392 바이트
-- **최신 갱신:** 2025년 06월 07일 23시 19분 42초 KST
+- **용량:** 2473 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -386,7 +386,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/auto-transactions.yml`
-- **파일 크기:** 2672 바이트
+- **파일 크기:** 2711 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
@@ -436,7 +436,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/delete_workflow_file.yml`
-- **파일 크기:** 2575 바이트
+- **파일 크기:** 2602 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
@@ -456,12 +456,12 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/docker-ci-cd.yml`
-- **파일 크기:** 7710 바이트
+- **파일 크기:** 7737 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/docker-ci.yml`
-- **파일 크기:** 8451 바이트
+- **파일 크기:** 8478 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
@@ -471,17 +471,17 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/download-security-regulationowasp.yml`
-- **파일 크기:** 6605 바이트
+- **파일 크기:** 6767 바이트
 - **파일 타입:** `text/x-script.python`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/download-security-regulations.yml`
-- **파일 크기:** 2392 바이트
+- **파일 크기:** 2473 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/encrypt-decrypt-tag-label.yml`
-- **파일 크기:** 2167 바이트
+- **파일 크기:** 2194 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
@@ -501,7 +501,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/generate-workflow-log06.yml`
-- **파일 크기:** 6711 바이트
+- **파일 크기:** 6792 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
@@ -546,12 +546,12 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/mysql-upgrade.yml`
-- **파일 크기:** 2486 바이트
+- **파일 크기:** 2525 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/python-ci.yml`
-- **파일 크기:** 2392 바이트
+- **파일 크기:** 2473 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
@@ -581,7 +581,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
 #### 📄 `.github/workflows/swift-backup.yml`
-- **파일 크기:** 3691 바이트
+- **파일 크기:** 3745 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
@@ -681,5 +681,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 07일 14시 30분 25초 KST
+2025년 06월 07일 14시 34분 38초 KST
 
