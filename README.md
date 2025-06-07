@@ -588,3 +588,13 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 ## 📅 보고서 생성 날짜
 2025년 06월 07일 06시 52분 55초 KST
 
+
+## 📦 Rust 프로그램 설치 및 예제 생성
+다음 스크립트를 실행하면 Rust를 설치하고 샘플 프로젝트를 생성할 수 있습니다.
+
+```bash
+./scripts/install_rust.sh
+cargo new rust-example
+```
+
+위 명령 실행 후 `rust-example/src/main.rs` 파일을 수정하여 원하는 Rust 코드를 작성할 수 있습니다.
