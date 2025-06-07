@@ -602,7 +602,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `scripts/db_setup_and_backup.sh`
-- **파일 크기:** 2170 바이트
+- **파일 크기:** 3389 바이트
 - **파일 타입:** `text/x-shellscript`
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
@@ -617,5 +617,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 07일 07시 18분 41초 KST
+2025년 06월 07일 07시 31분 38초 KST
 
