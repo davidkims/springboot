@@ -1,59 +1,69 @@
-name: Delete Erroneous Workflow File
+# .github/workflows/delete_workflow_file.yml
+name: Delete Specific Workflow File
 
 on:
-  # 이 워크플로우는 수동으로 실행되도록 설정하는 것이 안전합니다.
-  # 또는 특정 조건(예: 에러가 발생한 워크플로우의 실행 실패 시)에 따라 트리거되도록 할 수 있지만,
-  # 그 경우 추가적인 로직과 보안 고려사항이 필요합니다.
+  # 이 워크플로우는 GitHub Actions UI에서 'Run workflow' 버튼을 눌러 수동으로 실행합니다.
+  # 실행 시 'file_to_delete' 입력값을 통해 어떤 파일을 삭제할지 지정할 수 있습니다.
   workflow_dispatch:
     inputs:
       file_to_delete:
-        description: 'The path to the workflow file to delete (e.g., .github/workflows/rustci.yml)'
+        description: '삭제할 워크플로우 파일의 경로 (예: .github/workflows/잘못된_파일_이름.yml)'
         required: true
-        default: '.github/workflows/rustci.yml' # 에러 발생한 파일 경로를 기본값으로 지정
+        # 여기 'default' 값에 실제 삭제하려는 파일의 정확한 경로와 이름을 입력하세요.
+        # 예를 들어, 에러가 난 파일이 'rust_ci_build.yml'이라면 아래와 같이 수정합니다.
+        default: '.github/workflows/rustci.yml' # <--- 여기에 정확한 파일 경로 입력!
 
 jobs:
-  delete_file:
+  delete_file_job:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 파일 삭제를 위해 contents: write 권한 필요 (주의!)
+      contents: write # 파일 삭제를 위해 반드시 'contents: write' 권한이 필요합니다. (주의!)
 
     steps:
     - name: Checkout repository
+      # 리포지토리를 체크아웃하여 파일의 SHA를 가져옵니다.
       uses: actions/checkout@v4
 
     - name: Get file SHA
       id: get_sha
+      # 삭제하려는 파일의 SHA 값을 가져옵니다. GitHub API는 파일 삭제 시 SHA 값을 요구합니다.
       run: |
         FILE_PATH="${{ github.event.inputs.file_to_delete }}"
-        SHA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+        REPO_OWNER="${{ github.repository_owner }}"
+        REPO_NAME="${{ github.event.repository.name }}"
+        
+        # curl을 사용하여 파일 메타데이터(SHA 포함)를 가져옵니다.
+        # jq는 JSON 파싱 도구로, GitHub Actions 러너에 보통 설치되어 있습니다.
+        SHA=$(curl -s \
+                   -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                    -H "Accept: application/vnd.github.v3+json" \
-                   "https://api.github.com/repos/${{ github.repository }}/contents/$FILE_PATH" | jq -r '.sha')
+                   "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$FILE_PATH?ref=${{ github.ref }}" | jq -r '.sha')
         
         if [ "$SHA" == "null" ]; then
-          echo "Error: File '$FILE_PATH' not found or could not retrieve SHA."
+          echo "::error::Error: 파일 '$FILE_PATH'을(를) 찾을 수 없거나 SHA를 가져올 수 없습니다. 경로가 정확한지, 파일이 존재하는지 확인하세요."
           exit 1
         fi
-        echo "file_sha=$SHA" >> "$GITHUB_OUTPUT"
+        echo "Successfully retrieved SHA for $FILE_PATH: $SHA"
+        echo "file_sha=$SHA" >> "$GITHUB_OUTPUT" # 다음 스텝에서 사용할 출력값 설정
       env:
-        # 'jq'가 설치되어 있지 않을 수 있으므로 설치하거나 다른 방식으로 파싱
-        ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true' # GitHub Actions v3.0 이상에서는 사용하지 않는 것이 좋음. 대신 'outputs' 사용.
+        # GITHUB_TOKEN은 GitHub Actions가 현재 리포지토리에 대해 자동으로 제공합니다.
+        # 위의 'permissions' 블록에서 정의한 'contents: write' 권한이 필요합니다.
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Delete file via GitHub API
-      uses: octokit/request-action@v2.x # GitHub API 요청을 쉽게 해주는 액션 사용
+      # GitHub API와 상호작용하기 편리한 octokit/request-action 액션을 사용합니다.
+      uses: octokit/request-action@v2.x
       with:
         route: DELETE /repos/{owner}/{repo}/contents/{path}
         owner: ${{ github.repository_owner }}
         repo: ${{ github.event.repository.name }}
         path: ${{ github.event.inputs.file_to_delete }}
-        ref: ${{ github.ref }} # 현재 브랜치 (예: main)
-        mediaType: |
-          {
-            "format": "json"
-          }
+        ref: ${{ github.ref }} # 파일이 삭제될 대상 브랜치 (예: main)
+        mediaType: '{"format": "json"}' # 요청 본문의 JSON 형식 지정
         data: |
           {
-            "message": "Deleted erroneous workflow file: ${{ github.event.inputs.file_to_delete }} (triggered by workflow_dispatch)",
+            "message": "워크플로우를 통해 오류 파일 삭제: ${{ github.event.inputs.file_to_delete }}",
             "sha": "${{ steps.get_sha.outputs.file_sha }}"
           }
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GITHUB_TOKEN은 기본적으로 제공됨
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
