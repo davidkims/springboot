@@ -1,0 +1,59 @@
+name: Delete Erroneous Workflow File
+
+on:
+  # 이 워크플로우는 수동으로 실행되도록 설정하는 것이 안전합니다.
+  # 또는 특정 조건(예: 에러가 발생한 워크플로우의 실행 실패 시)에 따라 트리거되도록 할 수 있지만,
+  # 그 경우 추가적인 로직과 보안 고려사항이 필요합니다.
+  workflow_dispatch:
+    inputs:
+      file_to_delete:
+        description: 'The path to the workflow file to delete (e.g., .github/workflows/rustci.yml)'
+        required: true
+        default: '.github/workflows/rustci.yml' # 에러 발생한 파일 경로를 기본값으로 지정
+
+jobs:
+  delete_file:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 파일 삭제를 위해 contents: write 권한 필요 (주의!)
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Get file SHA
+      id: get_sha
+      run: |
+        FILE_PATH="${{ github.event.inputs.file_to_delete }}"
+        SHA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                   -H "Accept: application/vnd.github.v3+json" \
+                   "https://api.github.com/repos/${{ github.repository }}/contents/$FILE_PATH" | jq -r '.sha')
+        
+        if [ "$SHA" == "null" ]; then
+          echo "Error: File '$FILE_PATH' not found or could not retrieve SHA."
+          exit 1
+        fi
+        echo "file_sha=$SHA" >> "$GITHUB_OUTPUT"
+      env:
+        # 'jq'가 설치되어 있지 않을 수 있으므로 설치하거나 다른 방식으로 파싱
+        ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true' # GitHub Actions v3.0 이상에서는 사용하지 않는 것이 좋음. 대신 'outputs' 사용.
+
+    - name: Delete file via GitHub API
+      uses: octokit/request-action@v2.x # GitHub API 요청을 쉽게 해주는 액션 사용
+      with:
+        route: DELETE /repos/{owner}/{repo}/contents/{path}
+        owner: ${{ github.repository_owner }}
+        repo: ${{ github.event.repository.name }}
+        path: ${{ github.event.inputs.file_to_delete }}
+        ref: ${{ github.ref }} # 현재 브랜치 (예: main)
+        mediaType: |
+          {
+            "format": "json"
+          }
+        data: |
+          {
+            "message": "Deleted erroneous workflow file: ${{ github.event.inputs.file_to_delete }} (triggered by workflow_dispatch)",
+            "sha": "${{ steps.get_sha.outputs.file_sha }}"
+          }
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GITHUB_TOKEN은 기본적으로 제공됨
