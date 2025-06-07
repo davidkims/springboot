@@ -3,16 +3,19 @@ from datetime import datetime
 
 EXCLUDE_DIRS = {'.git', '.github'}
 EXTENSIONS = {'.py', '.sh', '.rs', '.yml', '.yaml', '.toml', '.md'}
+EXCLUDE_FILES = {'BLOG.md'}
 
 
-def collect_file_info(root_dir='.'):
+def collect_file_info(root_dir='.', exclude_files=EXCLUDE_FILES):
     file_info = []
     for root, dirs, files in os.walk(root_dir):
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
         for fname in files:
-            if fname.startswith('.'):
+            if fname.startswith('.'): 
                 continue
             path = os.path.join(root, fname)
+            if os.path.basename(path) in exclude_files:
+                continue
             if os.path.splitext(fname)[1] in EXTENSIONS:
                 try:
                     with open(path, 'r', encoding='utf-8', errors='ignore') as fp:

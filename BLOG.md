@@ -1,6 +1,6 @@
 # 코드 설명 블로그
 
-생성 시각: 2025-06-07 08:27:35
+생성 시각: 2025-06-07 08:31:27
 
 GitHub Actions를 통해 자동 생성된 현재 코드 베이스 요약입니다.
 
@@ -42,7 +42,7 @@ set -euxo pipefail
 : "${MYSQL_ROOT_PASSWORD:=rootpass123}"
 ```
 
-## 파일: `./scripts/generate_blog.py` (45 lines)
+## 파일: `./scripts/generate_blog.py` (48 lines)
 
 ```py
 import os
