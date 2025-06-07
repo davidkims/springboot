@@ -1,166 +1,77 @@
-# 워크플로우의 이름
-name: MySQL 설정, 마이그레이션 및 백업
+name: PostgreSQL DB 백업 및 S3 업로드
 
-# 워크플로우가 실행될 이벤트를 정의합니다.
-# 여기서는 'workflow_dispatch'를 사용하여 GitHub UI에서 수동으로 워크플로우를 실행할 수 있도록 합니다.
 on:
-  workflow_dispatch:
+  workflow_dispatch: # GitHub UI에서 수동 실행 가능하도록 설정
 
-# 워크플로우에서 실행될 작업(Jobs)들을 정의합니다.
 jobs:
-  mysql_setup_and_backup:
-    # 이 작업이 실행될 환경을 지정합니다. 여기서는 최신 Ubuntu 환경을 사용합니다.
+  backup_postgres:
     runs-on: ubuntu-latest
 
-    # 작업 전반에 걸쳐 사용될 환경 변수들을 정의합니다.
+    # 환경 변수 정의
     env:
-      MYSQL_IMAGE: mysql:8.0
-      DB_NAME: example_db
-      DB_USER: root
-      DB_PASS: rootpass123
-      ROOT_PASS: rootpass123
-      MIGRATION_DIR: /opt/mysql/migrations
-      BACKUP_DIR: /opt/backup/sql
+      DB_HOST: your_db_host        # PostgreSQL 호스트 IP 또는 도메인
+      DB_PORT: 5432              # PostgreSQL 포트 (기본 5432)
+      DB_USER: your_db_user      # PostgreSQL 사용자명
+      DB_NAME: your_db_name      # 백업할 데이터베이스 이름
+      PGPASSWORD: your_db_password # PostgreSQL 사용자 비밀번호
+      
+      AWS_REGION: ap-northeast-2 # S3 버킷이 위치한 AWS 리전
+      S3_BUCKET_NAME: your-s3-backup-bucket # 백업 파일을 업로드할 S3 버킷 이름
 
-    # 이 작업에서 실행될 단계(Steps)들을 정의합니다.
     steps:
-      - name: 📁 마이그레이션 디렉토리 생성 및 SQL 파일 준비
-        run: |
-          # 마이그레이션 디렉토리를 생성합니다.
-          sudo mkdir -p "${MIGRATION_DIR}"
-          
-          # SQL 마이그레이션 스크립트를 작성합니다.
-          # accounts 테이블과 corporate_transactions 테이블을 생성하고,
-          # 초기 데이터를 삽입하는 내용을 포함합니다.
-          echo "
-          CREATE TABLE IF NOT EXISTS accounts (
-              id INT AUTO_INCREMENT PRIMARY KEY,
-              name VARCHAR(50),
-              balance DECIMAL(12,2)
-          );
-
-          CREATE TABLE IF NOT EXISTS corporate_transactions (
-              transaction_id INT AUTO_INCREMENT PRIMARY KEY,
-              corporate_name VARCHAR(100) NOT NULL,
-              transaction_type VARCHAR(50) NOT NULL,
-              amount DECIMAL(12,2) NOT NULL,
-              transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP
-          );
-
-          INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
-          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('ABC Corporation', 'Purchase', 500000);
-          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('XYZ Inc.', 'Sale', 250000);
-          " | sudo tee "${MIGRATION_DIR}/migrate.sql" > /dev/null # tee를 사용하여 sudo 권한으로 파일에 쓰기
-          
-          # MySQL 관련 디렉토리의 권한을 조정합니다.
-          sudo chmod -R 777 /opt/mysql
-
-      - name: 🧪 MySQL 서버 설치
+      - name: 📦 사전 준비: PostgreSQL 클라이언트 설치
         run: |
           sudo apt-get update
-          # 비대화형 모드로 mysql-server를 설치합니다.
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+          sudo apt-get install -y postgresql-client
 
-      - name: 🧼 MySQL 안전 모드 및 루트 비밀번호 설정
+      - name: 🕒 타임스탬프 및 백업 파일 경로 설정
+        id: set_vars # 이 단계의 출력 값을 참조하기 위한 ID
         run: |
-          # MySQL 서비스를 중지합니다.
-          sudo systemctl stop mysql
-          # MySQL 런타임 디렉토리를 생성하고 권한을 설정합니다.
-          sudo mkdir -p /var/run/mysqld
-          sudo chown mysql:mysql /var/run/mysqld
-          # 안전 모드로 MySQL을 시작하여 grant-tables를 건너뛰고 루트 비밀번호를 재설정합니다.
-          sudo mysqld_safe --skip-networking --skip-grant-tables &
-          sleep 10 # MySQL이 완전히 시작될 때까지 기다립니다.
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          BACKUP_FILE_NAME="database_backup_${TIMESTAMP}.sql"
           
-          # 루트 사용자 비밀번호를 변경하고 권한을 새로고침합니다.
-          echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ env.ROOT_PASS }}'; FLUSH PRIVILEGES;" | sudo mysql -u root
+          # 백업 파일을 저장할 임시 디렉토리 생성 (runner 환경)
+          mkdir -p /tmp/db_backups
+          BACKUP_FILE_PATH="/tmp/db_backups/${BACKUP_FILE_NAME}"
           
-          # mysqld_safe 프로세스를 종료합니다.
-          sudo killall mysqld
-          sleep 5 # 프로세스 종료를 기다립니다.
+          echo "BACKUP_FILE_PATH=${BACKUP_FILE_PATH}" >> "$GITHUB_OUTPUT"
+          echo "BACKUP_FILE_NAME=${BACKUP_FILE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "TIMESTAMP=${TIMESTAMP}" >> "$GITHUB_OUTPUT" # 필요 시 사용
+
+      - name: 💾 PostgreSQL 데이터베이스 백업 (pg_dump)
+        run: |
+          # 환경 변수 PGPASSWORD를 사용하여 비밀번호를 안전하게 전달
+          # BACKUP_FILE_PATH는 이전 단계에서 설정된 정확한 경로를 사용
+          pg_dump -h "${{ env.DB_HOST }}" -p "${{ env.DB_PORT }}" -U "${{ env.DB_USER }}" -d "${{ env.DB_NAME }}" > "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}"
           
-          # MySQL 서비스를 다시 시작합니다.
-          sudo systemctl start mysql
+          echo "✅ PostgreSQL 백업 완료: ${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}"
+          ls -lh "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}" # 백업 파일 정보 확인
 
-      - name: 🛠️ 데이터베이스 및 사용자 생성
-        run: |
-          # 데이터베이스를 생성합니다. (만약 존재하지 않는다면)
-          mysql -u root -p"${{ env.ROOT_PASS }}" -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};"
-          # 새 사용자를 생성합니다. (만약 존재하지 않는다면)
-          mysql -u root -p"${{ env.ROOT_PASS }}" -e "CREATE USER IF NOT EXISTS '${{ env.DB_USER }}'@'localhost' IDENTIFIED BY '${{ env.DB_PASS }}';"
-          # 생성된 사용자에게 데이터베이스에 대한 모든 권한을 부여합니다.
-          mysql -u root -p"${{ env.DB_PASS }}" -e "GRANT ALL PRIVILEGES ON ${{ env.DB_NAME }}.* TO '${{ env.DB_USER }}'@'localhost';"
-          # 권한 변경 사항을 적용합니다.
-          mysql -u root -p"${{ env.DB_PASS }}" -e "FLUSH PRIVILEGES;"
+      - name: 🔐 백업 파일 암호화 (선택 사항)
+        # 이 단계는 암호화 키 관리 전략에 따라 달라집니다.
+        # 예시로 OpenSSL을 사용하지만, 실제 프로덕션에서는 더 안전한 방식을 고려해야 합니다.
+        # openssl enc -aes-256-cbc -salt -in "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}" -out "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}.enc" -k "your_encryption_key_here" # 실제 키 사용
+        # rm "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}" # 원본 파일 삭제 (암호화 성공 시)
+        run: echo "암호화 단계는 보안 키 관리 방안에 따라 구현 필요"
+        # continue-on-error: true # 암호화 실패 시에도 워크플로우 진행
 
-      - name: 📥 마이그레이션 실행
-        run: |
-          # 준비된 SQL 파일을 사용하여 데이터베이스 마이그레이션을 실행합니다.
-          mysql -u "${{ env.DB_USER }}" -p"${{ env.DB_PASS }}" "${{ env.DB_NAME }}" < "${MIGRATION_DIR}/migrate.sql"
+      - name: ☁️ AWS 자격 증명 구성
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: ✅ 데이터 확인
+      - name: ⬆️ S3에 백업 업로드
         run: |
-          # 마이그레이션된 데이터를 확인합니다.
-          mysql -u "${{ env.DB_USER }}" -p"${{ env.DB_PASS }}" -e "USE ${{ env.DB_NAME }}; SHOW TABLES; SELECT * FROM accounts; SELECT * FROM corporate_transactions;"
+          # 백업 파일을 S3 버킷에 업로드합니다.
+          # 암호화된 파일을 업로드하는 경우, ${BACKUP_FILE_PATH}.enc 를 사용해야 합니다.
+          aws s3 cp "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}" "s3://${{ env.S3_BUCKET_NAME }}/backups/${{ steps.set_vars.outputs.BACKUP_FILE_NAME }}"
+          echo "✅ S3 업로드 완료: s3://${{ env.S3_BUCKET_NAME }}/backups/${{ steps.set_vars.outputs.BACKUP_FILE_NAME }}"
 
-      - name: 🕒 타임스탬프 및 동적 포트 생성
-        id: vars # 이 단계의 출력 값을 참조하기 위한 ID
+      - name: 🧹 로컬 백업 파일 정리
+        if: always() # 이전 단계 실패 여부와 상관없이 항상 실행
         run: |
-          # 현재 시간을 기반으로 타임스탬프를 생성합니다.
-          TS=$(date +%Y%m%d%H%M%S)
-          # 3307에서 4306 사이의 동적 포트를 생성합니다.
-          PORT=$((RANDOM%1000+3307))
-          
-          # 다음 단계에서 사용할 수 있도록 출력 변수로 설정합니다.
-          echo "timestamp=${TS}" >> "${GITHUB_OUTPUT}"
-          echo "container=backup-mysql-${TS}" >> "${GITHUB_OUTPUT}"
-          echo "host_port=${PORT}" >> "${GITHUB_OUTPUT}"
-
-      - name: 🐳 MySQL 백업 컨테이너 실행
-        run: |
-          # Docker 컨테이너를 실행하여 백업 환경을 설정합니다.
-          docker run -d \
-            --name "${{ steps.vars.outputs.container }}" \
-            -e MYSQL_ROOT_PASSWORD="${{ env.DB_PASS }}" \
-            -e MYSQL_DATABASE="${{ env.DB_NAME }}" \
-            -p "${{ steps.vars.outputs.host_port }}:3306" \
-            "${{ env.MYSQL_IMAGE }}"
-          echo "⏳ 컨테이너 호출 중..."
-          sleep 30 # 컨테이너가 완전히 시작될 때까지 기다립니다.
-
-      - name: 🔐 보안 MySQL 로그인 파일(.my.cnf) 생성
-        run: |
-          # MySQL 클라이언트 로그인에 사용될 .my.cnf 파일을 생성합니다.
-          echo "[client]" > ~/.my.cnf
-          echo "user=${{ env.DB_USER }}" >> ~/.my.cnf
-          echo "password=${{ env.DB_PASS }}" >> ~/.my.cnf
-          echo "host=127.0.0.1" >> ~/.my.cnf
-          echo "port=${{ steps.vars.outputs.host_port }}" >> ~/.my.cnf
-          # .my.cnf 파일의 권한을 600으로 설정하여 보안을 강화합니다.
-          chmod 600 ~/.my.cnf
-
-      - name: 📁 백업 디렉토리 생성
-        run: |
-          # 백업 파일을 저장할 디렉토리를 생성합니다.
-          sudo mkdir -p "${BACKUP_DIR}"
-          # 백업 디렉토리의 권한을 조정합니다.
-          sudo chmod -R 777 "${BACKUP_DIR}"
-
-      - name: 💾 mysqldump 백업 실행
-        run: |
-          TIMESTAMP="${{ steps.vars.outputs.timestamp }}"
-          BACKUP_FILE="${BACKUP_DIR}/backup-${TIMESTAMP}.sql"
-          
-          echo "🔁 백업 시작: ${BACKUP_FILE}"
-          # mysqldump를 사용하여 데이터베이스를 백업합니다.
-          # 실패 시 오류 메시지를 출력하고 종료합니다.
-          mysqldump "${{ env.DB_NAME }}" > "${BACKUP_FILE}" || { echo "❌ 백업 실패"; exit 1; }
-          echo "✅ 백업 완료: ${BACKUP_FILE}"
-          
-          # 백업 파일 목록과 크기를 출력합니다.
-          ls -lh "${BACKUP_DIR}"
-
-      - name: 🔍 컨테이너 정보 인쇄
-        run: |
-          # 실행된 Docker 컨테이너의 이름을 출력합니다.
-          echo "📦컨테이너 이름: ${{ steps.vars.outputs.container }}"
+          # 임시 백업 파일과 디렉토리를 삭제합니다.
+          rm -rf /tmp/db_backups
+          echo "✅ 로컬 백업 파일 정리 완료"
