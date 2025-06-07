@@ -1,0 +1,198 @@
+# .github/workflows/finance-smart-backup1.yml
+# 이 워크플로우는 금융 데이터의 스마트 백업을 시뮬레이션합니다.
+# MySQL 컨테이너를 각 트랜잭션 유형별로 띄워 데이터를 초기화하고,
+# 'completed' 상태의 데이터가 있을 경우 백업을 수행합니다.
+# 백업 로그는 PostgreSQL에 기록되고, 간단한 'Kafka-style' 로그 파일에도 남깁니다.
+# OTP(일회용 비밀번호) 없이 자동화된 백업 프로세스를 가정합니다.
+
+name: 🔄 Finance Smart Backup without OTP
+
+on:
+  # 매 5분마다 이 워크플로우를 실행합니다.
+  schedule:
+    - cron: "*/5 * * * *"
+  # GitHub Actions UI에서 수동으로 이 워크플로우를 실행할 수 있게 합니다.
+  workflow_dispatch:
+
+jobs:
+  finance-backup:
+    # 워크플로우는 최신 Ubuntu 가상 머신에서 실행됩니다.
+    runs-on: ubuntu-latest
+
+    # 환경 변수 정의
+    env:
+      ROOT_PASS: rootpass123 # MySQL root 비밀번호
+      SQL_DIR: /opt/finance/sql # SQL 초기화 스크립트 저장 경로
+      BACKUP_DIR: /opt/finance/backups # 백업 파일 저장 경로
+      KAFKA_LOG: /opt/finance/kafka.log # Kafka 스타일 로그 파일 경로
+      PG_DB: postgres_finance # PostgreSQL 데이터베이스 이름
+      PG_USER: postgres # PostgreSQL 사용자 이름
+      PG_PASS: pgpass # PostgreSQL 사용자 비밀번호
+      TYPES: | # 백업할 트랜잭션 유형 목록 (파이프(|) 문자로 여러 줄 값 정의)
+        bank_transfer
+        check_card
+        credit_card
+        bitcoin
+        stock
+        futures
+
+    steps:
+      - name: Checkout repository # GitHub 리포지토리 코드를 워크플로우 러너로 체크아웃합니다.
+        uses: actions/checkout@v3
+
+      - name: 📁 Create Directories and Init SQL File # 필요한 디렉토리를 생성하고 MySQL 초기화 SQL 스크립트를 파일로 준비합니다.
+        run: |
+          set -euo pipefail
+          echo "SQL 및 백업 디렉토리 생성 중: ${SQL_DIR} 및 ${BACKUP_DIR}"
+          sudo mkdir -p "${SQL_DIR}" "${BACKUP_DIR}"
+          echo "SQL 디렉토리 부모 경로에 권한 설정 중: $(dirname "${SQL_DIR}")"
+          sudo chmod -R 777 "$(dirname "${SQL_DIR}")"
+          echo "MySQL 컨테이너에서 자동 실행될 init.sql 파일 ${SQL_DIR}에 생성 중..." # 설명 추가
+          cat << 'EOF' > "${SQL_DIR}/init.sql"
+# MySQL용 SQL 구문: transfers 테이블을 생성하고 샘플 데이터를 삽입합니다.
+# 이 SQL은 MySQL 컨테이너 시작 시 '/docker-entrypoint-initdb.d' 마운트 경로를 통해 자동으로 실행됩니다.
+CREATE TABLE IF NOT EXISTS transfers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  type VARCHAR(30),
+  amount NUMERIC,
+  currency VARCHAR(5),
+  status VARCHAR(20),
+  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO transfers(type, amount, currency, status) VALUES
+  ('bank_transfer', 100000, 'KRW', 'completed'),
+  ('check_card', 20000, 'KRW', 'completed'),
+  ('credit_card', 150000, 'KRW', 'completed'),
+  ('bitcoin', 0.03, 'BTC', 'pending'),
+  ('stock', 1000000, 'KRW', 'completed'),
+  ('futures', 500000, 'KRW', 'pending');
+EOF
+          echo "init.sql 파일이 성공적으로 생성되었습니다. MySQL 컨테이너가 시작될 때 자동으로 실행됩니다." # 설명 추가
+
+      - name: 🐘 Install and Configure PostgreSQL # PostgreSQL을 설치하고 구성합니다.
+        run: |
+          set -euo pipefail
+          echo "apt-get 패키지 업데이트 중..."
+          sudo apt-get update
+          echo "PostgreSQL 설치 중..."
+          sudo apt-get install -y postgresql
+          echo "PostgreSQL 서비스 시작 중..."
+          sudo systemctl start postgresql
+          echo "PostgreSQL 서비스 활성화 중..."
+          sudo systemctl enable postgresql
+          echo "PostgreSQL 사용자 '${PG_USER}'의 비밀번호 설정 중..."
+          sudo -u postgres psql -c \
+            "ALTER USER ${PG_USER} WITH PASSWORD '${PG_PASS}';"
+          echo ".pgpass 파일 생성 중 (비밀번호 없는 접근용)..."
+          cat << EOF > ~/.pgpass
+127.0.0.1:5432:${PG_DB}:${PG_USER}:${PG_PASS}
+EOF
+          echo ".pgpass 파일 권한 설정 중."
+          chmod 600 ~/.pgpass
+          echo "PostgreSQL 설치 및 구성 완료."
+
+      - name: 🐘 Create PostgreSQL DB and Log Tables # PostgreSQL 데이터베이스 및 로그 테이블을 생성합니다.
+        run: |
+          set -euo pipefail
+          echo "PostgreSQL 데이터베이스 '${PG_DB}'가 없으면 생성 중..."
+          sudo -u postgres createdb "${PG_DB}" || echo "${PG_DB} 데이터베이스가 이미 존재하므로 생성 건너뜁니다."
+          echo "PostgreSQL 데이터베이스 '${PG_DB}'에 'logs' 테이블 생성 중..."
+          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U "${PG_USER}" -d "${PG_DB}" << 'EOF'
+# PostgreSQL용 SQL 구문: logs 테이블을 생성합니다.
+CREATE TABLE IF NOT EXISTS logs (
+  type VARCHAR,
+  status VARCHAR,
+  backup_time TIMESTAMP
+);
+EOF
+          echo "PostgreSQL DB 및 logs 테이블 설정 완료."
+
+      - name: 🔁 Run Per-Type Backup Loop # 각 트랜잭션 유형별로 백업 루프를 실행합니다.
+        run: |
+          set -euo pipefail
+          echo "백업 루프 시작 (유형: ${TYPES})"
+          for TYPE in ${TYPES}; do
+            DB_NAME="db_${TYPE}"
+            DB_USER="user_${TYPE}"
+            DB_PASS="pass_${TYPE}"
+            CONTAINER="mysql_${TYPE}"
+            PORT=$((3307 + RANDOM % 1000))
+
+            echo "🚀 ${TYPE} MySQL 컨테이너 (${CONTAINER})를 포트 ${PORT}에서 시작 중..."
+            echo "init.sql은 컨테이너 시작 시 자동으로 실행되어 '${DB_NAME}' 데이터베이스를 초기화합니다." # 설명 추가
+            docker run -d --rm \
+              --name "${CONTAINER}" \
+              -e MYSQL_ROOT_PASSWORD="${ROOT_PASS}" \
+              -e MYSQL_DATABASE="${DB_NAME}" \
+              -e MYSQL_USER="${DB_USER}" \
+              -e MYSQL_PASSWORD="${DB_PASS}" \
+              -v "${SQL_DIR}:/docker-entrypoint-initdb.d" \
+              -p "${PORT}:3306" \
+              mysql:8.0
+
+            echo "⏳ ${TYPE} 컨테이너 초기화 대기 중 (30초)..."
+            sleep 30
+
+            echo "🔐 ${TYPE} MySQL 로그인 설정 구성 중..."
+            cat << EOF > ~/.my.cnf
+[client]
+user=${DB_USER}
+password=${DB_PASS}
+host=127.0.0.1
+port=${PORT}
+EOF
+            chmod 600 ~/.my.cnf
+            echo "유형 '${TYPE}'에 대한 'completed' 트랜잭션 확인 중..."
+            STATUS=$(mysql --defaults-file=~/.my.cnf -N \
+              -e "SELECT COUNT(*) FROM ${DB_NAME}.transfers WHERE type='${TYPE}' AND status='completed';")
+
+            if [ "${STATUS}" -gt 0 ]; then
+              BACKUP_FILE="${BACKUP_DIR}/${TYPE}_backup.sql"
+              echo "✅ '${TYPE}'에 대해 ${STATUS}개의 완료된 트랜잭션 발견. ${BACKUP_FILE}로 백업 수행 중..."
+              mysqldump --defaults-file=~/.my.cnf --no-tablespaces \
+                "${DB_NAME}" > "${BACKUP_FILE}"
+              echo "${TYPE} 백업이 성공적으로 완료되었습니다."
+              TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+              PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U "${PG_USER}" -d "${PG_DB}" \
+                -c "INSERT INTO logs(type,status,backup_time) VALUES('${TYPE}','backup','${TIMESTAMP}');"
+              echo "${TYPE} 백업 상태를 PostgreSQL에 기록 중."
+              echo "${TIMESTAMP} [${TYPE}] backup done" >> "${KAFKA_LOG}"
+              echo "${TYPE} 백업 상태를 Kafka-style 로그에 기록 중."
+            else
+              echo "⚠️ 유형 '${TYPE}'에 대해 완료된 트랜잭션이 없습니다. 백업을 건너뜁니다."
+            fi
+
+            echo "⚡ ${TYPE}에 대해 'pending'을 'completed'로 업데이트 중..."
+            mysql --defaults-file=~/.my.cnf -e \
+              "UPDATE ${DB_NAME}.transfers SET status='completed' WHERE type='${TYPE}' AND status='pending';"
+            echo "MySQL 컨테이너 '${CONTAINER}' 정지 중..."
+            docker stop "${CONTAINER}"
+            echo "----------------------------------------"
+          done
+          echo "모든 유형별 백업 처리가 완료되었습니다."
+
+      - name: 📦 Compress Backups # 백업 파일을 압축합니다.
+        run: |
+          set -euo pipefail
+          echo "백업 디렉토리로 이동 중: ${BACKUP_DIR}"
+          cd "${BACKUP_DIR}"
+          echo "모든 SQL 백업 파일을 finance-backups-${{ github.run_id }}.tar.gz로 압축 중..."
+          tar -czf "finance-backups-${{ github.run_id }}.tar.gz" -- *.sql
+          echo "압축된 백업 파일 목록:"
+          ls -lh
+          echo "백업 압축 완료."
+
+      - name: 📓 View PostgreSQL Logs # PostgreSQL에 기록된 로그를 조회합니다.
+        run: |
+          set -euo pipefail
+          echo "PostgreSQL 데이터베이스 '${PG_DB}'에서 로그 가져오는 중..."
+          PGPASSFILE=$HOME/.pgpass psql -h 127.0.0.1 -U "${PG_USER}" -d "${PG_DB}" \
+            -c "SELECT * FROM logs;"
+          echo "PostgreSQL 로그 표시 완료."
+
+      - name: 📄 Kafka-style Logs # Kafka-style 로그 파일을 표시합니다.
+        run: |
+          set -euo pipefail
+          echo "Kafka-style 로그 파일 '${KAFKA_LOG}' 내용 표시 중..."
+          cat "${KAFKA_LOG}" || echo "생성된 Kafka-style 로그가 없습니다."
+          echo "Kafka-style 로그 표시 완료."
