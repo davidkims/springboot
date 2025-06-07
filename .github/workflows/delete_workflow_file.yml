@@ -2,64 +2,69 @@
 name: Delete Specific Workflow File
 
 on:
-  # 이 워크플로우는 GitHub Actions UI에서 'Run workflow' 버튼을 눌러 수동으로 실행합니다.
-  # 실행 시 'file_to_delete' 입력값을 통해 어떤 파일을 삭제할지 지정할 수 있습니다.
+  # This workflow is designed to be manually triggered.
+  # When you run it from the GitHub Actions UI, you can specify
+  # which file to delete.
   workflow_dispatch:
     inputs:
       file_to_delete:
         description: '삭제할 워크플로우 파일의 경로 (예: .github/workflows/잘못된_파일_이름.yml)'
         required: true
-        # 여기 'default' 값에 실제 삭제하려는 파일의 정확한 경로와 이름을 입력하세요.
-        # 예를 들어, 에러가 난 파일이 'rust_ci_build.yml'이라면 아래와 같이 수정합니다.
-        default: '.github/workflows/rustci.yml' # <--- 여기에 정확한 파일 경로 입력!
+        # >>>>> 중요: 여기에 삭제하려는 파일의 정확한 경로를 입력하세요. <<<<<
+        # 예를 들어, 실제 파일 이름이 'my_rust_ci.yml'이라면 '.github/workflows/my_rust_ci.yml'로 변경해야 합니다.
+        default: '.github/workflows/rustci.yml' # <--- 이 부분이 현재 문제의 원인일 가능성이 높습니다.
+                                                #      이 경로가 실제 GitHub repo에 있는지 다시 확인해주세요.
 
 jobs:
   delete_file_job:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 파일 삭제를 위해 반드시 'contents: write' 권한이 필요합니다. (주의!)
+      contents: write # This permission is CRITICAL for file deletion. Use with extreme caution!
 
     steps:
     - name: Checkout repository
-      # 리포지토리를 체크아웃하여 파일의 SHA를 가져옵니다.
+      # Checkout the repository to get access to its files,
+      # which is necessary for retrieving the file's SHA.
       uses: actions/checkout@v4
 
     - name: Get file SHA
       id: get_sha
-      # 삭제하려는 파일의 SHA 값을 가져옵니다. GitHub API는 파일 삭제 시 SHA 값을 요구합니다.
+      # Fetch the SHA of the file to be deleted.
+      # The GitHub API requires the file's current SHA for deletion.
       run: |
         FILE_PATH="${{ github.event.inputs.file_to_delete }}"
         REPO_OWNER="${{ github.repository_owner }}"
         REPO_NAME="${{ github.event.repository.name }}"
         
-        # curl을 사용하여 파일 메타데이터(SHA 포함)를 가져옵니다.
-        # jq는 JSON 파싱 도구로, GitHub Actions 러너에 보통 설치되어 있습니다.
+        # Use curl to get file metadata, including its SHA
+        # jq is used for JSON parsing, which is usually pre-installed on GitHub Actions runners.
+        # We also explicitly specify the 'main' branch in the API call, just to be sure.
         SHA=$(curl -s \
                    -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                    -H "Accept: application/vnd.github.v3+json" \
-                   "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$FILE_PATH?ref=${{ github.ref }}" | jq -r '.sha')
+                   "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$FILE_PATH?ref=refs/heads/main" | jq -r '.sha')
         
         if [ "$SHA" == "null" ]; then
           echo "::error::Error: 파일 '$FILE_PATH'을(를) 찾을 수 없거나 SHA를 가져올 수 없습니다. 경로가 정확한지, 파일이 존재하는지 확인하세요."
           exit 1
         fi
         echo "Successfully retrieved SHA for $FILE_PATH: $SHA"
-        echo "file_sha=$SHA" >> "$GITHUB_OUTPUT" # 다음 스텝에서 사용할 출력값 설정
+        echo "file_sha=$SHA" >> "$GITHUB_OUTPUT" # Set output for subsequent steps
       env:
-        # GITHUB_TOKEN은 GitHub Actions가 현재 리포지토리에 대해 자동으로 제공합니다.
-        # 위의 'permissions' 블록에서 정의한 'contents: write' 권한이 필요합니다.
+        # GITHUB_TOKEN is automatically provided by GitHub Actions for the current repository.
+        # It needs 'contents: write' permission as defined in the 'permissions' block above.
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Delete file via GitHub API
-      # GitHub API와 상호작용하기 편리한 octokit/request-action 액션을 사용합니다.
+      # Use the octokit/request-action for a cleaner way to interact with the GitHub API.
       uses: octokit/request-action@v2.x
       with:
         route: DELETE /repos/{owner}/{repo}/contents/{path}
         owner: ${{ github.repository_owner }}
         repo: ${{ github.event.repository.name }}
         path: ${{ github.event.inputs.file_to_delete }}
-        ref: ${{ github.ref }} # 파일이 삭제될 대상 브랜치 (예: main)
-        mediaType: '{"format": "json"}' # 요청 본문의 JSON 형식 지정
+        ref: ${{ github.ref }} # Target the branch where the file should be deleted (e.g., main)
+        mediaType: '{"format": "json"}' # Specify JSON format for the request body
         data: |
           {
             "message": "워크플로우를 통해 오류 파일 삭제: ${{ github.event.inputs.file_to_delete }}",
