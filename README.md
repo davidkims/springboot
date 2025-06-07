@@ -307,8 +307,8 @@
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
 ### ✨ Download Security Regulations (`.github/workflows/download-security-regulations.yml`)
-- **용량:** 2441 바이트
-- **최신 갱신:** 2025년 06월 07일 23시 16분 24초 KST
+- **용량:** 2261 바이트
+- **최신 갱신:** 2025년 06월 07일 23시 17분 52초 KST
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
@@ -471,7 +471,7 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
 #### 📄 `.github/workflows/download-security-regulations.yml`
-- **파일 크기:** 2441 바이트
+- **파일 크기:** 2261 바이트
 - **파일 타입:** `text/plain`
 - **특이사항:** 자동 분석된 특이사항 없음. 수동 검토가 필요할 수 있습니다.
 
@@ -681,5 +681,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 07일 14시 16분 35초 KST
+2025년 06월 07일 14시 18분 05초 KST
 
