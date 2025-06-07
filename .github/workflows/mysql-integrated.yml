@@ -1,12 +1,18 @@
-name: 🐬 MySQL Setup, Migration & Backup
+# 워크플로우의 이름
+name: MySQL 설정, 마이그레이션 및 백업
 
+# 워크플로우가 실행될 이벤트를 정의합니다.
+# 여기서는 'workflow_dispatch'를 사용하여 GitHub UI에서 수동으로 워크플로우를 실행할 수 있도록 합니다.
 on:
   workflow_dispatch:
 
+# 워크플로우에서 실행될 작업(Jobs)들을 정의합니다.
 jobs:
   mysql_setup_and_backup:
+    # 이 작업이 실행될 환경을 지정합니다. 여기서는 최신 Ubuntu 환경을 사용합니다.
     runs-on: ubuntu-latest
 
+    # 작업 전반에 걸쳐 사용될 환경 변수들을 정의합니다.
     env:
       MYSQL_IMAGE: mysql:8.0
       DB_NAME: example_db
@@ -16,92 +22,145 @@ jobs:
       MIGRATION_DIR: /opt/mysql/migrations
       BACKUP_DIR: /opt/backup/sql
 
+    # 이 작업에서 실행될 단계(Steps)들을 정의합니다.
     steps:
-      - name: 📁 마이그레이션 디렉토리 및 SQL 생성
+      - name: 📁 마이그레이션 디렉토리 생성 및 SQL 파일 준비
         run: |
-          sudo mkdir -p $MIGRATION_DIR
-          echo "CREATE TABLE IF NOT EXISTS accounts (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), balance DECIMAL(12,2));" > $MIGRATION_DIR/migrate.sql
-          echo "INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);" >> $MIGRATION_DIR/migrate.sql
+          # 마이그레이션 디렉토리를 생성합니다.
+          sudo mkdir -p "${MIGRATION_DIR}"
+          
+          # SQL 마이그레이션 스크립트를 작성합니다.
+          # accounts 테이블과 corporate_transactions 테이블을 생성하고,
+          # 초기 데이터를 삽입하는 내용을 포함합니다.
+          echo "
+          CREATE TABLE IF NOT EXISTS accounts (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(50),
+              balance DECIMAL(12,2)
+          );
+
+          CREATE TABLE IF NOT EXISTS corporate_transactions (
+              transaction_id INT AUTO_INCREMENT PRIMARY KEY,
+              corporate_name VARCHAR(100) NOT NULL,
+              transaction_type VARCHAR(50) NOT NULL,
+              amount DECIMAL(12,2) NOT NULL,
+              transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+
+          INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
+          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('ABC Corporation', 'Purchase', 500000);
+          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('XYZ Inc.', 'Sale', 250000);
+          " | sudo tee "${MIGRATION_DIR}/migrate.sql" > /dev/null # tee를 사용하여 sudo 권한으로 파일에 쓰기
+          
+          # MySQL 관련 디렉토리의 권한을 조정합니다.
           sudo chmod -R 777 /opt/mysql
 
-      - name: 🧪 MySQL 설치
+      - name: 🧪 MySQL 서버 설치
         run: |
           sudo apt-get update
+          # 비대화형 모드로 mysql-server를 설치합니다.
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
 
-      - name: 🧼 MySQL 초기화 및 root 패스워드 설정
+      - name: 🧼 MySQL 안전 모드 및 루트 비밀번호 설정
         run: |
+          # MySQL 서비스를 중지합니다.
           sudo systemctl stop mysql
+          # MySQL 런타임 디렉토리를 생성하고 권한을 설정합니다.
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
+          # 안전 모드로 MySQL을 시작하여 grant-tables를 건너뛰고 루트 비밀번호를 재설정합니다.
           sudo mysqld_safe --skip-networking --skip-grant-tables &
-          sleep 10
-
-          echo "FLUSH PRIVILEGES;\nALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${ROOT_PASS}';\nFLUSH PRIVILEGES;" | sudo mysql -u root
-
+          sleep 10 # MySQL이 완전히 시작될 때까지 기다립니다.
+          
+          # 루트 사용자 비밀번호를 변경하고 권한을 새로고침합니다.
+          echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ env.ROOT_PASS }}'; FLUSH PRIVILEGES;" | sudo mysql -u root
+          
+          # mysqld_safe 프로세스를 종료합니다.
           sudo killall mysqld
-          sleep 5
+          sleep 5 # 프로세스 종료를 기다립니다.
+          
+          # MySQL 서비스를 다시 시작합니다.
           sudo systemctl start mysql
 
-      - name: 🛠️ DB 및 사용자 생성
+      - name: 🛠️ 데이터베이스 및 사용자 생성
         run: |
-          mysql -u root -p$ROOT_PASS -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
-          mysql -u root -p$ROOT_PASS -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-          mysql -u root -p$ROOT_PASS -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
-          mysql -u root -p$ROOT_PASS -e "FLUSH PRIVILEGES;"
+          # 데이터베이스를 생성합니다. (만약 존재하지 않는다면)
+          mysql -u root -p"${{ env.ROOT_PASS }}" -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};"
+          # 새 사용자를 생성합니다. (만약 존재하지 않는다면)
+          mysql -u root -p"${{ env.ROOT_PASS }}" -e "CREATE USER IF NOT EXISTS '${{ env.DB_USER }}'@'localhost' IDENTIFIED BY '${{ env.DB_PASS }}';"
+          # 생성된 사용자에게 데이터베이스에 대한 모든 권한을 부여합니다.
+          mysql -u root -p"${{ env.DB_PASS }}" -e "GRANT ALL PRIVILEGES ON ${{ env.DB_NAME }}.* TO '${{ env.DB_USER }}'@'localhost';"
+          # 권한 변경 사항을 적용합니다.
+          mysql -u root -p"${{ env.DB_PASS }}" -e "FLUSH PRIVILEGES;"
 
       - name: 📥 마이그레이션 실행
         run: |
-          mysql -u $DB_USER -p$DB_PASS $DB_NAME < $MIGRATION_DIR/migrate.sql
+          # 준비된 SQL 파일을 사용하여 데이터베이스 마이그레이션을 실행합니다.
+          mysql -u "${{ env.DB_USER }}" -p"${{ env.DB_PASS }}" "${{ env.DB_NAME }}" < "${MIGRATION_DIR}/migrate.sql"
 
       - name: ✅ 데이터 확인
         run: |
-          mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME; SHOW TABLES; SELECT * FROM accounts;"
+          # 마이그레이션된 데이터를 확인합니다.
+          mysql -u "${{ env.DB_USER }}" -p"${{ env.DB_PASS }}" -e "USE ${{ env.DB_NAME }}; SHOW TABLES; SELECT * FROM accounts; SELECT * FROM corporate_transactions;"
 
-      - name: 🕒 Generate Timestamp and Dynamic Port
-        id: vars
+      - name: 🕒 타임스탬프 및 동적 포트 생성
+        id: vars # 이 단계의 출력 값을 참조하기 위한 ID
         run: |
+          # 현재 시간을 기반으로 타임스탬프를 생성합니다.
           TS=$(date +%Y%m%d%H%M%S)
+          # 3307에서 4306 사이의 동적 포트를 생성합니다.
           PORT=$((RANDOM%1000+3307))
-          echo "timestamp=$TS" >> $GITHUB_OUTPUT
-          echo "container=backup-mysql-$TS" >> $GITHUB_OUTPUT
-          echo "host_port=$PORT" >> $GITHUB_OUTPUT
+          
+          # 다음 단계에서 사용할 수 있도록 출력 변수로 설정합니다.
+          echo "timestamp=${TS}" >> "${GITHUB_OUTPUT}"
+          echo "container=backup-mysql-${TS}" >> "${GITHUB_OUTPUT}"
+          echo "host_port=${PORT}" >> "${GITHUB_OUTPUT}"
 
-      - name: 🐳 Launch MySQL Backup Container
+      - name: 🐳 MySQL 백업 컨테이너 실행
         run: |
+          # Docker 컨테이너를 실행하여 백업 환경을 설정합니다.
           docker run -d \
-            --name ${{ steps.vars.outputs.container }} \
-            -e MYSQL_ROOT_PASSWORD=$DB_PASS \
-            -e MYSQL_DATABASE=$DB_NAME \
-            -p ${{ steps.vars.outputs.host_port }}:3306 \
-            $MYSQL_IMAGE
-          echo "⏳ 컨테이너 초기화 대기 중..."
-          sleep 30
+            --name "${{ steps.vars.outputs.container }}" \
+            -e MYSQL_ROOT_PASSWORD="${{ env.DB_PASS }}" \
+            -e MYSQL_DATABASE="${{ env.DB_NAME }}" \
+            -p "${{ steps.vars.outputs.host_port }}:3306" \
+            "${{ env.MYSQL_IMAGE }}"
+          echo "⏳ 컨테이너 호출 중..."
+          sleep 30 # 컨테이너가 완전히 시작될 때까지 기다립니다.
 
-      - name: 🔐 Generate Secure MySQL Login File (.my.cnf)
+      - name: 🔐 보안 MySQL 로그인 파일(.my.cnf) 생성
         run: |
+          # MySQL 클라이언트 로그인에 사용될 .my.cnf 파일을 생성합니다.
           echo "[client]" > ~/.my.cnf
-          echo "user=$DB_USER" >> ~/.my.cnf
-          echo "password=$DB_PASS" >> ~/.my.cnf
+          echo "user=${{ env.DB_USER }}" >> ~/.my.cnf
+          echo "password=${{ env.DB_PASS }}" >> ~/.my.cnf
           echo "host=127.0.0.1" >> ~/.my.cnf
           echo "port=${{ steps.vars.outputs.host_port }}" >> ~/.my.cnf
+          # .my.cnf 파일의 권한을 600으로 설정하여 보안을 강화합니다.
           chmod 600 ~/.my.cnf
 
-      - name: 📁 Create Backup Directory
+      - name: 📁 백업 디렉토리 생성
         run: |
-          sudo mkdir -p $BACKUP_DIR
-          sudo chmod -R 777 $BACKUP_DIR
+          # 백업 파일을 저장할 디렉토리를 생성합니다.
+          sudo mkdir -p "${BACKUP_DIR}"
+          # 백업 디렉토리의 권한을 조정합니다.
+          sudo chmod -R 777 "${BACKUP_DIR}"
 
-      - name: 💾 Run mysqldump Backup
+      - name: 💾 mysqldump 백업 실행
         run: |
-          TIMESTAMP=${{ steps.vars.outputs.timestamp }}
-          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
-          echo "🔁 백업 시작: $BACKUP_FILE"
-          mysqldump $DB_NAME > $BACKUP_FILE || { echo "❌ 백업 실패"; exit 1; }
-          echo "✅ 백업 완료: $BACKUP_FILE"
-          ls -lh $BACKUP_DIR
+          TIMESTAMP="${{ steps.vars.outputs.timestamp }}"
+          BACKUP_FILE="${BACKUP_DIR}/backup-${TIMESTAMP}.sql"
+          
+          echo "🔁 백업 시작: ${BACKUP_FILE}"
+          # mysqldump를 사용하여 데이터베이스를 백업합니다.
+          # 실패 시 오류 메시지를 출력하고 종료합니다.
+          mysqldump "${{ env.DB_NAME }}" > "${BACKUP_FILE}" || { echo "❌ 백업 실패"; exit 1; }
+          echo "✅ 백업 완료: ${BACKUP_FILE}"
+          
+          # 백업 파일 목록과 크기를 출력합니다.
+          ls -lh "${BACKUP_DIR}"
 
-      - name: 🔍 Print Container Info
+      - name: 🔍 컨테이너 정보 인쇄
         run: |
-          echo "📦 컨테이너 이름: ${{ steps.vars.outputs.container }}"
-          echo "🔌 연결된 포트: ${{ steps.vars.outputs.host_port }}"
+          # 실행된 Docker 컨테이너의 이름을 출력합니다.
+          echo "📦컨테이너 이름: ${{ steps.vars.outputs.container }}"
