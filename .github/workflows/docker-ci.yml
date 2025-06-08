@@ -1,4 +1,4 @@
-name: Docker 이미지 빌드 및 배포 (파일 생성 포함)
+name: Docker 이미지 빌드 및 배포 (AWS IAM Role 사용)
 
 on:
   push:
@@ -10,12 +10,16 @@ on:
 jobs:
   build_and_deploy:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # AWS OIDC를 사용하여 임시 자격 증명을 획득하는 데 필요
+      contents: read  # 리포지토리 코드를 읽는 데 필요
+
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v3
 
       - name: Docker Buildx 설정
-        uses: docker/setup-buildx-action@v3 # 최신 버전 사용 권장
+        uses: docker/setup-buildx-action@v3
 
       # ==========================================================
       # 1. 파일 생성 (예시: Dockerfile 및 간단한 스크립트)
@@ -31,29 +35,28 @@ jobs:
           echo "WORKDIR /app" >> Dockerfile
           echo "COPY . /app" >> Dockerfile
           echo "CMD [\"echo\", \"Hello from Docker!\"]" >> Dockerfile
-          echo "Dockerfile이 생성되었습니다." # 번역 오류 수정: "인증을 받았습니다" -> "생성되었습니다"
+          echo "Dockerfile이 생성되었습니다."
 
       - name: 예시 스크립트 생성 (install.sh)
         run: |
           mkdir -p scripts
           echo "#!/bin/bash" > scripts/install.sh
-          echo "echo '스크립트 실행: 애플리케이션 설치 중...'" >> scripts/install.sh # 번역 오류 수정: "텍스트 실행: 인력 설치 중..." -> "스크립트 실행: 애플리케이션 설치 중..."
+          echo "echo '스크립트 실행: 애플리케이션 설치 중...'" >> scripts/install.sh
           echo "mkdir -p /opt/my_app_data" >> scripts/install.sh
-          echo "echo '애플리케이션 데이터 디렉토리 생성 완료.'" >> scripts/install.sh # 번역 오류 수정: "애플리케이션 컨퍼런스 생성하기." -> "애플리케이션 데이터 디렉토리 생성 완료."
+          echo "echo '애플리케이션 데이터 디렉토리 생성 완료.'" >> scripts/install.sh
           chmod +x scripts/install.sh
-          echo "scripts/install.sh가 생성되었습니다." # 번역 오류 수정: "만들어졌습니다" -> "생성되었습니다"
+          echo "scripts/install.sh가 생성되었습니다."
 
       # ==========================================================
-      # 2. AWS ECR 자격 증명 존재 여부 확인
+      # 2. AWS OIDC 설정 및 자격 증명 획득
+      #    이 스텝이 성공하면, 이후 AWS 관련 스텝에서 자격 증명을 자동으로 사용합니다.
       # ==========================================================
-      - name: AWS 자격 증명 확인
-        id: check_aws_credentials
-        run: |
-          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.ECR_REGISTRY_URL }}" ]; then
-            echo "::set-output name=aws_credentials_exist::true"
-          else
-            echo "::set-output name=aws_credentials_exist::false"
-          fi
+      - name: AWS 자격 증명 구성 (IAM Role 사용)
+        id: configure_aws_credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsECRRole # <--- AWS 계정 ID와 IAM Role 이름으로 변경
+          aws-region: ap-northeast-2 # 또는 ECR이 위치한 리전으로 변경
 
       # ==========================================================
       # 3. Docker Hub 자격 증명 존재 여부 확인
@@ -68,7 +71,7 @@ jobs:
           fi
 
       # ==========================================================
-      # 4. SSH 호스트 Secret 존재 여부 확인 (새로 추가)
+      # 4. SSH 호스트 Secret 존재 여부 확인
       # ==========================================================
       - name: SSH Host Secret 확인
         id: check_ssh_host
@@ -80,24 +83,18 @@ jobs:
           fi
 
       # ==========================================================
-      # 5. AWS ECR 로그인 및 푸시 (AWS 자격 증명 존재 시)
+      # 5. AWS ECR 로그인 및 푸시 (AWS 자격 증명 획득 성공 시)
+      #    이 스텝의 'if' 조건은 이전 'configure_aws_credentials' 스텝의 성공 여부로 판단합니다.
+      #    실패 시 'configure_aws_credentials' 스텝이 종료 코드 1을 반환합니다.
       # ==========================================================
-      - name: AWS 자격 증명 구성
-        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-northeast-2 # 또는 ECR이 위치한 리전으로 변경
-
       - name: Amazon ECR에 로그인
-        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        if: steps.configure_aws_credentials.outcome == 'success'
         uses: docker/login-action@v3
         with:
           ecr: auto
 
       - name: Docker 이미지를 빌드하고 ECR에 푸시합니다.
-        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        if: steps.configure_aws_credentials.outcome == 'success'
         uses: docker/build-push-action@v5
         with:
           context: . # Dockerfile이 리포지토리 루트에 있다면 '.' 유지
@@ -110,25 +107,25 @@ jobs:
           cache-from: type=gha # GitHub Actions 캐시 사용 (빌드 속도 향상)
           cache-to: type=gha,mode=max # GitHub Actions 캐시 저장
 
-      - name: Amazon ECR에서 로그아웃(선택 사항)
-        if: always() && steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+      - name: Amazon ECR에서 로그아웃 (선택 사항)
+        if: always() && steps.configure_aws_credentials.outcome == 'success'
         uses: docker/login-action@v3
         with:
           ecr: auto
           logout: true
 
       # ==========================================================
-      # 6. Docker Hub 로그인 및 푸시 (AWS 자격 증명 없음 + Docker Hub 자격 증명 있음)
+      # 6. Docker Hub 로그인 및 푸시 (AWS 자격 증명 획득 실패 + Docker Hub 자격 증명 있음)
       # ==========================================================
-      - name: Docker Hub에 로그인 (AWS 자격 증명이 없는 경우 대체)
-        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true'
+      - name: Docker Hub에 로그인 (AWS 자격 증명 획득 실패 시 대체)
+        if: steps.configure_aws_credentials.outcome == 'failure' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Docker 이미지를 빌드하고 Docker Hub에 푸시합니다(폴백)
-        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true'
+        if: steps.configure_aws_credentials.outcome == 'failure' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true'
         uses: docker/build-push-action@v5
         with:
           context: . # Dockerfile이 리포지토리 루트에 있다면 '.' 유지
@@ -142,13 +139,12 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ==========================================================
-      # 7. 로컬 빌드 전용 (ECR/Docker Hub 자격 증명 모두 없음)
+      # 7. 로컬 빌드 전용 (모든 레지스트리 자격 증명 없음)
       # ==========================================================
-      - name: 로컬 빌드 전용 (ECR/Docker Hub 자격 증명이 없는 경우)
-        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'false'
+      - name: 로컬 빌드 전용 (모든 레지스트리 자격 증명이 없는 경우)
+        if: steps.configure_aws_credentials.outcome == 'failure' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'false'
         run: |
           echo "AWS ECR 또는 Docker Hub 자격 증명을 찾을 수 없습니다. Docker 이미지를 로컬에서만 빌드합니다."
-          # Dockerfile 경로를 여기에 직접 지정
           docker build -t my-local-image:latest . # Dockerfile이 리포지토리 루트에 있다면 '.' 유지
           # docker build -t my-local-image:latest -f ./docker/Dockerfile ./docker # 'docker/' 폴더에 있다면 이렇게 수정
           echo "로컬 빌드가 완료되었습니다. 이미지가 어떤 레지스트리에도 푸시되지 않았습니다."
@@ -158,7 +154,7 @@ jobs:
       # ==========================================================
       - name: 서버에 배포 (선택 사항 - SSH 또는 배포 스크립트 실행)
         # 배포 조건: ECR 또는 Docker Hub 중 하나라도 성공적으로 이미지를 푸시했고, SSH_HOST Secret이 존재할 때
-        if: (steps.check_aws_credentials.outputs.aws_credentials_exist == 'true' || steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true') && steps.check_ssh_host.outputs.ssh_host_exist == 'true'
+        if: (steps.configure_aws_credentials.outcome == 'success' || (steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true' && steps.configure_aws_credentials.outcome == 'failure')) && steps.check_ssh_host.outputs.ssh_host_exist == 'true'
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -169,12 +165,12 @@ jobs:
             
             # ECR 또는 Docker Hub 이미지 경로를 동적으로 선택
             IMAGE_TAG=""
-            if [ "${{ steps.check_aws_credentials.outputs.aws_credentials_exist }}" == "true" ]; then
+            if [ "${{ steps.configure_aws_credentials.outcome }}" == "success" ]; then
               IMAGE_TAG="${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:latest"
             elif [ "${{ steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist }}" == "true" ]; then
               IMAGE_TAG="${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:latest"
             else
-              echo "배포할 이미지 소스를 찾을 수 없습니다. 배포를 건너뜜."
+              echo "배포할 이미지 소스를 찾을 수 없습니다. 배포를 건너뜁니다."
               exit 0 # 이미지가 푸시되지 않았으므로 배포는 건너뛰지만 실패로 처리하지 않음
             fi
 
@@ -191,4 +187,4 @@ jobs:
             
             # 오래된 이미지 정리 (디스크 공간 확보)
             docker image prune -f
-            echo "--- 서버 배포 완료 ---" # 번역 오류 수정: "서버 플러그인" -> "서버 배포 완료"
+            echo "--- 서버 배포 완료 ---"
