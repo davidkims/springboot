@@ -1,85 +1,95 @@
-name: Disk & Cache Optimizer
+name: Disk & Cache Optimizer with Git Tagging
 
 on:
-  workflow_dispatch: # Allows manual triggering of the workflow
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: '생성할 Git 태그 이름 (예: v1.0.0, release-20250608)'
+        required: false # 태그 생성을 선택 사항으로 만들기 위해 false로 설정
+        type: string
 
 jobs:
-  optimize:
-    runs-on: ubuntu-latest # Using the latest Ubuntu runner
+  optimize_and_tag:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4 # Always use the latest stable version of actions
-
-      # --- Disk Optimization & Cleanup ---
-      # This section focuses on freeing up disk space on the runner before and during the build.
-      
-      - name: Report initial disk usage
-        run: |
-          echo "Initial disk usage:"
-          df -h
-
-      - name: Clean up existing Docker resources (if any)
-        # This is crucial for runners that might have lingering Docker images/volumes from previous runs.
-        # `--all` removes all unused images (not just dangling), `--force` avoids confirmation,
-        # `--volumes` removes unused volumes. Use with caution but it's effective for fresh starts.
-        run: |
-          echo "Pruning unused Docker images, containers, volumes, and build cache..."
-          docker system prune --all --force --volumes
-          echo "Disk usage after Docker prune:"
-          df -h
-
-      - name: Create cache directory if it doesn't exist
-        # This step is critical to prevent the "Path Validation Error".
-        # Ensure the path here matches the 'path' in your caching steps.
-        run: |
-          mkdir -p ~/.npm # For Node.js projects, create the npm cache directory
-          # Add other cache directories here if your project uses them, e.g.:
-          # mkdir -p ~/.m2/repository # For Maven
-          # mkdir -p ~/.cache/pip     # For Python pip cache
-          echo "Cache directories ensured."
-
-      # --- Cache Optimization (for Speed) ---
-      # Caching dependencies significantly speeds up subsequent runs.
-
-      - name: Restore dependencies cache
-        uses: actions/cache@v4 # Use the latest stable version for caching
+      - name: 리포지토리 체크아웃
+        uses: actions/checkout@v4
         with:
-          path: ~/.npm # The path where your package manager caches dependencies
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }} # Key based on OS and project lock file
-          restore-keys: |
-            ${{ runner.os }}-npm- # Fallback key if exact match isn't found
+          fetch-depth: 0 # 모든 Git 이력을 가져와야 태그 생성 및 푸시가 올바르게 작동
 
-      # --- Build Process (where your main work happens) ---
-      # Assuming you have a build step that uses your dependencies
-
-      - name: Install Node.js dependencies (example)
-        # This step would typically run after cache restore.
-        # If the cache hit, this step will be much faster or even skipped by npm/yarn.
+      # --- 디스크 최적화 및 정리 ---
+      - name: 초기 디스크 사용량 보고
         run: |
-          # npm ci # For clean installs based on package-lock.json
-          # npm install # For general installs
-          echo "Dependencies installed." # Replace with your actual build/install command
+          echo "초기 디스크 사용량:"
+          df -h
 
-      # --- Custom Disk Optimization Script Execution ---
-      # For project-specific cleanup, like removing logs or temporary build files.
+      - name: 불필요한 Docker 리소스 정리
+        run: |
+          echo "사용되지 않는 Docker 이미지, 컨테이너, 볼륨, 빌드 캐시 정리..."
+          docker system prune --all --force --volumes
+          echo "Docker 정리 후 디스크 사용량:"
+          df -h
 
-      - name: Run custom disk optimization script
-        # Ensure your optimize_disk.sh script has execute permissions.
+      - name: 캐시 디렉토리 생성 확인
+        # 'Path Validation Error' 방지를 위해 캐시 디렉토리가 존재하는지 확인하고 없으면 생성
+        run: |
+          mkdir -p ~/.npm # Node.js 프로젝트의 경우 npm 캐시 디렉토리
+          # 다른 프로젝트 유형에 따라 필요한 캐시 디렉토리 추가:
+          # mkdir -p ~/.m2/repository # Maven
+          # mkdir -p ~/.cache/pip     # Python pip 캐시
+          echo "캐시 디렉토리 생성이 확인되었습니다."
+
+      # --- 캐시 최적화 (속도 향상) ---
+      - name: 종속성 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm # 패키지 관리자가 종속성을 캐시하는 경로
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      # --- 빌드 프로세스 (주요 작업) ---
+      - name: Node.js 종속성 설치 (예시)
+        # 캐시가 적중되면 이 단계는 훨씬 빨라지거나 npm/yarn에 의해 건너뛸 수 있습니다.
+        run: |
+          npm install # 또는 npm ci, yarn 등 실제 프로젝트의 종속성 설치 명령
+          echo "종속성이 설치되었습니다."
+
+      # --- 사용자 정의 디스크 최적화 스크립트 실행 ---
+      - name: 사용자 정의 디스크 최적화 스크립트 실행
         run: |
           chmod +x scripts/optimize_disk.sh
-          bash scripts/optimize_disk.sh .github # Pass specific directories/arguments if needed
-          echo "Custom disk optimization script executed."
-          echo "Disk usage after custom script:"
+          bash scripts/optimize_disk.sh .github
+          echo "사용자 정의 디스크 최적화 스크립트가 실행되었습니다."
+          echo "사용자 정의 스크립트 실행 후 디스크 사용량:"
           df -h
 
-      # --- Cache Saving (for Speed) ---
-      # Save the cache only if the build was successful to avoid caching broken states.
-
-      - name: Save dependencies cache
+      # --- 캐시 저장 (속도 향상) ---
+      - name: 종속성 캐시 저장
         uses: actions/cache@v4
         with:
           path: ~/.npm
           key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-        # Only save cache if the previous steps succeeded
-        if: success()
+        if: success() # 이전 단계가 성공적으로 완료된 경우에만 캐시 저장
+
+      # --- Git 태그 생성 및 푸시 (새로운 기능) ---
+      - name: Git 태그 생성 및 푸시 (선택 사항)
+        if: github.event.inputs.tag_name != '' # tag_name 입력값이 있을 경우에만 실행
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 기본 GITHUB_TOKEN 사용
+        run: |
+          TAG_NAME=${{ github.event.inputs.tag_name }}
+          echo "새로운 Git 태그 '$TAG_NAME'을 생성하고 푸시합니다."
+
+          # Git 설정: GitHub Actions에서 태그를 푸시할 수 있도록 사용자 정보 설정
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 태그 생성
+          git tag $TAG_NAME
+
+          # 생성된 태그를 GitHub 리포지토리로 푸시
+          git push origin $TAG_NAME
+
+          echo "태그 '$TAG_NAME' 푸시 완료."
