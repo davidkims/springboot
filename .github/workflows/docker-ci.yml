@@ -1,166 +1,182 @@
-name: Docker 이미지 빌드 및 배포 (오류 스킵 포함)
+name: Docker 이미지 빌드 및 배포 (파일 생성 포함)
 
 on:
   push:
     branches:
-      - main # main 브랜치에 푸시될 때 워크플로우 실행
-  pull_request:
-    branches:
-      - main # main 브랜치로 풀 리퀘스트 발생 시 워크플로우 실행
-  workflow_dispatch: # GitHub UI에서 수동으로 워크플로우를 실행할 수 있도록 허용
-
-env:
-  # Docker 이미지 이름 (원하는 이름으로 변경하세요)
-  IMAGE_NAME: my-app-image
-  # Docker 이미지 태그 (Git SHA를 사용하여)
-  IMAGE_TAG: ${{ github.sha }}
+      - main
+  # schedule:
+  #   - cron: '0 * * * *' # 필요에 따라 주석 해제하여 매시간 실행 (자동 누적)
 
 jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest # 이 작업을 실행할 운영체제 환경을 지정합니다.
-
-    # 권한 설정: Docker Hub 또는 GHCR에 이미지를 푸시하려면 'packages: write' 권한이 필요합니다.
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-
+  build_and_deploy:
+    runs-on: ubuntu-latest
     steps:
-      - name: 🚀 코드 체크아웃
-        uses: actions/checkout@v4
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+      - name: 코드 체크아웃
+        uses: actions/checkout@v3
 
-      - name: 💬 코드 체크아웃 완료 메시지
-        run: echo "--- 리포지토리 코드 체크아웃 완료 ---"
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v3 # 최신 버전 사용 권장
 
-      - name: 🐳 Docker 및 Docker Compose 수동 설치
-        # docker/setup-docker 액션을 사용하지 않고 직접 설치합니다.
+      # ==========================================================
+      # 1. 파일 생성 (예시: Dockerfile 및 간단한 스크립트)
+      #    주의: 실제 프로젝트에서는 이 파일들이 리포지토리에 미리 커밋되어 있어야 합니다.
+      #    이 스텝은 "파일 생성"의 개념을 보여주기 위함입니다.
+      #    만약 외부 URL에서 파일을 다운로드해야 한다면 'run' 블록에 curl/wget 사용.
+      # ==========================================================
+      - name: Dockerfile 생성 (예시)
         run: |
-          echo "--- Docker 및 Docker Compose 수동 설치 시작 ---"
-          sudo apt-get update -y
-          sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-          curl --proto '=https' --tlsv1.2 -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update -y
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-          echo "--- Docker 및 Docker Compose 수동 설치 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+          echo "FROM ubuntu:22.04" > Dockerfile
+          echo "LABEL maintainer='your.email@example.com'" >> Dockerfile
+          echo "RUN apt-get update && apt-get install -y curl" >> Dockerfile
+          echo "WORKDIR /app" >> Dockerfile
+          echo "COPY . /app" >> Dockerfile
+          echo "CMD [\"echo\", \"Hello from Docker!\"]" >> Dockerfile
+          echo "Dockerfile이 루트 디렉토리에 생성되었습니다."
 
-      - name: ℹ️ Docker CLI 버전 확인 및 정보 출력
+      - name: 예시 스크립트 생성 (install.sh)
         run: |
-          echo "현재 시스템의 Docker 버전은 다음과 같습니다:"
-          docker --version
-          echo "Docker Compose 버전 (설치되어 있는 경우):"
-          docker compose version || true
-          echo "Docker 시스템 정보:"
-          docker info
-          echo "--- Docker CLI 준비 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+          mkdir -p scripts
+          echo "#!/bin/bash" > scripts/install.sh
+          echo "echo '스크립트 실행: 애플리케이션 설치 중...'" >> scripts/install.sh
+          echo "mkdir -p /opt/my_app_data" >> scripts/install.sh
+          echo "echo '애플리케이션 데이터 디렉토리 생성 완료.'" >> scripts/install.sh
+          chmod +x scripts/install.sh
+          echo "scripts/install.sh가 생성되었습니다."
 
-      - name: 📁 파일 및 디렉토리 생성
+      # ==========================================================
+      # 2. AWS ECR 자격 증명 존재 여부 확인
+      # ==========================================================
+      - name: AWS 자격 증명 확인
+        id: check_aws_credentials
         run: |
-          echo "--- 파일 및 디렉토리 생성 시작 ---"
-          echo "새로운 디렉토리 'my-data-volume' 생성 중..."
-          mkdir -p my-data-volume/logs
-          echo "새로운 파일 'my-data-volume/app.log' 생성 중..."
-          echo "애플리케이션 시작 로그: $(date)" > my-data-volume/app.log
-          echo "또 다른 파일 'my-data-volume/logs/error.log' 생성 중..."
-          echo "에러 발생: $(date)" > my-data-volume/logs/error.log
-          echo "생성된 파일 및 디렉토리 구조 확인:"
-          ls -R my-data-volume/
-          echo "--- 파일 및 디렉토리 생성 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.ECR_REGISTRY_URL }}" ]; then
+            echo "::set-output name=aws_credentials_exist::true"
+          else
+            echo "::set-output name=aws_credentials_exist::false"
+          fi
 
-      - name: ⚙️ Docker Buildx 설정 (Docker 수동 설치 시에는 필요 없을 수 있음)
-        # docker-buildx-plugin이 수동 설치에 포함되었으므로 이 액션은 필요 없을 수 있으나,
-        # 안정성을 위해 남겨둡니다. 오류 발생 시 이 액션도 제거 고려.
-        uses: docker/setup-buildx-action@v2
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
-
-      - name: 💬 Docker Buildx 설정 완료 메시지
-        run: echo "--- Docker Buildx 설정 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
-
-      - name: 🔑 Docker Hub 시크릿 환경 변수 설정
+      # ==========================================================
+      # 3. Docker Hub 자격 증명 존재 여부 확인
+      # ==========================================================
+      - name: Docker Hub 자격 증명 확인
+        id: check_docker_hub_credentials
         run: |
-          echo "DOCKER_USERNAME_VAL=${{ secrets.DOCKER_USERNAME || '' }}" >> $GITHUB_ENV
-          echo "DOCKER_PASSWORD_VAL=${{ secrets.DOCKER_PASSWORD || '' }}" >> $GITHUB_ENV
-        continue-on-error: true
+          if [ -n "${{ secrets.DOCKER_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_TOKEN }}" ]; then
+            echo "::set-output name=docker_hub_credentials_exist::true"
+          else
+            echo "::set-output name=docker_hub_credentials_exist::false"
+          fi
 
-      - name: 🔑 Docker Hub 로그인 (선택 사항:docker Hub에 푸시할 경우)
-        if: ${{ env.DOCKER_USERNAME_VAL != '' && env.DOCKER_PASSWORD_VAL != '' }}
+      # ==========================================================
+      # 4. AWS ECR 로그인 및 푸시 (AWS 자격 증명 존재 시)
+      # ==========================================================
+      - name: AWS 자격 증명 구성
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2 # 또는 ECR이 위치한 리전으로 변경
+
+      - name: Amazon ECR에 로그인
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ env.DOCKER_USERNAME_VAL }}
-          password: ${{ env.DOCKER_PASSWORD_VAL }}
-        continue-on-error: true # 로그인 실패 시에도 다음 단계 진행
+          ecr: auto
 
-      - name: 💬 Docker Hub 로그인 시도 완료 메시지 (조건부 출력)
-        if: ${{ env.DOCKER_USERNAME_VAL != '' && env.DOCKER_PASSWORD_VAL != '' }}
-        run: echo "--- Docker Hub 로그인 시도 완료 (시크릿이 있는 경우) ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
-
-      - name: 🔑 GitHub Container Registry (GHCR) 로그인
-        uses: docker/login-action@v3
+      - name: Docker 이미지를 빌드하고 ECR에 푸시합니다.
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: docker/build-push-action@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
-
-      - name: 💬 GHCR 로그인 시도 완료 메시지
-        run: echo "--- GHCR 로그인 시도 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
-
-      - name: 🏗️ Docker 이미지 빌드
-        # docker/build-push-action@v4를 사용합니다.
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          file: ./Dockerfile # Dockerfile 경로 지정
+          context: . # Dockerfile이 리포지토리 루트에 있다면 '.' 유지
+          # context: ./docker # Dockerfile이 'docker/' 폴더 안에 있다면 이 줄을 사용
+          # file: ./docker/Dockerfile.prod # Dockerfile 이름이 'Dockerfile'이 아니거나 서브 디렉토리에 있다면 이 줄을 사용
+          push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
-          outputs: type=docker # 빌드된 이미지를 Docker 데몬에 로드하여 다음 단계에서 사용 가능하게 합니다.
-          push: false # 일단 빌드하고 푸시는 하지 않습니다.
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+            ${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:latest
+            ${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:${{ github.sha }}
+          cache-from: type=gha # GitHub Actions 캐시 사용 (빌드 속도 향상)
+          cache-to: type=gha,mode=max # GitHub Actions 캐시 저장
 
-      - name: 💬 Docker 이미지 빌드 시작 및 완료 메시지
-        run: |
-          echo "--- Docker 이미지 빌드 시작 ---"
-          echo "빌드 중인 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          echo "Dockerfile 경로: ./Dockerfile"
-          echo "--- Docker 이미지 빌드 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+      - name: Amazon ECR에서 로그아웃(선택 사항)
+        if: always() && steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: docker/login-action@v3
+        with:
+          ecr: auto
+          logout: true
 
-      - name: 🔍 빌드된 Docker 이미지 확인
-        run: |
-          echo "--- 빌드된 Docker 이미지 목록 ---"
-          docker images
-          echo "--- 이미지 확인 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+      # ==========================================================
+      # 5. Docker Hub 로그인 및 푸시 (AWS 자격 증명 없음 + Docker Hub 자격 증명 있음)
+      # ==========================================================
+      - name: Docker Hub에 로그인 (AWS 자격 증명이 없는 경우 대체)
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: 📤 Docker 이미지 푸시 (Docker Hub)
-        if: ${{ env.DOCKER_USERNAME_VAL != '' && env.DOCKER_PASSWORD_VAL != '' }}
-        run: |
-          echo "--- Docker Hub로 이미지 푸시 시작 ---"
-          docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          docker push ${{ env.IMAGE_NAME }}:latest # 최신 태그도 푸시
-          echo "--- Docker Hub 푸시 완료 ---"
-        continue-on-error: true # 푸시 실패 시에도 다음 단계 진행
+      - name: Docker 이미지를 빌드하고 Docker Hub에 푸시합니다(폴백)
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: . # Dockerfile이 리포지토리 루트에 있다면 '.' 유지
+          # context: ./docker # Dockerfile이 'docker/' 폴더 안에 있다면 이 줄을 사용
+          # file: ./docker/Dockerfile.prod # Dockerfile 이름이 'Dockerfile'이 아니거나 서브 디렉토리에 있다면 이 줄을 사용
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:latest
+            ${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: 📤 Docker 이미지 푸시 (GitHub Container Registry)
+      # ==========================================================
+      # 6. 로컬 빌드 전용 (ECR/Docker Hub 자격 증명 모두 없음)
+      # ==========================================================
+      - name: 로컬 빌드 전용 (ECR/Docker Hub 자격 증명이 없는 경우)
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'false'
         run: |
-          echo "--- GHCR로 이미지 푸시 시작 ---"
-          docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
-          echo "--- GHCR 푸시 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+          echo "AWS ECR 또는 Docker Hub 자격 증명을 찾을 수 없습니다. Docker 이미지를 로컬에서만 빌드합니다."
+          # Dockerfile 경로를 여기에 직접 지정
+          docker build -t my-local-image:latest . # Dockerfile이 리포지토리 루트에 있다면 '.' 유지
+          # docker build -t my-local-image:latest -f ./docker/Dockerfile ./docker # 'docker/' 폴더에 있다면 이렇게 수정
+          echo "로컬 빌드가 완료되었습니다. 이미지가 어떤 레지스트리에도 푸시되지 않았습니다."
 
-      - name: 🏃 Docker 컨테이너 실행 (선택 사항:빌드된 이미지 테스트용)
-        run: |
-          echo "--- Docker 컨테이너 실행 시작 (테스트용) ---"
-          echo "실행 중인 이미지: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          docker run --rm ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          echo "--- Docker 컨테이너 실행 완료 ---"
-        continue-on-error: true # 오류 발생 시에도 다음 단계 진행
+      # ==========================================================
+      # 7. 배포 (옵션)
+      # ==========================================================
+      - name: 서버에 배포 (선택 사항 - SSH 또는 배포 스크립트 실행)
+        # 배포 조건: ECR 또는 Docker Hub 중 하나라도 성공적으로 이미지를 푸시했거나, SSH_HOST Secret이 존재할 때
+        if: (steps.check_aws_credentials.outputs.aws_credentials_exist == 'true' || steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist == 'true') && secrets.SSH_HOST
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "--- 서버에 최신 Docker 이미지 배포 시작 ---"
+            
+            # ECR 또는 Docker Hub 이미지 경로를 동적으로 선택
+            IMAGE_TAG=""
+            if [ "${{ steps.check_aws_credentials.outputs.aws_credentials_exist }}" == "true" ]; then
+              IMAGE_TAG="${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:latest"
+            elif [ "${{ steps.check_docker_hub_credentials.outputs.docker_hub_credentials_exist }}" == "true" ]; then
+              IMAGE_TAG="${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:latest"
+            else
+              echo "배포할 이미지 소스를 찾을 수 없습니다. 배포를 건너뜜."
+              exit 0 # 이미지가 푸시되지 않았으므로 배포는 건너뛰지만 실패로 처리하지 않음
+            fi
+
+            echo "풀 받을 이미지: $IMAGE_TAG"
+            cd /path/to/your/app_on_server # 서버의 애플리케이션 디렉토리로 이동
+            
+            # 기존 컨테이너 중지 및 삭제 (멱등성을 위해, 컨테이너가 없어도 오류 없이 진행)
+            docker stop my_application_container || true
+            docker rm my_application_container || true
+            
+            # 최신 이미지 풀 및 컨테이너 실행
+            docker pull $IMAGE_TAG
+            docker run -d --name my_application_container -p 80:8080 $IMAGE_TAG # -p 옵션은 예시, 실제 포트에 맞게 변경
+            
+            # 오래된 이미지 정리 (디스크 공간 확보)
+            docker image prune -f
+            echo "--- 서버 배포 완료 ---"
