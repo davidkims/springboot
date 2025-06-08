@@ -1,11 +1,11 @@
-name: Docker Image Build and Deploy
+name: Docker Image Build and Deploy with Conditional Login
 
 on:
   push:
     branches:
-      - main # main 브랜치에 push될 때마다 실행
-  schedule:
-    - cron: '0 * * * *' # 매 시간 0분마다 (이것이 "매시간마다 최신 버전 누적"의 의미에 가장 가깝지만, 일반적으로 권장되지는 않습니다. 태그를 활용하는 것이 좋습니다.)
+      - main
+  # schedule:
+  #   - cron: '0 * * * *' # 필요에 따라 주석 해제하여 매시간 실행
 
 jobs:
   build_and_push:
@@ -17,32 +17,110 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
+      # ==========================================================
+      # 1. AWS ECR 자격 증명 존재 여부 확인
+      # ==========================================================
+      - name: Check for AWS Credentials
+        id: check_aws_credentials
+        run: |
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "::set-output name=aws_credentials_exist::true"
+          else
+            echo "::set-output name=aws_credentials_exist::false"
+          fi
+
+      # ==========================================================
+      # 2. AWS ECR 로그인 및 푸시 (AWS 자격 증명 존재 시)
+      # ==========================================================
+      - name: Configure AWS Credentials
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2 # 또는 ECR이 위치한 리전으로 변경
+
+      - name: Login to Amazon ECR
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: docker/login-action@v3
+        with:
+          ecr: auto
+
+      - name: Build and push Docker image to ECR
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:latest
+            ${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:${{ github.sha }}
+
+      - name: Logout from Amazon ECR (Optional)
+        if: always() && steps.check_aws_credentials.outputs.aws_credentials_exist == 'true'
+        uses: docker/login-action@v3
+        with:
+          ecr: auto
+          logout: true
+
+      # ==========================================================
+      # 3. Docker Hub 로그인 및 푸시 (AWS 자격 증명 없을 시 - 대안)
+      # ==========================================================
+      - name: Login to Docker Hub (Fallback if no AWS credentials)
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && secrets.DOCKER_USERNAME && secrets.DOCKER_TOKEN
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+      - name: Build and push Docker image to Docker Hub (Fallback)
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && secrets.DOCKER_USERNAME && secrets.DOCKER_TOKEN
+        uses: docker/build-push-action@v5
         with:
-          context: . # Dockerfile이 있는 경로
+          context: .
           push: true
           tags: |
-            my_organization/my_app:latest
-            my_organization/my_app:${{ github.sha }} # 커밋 SHA를 태그로 사용 (버전 관리)
-            # my_organization/my_app:${{ github.run_number }} # 워크플로우 실행 번호를 태그로 사용
+            ${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:latest
+            ${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:${{ github.sha }}
 
+      - name: Local Build Only (If no ECR/Docker Hub credentials)
+        if: steps.check_aws_credentials.outputs.aws_credentials_exist == 'false' && (!secrets.DOCKER_USERNAME || !secrets.DOCKER_TOKEN)
+        run: |
+          echo "No AWS ECR or Docker Hub credentials found. Building Docker image locally only."
+          docker build -t my-local-image:latest .
+          echo "Local build complete. Image not pushed to any registry."
+
+      # ==========================================================
+      # 4. 배포 (옵션)
+      # ==========================================================
       - name: Deploy to Server (Optional - SSH 또는 배포 스크립트 실행)
         # 이 부분은 실제 배포 환경에 따라 달라집니다.
-        # 예: SSH를 통해 서버에 접속하여 docker-compose pull && docker-compose up -d 실행
+        # ECR에 푸시했는지, Docker Hub에 푸시했는지에 따라 이미지 경로가 달라질 수 있습니다.
+        # 이 단계에서도 자격 증명 유무에 따라 조건을 추가할 수 있습니다.
+        if: (steps.check_aws_credentials.outputs.aws_credentials_exist == 'true' || (secrets.DOCKER_USERNAME && secrets.DOCKER_TOKEN)) && secrets.SSH_HOST
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            echo "Deploying the latest image..."
+            # ECR 또는 Docker Hub 이미지 경로를 동적으로 선택
+            if [ "${{ steps.check_aws_credentials.outputs.aws_credentials_exist }}" == "true" ]; then
+              IMAGE_TAG="${{ secrets.ECR_REGISTRY_URL }}/my-ecr-repo:latest"
+            else
+              IMAGE_TAG="${{ secrets.DOCKER_USERNAME }}/my-dockerhub-repo:latest"
+            fi
+            
             cd /path/to/your/app_on_server
-            docker-compose pull myapp
-            docker-compose up -d --no-deps myapp # 의존성 없이 특정 서비스만 업데이트
-            docker image prune -f # 오래된 이미지 삭제
+            docker pull $IMAGE_TAG
+            # docker-compose 사용 시
+            # docker-compose pull myapp
+            # docker-compose up -d --no-deps myapp
+            # 또는 직접 컨테이너 재시작
+            docker stop my_application_container || true
+            docker rm my_application_container || true
+            docker run -d --name my_application_container $IMAGE_TAG
+            
+            docker image prune -f # 오래된 이미지 정리
+            echo "Deployment complete."
