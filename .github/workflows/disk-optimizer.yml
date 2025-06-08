@@ -5,7 +5,7 @@ on:
     inputs:
       tag_name:
         description: '생성할 Git 태그 이름 (예: v1.0.0, release-20250608)'
-        required: false # 태그 생성을 선택 사항으로 만들기 위해 false로 설정
+        required: false
         type: string
 
 jobs:
@@ -31,30 +31,83 @@ jobs:
           echo "Docker 정리 후 디스크 사용량:"
           df -h
 
-      - name: 캐시 디렉토리 생성 확인
-        # 'Path Validation Error' 방지를 위해 캐시 디렉토리가 존재하는지 확인하고 없으면 생성
-        run: |
-          mkdir -p ~/.npm # Node.js 프로젝트의 경우 npm 캐시 디렉토리
-          # 다른 프로젝트 유형에 따라 필요한 캐시 디렉토리 추가:
-          # mkdir -p ~/.m2/repository # Maven
-          # mkdir -p ~/.cache/pip     # Python pip 캐시
-          echo "캐시 디렉토리 생성이 확인되었습니다."
+      # ==========================================================
+      # ⚠️ 중요: 아래 종속성 설치 및 캐시 설정을 프로젝트 유형에 맞게 선택/수정하세요.
+      # ==========================================================
 
-      # --- 캐시 최적화 (속도 향상) ---
-      - name: 종속성 캐시 복원
+      # --- Case 1: Node.js 프로젝트인 경우 (package.json이 있을 때) ---
+      - name: package.json 존재 여부 확인 (Node.js 프로젝트용)
+        id: check_package_json
+        run: |
+          if [ -f "package.json" ]; then
+            echo "::set-output name=exists::true"
+            echo "package.json 파일이 현재 디렉토리에서 발견되었습니다."
+          else
+            echo "::set-output name=exists::false"
+            echo "package.json 파일이 현재 디렉토리에서 발견되지 않았습니다."
+          fi
+
+      - name: Node.js 및 npm 캐시 디렉토리 생성 및 종속성 캐시 복원
+        if: steps.check_package_json.outputs.exists == 'true'
         uses: actions/cache@v4
         with:
-          path: ~/.npm # 패키지 관리자가 종속성을 캐시하는 경로
+          path: ~/.npm # npm 캐시 경로
           key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-npm-
 
-      # --- 빌드 프로세스 (주요 작업) ---
-      - name: Node.js 종속성 설치 (예시)
-        # 캐시가 적중되면 이 단계는 훨씬 빨라지거나 npm/yarn에 의해 건너뛸 수 있습니다.
+      - name: Node.js 종속성 설치
+        if: steps.check_package_json.outputs.exists == 'true'
         run: |
-          npm install # 또는 npm ci, yarn 등 실제 프로젝트의 종속성 설치 명령
-          echo "종속성이 설치되었습니다."
+          npm ci # package-lock.json을 기반으로 깨끗한 설치 (일관성 유지)
+          # 또는 npm install # package.json을 기반으로 일반 설치 (버전 업데이트 가능)
+          echo "Node.js 종속성이 설치되었습니다."
+
+      - name: Node.js 종속성 캐시 저장
+        if: steps.check_package_json.outputs.exists == 'true' && success()
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+
+
+      # --- Case 2: Java Spring Boot 프로젝트인 경우 (Maven/Gradle 사용) ---
+      # ⚠️ 만약 Node.js 프로젝트가 아니고 Spring Boot Java 프로젝트라면,
+      #    위의 'Node.js' 관련 스텝들을 모두 제거하고 아래 스텝들을 활성화하세요.
+      #    또한 .m2 또는 .gradle 캐시 경로를 사용하도록 캐시 설정을 변경해야 합니다.
+
+      # - name: Java 및 Maven 캐시 디렉토리 생성 및 종속성 캐시 복원 (Maven 프로젝트용)
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: ~/.m2/repository # Maven 로컬 저장소 캐시 경로
+      #     key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-maven-
+
+      # - name: Java 및 Gradle 캐시 디렉토리 생성 및 종속성 캐시 복원 (Gradle 프로젝트용)
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: ~/.gradle/caches # Gradle 캐시 경로
+      #     key: ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle*', '**/gradle-wrapper.properties') }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-gradle-
+
+      # - name: Java 개발 환경 설정 (Maven/Gradle 프로젝트용)
+      #   uses: actions/setup-java@v4
+      #   with:
+      #     distribution: 'temurin' # Adoptium Temurin 또는 원하는 Java 배포판 선택
+      #     java-version: '17' # 프로젝트에 맞는 Java 버전 설정 (예: '8', '11', '17', '21')
+      #     cache: 'maven' # 또는 'gradle'
+
+      # - name: Maven 프로젝트 빌드 (Maven 프로젝트용)
+      #   run: |
+      #     mvn clean install -DskipTests
+      #   # 또는 mvn clean package -DskipTests
+
+      # - name: Gradle 프로젝트 빌드 (Gradle 프로젝트용)
+      #   run: |
+      #     gradlew build -x test # 윈도우 환경인 경우 gradlew.bat build -x test
+      #   # 또는 ./gradlew build -x test
 
       # --- 사용자 정의 디스크 최적화 스크립트 실행 ---
       - name: 사용자 정의 디스크 최적화 스크립트 실행
@@ -65,31 +118,19 @@ jobs:
           echo "사용자 정의 스크립트 실행 후 디스크 사용량:"
           df -h
 
-      # --- 캐시 저장 (속도 향상) ---
-      - name: 종속성 캐시 저장
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-        if: success() # 이전 단계가 성공적으로 완료된 경우에만 캐시 저장
-
       # --- Git 태그 생성 및 푸시 (새로운 기능) ---
       - name: Git 태그 생성 및 푸시 (선택 사항)
-        if: github.event.inputs.tag_name != '' # tag_name 입력값이 있을 경우에만 실행
+        if: github.event.inputs.tag_name != ''
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 기본 GITHUB_TOKEN 사용
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME=${{ github.event.inputs.tag_name }}
           echo "새로운 Git 태그 '$TAG_NAME'을 생성하고 푸시합니다."
 
-          # Git 설정: GitHub Actions에서 태그를 푸시할 수 있도록 사용자 정보 설정
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 태그 생성
           git tag $TAG_NAME
-
-          # 생성된 태그를 GitHub 리포지토리로 푸시
           git push origin $TAG_NAME
 
           echo "태그 '$TAG_NAME' 푸시 완료."
