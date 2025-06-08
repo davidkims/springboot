@@ -312,6 +312,12 @@
 - **설명:**
   - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
 
+### ✨ Scorecard supply-chain security (`.github/workflows/scorecard.yml`)
+- **용량:** 3427 바이트
+- **최신 갱신:** 2025년 06월 08일 10시 09분 23초 KST
+- **설명:**
+  - 이 워크플로우에 대한 구체적인 설명이 필요합니다. 워크플로우 파일을 검토해주세요.
+
 ### ✨ Download Security Regulations (`.github/workflows/download-security-regulations.yml`)
 - **용량:** 2473 바이트
 - **최신 갱신:** 2025년 06월 07일 23시 34분 14초 KST
@@ -581,6 +587,11 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **파일 타입:** `text/plain`
 - **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
 
+#### 📄 `.github/workflows/scorecard.yml`
+- **파일 크기:** 3427 바이트
+- **파일 타입:** `text/plain`
+- **특이사항:** 민감 정보(password, secret, api_key 등) 키워드 발견 가능성. 외부 노출에 주의하고 GitHub Secrets 사용을 권장합니다.
+
 #### 📄 `.github/workflows/security-codeql.yml`
 - **파일 크기:** 776 바이트
 - **파일 타입:** `text/plain`
@@ -707,5 +718,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 06월 08일 01시 06분 22초 KST
+2025년 06월 08일 01시 09분 54초 KST
 
