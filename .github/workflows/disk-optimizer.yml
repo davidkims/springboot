@@ -1,15 +1,79 @@
-name: Disk Optimizer
+name: Disk & Cache Optimizer
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 수동으로 워크플로우를 실행할 수 있도록 허용
 
 jobs:
   optimize:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    runs-on: ubuntu-latest # 최신 Ubuntu 환경에서 실행
 
-      - name: Run disk optimization
+    steps:
+      - name: 리포지토리 체크아웃
+        uses: actions/checkout@v4 # 최신 버전의 checkout 액션 사용
+
+      # ==========================================================
+      # 1. GitHub Actions 캐시 설정 (속도 개선의 핵심)
+      #    - 종속성(dependency) 설치 시간 단축에 크게 기여합니다.
+      #    - 여기서는 'node_modules' 예시이지만, 프로젝트에 따라 변경하세요 (예: Maven의 .m2, npm의 cache, pip의 venv 등)
+      # ==========================================================
+      - name: 종속성 캐시 복원
+        uses: actions/cache@v4 # 최신 버전의 cache 액션 사용
+        with:
+          path: ~/.npm # 또는 프로젝트의 캐시 경로 (예: ~/.cache/pip, ~/.m2/repository 등)
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }} # OS와 package-lock.json 해시를 기반으로 키 생성
+          restore-keys: |
+            ${{ runner.os }}-npm- # 이전 캐시 키가 변경되어도 복원 시도
+
+      # - name: Build Cache 복원 (필요시 추가)
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: build_output_directory # 빌드 결과물이 저장되는 경로
+      #     key: ${{ runner.os }}-build-${{ github.sha }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-build-
+
+      # ==========================================================
+      # 2. 빌드 환경 초기화 및 Docker 캐시 정리 (디스크 공간 확보)
+      #    - actions/checkout@v4는 기본적으로 .git 디렉토리를 제외한 나머지 파일을 가져옵니다.
+      #    - 이전 빌드에서 남은 Docker 이미지, 볼륨 등을 정리하여 공간을 확보합니다.
+      # ==========================================================
+      - name: 불필요한 Docker 리소스 정리
         run: |
-          bash scripts/optimize_disk.sh .github
+          echo "현재 디스크 사용량 (정리 전):"
+          df -h
+          echo "Docker 이미지 및 볼륨 정리..."
+          docker system prune --all --force --volumes # 모든 Docker 이미지, 컨테이너, 볼륨, 네트워크 정리 (강력함)
+          # docker system prune --force # 컨테이너, 네트워크, 이미지(사용되지 않는), 빌드 캐시만 정리 (덜 강력함)
+          echo "정리 후 디스크 사용량:"
+          df -h
+
+      # ==========================================================
+      # 3. 사용자 정의 디스크 최적화 스크립트 실행
+      #    - 이 스크립트에는 특정 프로젝트에 필요한 추가적인 정리 작업이 포함될 수 있습니다.
+      #    - 예: 임시 파일 삭제, 오래된 로그 삭제 등
+      # ==========================================================
+      - name: 사용자 정의 디스크 최적화 스크립트 실행
+        run: |
+          chmod +x scripts/optimize_disk.sh # 스크립트 실행 권한 부여
+          bash scripts/optimize_disk.sh .github # .github 디렉토리를 인자로 전달 (스크립트 내에서 활용 가능)
+          echo "사용자 정의 최적화 스크립트가 실행되었습니다."
+
+      # ==========================================================
+      # 4. (선택 사항) 다음 빌드를 위한 캐시 저장
+      #    - 종속성 캐시 복원 스텝과 세트로 사용합니다.
+      # ==========================================================
+      - name: 종속성 캐시 저장
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm # 종속성 캐시 경로 (복원 스텝과 동일하게 설정)
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }} # 키는 복원 스텝과 동일하게 설정
+          # 이 스텝은 이전에 저장된 캐시가 없거나 키가 변경되었을 때만 새로운 캐시를 저장합니다.
+          # 빌드가 성공적으로 완료된 경우에만 캐시를 저장하도록 'if' 조건을 추가할 수 있습니다:
+          # if: steps.my-build-step.outcome == 'success' # 예를 들어, 'my-build-step'이 성공했을 때만 저장
+
+      # - name: Build Cache 저장 (필요시 추가)
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: build_output_directory
+      #     key: ${{ runner.os }}-build-${{ github.sha }}
+      #     # if: steps.my-build-step.outcome == 'success'
