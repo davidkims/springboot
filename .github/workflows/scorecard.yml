@@ -1,81 +1,138 @@
-name: Scorecard Supply-Chain Security
-
+# File: .github/workflows/setup-logistics-environment.yml
+name: Setup Logistics Environment
 on:
- echo "branch_protection_rules:"
-  schedule:
-    - cron: '21 2 * * 0' # 매주 일요일 새벽 2시 21분 UTC에 실행
-  push:
-    branches: ["main"]
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
-  analyze:
-    name: Scorecard 분석
+  build-environment:
     runs-on: ubuntu-latest
-    if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
-    permissions:
-      security-events: write
-      id-token: write
-      contents: read
-
     steps:
-      - name: ">> 스텝 시작: 리포지토리 코드 체크아웃"
-        run: echo "--- 리포지토리 체크아웃 스텝 시작 ---"
-      - name: "리포지토리 코드 체크아웃"
-        uses: actions/checkout@v4 # 최신 안정화 버전 태그 사용
-      - name: "<< 스텝 완료: 리포지토리 코드 체크아웃"
-        run: echo "--- 리포지토리 체크아웃 스텝 완료 ---"
 
-      - name: ">> 스텝 시작: OpenSSF Scorecard 분석 실행"
-        run: echo "--- Scorecard 분석 스텝 시작 ---"
-      - name: "OpenSSF Scorecard 분석 실행"
-        # --- 🔴 이 부분을 아래 옵션 중 하나로 수정하세요 🔴 ---
-        # 옵션 1 (권장): 최신 커밋 SHA 사용 (ossf/scorecard-action GitHub 저장소에서 확인)
-        uses: ossf/scorecard-action@1a415a775193984d720b7218684d0b17b01d6706 # 2025년 6월 8일 기준 v2.4.1의 SHA
+      # 1. 레포지토리 체크아웃
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        # 옵션 2 (대안): 최신 안정화 버전 태그 사용 (만약 v2가 유효하지 않다면 v2.4.1 등 특정 태그 시도)
-        # uses: ossf/scorecard-action@v2.4.1 # v2 태그가 안된다면 구체적인 v2.x.x 태그 시도
-
-        with:
-          results_file: results.sarif
-          results_format: sarif
-          publish_results: true
-          # repo_token: ${{ secrets.SCORECARD_TOKEN }} # 필요한 경우 주석 해제
-
-      - name: "Scorecard 분석 결과 확인"
+      # 2. 디스크 슬롯 확보 (50GB)
+      - name: Reserve disk slot
         run: |
-          echo "Scorecard 분석이 완료되었습니다. results.sarif 파일 내용을 확인합니다."
-          if [ -f "results.sarif" ]; then
-            echo "results.sarif 파일이 성공적으로 생성되었습니다."
-            cat results.sarif | head -n 20
+          sudo mkdir -p /opt/logistics/.disk_slot
+          echo "📦 Reserving disk space..."
+          if sudo fallocate -l 50G /opt/logistics/.disk_slot/reserve; then
+            echo "✅ fallocate success"
           else
-            echo "오류: results.sarif 파일이 생성되지 않았습니다."
-            exit 1
+            echo "⚠️ fallocate failed, falling back to dd"
+            sudo dd if=/dev/zero of=/opt/logistics/.disk_slot/reserve bs=1M count=51200 || echo "❌ dd failed"
           fi
-      - name: "<< 스텝 완료: OpenSSF Scorecard 분석 실행"
-        run: echo "--- Scorecard 분석 스텝 완료 ---"
+          sudo chmod -R 777 /opt/logistics/.disk_slot
 
-      - name: ">> 스텝 시작: SARIF 결과를 아티팩트로 업로드"
-        run: echo "--- 아티팩트 업로드 스텝 시작 ---"
-      - name: "SARIF 결과를 아티팩트로 업로드"
-        uses: actions/upload-artifact@v4 # 최신 안정화 버전 태그 사용
+      # 3. 운영 디렉터리 생성 & 권한 설정
+      - name: Create directories
+        run: |
+          sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data}
+          sudo chmod -R 775 /opt/logistics
+
+      # 4. 프로그래밍 언어 런타임 설치
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v4
         with:
-          name: Scorecard SARIF 파일
-          path: results.sarif
-          retention-days: 7
-      - name: "<< 스텝 완료: SARIF 결과를 아티팩트로 업로드"
-        run: echo "--- 아티팩트 업로드 스텝 완료 ---"
+          python-version: '3.10'
 
-      - name: ">> 스텝 시작: 결과를 GitHub 코드 스캐닝 대시보드에 업로드"
-        run: echo "--- 코드 스캐닝 업로드 스텝 시작 ---"
-      - name: "결과를 GitHub 코드 스캐닝 대시보드에 업로드"
-        uses: github/codeql-action/upload-sarif@v3 # 최신 안정화 버전 태그 사용
+      - name: Setup Java 11 (Temurin)
+        uses: actions/setup-java@v3
         with:
-          sarif_file: results.sarif
-      - name: "<< 스텝 완료: 결과를 GitHub 코드 스캐닝 대시보드에 업로드"
-        run: echo "--- 코드 스캐닝 업로드 스텝 완료 ---"
+          distribution: 'temurin'
+          java-version: '11'
 
-      - name: ">> 워크플로우 실행 종료"
-        run: echo "--- 워크플로우 실행이 성공적으로 완료되었습니다 ---"
+      - name: Setup .NET 7
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '7.0.x'
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      # 5. 데이터베이스 설치 및 기동
+      - name: Install MySQL Server
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+          sudo systemctl enable mysql
+          sudo systemctl start mysql
+
+      - name: Install PostgreSQL
+        run: |
+          sudo apt-get install -y postgresql postgresql-contrib
+          sudo systemctl enable postgresql
+          sudo systemctl start postgresql
+
+      - name: Install MongoDB
+        run: |
+          wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo apt-key add -
+          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/6.0 multiverse" \
+            | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+          sudo apt-get update
+          sudo apt-get install -y mongodb-org
+          sudo systemctl enable mongod
+          sudo systemctl start mongod
+
+      - name: Run Oracle XE in Docker
+        run: |
+          sudo docker pull quay.io/license/oracle-xe:latest
+          sudo docker run -d --name oracle-xe -p 1521:1521 quay.io/license/oracle-xe:latest
+
+      # 6. 워크플로우 엔진/플랫폼 설치
+      - name: Install Apache Airflow
+        run: |
+          python -m pip install --upgrade pip
+          pip install apache-airflow==2.6.0 \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.6.0/constraints-3.10.txt"
+          airflow db init
+
+      - name: Install Camunda BPM Platform
+        run: |
+          wget https://downloads.camunda.cloud/release/camunda-bpm/tomcat/7.19/camunda-bpm-tomcat-7.19.0.tar.gz \
+            -O camunda.tar.gz
+          sudo mkdir -p /opt/logistics/camunda
+          sudo tar xzf camunda.tar.gz -C /opt/logistics/camunda --strip-components=1
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global sfdx-cli
+          sfdx update
+
+      # 7. 물류 DB(MySQL)에 가상 고객 데이터 및 카드 거래 테이블 생성 (echo 방식)
+      - name: Initialize logistics MySQL DB
+        run: |
+          sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;"
+          SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
+
+          # (재)생성 디렉터리 확인
+          sudo mkdir -p $(dirname $SCRIPT)
+
+          # SQL 스크립트를 echo로 한 줄씩 작성
+          echo "CREATE TABLE customers ("                                > $SCRIPT
+          echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"         >> $SCRIPT
+          echo "  name VARCHAR(100) NOT NULL"                          >> $SCRIPT
+          echo ");"                                                    >> $SCRIPT
+          echo ""                                                      >> $SCRIPT
+          echo "CREATE TABLE card_transactions ("                      >> $SCRIPT
+          echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT,"     >> $SCRIPT
+          echo "  customer_id INT NOT NULL,"                          >> $SCRIPT
+          echo "  card_type ENUM('credit','debit') NOT NULL,"         >> $SCRIPT
+          echo "  amount DECIMAL(10,2) NOT NULL,"                     >> $SCRIPT
+          echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> $SCRIPT
+          echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> $SCRIPT
+          echo ");"                                                    >> $SCRIPT
+          echo ""                                                      >> $SCRIPT
+          echo "INSERT INTO customers (name) VALUES ('Alice'),('Bob'),('Charlie');" >> $SCRIPT
+          echo ""                                                      >> $SCRIPT
+          echo "INSERT INTO card_transactions (customer_id, card_type, amount) VALUES" >> $SCRIPT
+          echo "  (1,'credit',250.00),"                                >> $SCRIPT
+          echo "  (1,'debit',50.00),"                                  >> $SCRIPT
+          echo "  (2,'credit',120.00),"                                >> $SCRIPT
+          echo "  (3,'debit',75.50);"                                  >> $SCRIPT
+
+          # 스크립트 실행
+          sudo mysql logistics < $SCRIPT
