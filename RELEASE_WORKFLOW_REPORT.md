@@ -1,0 +1,88 @@
+# 릴리즈 워크플로우 전체 설명 보고서
+
+이 문서는 저장소의 `Release` 워크플로우(`.github/workflows/Release.yml`)에서 수행되는 모든 단계와 코드를 한눈에 볼 수 있도록 정리한 보고서입니다.
+
+## 워크플로우 목적
+- `v1.0.0` 처럼 `v` 로 시작하는 태그가 푸시될 때 실행됩니다.
+- Swift CLI 애플리케이션을 빌드하고 실행 파일을 압축한 후 GitHub Release를 생성합니다.
+
+## 전체 워크플로우 코드
+```yaml
+# 파일명: .github/workflows/release.yml
+# 설명: 이 워크플로우는 'v'로 시작하는 새 태그(예: v1.0.0)가 리포지토리에 푸시될 때마다
+#        Swift CLI 애플리케이션을 빌드하고 GitHub Release를 자동으로 생성합니다.
+
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*' # 'v1.0.0', 'v1.0.1-beta' 등 'v'로 시작하는 모든 태그에 의해 트리거
+
+jobs:
+  release:
+    runs-on: ubuntu-latest # macOS 바이너리가 필요한 경우 'macos-latest'로 변경
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4 # 리포지토리 코드를 가져옵니다.
+
+    - name: Install Swift Toolchain
+      # 빌드 및 테스트 워크플로우와 동일한 Swift 버전 사용 권장
+      uses: swift-actions/setup-swift@v2
+      with:
+        swift-version: '5.10'
+
+    - name: Get Project Name
+      id: get_project_name
+      run: |
+        # 리포지토리 이름이 Swift 실행 파일의 이름과 동일하다고 가정합니다.
+        # 필요하다면 Package.swift 파일에서 실제 실행 파일 이름을 파싱하도록 수정할 수 있습니다.
+        PROJECT_NAME=$(basename ${{ github.repository }})
+        echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
+
+    - name: Build Release Executable
+      # Package.swift 파일이 리포지토리의 루트 디렉토리에 있다고 가정합니다.
+      run: swift build -c release
+
+    - name: Prepare Release Assets
+      id: prepare_assets
+      run: |
+        EXECUTABLE_NAME=${{ steps.get_project_name.outputs.project_name }}
+        TAG_NAME=${{ github.ref_name }} # 예: v1.0.0
+        RUNNER_OS_LOWER=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]') # 운영체제 이름을 소문자로 변환
+        ARCHIVE_NAME="${EXECUTABLE_NAME}-${TAG_NAME}-${RUNNER_OS_LOWER}.zip"
+        RELEASE_DIR="release_assets"
+
+        mkdir -p "${RELEASE_DIR}"
+
+        # 컴파일된 실행 파일 복사
+        cp ".build/release/${EXECUTABLE_NAME}" "${RELEASE_DIR}/${EXECUTABLE_NAME}"
+
+        # 실행 파일을 압축 (zip)하여 릴리즈 자산으로 준비
+        cd "${RELEASE_DIR}"
+        zip -r "../${ARCHIVE_NAME}" "${EXECUTABLE_NAME}"
+        cd - # 원래 디렉토리로 돌아가기
+        echo "archive_path=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Get Release Notes (Optional)
+      id: get_release_notes
+      run: |
+        # 릴리즈 노트를 생성하는 방법은 여러 가지가 있습니다. 여기서는 간단한 메시지를 사용합니다.
+        echo "release_body=🚀 New Release: ${{ github.ref_name }}" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2 # GitHub 릴리즈를 생성하는 액션입니다.
+      with:
+        tag_name: ${{ github.ref }} # 워크플로우를 트리거한 태그 (예: refs/tags/v1.0.0)
+        name: Release ${{ github.ref_name }} # GitHub 릴리즈에 표시될 이름 (예: v1.0.0)
+        body: ${{ steps.get_release_notes.outputs.release_body }} # 릴리즈 본문 내용
+        files: |
+          ${{ steps.prepare_assets.outputs.archive_path }} # 준비된 압축 파일 첨부
+          # 다른 첨부할 파일이 있다면 여기에 추가 (예: "path/to/my-doc.pdf")
+        draft: false # 초안으로 릴리즈를 생성하려면 true로 변경
+        prerelease: false # 사전 릴리즈(베타 등)인 경우 true로 변경
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub에서 자동으로 제공하는 토큰 (쓰기 권한 필요)
+```
+
