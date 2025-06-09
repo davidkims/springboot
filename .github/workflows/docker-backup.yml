@@ -14,33 +14,34 @@ jobs:
     outputs:
       docker_ready: true
     steps:
-      - name: Remove old Docker / containerd packages
+      - name: Removing old Docker / containerd packages
         run: |
-          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc || true
+          echo "🗑️  Removing legacy Docker packages..."
+          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc || echo "No legacy packages to remove."
 
-      - name: Install prerequisites
+      - name: Installing prerequisites
         run: |
+          echo "🔧 Installing prerequisites: ca-certificates, curl, gnupg, lsb-release..."
           sudo apt-get update
-          sudo apt-get install -y \
-            ca-certificates \
-            curl \
-            gnupg \
-            lsb-release
+          sudo apt-get install -y ca-certificates curl gnupg lsb-release
 
-      - name: Add Docker’s official GPG key
+      - name: Adding Docker’s official GPG key
         run: |
+          echo "🔑 Adding Docker GPG key..."
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
             | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-      - name: Set up Docker stable repository
+      - name: Setting up Docker stable repository
         run: |
+          echo "📦 Setting up Docker stable repository..."
           echo \
             "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
             https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
             | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-      - name: Install Docker Engine & CLI
+      - name: Installing Docker Engine & CLI
         run: |
+          echo "🚀 Installing Docker Engine & CLI..."
           sudo apt-get update
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io
 
@@ -52,19 +53,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure Dockerfile exists
+        run: |
+          echo "📝 Checking for Dockerfile..."
+          if [ ! -f Dockerfile ]; then
+            echo "📋 Dockerfile not found — creating with echo commands..."
+            echo "FROM python:3.10-slim" > Dockerfile
+            echo "WORKDIR /app" >> Dockerfile
+            echo "COPY . ." >> Dockerfile
+            echo "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi" >> Dockerfile
+            echo 'CMD ["python", "app.py"]' >> Dockerfile
+            echo "✅ Dockerfile created."
+          else
+            echo "✅ Dockerfile already exists."
+          fi
+
       - name: Build Docker image
         run: |
+          echo "🔨 Building Docker image: finance-transactions:latest..."
           docker build -t finance-transactions:latest .
 
       - name: Restart finance-transactions container
         run: |
+          echo "♻️  Restarting finance-transactions container..."
           if docker ps -a --format '{{.Names}}' | grep -q '^finance-transactions$'; then
+            echo "🛑 Stopping and removing existing container..."
             docker rm -f finance-transactions
           fi
+          echo "▶️  Launching new container with volume mount..."
           docker run -d \
             --name finance-transactions \
             -v finance-data:/data \
             finance-transactions:latest
+          echo "✅ Container is up."
 
   backup:
     if: github.event_name == 'schedule'
@@ -76,30 +97,37 @@ jobs:
       - name: Create raw backups (image, container, volume)
         run: |
           TIMESTAMP=$(date +'%Y%m%d%H%M')
-          # 1) 이미지 백업
+          echo "📦 Creating raw backups with timestamp ${TIMESTAMP}..."
+          echo "   • Saving image..."
           docker save finance-transactions:latest \
             | gzip > finance-transactions_${TIMESTAMP}.tar.gz
-          # 2) 컨테이너 파일시스템 백업
+          echo "   • Exporting container filesystem..."
           docker export finance-transactions \
             | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
-          # 3) 볼륨 데이터 백업
+          echo "   • Archiving volume data..."
           docker run --rm \
             -v finance-data:/data \
             -v $PWD:/backup \
             ubuntu:latest \
             bash -c "cd /data && tar czf /backup/volume_${TIMESTAMP}.tar.gz ."
+          echo "✅ Raw backups created."
 
       - name: Encrypt all backups with GPG
         run: |
+          echo "🔒 Encrypting backups with GPG..."
           for F in *_${TIMESTAMP}.tar.gz; do
+            echo "   • Encrypting $F..."
             gpg --batch --yes \
                 --passphrase "$BACKUP_PASSPHRASE" \
                 -c "$F"
             rm "$F"
           done
+          echo "✅ All backups encrypted."
 
       - name: Upload encrypted artifacts
         uses: actions/upload-artifact@v3
         with:
           name: docker-backup-${{ github.run_id }}
           path: '*.tar.gz.gpg'
+        run: |
+          echo "☁️  Uploaded encrypted artifacts to GitHub."
