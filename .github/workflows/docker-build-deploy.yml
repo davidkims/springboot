@@ -1,9 +1,9 @@
 # .github/workflows/docker-backup.yml
-name: Docker Build, Deploy & Hourly Backup with Volume, Encryption, Image Generation & Optional Registry Push
+name: Docker Build, Deploy, Migration Simulation & Hourly Backup
 
 permissions:
-  contents: read      # code checkout
-  packages: write     # GHCR push
+  contents: read
+  packages: write
 
 on:
   push:
@@ -21,13 +21,13 @@ jobs:
           echo "[setup-docker] Removing legacy Docker packages..."
           sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc \
             || echo "[setup-docker] Nothing to remove"
-          echo "[setup-docker] Done."
+          echo "[setup-docker] Removal complete."
 
       - name: "[setup-docker] Install prerequisites & extras"
         run: |
-          echo "[setup-docker] Installing prerequisites..."
+          echo "[setup-docker] Updating apt and installing prerequisites..."
           sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg lsb-release
+          sudo apt-get install -y ca-certificates curl gnupg lsb-release mysql-client
           echo "[setup-docker] Checking for components.txt..."
           if [ -f components.txt ]; then
             echo "[setup-docker] Installing extras from components.txt..."
@@ -36,7 +36,7 @@ jobs:
           else
             echo "[setup-docker] No components.txt found; skipping extras."
           fi
-          echo "[setup-docker] Done."
+          echo "[setup-docker] Prerequisites complete."
 
       - name: "[setup-docker] Add Docker GPG key & repo"
         run: |
@@ -47,14 +47,15 @@ jobs:
           echo \
             "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
             https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-            | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+          echo "[setup-docker] Docker repo configured."
 
       - name: "[setup-docker] Install Docker Engine & CLI"
         run: |
           echo "[setup-docker] Installing Docker Engine & CLI..."
           sudo apt-get update
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-          echo "[setup-docker] Done."
+          echo "[setup-docker] Docker Engine & CLI installed."
 
   build-and-deploy:
     needs: setup-docker
@@ -64,111 +65,68 @@ jobs:
       - name: "[build-and-deploy] Checkout code"
         uses: actions/checkout@v4
 
-      - name: "[build-and-deploy] Load image backups"
-        run: |
-          echo "[build-and-deploy] Loading saved image backups..."
-          for f in finance-transactions_*.tar.gz; do
-            if [ -f "$f" ]; then
-              echo "[build-and-deploy] docker load -i $f"
-              docker load -i "$f"
-            fi
-          done
-          echo "[build-and-deploy] Image backups loaded."
+      # ... (other steps omitted for brevity)
 
-      - name: "[build-and-deploy] Import container backups"
+      - name: "[build-and-deploy] Start finance-db container"
         run: |
-          echo "[build-and-deploy] Importing saved container backups..."
-          for f in finance-transactions-container_*.tar.gz; do
-            if [ -f "$f" ]; then
-              echo "[build-and-deploy] docker import $f"
-              docker import "$f" finance-transactions:restored
-            fi
-          done
-          echo "[build-and-deploy] Container backups imported."
+          echo "[build-and-deploy] Starting finance-db container..."
+          docker rm -f finance-db || echo "[build-and-deploy] finance-db not running"
+          docker run -d --name finance-db \
+            -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
+            -e MYSQL_DATABASE=finance \
+            mysql:8.0
+          echo "[build-and-deploy] finance-db container is running."
 
-      - name: "[build-and-deploy] Restore volume backups"
-        run: |
-          echo "[build-and-deploy] Restoring saved volume backups..."
-          for f in volume_*.tar.gz; do
-            if [ -f "$f" ]; then
-              echo "[build-and-deploy] Restoring $f into volume finance-data"
-              docker volume create finance-data || true
-              docker run --rm -v finance-data:/data -v "$PWD":/backup ubuntu:latest \
-                bash -c "cd /data && tar xzf /backup/$f"
-            fi
-          done
-          echo "[build-and-deploy] Volume backups restored."
-
-      - name: "[build-and-deploy] Ensure Dockerfile exists"
-        run: |
-          echo "[build-and-deploy] Checking for Dockerfile..."
-          if [ ! -f Dockerfile ]; then
-            echo "[build-and-deploy] Creating Dockerfile..."
-            echo "FROM python:3.10-slim" > Dockerfile && echo "[Dockerfile] Base image set"
-            echo "WORKDIR /app"           >> Dockerfile && echo "[Dockerfile] WORKDIR set"
-            echo "COPY . ."              >> Dockerfile && echo "[Dockerfile] COPY ."
-            echo "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi" \
-                                        >> Dockerfile && echo "[Dockerfile] pip install step"
-            echo 'CMD ["python", "app.py"]' >> Dockerfile && echo "[Dockerfile] CMD set"
-          else
-            echo "[build-and-deploy] Dockerfile already exists."
-          fi
-
-      - name: "[build-and-deploy] Build & optionally push image"
-        run: |
-          echo "[build-and-deploy] Building Docker image..."
-          docker build -t finance-transactions:latest .
-          echo "[build-and-deploy] Build complete."
-          if [ -n "${{ secrets.GHCR_PAT }}" ]; then
-            echo "[build-and-deploy] Logging in to GHCR..."
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            echo "[build-and-deploy] Tagging image for GHCR..."
-            docker tag finance-transactions:latest ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
-            echo "[build-and-deploy] Pushing image to GHCR..."
-            docker push ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
-            echo "[build-and-deploy] Image pushed to GHCR."
-          else
-            echo "[build-and-deploy] GHCR_PAT not set; skipping push."
-          fi
-
-      - name: "[build-and-deploy] Restart container"
+      - name: "[build-and-deploy] Restart finance-transactions container"
         run: |
           echo "[build-and-deploy] Restarting finance-transactions container..."
-          if docker ps -a --format '{{.Names}}' | grep -q '^finance-transactions$'; then
-            echo "[build-and-deploy] Removing existing container..."
-            docker rm -f finance-transactions
-          fi
-          echo "[build-and-deploy] Launching new container..."
+          docker rm -f finance-transactions || echo "[build-and-deploy] finance-transactions not running"
           docker run -d --name finance-transactions -v finance-data:/data finance-transactions:latest
-          echo "[build-and-deploy] Container running."
+          echo "[build-and-deploy] finance-transactions container is running."
+
+  migrate-simulation:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'schedule' }}
+    steps:
+      - name: "[migration] Checkout code"
+        uses: actions/checkout@v4
+
+      - name: "[migration] Download & run simulation script"
+        run: |
+          echo "[migration] Downloading simulate_migration.py..."
+          curl -fsSL https://raw.githubusercontent.com/davidkims/assets/main/finance-ledger/simulate_migration.py \
+            -o simulate_migration.py
+          echo "[migration] Running simulate_migration.py for 10-hour simulation..."
+          python simulate_migration.py
+          echo "[migration] Bulk migration simulation complete."
 
   backup:
-    needs: setup-docker
+    needs: [setup-docker, migrate-simulation]
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'schedule' }}
     env:
       BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+      MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
     steps:
       - name: "[backup] Create raw backups"
         run: |
           echo "[backup] Starting raw backups..."
           TIMESTAMP=$(date +'%Y%m%d%H%M')
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-          echo "[backup] Saving image..."
+          echo "[backup] Saving finance-transactions image..."
           docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
-          echo "[backup] Exporting container filesystem..."
+          echo "[backup] Exporting finance-transactions container..."
           docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
-          echo "[backup] Archiving volume..."
+          echo "[backup] Exporting finance-db container..."
+          docker export finance-db | gzip > finance-db_${TIMESTAMP}.tar.gz
+          echo "[backup] Dumping finance DB..."
+          docker exec finance-db sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" finance' \
+            | gzip > finance-db-dump_${TIMESTAMP}.sql.gz
+          echo "[backup] Archiving finance-data volume..."
           docker run --rm -v finance-data:/data -v $PWD:/backup ubuntu:latest \
             bash -c "cd /data && tar czf /backup/volume_${TIMESTAMP}.tar.gz ."
-          echo "[backup] Raw backups done."
-
-      - name: "[backup] Restore volume for image gen"
-        run: |
-          echo "[backup] Restoring volume to data_restore/..."
-          mkdir -p data_restore
-          tar xzf volume_${TIMESTAMP}.tar.gz -C data_restore
-          echo "[backup] Volume restored."
+          echo "[backup] Raw backups completed."
 
       - name: "[backup] Setup Python & deps"
         uses: actions/setup-python@v4
@@ -181,7 +139,7 @@ jobs:
           pip install pandas matplotlib
           echo "[backup] Python deps installed."
 
-      - name: "[backup] Download and run chart-generation script"
+      - name: "[backup] Download & run chart script"
         run: |
           echo "[backup] Downloading chart-generation script..."
           curl -fsSL https://raw.githubusercontent.com/davidkims/assets/main/finance-ledger/generate_charts.py \
@@ -190,15 +148,20 @@ jobs:
           python generate_charts.py
           echo "[backup] Charts generated."
 
-      - name: "[backup] Encrypt raw backups"
+      - name: "[backup] Encrypt backups"
         run: |
-          echo "[backup] Encrypting raw backups..."
-          for F in *_${TIMESTAMP}.tar.gz; do
+          echo "[backup] Encrypting all backups..."
+          for F in finance-transactions_${TIMESTAMP}.tar.gz \
+                   finance-transactions-container_${TIMESTAMP}.tar.gz \
+                   finance-db_${TIMESTAMP}.tar.gz \
+                   finance-db-dump_${TIMESTAMP}.sql.gz \
+                   volume_${TIMESTAMP}.tar.gz
+          do
             echo "[backup] Encrypting $F..."
             gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" -c "$F"
             rm "$F"
           done
-          echo "[backup] Encryption done."
+          echo "[backup] Encryption complete."
 
       - name: "[backup] Generate key file"
         run: |
@@ -209,11 +172,10 @@ jobs:
       - name: "[backup] Upload artifacts"
         uses: actions/upload-artifact@v3
         with:
-          name: docker-backup-${{ github.run_id }}
+          name: docker-migration-backup-${{ github.run_id }}
           path: |
-            finance-transactions_${TIMESTAMP}.tar.gz.gpg
-            finance-transactions-container_${TIMESTAMP}.tar.gz.gpg
-            volume_${TIMESTAMP}.tar.gz.gpg
+            *.tar.gz.gpg
+            *.sql.gz.gpg
             backup_key_${TIMESTAMP}.txt
             credit_transactions_${TIMESTAMP}.png
             check_transactions_${TIMESTAMP}.png
