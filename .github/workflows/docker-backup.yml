@@ -2,47 +2,55 @@
 name: Docker Build, Deploy & Hourly Backup with Volume, Encryption & Optional Registry Push
 
 permissions:
-  contents: read      # 코드 체크아웃용
-  packages: write     # GHCR에 푸시할 때 필요
+  contents: read
+  packages: write
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'  # 매시간 0분 (UTC) 실행
+    - cron: '0 * * * *'  # every hour at minute 0 (UTC)
 
 jobs:
   setup-docker:
     runs-on: ubuntu-latest
-    outputs:
-      docker_ready: true
     steps:
       - name: Remove legacy Docker packages
         run: |
-          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc || echo "Nothing to remove"
+          echo "[setup-docker] Removing legacy Docker packages..."
+          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc || echo "[setup-docker] Nothing to remove"
+          echo "[setup-docker] Legacy removal done."
 
       - name: Install prerequisites
         run: |
+          echo "[setup-docker] Installing prerequisites..."
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl gnupg lsb-release
+          echo "[setup-docker] Prerequisites installed."
 
       - name: Add Docker GPG key
         run: |
+          echo "[setup-docker] Adding Docker GPG key..."
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
             | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "[setup-docker] GPG key added."
 
       - name: Configure Docker repository
         run: |
+          echo "[setup-docker] Configuring Docker repository..."
           echo \
             "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
             https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
             | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          echo "[setup-docker] Repository configured."
 
       - name: Install Docker Engine & CLI
         run: |
+          echo "[setup-docker] Installing Docker Engine & CLI..."
           sudo apt-get update
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+          echo "[setup-docker] Docker Engine & CLI installed."
 
   build-and-deploy:
     needs: setup-docker
@@ -52,24 +60,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Ensure Dockerfile exists
+      - name: Ensure Dockerfile exists (with echo-based creation)
         run: |
+          echo "[build-and-deploy] Checking for Dockerfile..."
           if [ ! -f Dockerfile ]; then
-            echo "FROM python:3.10-slim" > Dockerfile
-            echo "WORKDIR /app" >> Dockerfile
-            echo "COPY . ." >> Dockerfile
-            echo "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi" >> Dockerfile
-            echo 'CMD ["python", "app.py"]' >> Dockerfile
-            echo "✅ Dockerfile created."
+            echo "[build-and-deploy] Dockerfile not found — creating via echo..."
+            echo "FROM python:3.10-slim" > Dockerfile && echo "[Dockerfile] Wrote base image"
+            echo "WORKDIR /app" >> Dockerfile && echo "[Dockerfile] Wrote WORKDIR"
+            echo "COPY . ." >> Dockerfile && echo "[Dockerfile] Wrote COPY instruction"
+            echo "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi" >> Dockerfile && echo "[Dockerfile] Wrote RUN pip install"
+            echo 'CMD ["python", "app.py"]' >> Dockerfile && echo "[Dockerfile] Wrote CMD"
+            echo "[build-and-deploy] Dockerfile created."
           else
-            echo "✅ Dockerfile already exists."
+            echo "[build-and-deploy] Dockerfile already exists."
           fi
 
       - name: Build Docker image
         run: |
+          echo "[build-and-deploy] Building image finance-transactions:latest..."
           docker build -t finance-transactions:latest .
+          echo "[build-and-deploy] Image build complete."
 
-      - name: Login to GHCR (conditional)
+      - name: Login to GHCR (if PAT)
         if: ${{ secrets.GHCR_PAT != '' }}
         uses: docker/login-action@v2
         with:
@@ -79,22 +91,28 @@ jobs:
 
       - name: Skip GHCR login if no PAT
         if: ${{ secrets.GHCR_PAT == '' }}
-        run: echo "⚠️  GHCR_PAT not set — skipping registry login & push."
+        run: |
+          echo "[build-and-deploy] GHCR_PAT not set — skipping login & push."
 
-      - name: Tag & Push to GHCR (conditional)
+      - name: Tag & Push to GHCR (if PAT)
         if: ${{ secrets.GHCR_PAT != '' }}
         run: |
+          echo "[build-and-deploy] Tagging image for GHCR..."
           docker tag finance-transactions:latest ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
+          echo "[build-and-deploy] Pushing image to GHCR..."
           docker push ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
-          echo "✅ Image pushed to GHCR."
+          echo "[build-and-deploy] Image pushed to GHCR."
 
       - name: Restart finance-transactions container
         run: |
+          echo "[build-and-deploy] Restarting finance-transactions container..."
           if docker ps -a --format '{{.Names}}' | grep -q '^finance-transactions$'; then
+            echo "[build-and-deploy] Removing existing container..."
             docker rm -f finance-transactions
           fi
+          echo "[build-and-deploy] Launching new container with volume..."
           docker run -d --name finance-transactions -v finance-data:/data finance-transactions:latest
-          echo "✅ Container restarted."
+          echo "[build-and-deploy] Container restarted."
 
   backup:
     needs: setup-docker
@@ -103,32 +121,36 @@ jobs:
     env:
       BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
     steps:
-      - name: Create raw backups (image, container, volume)
+      - name: Create raw backups
         run: |
+          echo "[backup] Starting raw backups..."
           TIMESTAMP=$(date +'%Y%m%d%H%M')
-          echo "📦 Creating backups at ${TIMESTAMP}..."
+          echo "[backup] Saving image..."
           docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
+          echo "[backup] Exporting container fs..."
           docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
-          docker run --rm \
-            -v finance-data:/data \
-            -v $PWD:/backup \
-            ubuntu:latest \
+          echo "[backup] Archiving volume data..."
+          docker run --rm -v finance-data:/data -v $PWD:/backup ubuntu:latest \
             bash -c "cd /data && tar czf /backup/volume_${TIMESTAMP}.tar.gz ."
-          echo "✅ Raw backups created."
+          echo "[backup] Raw backups created."
 
       - name: Encrypt backups with GPG
         run: |
-          echo "🔒 Encrypting backups..."
+          echo "[backup] Encrypting backups..."
           for F in *_${TIMESTAMP}.tar.gz; do
+            echo "[backup] Encrypting $F..."
             gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" -c "$F"
             rm "$F"
-            echo "   • $F.gpg"
+            echo "[backup] Created $F.gpg"
           done
-          echo "✅ Encryption complete."
+          echo "[backup] Encryption complete."
 
       - name: Upload encrypted artifacts
         uses: actions/upload-artifact@v3
         with:
           name: docker-backup-${{ github.run_id }}
           path: '*.tar.gz.gpg'
-          retention-days: 90
+
+      - name: Confirm upload
+        run: |
+          echo "[backup] Encrypted artifacts uploaded."
