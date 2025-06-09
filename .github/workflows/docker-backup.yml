@@ -2,8 +2,8 @@
 name: Docker Build, Deploy & Hourly Backup with Volume, Encryption & Optional Registry Push
 
 permissions:
-  contents: read        # 코드 체크아웃용
-  packages: write       # GHCR에 푸시할 때 필요
+  contents: read      # 코드 체크아웃용
+  packages: write     # GHCR에 푸시할 때 필요
 
 on:
   push:
@@ -18,28 +18,28 @@ jobs:
     outputs:
       docker_ready: true
     steps:
-      - name: 🗑️ Removing legacy Docker packages
+      - name: Remove legacy Docker packages
         run: |
           sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc || echo "Nothing to remove"
 
-      - name: 🔧 Installing prerequisites
+      - name: Install prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl gnupg lsb-release
 
-      - name: 🔑 Adding Docker GPG key
+      - name: Add Docker GPG key
         run: |
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
             | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-      - name: 📦 Configuring Docker repo
+      - name: Configure Docker repository
         run: |
           echo \
             "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
             https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
             | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-      - name: 🚀 Installing Docker Engine & CLI
+      - name: Install Docker Engine & CLI
         run: |
           sudo apt-get update
           sudo apt-get install -y docker-ce docker-ce-cli containerd.io
@@ -47,12 +47,12 @@ jobs:
   build-and-deploy:
     needs: setup-docker
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
+    if: ${{ github.event_name != 'schedule' }}
     steps:
-      - name: ✅ Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 📝 Ensure Dockerfile exists
+      - name: Ensure Dockerfile exists
         run: |
           if [ ! -f Dockerfile ]; then
             echo "FROM python:3.10-slim" > Dockerfile
@@ -60,64 +60,75 @@ jobs:
             echo "COPY . ." >> Dockerfile
             echo "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi" >> Dockerfile
             echo 'CMD ["python", "app.py"]' >> Dockerfile
-            echo "Dockerfile created."
+            echo "✅ Dockerfile created."
           else
-            echo "Dockerfile already exists."
+            echo "✅ Dockerfile already exists."
           fi
 
-      - name: 🔨 Build Docker image
+      - name: Build Docker image
         run: |
           docker build -t finance-transactions:latest .
 
-      - name: 🐙 Login to GHCR (if GHCR_PAT)
-        if: secrets.GHCR_PAT != ''
+      - name: Login to GHCR (conditional)
+        if: ${{ secrets.GHCR_PAT != '' }}
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
 
-      - name: ⚠️ Skip GHCR login if no PAT
-        if: secrets.GHCR_PAT == ''
-        run: echo "No GHCR_PAT secret — skipping registry login and push."
+      - name: Skip GHCR login if no PAT
+        if: ${{ secrets.GHCR_PAT == '' }}
+        run: echo "⚠️  GHCR_PAT not set — skipping registry login & push."
 
-      - name: 🔖 Tag & Push to GHCR (if GHCR_PAT)
-        if: secrets.GHCR_PAT != ''
+      - name: Tag & Push to GHCR (conditional)
+        if: ${{ secrets.GHCR_PAT != '' }}
         run: |
           docker tag finance-transactions:latest ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
           docker push ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
+          echo "✅ Image pushed to GHCR."
 
-      - name: ✅ Restart finance-transactions container
+      - name: Restart finance-transactions container
         run: |
           if docker ps -a --format '{{.Names}}' | grep -q '^finance-transactions$'; then
             docker rm -f finance-transactions
           fi
           docker run -d --name finance-transactions -v finance-data:/data finance-transactions:latest
+          echo "✅ Container restarted."
 
   backup:
     needs: setup-docker
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    if: ${{ github.event_name == 'schedule' }}
     env:
       BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
     steps:
-      - name: 📦 Create raw backups
+      - name: Create raw backups (image, container, volume)
         run: |
           TIMESTAMP=$(date +'%Y%m%d%H%M')
+          echo "📦 Creating backups at ${TIMESTAMP}..."
           docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
           docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
-          docker run --rm -v finance-data:/data -v $PWD:/backup ubuntu:latest \
+          docker run --rm \
+            -v finance-data:/data \
+            -v $PWD:/backup \
+            ubuntu:latest \
             bash -c "cd /data && tar czf /backup/volume_${TIMESTAMP}.tar.gz ."
+          echo "✅ Raw backups created."
 
-      - name: 🔒 Encrypt backups
+      - name: Encrypt backups with GPG
         run: |
+          echo "🔒 Encrypting backups..."
           for F in *_${TIMESTAMP}.tar.gz; do
             gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" -c "$F"
             rm "$F"
+            echo "   • $F.gpg"
           done
+          echo "✅ Encryption complete."
 
-      - name: ☁️ Upload encrypted artifacts
+      - name: Upload encrypted artifacts
         uses: actions/upload-artifact@v3
         with:
           name: docker-backup-${{ github.run_id }}
           path: '*.tar.gz.gpg'
+          retention-days: 90
