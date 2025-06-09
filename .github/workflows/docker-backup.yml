@@ -6,20 +6,51 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'  # 매시간 0분에 실행 (UTC 기준)
+    - cron: '0 * * * *'  # 매시간 0분 (UTC) 실행
 
 jobs:
+  setup-docker:
+    runs-on: ubuntu-latest
+    outputs:
+      docker_ready: true
+    steps:
+      - name: Remove old Docker / containerd packages
+        run: |
+          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc || true
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            gnupg \
+            lsb-release
+
+      - name: Add Docker’s official GPG key
+        run: |
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+      - name: Set up Docker stable repository
+        run: |
+          echo \
+            "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+      - name: Install Docker Engine & CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
   build-and-deploy:
     if: github.event_name != 'schedule'
+    needs: setup-docker
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install Docker Engine
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y docker.io
 
       - name: Build Docker image
         run: |
@@ -27,37 +58,28 @@ jobs:
 
       - name: Restart finance-transactions container
         run: |
-          # 기존 컨테이너가 있으면 제거
           if docker ps -a --format '{{.Names}}' | grep -q '^finance-transactions$'; then
             docker rm -f finance-transactions
           fi
-          # 백그라운드로 컨테이너 실행
           docker run -d --name finance-transactions finance-transactions:latest
 
   backup:
     if: github.event_name == 'schedule'
-    needs: build-and-deploy
+    needs: setup-docker
     runs-on: ubuntu-latest
     steps:
-      - name: Install Docker Engine
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y docker.io
-
-      - name: Backup Docker image
+      - name: Create image & container backups
         run: |
           TIMESTAMP=$(date +'%Y%m%d%H%M')
-          docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
-
-      - name: Backup container filesystem
-        run: |
-          TIMESTAMP=$(date +'%Y%m%d%H%M')
-          docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
+          # 이미지 백업
+          docker save finance-transactions:latest \
+            | gzip > finance-transactions_${TIMESTAMP}.tar.gz
+          # 컨테이너 파일시스템 백업
+          docker export finance-transactions \
+            | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
 
       - name: Upload backup artifacts
         uses: actions/upload-artifact@v3
         with:
           name: docker-backup-${{ github.run_id }}
-          path: |
-            finance-transactions_${TIMESTAMP}.tar.gz
-            finance-transactions-container_${TIMESTAMP}.tar.gz
+          path: finance-transactions_*.tar.gz
