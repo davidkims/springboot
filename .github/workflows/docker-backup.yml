@@ -1,0 +1,63 @@
+# .github/workflows/docker-backup.yml
+name: Docker Build, Deploy & Hourly Backup
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'  # 매시간 0분에 실행 (UTC 기준)
+
+jobs:
+  build-and-deploy:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Docker Engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+
+      - name: Build Docker image
+        run: |
+          docker build -t finance-transactions:latest .
+
+      - name: Restart finance-transactions container
+        run: |
+          # 기존 컨테이너가 있으면 제거
+          if docker ps -a --format '{{.Names}}' | grep -q '^finance-transactions$'; then
+            docker rm -f finance-transactions
+          fi
+          # 백그라운드로 컨테이너 실행
+          docker run -d --name finance-transactions finance-transactions:latest
+
+  backup:
+    if: github.event_name == 'schedule'
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker Engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+
+      - name: Backup Docker image
+        run: |
+          TIMESTAMP=$(date +'%Y%m%d%H%M')
+          docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
+
+      - name: Backup container filesystem
+        run: |
+          TIMESTAMP=$(date +'%Y%m%d%H%M')
+          docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
+
+      - name: Upload backup artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-backup-${{ github.run_id }}
+          path: |
+            finance-transactions_${TIMESTAMP}.tar.gz
+            finance-transactions-container_${TIMESTAMP}.tar.gz
