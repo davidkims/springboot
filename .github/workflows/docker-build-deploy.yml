@@ -1,185 +1,44 @@
-# .github/workflows/docker-backup.yml
-name: Docker Build, Deploy, Migration Simulation & Hourly Backup
-
-permissions:
-  contents: read
-  packages: write
+# .github/workflows/build-and-deploy.yml
+name: Build & Deploy finance-transactions
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'  # every hour at minute 0 (UTC)
 
 jobs:
-  setup-docker:
-    runs-on: ubuntu-latest
-    steps:
-      - name: "[setup-docker] Remove legacy Docker packages"
-        run: |
-          echo "[setup-docker] Removing legacy Docker packages..."
-          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc \
-            || echo "[setup-docker] Nothing to remove"
-          echo "[setup-docker] Removal complete."
-
-      - name: "[setup-docker] Install prerequisites & extras"
-        run: |
-          echo "[setup-docker] Updating apt and installing prerequisites..."
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg lsb-release mysql-client
-          echo "[setup-docker] Checking for components.txt..."
-          if [ -f components.txt ]; then
-            echo "[setup-docker] Installing extras from components.txt..."
-            xargs sudo apt-get install -y < components.txt
-            echo "[setup-docker] Extras installed."
-          else
-            echo "[setup-docker] No components.txt found; skipping extras."
-          fi
-          echo "[setup-docker] Prerequisites complete."
-
-      - name: "[setup-docker] Add Docker GPG key & repo"
-        run: |
-          echo "[setup-docker] Adding Docker GPG key..."
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-            | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "[setup-docker] Configuring Docker repository..."
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
-            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-            | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-          echo "[setup-docker] Docker repo configured."
-
-      - name: "[setup-docker] Install Docker Engine & CLI"
-        run: |
-          echo "[setup-docker] Installing Docker Engine & CLI..."
-          sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-          echo "[setup-docker] Docker Engine & CLI installed."
-
   build-and-deploy:
-    needs: setup-docker
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'schedule' }}
     steps:
-      - name: "[build-and-deploy] Checkout code"
+      - name: Checkout 코드
         uses: actions/checkout@v4
 
-      # ... (other steps omitted for brevity)
-
-      - name: "[build-and-deploy] Start finance-db container"
+      - name: Docker 설치 및 버전 확인
         run: |
-          echo "[build-and-deploy] Starting finance-db container..."
-          docker rm -f finance-db || echo "[build-and-deploy] finance-db not running"
-          docker run -d --name finance-db \
-            -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
-            -e MYSQL_DATABASE=finance \
-            mysql:8.0
-          echo "[build-and-deploy] finance-db container is running."
+          echo "[build-and-deploy] apt-get update 시작..."
+          sudo apt-get update
+          echo "[build-and-deploy] apt-get update 완료"
 
-      - name: "[build-and-deploy] Restart finance-transactions container"
+          echo "[build-and-deploy] Docker 설치 시작..."
+          sudo apt-get install -y docker.io
+          echo "[build-and-deploy] Docker 설치 완료"
+
+          echo "[build-and-deploy] Docker 버전 확인 시작..."
+          docker --version
+          echo "[build-and-deploy] Docker 버전 확인 완료"
+
+      - name: finance-transactions 이미지 빌드
         run: |
-          echo "[build-and-deploy] Restarting finance-transactions container..."
-          docker rm -f finance-transactions || echo "[build-and-deploy] finance-transactions not running"
-          docker run -d --name finance-transactions -v finance-data:/data finance-transactions:latest
-          echo "[build-and-deploy] finance-transactions container is running."
+          echo "[build-and-deploy] Docker 이미지 빌드 시작..."
+          docker build -t finance-transactions:latest .
+          echo "[build-and-deploy] Docker 이미지 빌드 완료"
 
-  migrate-simulation:
-    needs: build-and-deploy
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'schedule' }}
-    steps:
-      - name: "[migration] Checkout code"
-        uses: actions/checkout@v4
-
-      - name: "[migration] Download & run simulation script"
+      - name: finance-transactions 컨테이너 재시작
         run: |
-          echo "[migration] Downloading simulate_migration.py..."
-          curl -fsSL https://raw.githubusercontent.com/davidkims/assets/main/finance-ledger/simulate_migration.py \
-            -o simulate_migration.py
-          echo "[migration] Running simulate_migration.py for 10-hour simulation..."
-          python simulate_migration.py
-          echo "[migration] Bulk migration simulation complete."
+          echo "[build-and-deploy] 기존 컨테이너 중지/삭제 시도..."
+          docker rm -f finance-transactions || echo "[build-and-deploy] finance-transactions 컨테이너가 실행 중이 아니거나 이미 삭제됨"
 
-  backup:
-    needs: [setup-docker, migrate-simulation]
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' }}
-    env:
-      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
-      MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-    steps:
-      - name: "[backup] Create raw backups"
-        run: |
-          echo "[backup] Starting raw backups..."
-          TIMESTAMP=$(date +'%Y%m%d%H%M')
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-          echo "[backup] Saving finance-transactions image..."
-          docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
-          echo "[backup] Exporting finance-transactions container..."
-          docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
-          echo "[backup] Exporting finance-db container..."
-          docker export finance-db | gzip > finance-db_${TIMESTAMP}.tar.gz
-          echo "[backup] Dumping finance DB..."
-          docker exec finance-db sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" finance' \
-            | gzip > finance-db-dump_${TIMESTAMP}.sql.gz
-          echo "[backup] Archiving finance-data volume..."
-          docker run --rm -v finance-data:/data -v $PWD:/backup ubuntu:latest \
-            bash -c "cd /data && tar czf /backup/volume_${TIMESTAMP}.tar.gz ."
-          echo "[backup] Raw backups completed."
-
-      - name: "[backup] Setup Python & deps"
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: "[backup] Install Python deps"
-        run: |
-          echo "[backup] Installing pandas & matplotlib..."
-          pip install pandas matplotlib
-          echo "[backup] Python deps installed."
-
-      - name: "[backup] Download & run chart script"
-        run: |
-          echo "[backup] Downloading chart-generation script..."
-          curl -fsSL https://raw.githubusercontent.com/davidkims/assets/main/finance-ledger/generate_charts.py \
-            -o generate_charts.py
-          echo "[backup] Running chart-generation script..."
-          python generate_charts.py
-          echo "[backup] Charts generated."
-
-      - name: "[backup] Encrypt backups"
-        run: |
-          echo "[backup] Encrypting all backups..."
-          for F in finance-transactions_${TIMESTAMP}.tar.gz \
-                   finance-transactions-container_${TIMESTAMP}.tar.gz \
-                   finance-db_${TIMESTAMP}.tar.gz \
-                   finance-db-dump_${TIMESTAMP}.sql.gz \
-                   volume_${TIMESTAMP}.tar.gz
-          do
-            echo "[backup] Encrypting $F..."
-            gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" -c "$F"
-            rm "$F"
-          done
-          echo "[backup] Encryption complete."
-
-      - name: "[backup] Generate key file"
-        run: |
-          echo "[backup] Writing backup key file..."
-          echo "$BACKUP_PASSPHRASE" > backup_key_${TIMESTAMP}.txt
-          echo "[backup] Key file created."
-
-      - name: "[backup] Upload artifacts"
-        uses: actions/upload-artifact@v3
-        with:
-          name: docker-migration-backup-${{ github.run_id }}
-          path: |
-            *.tar.gz.gpg
-            *.sql.gz.gpg
-            backup_key_${TIMESTAMP}.txt
-            credit_transactions_${TIMESTAMP}.png
-            check_transactions_${TIMESTAMP}.png
-
-      - name: "[backup] Confirm upload"
-        run: |
-          echo "[backup] All artifacts uploaded."
+          echo "[build-and-deploy] finance-transactions 컨테이너 실행 시작..."
+          docker run -d \
+            --name finance-transactions \
+            -v finance-data:/data \
+            finance-transactions:latest
+          echo "[build-and-deploy] finance-transactions 컨테이너 실행 완료"
