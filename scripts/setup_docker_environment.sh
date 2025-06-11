@@ -13,13 +13,15 @@ install_docker() {
     echo "Installing Docker..."
     sudo apt-get update
     sudo apt-get install -y docker.io
-    if command -v systemctl >/dev/null 2>&1; then
-      sudo systemctl enable --now docker || true
-    else
-      sudo service docker start || true
-    fi
   else
     echo "Docker already installed"
+  fi
+
+  # Ensure the Docker service is running even when already installed
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl start docker || true
+  else
+    sudo service docker start || true
   fi
 }
 
