@@ -1,125 +1,93 @@
-# 파일명: .github/workflows/generate_workflow_run_log.yml
-name: 워크플로 실행 로그 생성
+name: ♾️ Transfer Log Backup & Load - Download Scripts via curl
 
 on:
-  workflow_dispatch: # GitHub Actions 탭에서 수동 트리거 허용
   schedule:
-    # 매주 일요일, 매 5분마다 실행 (UTC 기준)
-    # * 중요: GitHub Actions의 최소 cron 간격은 5분입니다.
-    #        만약 매일 5분마다를 원한다면 '*/5 * * * *'로 변경할 수 있습니다.
-    - cron: '*/5 * * * 0'
-
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/**' # 워크플로우 파일 변경 시에도 트리거
+    - cron: '*/5 * * * *'
 
 jobs:
-  create_log:
+  transfer_log_and_load:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # 리포지토리 콘텐츠에 쓰기 권한 부여 (로그 파일 커밋을 위해 필요)
+
+    env:
+      TRANSFER_LOG_DIR: /opt/logs/transfer
+      BACKUP_DIR:        /opt/backup/transfer
+      MYSQL_ROOT_PASS:   root
+      MYSQL_DB:          transactions
+      REPO_RAW_BASE:     https://raw.githubusercontent.com/${{ github.repository }}/main
 
     steps:
-      - name: 체크아웃 저장소 (전체 기록 포함)
+      - name: 📦 Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # 모든 기록을 가져와 git 작업(특히 pull --ff-only)에 필요합니다.
 
-      - name: 워크플로 실행을 가져오고 로그를 생성합니다.
-        id: fetch_runs
-        env:
-          # GITHUB_TOKEN은 자동으로 제공되며, 리포지토리 콘텐츠에 대한 읽기/쓰기 권한을 가집니다.
-          # (위에서 permissions: contents: write가 설정되어 있어야 합니다.)
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 📁 Prepare directories
         run: |
-          #!/bin/bash
-          REPO="${{ github.repository }}" # 예: 'your-username/your-repo-name'
-          LOG_FILE=".github/workflow_run_log.md"
+          echo "📁 시작: 디렉토리 준비"
+          sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR"
+          sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR"
+          echo "✅ 디렉토리 준비 완료"
 
-          # 로그 파일 헤더 생성 (매번 새로 생성)
-          echo "# GitHub 워크플로 실행 로그" > "$LOG_FILE"
-          echo "" >> "$LOG_FILE"
-          echo "이 파일은 \`워크플로 실행 로그 생성\` 워크플로에 의해 자동으로 생성됩니다." >> "$LOG_FILE"
-          echo "" >> "$LOG_FILE"
-          echo "마지막 업데이트: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> "$LOG_FILE"
-          echo "" >> "$LOG_FILE"
-          echo "| 워크플로 이름 | 실행 ID | 상태 | 결론 | 실행 시간(UTC) | 브랜치 | 커미터 | 커밋 메시지 |" >> "$LOG_FILE"
-          echo "|---|---|---|---|---|---|---|---|" >> "$LOG_FILE"
-
-          # 리포지토리 내 모든 워크플로우 ID 가져오기
-          WORKFLOWS=$(curl --proto '=https' --tlsv1.2 -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$REPO/actions/workflows" | jq -r '.workflows[] | .id')
-
-          # 각 워크플로우에 대해 실행 로그 가져오기
-          for WORKFLOW_ID in $WORKFLOWS; do
-            WORKFLOW_NAME=$(curl --proto '=https' --tlsv1.2 -s -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID" | jq -r '.name')
-
-            # 해당 워크플로우의 최근 100개 완료/진행/큐잉 상태의 실행 로그 가져오기
-            # event 필터링을 통해 push, workflow_dispatch, schedule, pull_request 이벤트만 포함
-            RUNS=$(curl --proto '=https' --tlsv1.2 -s -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_ID/runs?per_page=100&status=completed,in_progress,queued&event=push,workflow_dispatch,schedule,pull_request" \
-              | jq -r '.workflow_runs[] | "\(.name) \(.id) \(.status) \(.conclusion) \(.created_at) \(.head_branch) \(.head_commit.committer.name) \(.head_commit.message | gsub("[\r\n]"; " "))"')
-
-            # 실행 로그가 없는 경우 건너뛰기
-            if [ -z "$RUNS" ]; then
-              continue
-            fi
-
-            # 각 실행 로그를 파싱하여 Markdown 테이블에 추가
-            while IFS= read -r RUN; do
-              # 필드를 공백으로 분리하고 배열에 저장
-              RUN_ARRAY=($RUN)
-              RUN_NAME="${RUN_ARRAY[0]}"
-              RUN_ID="${RUN_ARRAY[1]}"
-              RUN_STATUS="${RUN_ARRAY[2]}"
-              RUN_CONCLUSION="${RUN_ARRAY[3]}"
-              RUN_CREATED_AT="${RUN_ARRAY[4]}"
-              RUN_BRANCH="${RUN_ARRAY[5]}"
-              RUN_COMMITTER="${RUN_ARRAY[6]}"
-
-              # 커밋 메시지는 여러 단어일 수 있으므로 나머지를 모두 가져옵니다.
-              RUN_COMMIT_MESSAGE=""
-              for ((i=7; i<${#RUN_ARRAY[@]}; i++)); do
-                  RUN_COMMIT_MESSAGE+="${RUN_ARRAY[i]} "
-              done
-              RUN_COMMIT_MESSAGE=$(echo "$RUN_COMMIT_MESSAGE" | sed 's/ $//') # 마지막 공백 제거
-
-              # conclusion이 null인 경우 "N/A"로 표시
-              if [ "$RUN_CONCLUSION" == "null" ]; then
-                RUN_CONCLUSION="N/A"
-              fi
-
-              # Markdown 테이블 형식으로 로그 파일에 추가
-              echo "| $RUN_NAME | $RUN_ID | $RUN_STATUS | $RUN_CONCLUSION | $RUN_CREATED_AT | $RUN_BRANCH | $RUN_COMMITTER | $RUN_COMMIT_MESSAGE |" >> "$LOG_FILE"
-            done <<< "$RUNS"
+      - name: 💾 Generate 60 corporate transfer logs
+        run: |
+          echo "🕒 시작: 60건 거래 로그 생성"
+          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt
+          for i in $(seq 1 60); do
+            TS=$(date +'%Y-%m-%d %H:%M:%S')
+            AMT=$((RANDOM % 900000 + 100000))
+            LOG="[TRANSFER] $TS | ID:$i | 금액:₩${AMT} | 계좌:110-123-4567$(printf '%02d' $i)"
+            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-$i.txt" >/dev/null
           done
+          echo "✅ 60건 거래 로그 생성 완료"
 
-      - name: 원격 브랜치와 최종 동기화
-        # 이 단계는 git-auto-commit-action이 푸시하기 전에
-        # 로컬 브랜치가 원격의 최신 상태와 완벽하게 일치하도록 합니다.
+      - name: 📦 Backup logs into timestamped folder
+        id: backup
         run: |
-          LOCAL_BRANCH="${{ github.ref_name }}"
-          echo "최종 동기화를 위해 원격 브랜치 '$LOCAL_BRANCH'를 풀합니다."
-          # --ff-only: fast-forward 병합만 시도합니다. diverged 상태에서는 실패하고 워크플로를 중단합니다.
-          # 이는 diverged 상태를 발생시키지 않고 원격의 최신 커밋을 가져옵니다.
-          git pull --ff-only origin "$LOCAL_BRANCH"
-          if [ $? -ne 0 ]; then
-            echo "오류: 최종 'git pull --ff-only'에 실패했습니다. 원격 브랜치가 diverged되었을 수 있습니다."
-            echo "워크플로우를 중단합니다. 수동으로 'git pull' 또는 'git rebase'가 필요할 수 있습니다."
-            exit 1 # 푸시 거부 방지를 위해 워크플로우를 즉시 종료
-          fi
+          TSF=$(date +'%Y%m%d_%H%M%S')
+          echo "ts_folder=$TSF" >> "$GITHUB_OUTPUT"
+          DEST="$BACKUP_DIR/$TSF"
+          sudo mkdir -p "$DEST"
+          sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/"
+          echo "✅ 백업 완료: $DEST"
 
-      - name: 변경 사항 커밋 및 푸시
-        # 이 액션은 이전 스텝에서 생성된 로그 파일을 자동으로 커밋하고 푸시합니다.
-        # 이전의 'git pull --ff-only' 스텝이 성공했다면, 충돌 없이 푸시될 것입니다.
-        uses: stefanzweifel/git-auto-commit-action@v5
+      - name: 📤 Upload logs artifact
+        uses: actions/upload-artifact@v3
         with:
-          commit_message: "워크플로 실행 로그 업데이트"
-          file_pattern: ".github/workflow_run_log.md" # 변경 사항을 추적할 파일 지정
-          commit_user_name: "GitHub Actions Bot"
-          commit_user_email: "actions@github.com"
-          commit_author: "GitHub Actions Bot <actions@github.com>"
-          branch: ${{ github.ref_name }} # 명시적으로 대상 브랜치 지정
+          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
+          path: $TRANSFER_LOG_DIR/*.txt
+
+      - name: 🗄 Copy backup into .github/files
+        run: |
+          mkdir -p ".github/files/${{ steps.backup.outputs.ts_folder }}"
+          cp "$BACKUP_DIR/${{ steps.backup.outputs.ts_folder }}"/*.txt ".github/files/${{ steps.backup.outputs.ts_folder }}/"
+          echo "✅ .github/files 복사 완료"
+
+      - name: 🛠 Download Dockerfile and helper scripts
+        run: |
+          echo "🛠 시작: 스크립트 및 Dockerfile 다운로드"
+          curl -fsSL "$REPO_RAW_BASE/.github/Dockerfile" -o .github/Dockerfile
+          chmod 644 .github/Dockerfile
+          curl -fsSL "$REPO_RAW_BASE/.github/scripts/build_txn_processor.sh" -o .github/scripts/build_txn_processor.sh
+          chmod +x .github/scripts/build_txn_processor.sh
+          curl -fsSL "$REPO_RAW_BASE/.github/scripts/init_mysql.sh" -o .github/scripts/init_mysql.sh
+          chmod +x .github/scripts/init_mysql.sh
+          curl -fsSL "$REPO_RAW_BASE/.github/scripts/load_transactions.sh" -o .github/scripts/load_transactions.sh
+          chmod +x .github/scripts/load_transactions.sh
+          echo "✅ 다운로드 완료"
+
+      - name: 🛠 Run build_txn_processor.sh
+        run: .github/scripts/build_txn_processor.sh
+
+      - name: 🛠 Run init_mysql.sh
+        run: .github/scripts/init_mysql.sh
+
+      - name: 🛠 Run load_transactions.sh
+        run: .github/scripts/load_transactions.sh
+
+      - name: 📤 Upload backup folder artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
+          path: $BACKUP_DIR/${{ steps.backup.outputs.ts_folder }}
+
+      - name: 📂 Show final backup state
+        run: |
+          ls -R "$BACKUP_DIR" | tail -n 20
