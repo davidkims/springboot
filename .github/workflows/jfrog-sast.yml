@@ -1,54 +1,87 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-# JFrog SAST performs 1st party source code security analysis
-# For more information, see
-# https://docs.jfrog-applications.jfrog.io/jfrog-security-features/sast
-
+# .github/workflows/jfrog-sast-scan.yml
 name: "JFrog SAST Scan"
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   schedule:
-    - cron: '25 4 * * 1'
+    - cron: '25 4 * * 1'  # 매주 월요일 UTC 04:25
 
 env:
-  # [Mandatory]
-  # JFrog platform URL and access token for
-  # a JFrog platform instance with active
-  # JFrog Advanced Security subscription
+  # JFrog 플랫폼 URL 및 토큰을 Secrets에 설정하세요
   JF_URL: ${{ secrets.JF_URL }}
   JF_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+
 jobs:
   analyze:
-    name: Analyze
+    name: JFrog SAST Analyze
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
       security-events: write
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
 
-    - name: Install and configure JFrog CLI
-      run: |
-        npm install -g jfrog-cli-v2-jf
-        echo $JF_TOKEN | jf c add --interactive=false --url=$JF_URL --access-token-stdin
+      - name: 🛠️ Install JFrog CLI
+        run: |
+          echo "📦 Installing JFrog CLI via npm..."
+          if npm install -g jfrog-cli-v2-jf; then
+            echo "✅ Installed JFrog CLI (npm)"
+          else
+            echo "⚠️ npm install failed, falling back to binary download"
+            echo "📥 Downloading JFrog CLI binary..."
+            curl -fL https://getcli.jfrog.io | sh
+            chmod +x jfrog
+            sudo mv jfrog /usr/local/bin/jfrog
+            echo "✅ Installed JFrog CLI (binary)"
+          fi
 
-    - name: Run JFrog SAST
-      run: |
-        jf audit --sast --format=sarif > jfrog_sast.sarif
+      - name: 🔍 Verify JFrog CLI version
+        run: |
+          echo "🔒 Verifying JFrog CLI..."
+          jf --version
 
+      - name: 📁 Create JFrog CLI config directory
+        run: |
+          echo "📂 Setting up config directory..."
+          mkdir -p ~/.jfrog
 
-    - name: Upload output to generate autofix
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: jfrog_sast.sarif
+      - name: 🔑 Configure JFrog CLI
+        run: |
+          echo "🔐 Configuring JFrog CLI with defaults..."
+          jf c add default \
+            --url="$JF_URL" \
+            --access-token="$JF_TOKEN" \
+            --interactive=false
+
+      - name: 📦 Install project dependencies
+        if: fileExists('package.json')
+        run: |
+          echo "📥 Installing project dependencies..."
+          npm ci
+
+      - name: 📂 Create output directory
+        run: |
+          echo "📂 Creating reports directory..."
+          mkdir -p reports
+
+      - name: 🔎 Run JFrog SAST scan
+        run: |
+          echo "🔍 Running JFrog SAST (SAST) scan..."
+          jf audit --sast --format=sarif > reports/jfrog_sast.sarif
+          echo "✅ SAST scan complete, output -> reports/jfrog_sast.sarif"
+
+      - name: ☁️ Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/jfrog_sast.sarif
