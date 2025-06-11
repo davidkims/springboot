@@ -1,7 +1,9 @@
-name: ♾️ Transfer Log Backup - Infinite Resident Container
+name: ♾️ Transfer Log Backup - Cron (60건 Infinite)
 
 on:
-  workflow_dispatch:
+  # 매 5분마다 자동 실행
+  schedule:
+    - cron: '*/5 * * * *'
 
 jobs:
   transfer_log_backup:
@@ -10,40 +12,52 @@ jobs:
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
-      CONTAINER_IMAGE: alpine:latest
 
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📁 Prepare transfer log directory and sample log
+      - name: 📁 Prepare directories
         run: |
           sudo mkdir -p $TRANSFER_LOG_DIR
           sudo mkdir -p $BACKUP_DIR
-          echo "[TRANSFER] 2025-06-02 15:00 송금 ₩1,000,000 완료 | 계좌: 110-123-456789" | sudo tee $TRANSFER_LOG_DIR/transfer-log.txt
           sudo chmod -R 777 $TRANSFER_LOG_DIR $BACKUP_DIR
 
-      - name: 🐳 Run infinite backup container
+      - name: 💾 Generate 60 corporate transfer logs
         run: |
-          docker run -d \
-            --name transfer-backup-resident \
-            --restart unless-stopped \
-            -v $TRANSFER_LOG_DIR:/data/logs:ro \
-            -v $BACKUP_DIR:/data/backup \
-            $CONTAINER_IMAGE \
-            sh -c '
-              echo "♾️ Transfer log backup container started";
-              while true; do
-                TS=$(date +%Y%m%d_%H%M%S);
-                mkdir -p "/data/backup/$TS";
-                cp -r /data/logs/* "/data/backup/$TS/";
-                echo "✅ Backup completed at $TS";
-                sleep 60;
-              done
-            '
+          echo "🕒 Generating 60 corporate transfer logs..."
+          # 기존 로그 삭제 (필요시 주석 처리)
+          sudo rm -f $TRANSFER_LOG_DIR/*.txt
+          for i in $(seq 1 60); do
+            TS_HUMAN=$(date +'%Y-%m-%d %H:%M:%S')
+            AMOUNT=$((RANDOM % 900000 + 100000))
+            LOG="[TRANSFER] $TS_HUMAN | 기업거래ID:$i | 송금금액:₩${AMOUNT} 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
+            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
+          done
 
-      - name: 📂 Show initial backup result
+      - name: 📦 Backup logs into timestamped folder
+        id: backup
         run: |
-          sleep 10
-          echo "📦 백업 디렉토리 상태:"
+          TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
+          echo "ts_folder=$TS_FOLDER" >> $GITHUB_OUTPUT
+          DEST="$BACKUP_DIR/$TS_FOLDER"
+          sudo mkdir -p "$DEST"
+          sudo cp $TRANSFER_LOG_DIR/*.txt "$DEST/"
+          echo "✅ Backed up 60 logs at: $DEST"
+
+      - name: 📤 Upload generated logs as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
+          path: $TRANSFER_LOG_DIR/*.txt
+
+      - name: 📤 Upload backup folder as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
+          path: $BACKUP_DIR/${{ steps.backup.outputs.ts_folder }}
+
+      - name: 📂 Show recent backup state
+        run: |
+          echo "📂 Backup directory tree:"
           ls -R $BACKUP_DIR | tail -n 20
