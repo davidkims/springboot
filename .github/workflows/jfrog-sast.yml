@@ -1,94 +1,63 @@
-# .github/workflows/jfrog-sast-scan.yml
-name: "JFrog SAST Scan"
+name: ♾️ Transfer Log Backup - Cron (60건 Infinite)
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+  # 매 5분마다 자동 실행
   schedule:
-    - cron: '25 4 * * 1'  # 매주 월요일 UTC 04:25
-
-env:
-  # JFrog Platform(Base) URL: https://<your-domain>.jfrog.io
-  JF_URL:           ${{ secrets.JF_URL }}
-  # JFrog Xray URL:  https://<your-domain>.jfrog.io/xray
-  JF_XRAY_URL:      ${{ secrets.JF_XRAY_URL }}
-  # JFrog Access Token (Artifactory/Xray 모두 권한 포함)
-  JF_TOKEN:         ${{ secrets.JF_ACCESS_TOKEN }}
+    - cron: '*/5 * * * *'
 
 jobs:
-  analyze:
-    name: JFrog SAST Analyze
+  transfer_log_backup:
     runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
+
+    env:
+      TRANSFER_LOG_DIR: /opt/logs/transfer
+      BACKUP_DIR: /opt/backup/transfer
 
     steps:
-      - name: Checkout repository
+      - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: 📁 Prepare directories
+        run: |
+          sudo mkdir -p $TRANSFER_LOG_DIR
+          sudo mkdir -p $BACKUP_DIR
+          sudo chmod -R 777 $TRANSFER_LOG_DIR $BACKUP_DIR
+
+      - name: 💾 Generate 60 corporate transfer logs
+        run: |
+          echo "🕒 Generating 60 corporate transfer logs..."
+          # 기존 로그 삭제 (필요시 주석 처리)
+          sudo rm -f $TRANSFER_LOG_DIR/*.txt
+          for i in $(seq 1 60); do
+            TS_HUMAN=$(date +'%Y-%m-%d %H:%M:%S')
+            AMOUNT=$((RANDOM % 900000 + 100000))
+            LOG="[TRANSFER] $TS_HUMAN | 기업거래ID:$i | 송금금액:₩${AMOUNT} 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
+            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
+          done
+
+      - name: 📦 Backup logs into timestamped folder
+        id: backup
+        run: |
+          TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
+          echo "ts_folder=$TS_FOLDER" >> $GITHUB_OUTPUT
+          DEST="$BACKUP_DIR/$TS_FOLDER"
+          sudo mkdir -p "$DEST"
+          sudo cp $TRANSFER_LOG_DIR/*.txt "$DEST/"
+          echo "✅ Backed up 60 logs at: $DEST"
+
+      - name: 📤 Upload generated logs as artifact
+        uses: actions/upload-artifact@v3
         with:
-          node-version: '16'
+          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
+          path: $TRANSFER_LOG_DIR/*.txt
 
-      - name: Install JFrog CLI
-        run: |
-          echo "📦 Installing JFrog CLI via npm..."
-          if npm install -g jfrog-cli-v2-jf; then
-            echo "✅ JFrog CLI installed (npm)"
-          else
-            echo "⚠️ npm install failed, falling back to binary download"
-            curl -fL https://getcli.jfrog.io | sh
-            chmod +x jfrog
-            sudo mv jfrog /usr/local/bin/jfrog
-            echo "✅ JFrog CLI installed (binary)"
-          fi
-
-      - name: Verify JFrog CLI version
-        run: |
-          echo "🔍 Verifying JFrog CLI version..."
-          jf --version
-
-      - name: Create JFrog CLI config dir
-        run: |
-          mkdir -p ~/.jfrog
-          echo "📂 ~/.jfrog directory ready"
-
-      - name: Configure JFrog CLI (Artifactory + Xray)
-        run: |
-          echo "🔐 Configuring JFrog CLI with Artifactory & Xray endpoints..."
-          jf c add default \
-            --url="$JF_URL" \
-            --xray-url="$JF_XRAY_URL" \
-            --access-token="$JF_TOKEN" \
-            --interactive=false
-          echo "✅ JFrog CLI configured (default)"
-
-      - name: Install dependencies if needed
-        run: |
-          if [ -f package.json ]; then
-            echo "📥 package.json found — running npm ci"
-            npm ci
-          else
-            echo "ℹ️ No package.json — skipping npm ci"
-          fi
-
-      - name: Create reports directory
-        run: |
-          mkdir -p reports
-          echo "📂 reports directory created"
-
-      - name: Run JFrog SAST scan
-        run: |
-          echo "🔎 Running JFrog SAST scan..."
-          jf audit --sast --format=sarif > reports/jfrog_sast.sarif
-          echo "✅ Scan complete: reports/jfrog_sast.sarif"
-
-      - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@v3
+      - name: 📤 Upload backup folder as artifact
+        uses: actions/upload-artifact@v3
         with:
-          sarif_file: reports/jfrog_sast.sarif
+          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
+          path: $BACKUP_DIR/${{ steps.backup.outputs.ts_folder }}
+
+      - name: 📂 Show recent backup state
+        run: |
+          echo "📂 Backup directory tree:"
+          ls -R $BACKUP_DIR | tail -n 20
