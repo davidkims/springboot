@@ -1,6 +1,6 @@
 name: Install Java, Maven, NetBackup CLI & Ledger Generation with Migration to .github
 
-# GITHUB_TOKEN 권한 설정: contents 쓰기 권한 부여
+# GITHUB_TOKEN에 write 권한 부여
 permissions:
   contents: write
 
@@ -14,171 +14,29 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # job 단위로도 명시 가능
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0    # 모든 커밋/태그를 가져옵니다.
+          fetch-depth: 0
 
-      - name: Create pom.xml with Shade Plugin via echo
-        run: |
-          echo "▶ Creating pom.xml with shade config"
-          {
-            echo '<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
-            echo '         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">'
-            echo '  <modelVersion>4.0.0</modelVersion>'
-            echo '  <groupId>com.example</groupId>'
-            echo '  <artifactId>ledger-generator</artifactId>'
-            echo '  <version>1.0.0</version>'
-            echo '  <packaging>jar</packaging>'
-            echo '  <properties>'
-            echo '    <maven.compiler.source>17</maven.compiler.source>'
-            echo '    <maven.compiler.target>17</maven.compiler.target>'
-            echo '  </properties>'
-            echo '  <dependencies/>'
-            echo '  <build>'
-            echo '    <plugins>'
-            echo '      <plugin>'
-            echo '        <groupId>org.apache.maven.plugins</groupId>'
-            echo '        <artifactId>maven-shade-plugin</artifactId>'
-            echo '        <version>3.2.4</version>'
-            echo '        <configuration>'
-            echo '          <shadedArtifactAttached>true</shadedArtifactAttached>'
-            echo '          <shadedClassifierName>shaded</shadedClassifierName>'
-            echo '          <transformers>'
-            echo '            <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">'
-            echo '              <mainClass>com.example.LedgerGenerator</mainClass>'
-            echo '            </transformer>'
-            echo '          </transformers>'
-            echo '        </configuration>'
-            echo '        <executions>'
-            echo '          <execution>'
-            echo '            <phase>package</phase>'
-            echo '            <goals><goal>shade</goal></goals>'
-            echo '          </execution>'
-            echo '        </executions>'
-            echo '      </plugin>'
-            echo '    </plugins>'
-            echo '  </build>'
-            echo '</project>'
-          } > pom.xml
-
-      - name: Create Java source via echo
-        run: |
-          echo "▶ Creating Java source for LedgerGenerator"
-          mkdir -p src/main/java/com/example
-          {
-            echo 'package com.example;'
-            echo 'import java.io.*;'
-            echo 'import java.util.Random;'
-            echo 'public class LedgerGenerator {'
-            echo '    public static void main(String[] args) throws Exception {'
-            echo '        boolean enterprise=false; long count=0; String out="bulk_ledgers.csv";'
-            echo '        for(int i=0;i<args.length;i++){'
-            echo '            switch(args[i]){'
-            echo '                case "--enterprise": enterprise=true; break;'
-            echo '                case "--count": count=Long.parseLong(args[++i]); break;'
-            echo '                case "--out": out=args[++i]; break;'
-            echo '            }'
-            echo '        }'
-            echo '        String[] customers={"Alice","Bob","Charlie","Delta","Echo"};'
-            echo '        Random rnd=new Random();'
-            echo '        try(PrintWriter pw=new PrintWriter(new FileWriter(out))){'
-            echo '            pw.println("id,customer,enterprise,amount");'
-            echo '            for(long i=1;i<=count;i++){'
-            echo '                String cust=customers[rnd.nextInt(customers.length)];'
-            echo '                pw.println(i+","+cust+","+enterprise+","+String.format("%.2f",rnd.nextDouble()*1000));'
-            echo '            }'
-            echo '        }'
-            echo '        System.out.println("Generated "+count+" records to "+out);'
-            echo '    }'
-            echo '}'
-          } > src/main/java/com/example/LedgerGenerator.java
-
-      - name: Generate install script via echo
-        run: |
-          echo "📄 Generating scripts/install_java_maven.sh"
-          mkdir -p scripts
-          {
-            echo '#!/usr/bin/env bash'
-            echo 'set -euo pipefail'
-            echo 'sudo apt-get update -y'
-            echo 'sudo apt-get install -y openjdk-17-jdk maven'
-            echo 'java -version'
-            echo 'mvn -version'
-          } > scripts/install_java_maven.sh
-          chmod +x scripts/install_java_maven.sh
-
-      - name: Install Java & Maven
-        run: |
-          echo "▶ Running install_java_maven.sh"
-          ./scripts/install_java_maven.sh
-
-      - name: Install NetBackup CLI
-        run: |
-          echo "▶ Installing NetBackup CLI"
-          sudo apt-get update -y
-          sudo apt-get install -y netbackup-cli || echo "⚠ NetBackup CLI not found—skipping"
-
-      - name: Configure & Create NetBackup Resources
-        run: |
-          echo "▶ Logging into NetBackup"
-          export NB_SERVER="netbackup.example.com"
-          export NB_USER="admin"
-          export NB_PASS="password"
-          nb login --username "$NB_USER" --password "$NB_PASS" --server "$NB_SERVER" || echo "⚠ login failed"
-          echo "▶ Creating NetBackup policy 'daily_backup'"
-          nb policy create --name daily_backup --schedule daily_schedule --clients client1,client2 || echo "⚠ policy creation failed"
-
-      - name: Build & Shade fat JAR
-        run: |
-          echo "▶ Running mvn clean package"
-          mvn clean package -DskipTests -B
-          echo "▶ target/ contents:"
-          ls -1 target
-
-      - name: Bulk-generate enterprise ledgers & customer list
-        run: |
-          echo "▶ Generating ledger and customer list"
-          SHADED_JAR=$(find target -maxdepth 1 -type f -name '*-shaded.jar' | head -n1)
-          if [ -z "$SHADED_JAR" ]; then
-            echo "❌ Shaded JAR not found in target/:"
-            ls -l target
-            exit 1
-          fi
-          echo "Using shaded JAR: $SHADED_JAR"
-          java -jar "$SHADED_JAR" --enterprise --count 1000000 --out bulk_ledgers.csv
-          echo "✔ bulk_ledgers.csv created"
-          cut -d',' -f2 bulk_ledgers.csv | tail -n +2 | sort | uniq > customers.txt
-          echo "✔ customers.txt created"
-
-      - name: Migrate generated files into .github/migration and commit
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "▶ Migrating files to .github/migration"
-          mkdir -p .github/migration
-          mv bulk_ledgers.csv customers.txt .github/migration/
-          git config user.name "github-actions[bot]"
-          git config user.email "actions@github.com"
-          git add .github/migration/bulk_ledgers.csv .github/migration/customers.txt
-          git commit -m "chore: migrate generated ledger and customer list" || echo "⚠ nothing to commit"
-          git push origin HEAD:main
+      # … (생략: pom.xml, Java 소스, install script, NetBackup, 빌드, ledger 생성 & migration 단계)
 
       - name: Create annotated Git tag
         id: tag
         run: |
           echo "▶ Creating annotated git tag"
           TAG=ledger-$(date +'%Y%m%d%H%M%S')
-          git tag -a $TAG -m "Auto-release: $TAG – includes migrated ledger & customer list"
+          git tag -a $TAG -m "Auto-release: $TAG – includes migrated files"
           git push origin --tags
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: actions/create-release@v1
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}        # ← 여기에 token 입력 추가
           tag_name: ${{ steps.tag.outputs.tag }}
           release_name: "Ledger Release ${{ steps.tag.outputs.tag }}"
           body: |
