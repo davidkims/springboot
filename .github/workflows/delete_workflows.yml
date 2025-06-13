@@ -1,223 +1,153 @@
-# .github/workflows/docker-backup.yml
-name: Docker Build, Deploy & Hourly Backup with Volume, Encryption, SQL DB & Optional Registry Push
-
-permissions:
-  contents: read      # code checkout
-  packages: write     # GHCR push
+name: Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'  # every hour at minute 0 (UTC)
+  push:
+    branches:
+      - main
 
 jobs:
-  setup-docker:
+  build-and-generate-ledger:
     runs-on: ubuntu-latest
+
     steps:
-      - name: "[setup-docker] Remove legacy Docker packages"
-        run: |
-          echo "[setup-docker] Removing legacy Docker packages..."
-          sudo apt-get remove -y docker docker-engine docker.io containerd containerd.io runc \
-            || echo "[setup-docker] Nothing to remove"
-          echo "[setup-docker] Done."
-
-      - name: "[setup-docker] Install prerequisites & extras"
-        run: |
-          echo "[setup-docker] Installing prerequisites..."
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg lsb-release mysql-client
-          echo "[setup-docker] Checking for components.txt..."
-          if [ -f components.txt ]; then
-            echo "[setup-docker] Installing extras from components.txt..."
-            xargs sudo apt-get install -y < components.txt
-            echo "[setup-docker] Extras installed."
-          else
-            echo "[setup-docker] No components.txt found; skipping extras."
-          fi
-          echo "[setup-docker] Done."
-
-      - name: "[setup-docker] Add Docker GPG key & repo"
-        run: |
-          echo "[setup-docker] Adding Docker GPG key..."
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-            | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "[setup-docker] Configuring Docker repo..."
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
-            https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-            | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-      - name: "[setup-docker] Install Docker Engine & CLI"
-        run: |
-          echo "[setup-docker] Installing Docker Engine & CLI..."
-          sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-          echo "[setup-docker] Done."
-
-  build-and-deploy:
-    needs: setup-docker
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'schedule' }}
-    steps:
-      - name: "[build-and-deploy] Checkout code"
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: "[build-and-deploy] Load image backups"
+      - name: Create pom.xml with Shade Plugin via echo
         run: |
-          echo "[build-and-deploy] Loading saved image backups..."
-          for f in finance-transactions_*.tar.gz; do
-            [ -f "$f" ] && echo "[build-and-deploy] docker load -i $f" && docker load -i "$f"
-          done
-          echo "[build-and-deploy] Image backups loaded."
+          echo "▶ Creating pom.xml with shade settings"
+          {
+            echo '<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+            echo '         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">'
+            echo '  <modelVersion>4.0.0</modelVersion>'
+            echo '  <groupId>com.example</groupId>'
+            echo '  <artifactId>ledger-generator</artifactId>'
+            echo '  <version>1.0.0</version>'
+            echo '  <packaging>jar</packaging>'
+            echo '  <properties>'
+            echo '    <maven.compiler.source>17</maven.compiler.source>'
+            echo '    <maven.compiler.target>17</maven.compiler.target>'
+            echo '  </properties>'
+            echo '  <dependencies/>'
+            echo '  <build>'
+            echo '    <plugins>'
+            echo '      <plugin>'
+            echo '        <groupId>org.apache.maven.plugins</groupId>'
+            echo '        <artifactId>maven-shade-plugin</artifactId>'
+            echo '        <version>3.2.4</version>'
+            echo '        <configuration>'
+            echo '          <shadedArtifactAttached>true</shadedArtifactAttached>'
+            echo '          <shadedClassifierName>shaded</shadedClassifierName>'
+            echo '          <transformers>'
+            echo '            <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">'
+            echo '              <mainClass>com.example.LedgerGenerator</mainClass>'
+            echo '            </transformer>'
+            echo '          </transformers>'
+            echo '        </configuration>'
+            echo '        <executions>'
+            echo '          <execution>'
+            echo '            <phase>package</phase>'
+            echo '            <goals><goal>shade</goal></goals>'
+            echo '          </execution>'
+            echo '        </executions>'
+            echo '      </plugin>'
+            echo '    </plugins>'
+            echo '  </build>'
+            echo '</project>'
+          } > pom.xml
 
-      - name: "[build-and-deploy] Import container backups"
+      - name: Create Java source via echo
         run: |
-          echo "[build-and-deploy] Importing saved container backups..."
-          for f in finance-transactions-container_*.tar.gz; do
-            [ -f "$f" ] && echo "[build-and-deploy] docker import $f" \
-              && docker import "$f" finance-transactions:restored
-          done
-          echo "[build-and-deploy] Container backups imported."
+          echo "▶ Creating Java source for LedgerGenerator with customers"
+          mkdir -p src/main/java/com/example
+          {
+            echo 'package com.example;'
+            echo 'import java.io.*;'
+            echo 'import java.util.Random;'
+            echo 'public class LedgerGenerator {'
+            echo '    public static void main(String[] args) throws Exception {'
+            echo '        boolean enterprise=false; long count=0; String out="bulk_ledgers.csv";'
+            echo '        for(int i=0;i<args.length;i++){'
+            echo '            switch(args[i]){'
+            echo '                case "--enterprise": enterprise=true; break;'
+            echo '                case "--count": count=Long.parseLong(args[++i]); break;'
+            echo '                case "--out": out=args[++i]; break;'
+            echo '            }'
+            echo '        }'
+            echo '        String[] customers = {"Alice","Bob","Charlie","Delta","Echo"};'
+            echo '        Random rnd = new Random();'
+            echo '        try(PrintWriter pw=new PrintWriter(new FileWriter(out))){'
+            echo '            pw.println("id,customer,enterprise,amount");'
+            echo '            for(long i=1;i<=count;i++){'
+            echo '                String cust = customers[rnd.nextInt(customers.length)];'
+            echo '                String amt = String.format("%.2f", rnd.nextDouble()*1000);'
+            echo '                pw.println(i + "," + cust + "," + enterprise + "," + amt);'
+            echo '            }'
+            echo '        }'
+            echo '        System.out.println("Generated " + count + " records to " + out);'
+            echo '    }'
+            echo '}'
+          } > src/main/java/com/example/LedgerGenerator.java
 
-      - name: "[build-and-deploy] Restore volume backups"
+      - name: Generate install script via echo
         run: |
-          echo "[build-and-deploy] Restoring saved volume backups..."
-          for f in volume_*.tar.gz; do
-            if [ -f "$f" ]; then
-              echo "[build-and-deploy] Restoring $f into volume finance-data"
-              docker volume create finance-data || true
-              docker run --rm -v finance-data:/data -v "$PWD":/backup ubuntu:latest \
-                bash -c "cd /data && tar xzf /backup/$f"
-            fi
-          done
-          echo "[build-and-deploy] Volume backups restored."
+          echo "📄 Generating scripts/install_java_maven.sh"
+          mkdir -p scripts
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'set -euo pipefail'
+            echo 'sudo apt-get update -y'
+            echo 'sudo apt-get install -y openjdk-17-jdk maven'
+            echo 'java -version'
+            echo 'mvn -version'
+          } > scripts/install_java_maven.sh
+          chmod +x scripts/install_java_maven.sh
 
-      - name: "[build-and-deploy] Ensure Dockerfile exists"
+      - name: Install Java & Maven
         run: |
-          echo "[build-and-deploy] Checking for Dockerfile..."
-          if [ ! -f Dockerfile ]; then
-            echo "[build-and-deploy] Creating Dockerfile..."
-            echo "FROM python:3.10-slim" > Dockerfile && echo "[Dockerfile] Base image set"
-            echo "WORKDIR /app"           >> Dockerfile && echo "[Dockerfile] WORKDIR set"
-            echo "COPY . ."              >> Dockerfile && echo "[Dockerfile] COPY ."
-            echo "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi" \
-                                        >> Dockerfile && echo "[Dockerfile] pip install step"
-            echo 'CMD ["python", "app.py"]' >> Dockerfile && echo "[Dockerfile] CMD set"
-          else
-            echo "[build-and-deploy] Dockerfile already exists."
+          echo "▶ Running install_java_maven.sh"
+          ./scripts/install_java_maven.sh
+
+      - name: Install NetBackup CLI
+        run: |
+          echo "▶ Installing NetBackup CLI"
+          sudo apt-get update -y
+          sudo apt-get install -y netbackup-cli || echo "⚠ NetBackup CLI not found—skipping"
+
+      - name: Configure & Create NetBackup Resources
+        run: |
+          echo "▶ Logging into NetBackup"
+          export NB_SERVER="netbackup.example.com"
+          export NB_USER="admin"
+          export NB_PASS="password"
+          nb login --username "$NB_USER" --password "$NB_PASS" --server "$NB_SERVER" || echo "⚠ login failed"
+          echo "▶ Creating NetBackup policy 'daily_backup'"
+          nb policy create --name daily_backup --schedule daily_schedule --clients client1,client2 || echo "⚠ policy creation failed"
+
+      - name: Build & Shade fat JAR
+        run: |
+          echo "▶ Running mvn clean package"
+          mvn clean package -DskipTests -B
+          echo "▶ target/ contents:"
+          ls -1 target
+
+      - name: Bulk-generate enterprise ledgers
+        run: |
+          echo "▶ Generating large-scale customer transaction ledgers"
+          SHADED_JAR=$(find target -maxdepth 1 -type f -name '*-shaded.jar' | head -n1)
+          if [ -z "$SHADED_JAR" ]; then
+            echo "❌ Shaded JAR not found in target/:"
+            ls -l target
+            exit 1
           fi
+          echo "Using shaded JAR: $SHADED_JAR"
+          java -jar "$SHADED_JAR" --enterprise --count 1000000 --out bulk_ledgers.csv
+          echo "✔ bulk_ledgers.csv created with 1,000,000 records"
 
-      - name: "[build-and-deploy] Start finance-db container"
+      - name: Show customer list
         run: |
-          echo "[build-and-deploy] Starting finance-db container..."
-          docker rm -f finance-db || true
-          docker run -d --name finance-db \
-            -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
-            -e MYSQL_DATABASE=finance \
-            mysql:8.0
-          echo "[build-and-deploy] finance-db container running."
-
-      - name: "[build-and-deploy] Build & optionally push image"
-        run: |
-          echo "[build-and-deploy] Building finance-transactions image..."
-          docker build -t finance-transactions:latest .
-          echo "[build-and-deploy] Build complete."
-          if [ -n "${{ secrets.GHCR_PAT }}" ]; then
-            echo "[build-and-deploy] Logging in to GHCR..."
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            echo "[build-and-deploy] Tagging & pushing to GHCR..."
-            docker tag finance-transactions:latest ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
-            docker push ghcr.io/${{ github.repository_owner }}/finance-transactions:latest
-            echo "[build-and-deploy] Image pushed to GHCR."
-          else
-            echo "[build-and-deploy] GHCR_PAT not set; skipping push."
-          fi
-
-      - name: "[build-and-deploy] Restart finance-transactions container"
-        run: |
-          echo "[build-and-deploy] Restarting finance-transactions container..."
-          docker rm -f finance-transactions || true
-          docker run -d --name finance-transactions -v finance-data:/data finance-transactions:latest
-          echo "[build-and-deploy] finance-transactions container running."
-
-  backup:
-    needs: setup-docker
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' }}
-    env:
-      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
-      MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-    steps:
-      - name: "[backup] Create raw backups"
-        run: |
-          echo "[backup] Starting raw backups..."
-          TIMESTAMP=$(date +'%Y%m%d%H%M')
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-          echo "[backup] Saving finance-transactions image..."
-          docker save finance-transactions:latest | gzip > finance-transactions_${TIMESTAMP}.tar.gz
-          echo "[backup] Exporting finance-transactions container..."
-          docker export finance-transactions | gzip > finance-transactions-container_${TIMESTAMP}.tar.gz
-          echo "[backup] Exporting finance-db container..."
-          docker export finance-db | gzip > finance-db_${TIMESTAMP}.tar.gz
-          echo "[backup] Dumping finance DB..."
-          docker exec finance-db sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" finance' \
-            | gzip > finance-db-dump_${TIMESTAMP}.sql.gz
-          echo "[backup] Archiving volume..."
-          docker run --rm -v finance-data:/data -v $PWD:/backup ubuntu:latest \
-            bash -c "cd /data && tar czf /backup/volume_${TIMESTAMP}.tar.gz ."
-          echo "[backup] Raw backups done."
-
-      - name: "[backup] Setup Python & deps"
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: "[backup] Install Python deps"
-        run: |
-          echo "[backup] Installing pandas & matplotlib..."
-          pip install pandas matplotlib
-          echo "[backup] Python deps installed."
-
-      - name: "[backup] Download and run chart-generation script"
-        run: |
-          echo "[backup] Downloading chart-generation script..."
-          curl -fsSL https://raw.githubusercontent.com/davidkims/assets/main/finance-ledger/generate_charts.py \
-            -o generate_charts.py
-          echo "[backup] Running chart-generation script..."
-          python generate_charts.py
-          echo "[backup] Charts generated."
-
-      - name: "[backup] Encrypt backups"
-        run: |
-          echo "[backup] Encrypting all raw backups..."
-          for F in *_${TIMESTAMP}.tar.gz finance-db-dump_${TIMESTAMP}.sql.gz; do
-            echo "[backup] Encrypting $F..."
-            gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" -c "$F" && rm "$F"
-          done
-          echo "[backup] Encryption done."
-
-      - name: "[backup] Generate key file"
-        run: |
-          echo "[backup] Writing backup key file..."
-          echo "$BACKUP_PASSPHRASE" > backup_key_${TIMESTAMP}.txt
-          echo "[backup] Key file created."
-
-      - name: "[backup] Upload artifacts"
-        uses: actions/upload-artifact@v3
-        with:
-          name: docker-db-backup-${{ github.run_id }}
-          path: |
-            finance-transactions_${TIMESTAMP}.tar.gz.gpg
-            finance-transactions-container_${TIMESTAMP}.tar.gz.gpg
-            finance-db_${TIMESTAMP}.tar.gz.gpg
-            finance-db-dump_${TIMESTAMP}.sql.gz.gpg
-            volume_${TIMESTAMP}.tar.gz.gpg
-            backup_key_${TIMESTAMP}.txt
-            credit_transactions_${TIMESTAMP}.png
-            check_transactions_${TIMESTAMP}.png
-
-      - name: "[backup] Confirm upload"
-        run: |
-          echo "[backup] All artifacts uploaded."
+          echo "▶ Extracting unique customer list"
+          cut -d',' -f2 bulk_ledgers.csv | tail -n +2 | sort | uniq > customers.txt
+          echo "✔ Customer list:"
+          cat customers.txt
