@@ -3,11 +3,11 @@ name: 📊 Google Sheets Audit Monitor
 
 on:
   schedule:
-    - cron: '0 * * * *'       # 매 정시마다 실행
-  workflow_dispatch:         # 수동 실행 지원
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 env:
-  SHEET_ID: 1HnEcXGjY8lN_MH8U8UqBO8eoo2g-Gcv4IImFx-S9I0  # 모니터링할 스프레드시트 ID
+  SHEET_ID: 1HnEcXGjY8lN_MH8U8UqBO8eoo2g-Gcv4IImFx-S9I0
 
 jobs:
   audit:
@@ -17,12 +17,13 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔐 Authenticate to Google
+      - name: 🔐 Authenticate to Google via Workload Identity
         uses: google-github-actions/auth@v1
         with:
-          # 반드시 하나의 방법으로만 인증 정보 제공
-          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
-          create_credentials_file: true
+          workload_identity_provider: "projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "github-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
+          create_credentials_file: true      # (선택) 파일로 저장할 경우
+          export_environment_variables: true # 자동으로 GOOGLE_* env 노출
 
       - name: 🐍 Set up Python
         uses: actions/setup-python@v4
@@ -31,48 +32,10 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install google-api-python-client google-auth google-auth-httplib2
+          pip install --upgrade pip \
+            google-api-python-client google-auth google-auth-httplib2
 
-      - name: ✍️ Create audit script
-        run: |
-          mkdir -p .github/scripts
-          cat << 'EOF' > .github/scripts/generate_sheet_audit.py
-          import os
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-
-          SCOPES = [
-            'https://www.googleapis.com/auth/drive.metadata.readonly',
-            'https://www.googleapis.com/auth/spreadsheets.readonly'
-          ]
-          creds = service_account.Credentials.from_service_account_file(
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'], scopes=SCOPES
-          )
-          drive = build('drive', 'v3', credentials=creds)
-
-          sheet_id = os.environ['SHEET_ID']
-          revs = drive.revisions().list(
-            fileId=sheet_id,
-            fields='revisions(id,modifiedTime,lastModifyingUser(displayName,emailAddress))'
-          ).execute().get('revisions', [])
-
-          lines = [
-            "# Google Sheets Revision Audit",
-            "| Revision ID | Modified Time           | User            | Email            |",
-            "|-------------|-------------------------|-----------------|------------------|"
-          ]
-          for r in revs:
-              user = r.get('lastModifyingUser', {})
-              name  = user.get('displayName','')
-              email = user.get('emailAddress','')
-              lines.append(f"| {r['id']} | {r['modifiedTime']} | {name} | {email} |")
-
-          with open('REVISION_HISTORY.md', 'w', encoding='utf-8') as f:
-              f.write("\n".join(lines))
-          EOF
-
-      - name: ▶️ Run audit script
+      - name: ✍️ Generate audit report
         run: python .github/scripts/generate_sheet_audit.py
 
       - name: 💾 Commit & Push if changed
