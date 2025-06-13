@@ -1,0 +1,82 @@
+# .github/workflows/monitor-google-sheet-audit.yml
+name: 📊 Google Sheets Audit Monitor
+
+on:
+  schedule:
+    - cron: '0 * * * *'        # 매 정시마다 실행 (원하면 조정)
+  workflow_dispatch:          # 수동 실행 지원
+
+env:
+  SHEET_ID: 1HnEcXGjY8lN_MH8U8UqBO8eoo2g-Gcv4IImFx-S9I0  # 모니터링할 스프레드시트 ID
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔐 Authenticate to Google
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth google-auth-httplib2
+
+      - name: ✍️ Create audit script
+        run: |
+          mkdir -p .github/scripts
+          cat << 'EOF' > .github/scripts/generate_sheet_audit.py
+          import os
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+
+          SCOPES = [
+            'https://www.googleapis.com/auth/drive.metadata.readonly',
+            'https://www.googleapis.com/auth/spreadsheets.readonly'
+          ]
+          creds = service_account.Credentials.from_service_account_file(
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'], scopes=SCOPES
+          )
+          drive = build('drive', 'v3', credentials=creds)
+
+          sheet_id = os.environ['SHEET_ID']
+          revs = drive.revisions().list(
+            fileId=sheet_id,
+            fields='revisions(id,modifiedTime,lastModifyingUser(displayName,emailAddress))'
+          ).execute().get('revisions', [])
+
+          lines = [
+            "# Google Sheets Revision Audit",
+            "| Revision ID | Modified Time           | User            | Email            |",
+            "|-------------|-------------------------|-----------------|------------------|"
+          ]
+          for r in revs:
+              user = r.get('lastModifyingUser', {})
+              name  = user.get('displayName','')
+              email = user.get('emailAddress','')
+              lines.append(f"| {r['id']} | {r['modifiedTime']} | {name} | {email} |")
+
+          with open('REVISION_HISTORY.md', 'w', encoding='utf-8') as f:
+              f.write("\n".join(lines))
+          EOF
+
+      - name: ▶️ Run audit script
+        run: python .github/scripts/generate_sheet_audit.py
+
+      - name: 💾 Commit & Push if changed
+        uses: EndBug/add-and-commit@v7
+        with:
+          message: "chore: update Google Sheets audit report"
+          add: "REVISION_HISTORY.md"
+          author_name: "github-actions[bot]"
+          author_email: "github-actions[bot]@users.noreply.github.com"
