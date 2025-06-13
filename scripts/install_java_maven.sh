@@ -21,18 +21,15 @@ for dir in "$JAVA_DIR" "$MAVEN_DIR" "$SPRING_DIR"; do
   sudo rm -rf "$dir"/*
 done
 
-# Install latest Java (Temurin)
+# Install Java and Maven from apt
 sudo apt-get update
-sudo apt-get install -y wget tar
-JDK_URL="https://api.adoptium.net/v3/binary/latest/temurin?package=jdk&architecture=x64&heap_size=normal&image_type=jdk&os=linux&arch=x64"
-wget -O /tmp/jdk.tar.gz "$JDK_URL"
-sudo tar -xzf /tmp/jdk.tar.gz -C "$JAVA_DIR" --strip-components=1
+sudo apt-get install -y wget tar openjdk-21-jdk maven
 
-# Install latest Maven
-MAVEN_VERSION=$(curl -s https://api.github.com/repos/apache/maven/releases/latest | grep tag_name | cut -d '"' -f4)
-MAVEN_URL="https://downloads.apache.org/maven/maven-3/${MAVEN_VERSION#v}/binaries/apache-maven-${MAVEN_VERSION#v}-bin.tar.gz"
-wget -O /tmp/maven.tar.gz "$MAVEN_URL"
-sudo tar -xzf /tmp/maven.tar.gz -C "$MAVEN_DIR" --strip-components=1
+# Link installed software to /opt paths
+JAVA_HOME=$(dirname $(dirname $(readlink -f $(which javac))))
+MAVEN_HOME=$(dirname $(dirname $(readlink -f $(which mvn))))
+sudo ln -sfn "$JAVA_HOME" "$JAVA_DIR"
+sudo ln -sfn "$MAVEN_HOME" "$MAVEN_DIR"
 
 # Set permissions
 sudo chmod -R 755 "$JAVA_DIR" "$MAVEN_DIR" "$SPRING_DIR"
