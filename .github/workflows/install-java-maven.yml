@@ -1,4 +1,4 @@
-name: Install Java, Maven, NetBackup CLI & Ledger Generation
+name: Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
 
       - name: Create pom.xml with Shade Plugin via echo
         run: |
-          echo "▶ Creating pom.xml with explicit packaging & shade config"
+          echo "▶ Creating pom.xml with shade settings"
           {
             echo '<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
             echo '         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">'
@@ -29,9 +29,7 @@ jobs:
             echo '    <maven.compiler.source>17</maven.compiler.source>'
             echo '    <maven.compiler.target>17</maven.compiler.target>'
             echo '  </properties>'
-            echo '  <dependencies>'
-            echo '    <!-- 필요한 의존성을 여기에 추가하세요 -->'
-            echo '  </dependencies>'
+            echo '  <dependencies/>'
             echo '  <build>'
             echo '    <plugins>'
             echo '      <plugin>'
@@ -61,28 +59,33 @@ jobs:
 
       - name: Create Java source via echo
         run: |
-          echo "▶ Creating Java source for LedgerGenerator"
+          echo "▶ Creating Java source for LedgerGenerator with customers"
           mkdir -p src/main/java/com/example
           {
             echo 'package com.example;'
             echo 'import java.io.*;'
+            echo 'import java.util.Random;'
             echo 'public class LedgerGenerator {'
             echo '    public static void main(String[] args) throws Exception {'
             echo '        boolean enterprise=false; long count=0; String out="bulk_ledgers.csv";'
             echo '        for(int i=0;i<args.length;i++){'
-            echo '          switch(args[i]){'
-            echo '            case "--enterprise": enterprise=true; break;'
-            echo '            case "--count": count=Long.parseLong(args[++i]); break;'
-            echo '            case "--out": out=args[++i]; break;'
-            echo '          }'
+            echo '            switch(args[i]){'
+            echo '                case "--enterprise": enterprise=true; break;'
+            echo '                case "--count": count=Long.parseLong(args[++i]); break;'
+            echo '                case "--out": out=args[++i]; break;'
+            echo '            }'
             echo '        }'
+            echo '        String[] customers = {"Alice","Bob","Charlie","Delta","Echo"};'
+            echo '        Random rnd = new Random();'
             echo '        try(PrintWriter pw=new PrintWriter(new FileWriter(out))){'
-            echo '          pw.println("id,enterprise,amount");'
-            echo '          for(long i=1;i<=count;i++){'
-            echo '            pw.println(i+","+enterprise+","+String.format("%.2f",Math.random()*1000));'
-            echo '          }'
+            echo '            pw.println("id,customer,enterprise,amount");'
+            echo '            for(long i=1;i<=count;i++){'
+            echo '                String cust = customers[rnd.nextInt(customers.length)];'
+            echo '                String amt = String.format("%.2f", rnd.nextDouble()*1000);'
+            echo '                pw.println(i + "," + cust + "," + enterprise + "," + amt);'
+            echo '            }'
             echo '        }'
-            echo '        System.out.println("Generated "+count+" records to "+out);'
+            echo '        System.out.println("Generated " + count + " records to " + out);'
             echo '    }'
             echo '}'
           } > src/main/java/com/example/LedgerGenerator.java
@@ -120,26 +123,31 @@ jobs:
           export NB_PASS="password"
           nb login --username "$NB_USER" --password "$NB_PASS" --server "$NB_SERVER" || echo "⚠ login failed"
           echo "▶ Creating NetBackup policy 'daily_backup'"
-          nb policy create --name daily_backup --schedule daily_schedule --clients client1,client2 \
-            || echo "⚠ policy creation failed"
+          nb policy create --name daily_backup --schedule daily_schedule --clients client1,client2 || echo "⚠ policy creation failed"
 
       - name: Build & Shade fat JAR
         run: |
           echo "▶ Running mvn clean package"
           mvn clean package -DskipTests -B
           echo "▶ target/ contents:"
-          ls -l target
-          echo "✔ Build & shade completed"
+          ls -1 target
 
       - name: Bulk-generate enterprise ledgers
         run: |
-          echo "▶ Locating shaded JAR"
-          JAR=$(find target -maxdepth 1 -type f -name '*-shaded.jar' | head -n1)
-          if [ -z "$JAR" ]; then
-            echo "❌ No shaded JAR in target/:"
+          echo "▶ Generating large-scale customer transaction ledgers"
+          SHADED_JAR=$(find target -maxdepth 1 -type f -name '*-shaded.jar' | head -n1)
+          if [ -z "$SHADED_JAR" ]; then
+            echo "❌ Shaded JAR not found in target/:"
             ls -l target
             exit 1
           fi
-          echo "Using JAR: $JAR"
-          java -jar "$JAR" --enterprise --count 1000000 --out bulk_ledgers.csv
+          echo "Using shaded JAR: $SHADED_JAR"
+          java -jar "$SHADED_JAR" --enterprise --count 1000000 --out bulk_ledgers.csv
           echo "✔ bulk_ledgers.csv created with 1,000,000 records"
+
+      - name: Show customer list
+        run: |
+          echo "▶ Extracting unique customer list"
+          cut -d',' -f2 bulk_ledgers.csv | tail -n +2 | sort | uniq > customers.txt
+          echo "✔ Customer list:"
+          cat customers.txt
