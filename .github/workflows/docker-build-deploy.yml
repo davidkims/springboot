@@ -8,77 +8,87 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🛒 Checkout 코드
+      - name: Checkout 코드
         uses: actions/checkout@v4
 
-      - name: 📄 requirements.txt 생성
+      - name: 📦 requirements.txt 생성
         run: |
-          echo "[✔️] requirements.txt 생성"
           echo "flask" > requirements.txt
           echo "python-dotenv" >> requirements.txt
+          echo "psycopg2-binary" >> requirements.txt
+          echo "SQLAlchemy" >> requirements.txt
           cat requirements.txt
 
       - name: ⚙️ .env 생성
         run: |
-          echo "[✔️] .env 생성"
           echo "FLASK_ENV=production" > .env
           echo "APP_NAME=FinanceTransactions" >> .env
           echo "DEBUG=False" >> .env
+          echo "POSTGRES_DB=finance" >> .env
+          echo "POSTGRES_USER=postgres" >> .env
+          echo "POSTGRES_PASSWORD=postgres123" >> .env
+          echo "DB_HOST=db" >> .env
+          echo "DB_PORT=5432" >> .env
           cat .env
 
-      - name: 📄 app.py echo 생성 (GET/POST API)
+      - name: 📄 app.py 생성 (PostgreSQL 연동)
         run: |
-          echo "[✔️] app.py 생성 시작"
           echo "from flask import Flask, request, jsonify" > app.py
+          echo "from flask_sqlalchemy import SQLAlchemy" >> app.py
           echo "from dotenv import load_dotenv" >> app.py
           echo "import os" >> app.py
           echo "" >> app.py
           echo "load_dotenv()" >> app.py
           echo "app = Flask(__name__)" >> app.py
           echo "" >> app.py
+          echo "DB_URI = f\"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('POSTGRES_DB')}\"" >> app.py
+          echo "app.config['SQLALCHEMY_DATABASE_URI'] = DB_URI" >> app.py
+          echo "db = SQLAlchemy(app)" >> app.py
+          echo "" >> app.py
+          echo "class Transaction(db.Model):" >> app.py
+          echo "    id = db.Column(db.Integer, primary_key=True)" >> app.py
+          echo "    amount = db.Column(db.Float)" >> app.py
+          echo "    currency = db.Column(db.String(10))" >> app.py
+          echo "    status = db.Column(db.String(20))" >> app.py
+          echo "" >> app.py
+          echo "@app.before_first_request" >> app.py
+          echo "def create_tables():" >> app.py
+          echo "    db.create_all()" >> app.py
+          echo "" >> app.py
           echo "@app.route('/', methods=['GET'])" >> app.py
           echo "def index():" >> app.py
           echo "    return jsonify({" >> app.py
           echo "        'status': 'success'," >> app.py
-          echo "        'message': f'{os.getenv(\"APP_NAME\")} is running!'," >> app.py
-          echo "        'env': os.getenv('FLASK_ENV')" >> app.py
+          echo "        'message': f'{os.getenv(\"APP_NAME\")} is running!'" >> app.py
           echo "    })" >> app.py
           echo "" >> app.py
           echo "@app.route('/transaction', methods=['POST'])" >> app.py
           echo "def transaction():" >> app.py
           echo "    try:" >> app.py
           echo "        data = request.get_json(force=True)" >> app.py
-          echo "        return jsonify({" >> app.py
-          echo "            'status': 'success'," >> app.py
-          echo "            'message': 'Transaction received'," >> app.py
-          echo "            'data': data" >> app.py
-          echo "        }), 200" >> app.py
+          echo "        tx = Transaction(**data)" >> app.py
+          echo "        db.session.add(tx)" >> app.py
+          echo "        db.session.commit()" >> app.py
+          echo "        return jsonify({'status': 'success', 'message': 'Saved', 'data': data})" >> app.py
           echo "    except Exception as e:" >> app.py
-          echo "        return jsonify({" >> app.py
-          echo "            'status': 'error'," >> app.py
-          echo "            'message': str(e)" >> app.py
-          echo "        }), 400" >> app.py
+          echo "        return jsonify({'status': 'error', 'message': str(e)}), 400" >> app.py
           echo "" >> app.py
           echo "if __name__ == '__main__':" >> app.py
           echo "    app.run(host='0.0.0.0', port=5000)" >> app.py
-          echo "[✔️] app.py 생성 완료"
           cat app.py
 
       - name: 📄 Dockerfile 생성
         run: |
-          echo "[✔️] Dockerfile 생성 시작"
           echo "FROM python:3.11-slim" > Dockerfile
           echo "WORKDIR /app" >> Dockerfile
           echo "COPY . ." >> Dockerfile
           echo "RUN pip install --no-cache-dir -r requirements.txt" >> Dockerfile
           echo "EXPOSE 5000" >> Dockerfile
           echo "CMD [\"python\", \"app.py\"]" >> Dockerfile
-          echo "[✔️] Dockerfile 생성 완료"
           cat Dockerfile
 
       - name: 🐳 Docker 설치
         run: |
-          echo "[✔️] Docker 설치 시작"
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker || sudo service docker start
@@ -86,25 +96,35 @@ jobs:
 
       - name: 🏗️ Docker 이미지 빌드
         run: |
-          echo "[🚧] Docker 이미지 빌드 시작"
           docker build -t finance-transactions:latest .
-          echo "[✔️] Docker 이미지 빌드 완료"
 
-      - name: 🚀 컨테이너 실행
+      - name: 🐘 PostgreSQL 컨테이너 실행
         run: |
-          echo "[🧹] 이전 컨테이너 정리 중"
-          docker rm -f finance-transactions || echo "⚠️ 이전 컨테이너 없음"
-          echo "[🚀] 새 컨테이너 실행 중"
+          docker rm -f db || true
           docker run -d \
-            -p 8080:5000 \
-            --name finance-transactions \
-            -v finance-data:/data \
-            finance-transactions:latest
-          echo "[✔️] 컨테이너 실행 완료"
+            --name db \
+            -e POSTGRES_DB=finance \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres123 \
+            -p 5432:5432 \
+            postgres:15
 
-      - name: 🧹 정리 작업 (Always)
+          echo "⏳ DB 초기화 대기 중..."
+          sleep 20
+
+      - name: 🚀 앱 컨테이너 실행
+        run: |
+          docker rm -f finance-transactions || true
+          docker run -d \
+            --name finance-transactions \
+            --link db \
+            --env-file .env \
+            -p 8080:5000 \
+            finance-transactions:latest
+
+      - name: 🧹 정리
         if: always()
         run: |
-          echo "[🧼] 컨테이너 정리 중"
           docker rm -f finance-transactions || true
+          docker rm -f db || true
           docker volume prune -f || true
