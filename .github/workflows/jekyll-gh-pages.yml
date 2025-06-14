@@ -1,138 +1,95 @@
-name: 📄 Provenance Index Generator
+name: 🔁 Auto Finance Backup (Manual + Cron)
 
 on:
-  push:
-    paths:
-      - "_provenance/*.json"
-      - ".attestation/*.json"
   workflow_dispatch:
-
-permissions:
-  contents: write
+  schedule:
+    - cron: "*/5 * * * *"  # 5분마다 자동 실행
 
 jobs:
-  generate-index:
+  auto-finance-backup:
     runs-on: ubuntu-latest
+
     env:
-      ARTIFACT_NAME: provenance-${{ github.run_id }}-${{ github.run_number }}
+      DB_NAME: finance
+      DB_USER: root
+      DB_PASS: rootpass123
+      BACKUP_DIR: /opt/finance/backups
+      SQL_INIT_FILE: /opt/finance/init.sql
 
     steps:
-      - name: 📂 Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: 🐍 Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: 🧱 Ensure .attestation and _provenance directories
+      - name: 📂 1. 디렉토리 및 SQL 초기화 파일 생성
         run: |
-          mkdir -p .attestation
-          mkdir -p _provenance
+          echo "📁 [mkdir] Creating backup directory: $BACKUP_DIR"
+          sudo mkdir -p "$BACKUP_DIR"
 
-      - name: 📄 Copy provenance.json or create fallback
+          echo "📄 [echo] Writing SQL to $SQL_INIT_FILE"
+          {
+            echo "CREATE TABLE IF NOT EXISTS transactions ("
+            echo "  id INT AUTO_INCREMENT PRIMARY KEY,"
+            echo "  type VARCHAR(30),"
+            echo "  amount DECIMAL(10,2),"
+            echo "  currency VARCHAR(10),"
+            echo "  status VARCHAR(20),"
+            echo "  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            echo ");"
+          } | tee "$SQL_INIT_FILE"
+
+          echo "✅ SQL 초기화 파일 내용:"
+          cat "$SQL_INIT_FILE"
+
+      - name: 🐬 2. MySQL 컨테이너 실행
         run: |
-          FILE=".attestation/provenance.json"
-          OUT="_provenance/${ARTIFACT_NAME}.json"
+          echo "🐳 [docker run] Starting MySQL container..."
+          docker run -d --rm \
+            --name mysql-auto \
+            -e MYSQL_ROOT_PASSWORD=$DB_PASS \
+            -e MYSQL_DATABASE=$DB_NAME \
+            -v "$SQL_INIT_FILE":/docker-entrypoint-initdb.d/init.sql \
+            -p 3306:3306 \
+            mysql:8.0
 
-          if [ -f "$FILE" ]; then
-            echo "✅ Found $FILE"
-            cp "$FILE" "$OUT"
-          else
-            echo "⚠️ Not found: $FILE — creating dummy"
-            cat <<EOF > "$OUT"
-{
-  "subject": [{
-    "name": "${ARTIFACT_NAME}.zip",
-    "digest": { "sha256": "dummyhashvalue0123456789abcdef" }
-  }],
-  "buildType": "https://example.com/fake/buildtype",
-  "predicate": {
-    "metadata": {
-      "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-      "tag": "dummy"
-    }
-  },
-  "builder": {
-    "id": "dummy.builder"
-  },
-  "invocation": {
-    "configSource": {
-      "uri": "https://github.com/example/repo"
-    }
-  }
-}
-EOF
-          fi
+          echo "⏳ Waiting 25s for DB init..."
+          sleep 25
 
-          # Also generate SARIF
-          cat <<EOF > "_provenance/${ARTIFACT_NAME}.sarif"
-{
-  "version": "2.1.0",
-  "runs": [{
-    "tool": {
-      "driver": {
-        "name": "attestation-converter",
-        "informationUri": "https://github.com/actions/attest-build-provenance",
-        "version": "1.0.0"
-      }
-    },
-    "results": []
-  }]
-}
-EOF
-
-      - name: 📊 Generate CSV and index files
+      - name: 🔐 3. 로그인 구성 및 백업 수행
         run: |
-          mkdir -p _data
-          echo "artifact,sha256,tag,buildType,created,builder_id,config_source_uri" > _data/metadata.csv
+          echo "🔐 [auth] Creating ~/.my.cnf"
+          {
+            echo "[client]"
+            echo "user=$DB_USER"
+            echo "password=$DB_PASS"
+            echo "host=127.0.0.1"
+            echo "port=3306"
+          } > ~/.my.cnf
+          chmod 600 ~/.my.cnf
 
-          declare -A tag_map
-          all_dates=()
+          echo "🕐 [timestamp] Generating timestamp"
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
 
-          for f in _provenance/*.json; do
-            ARTIFACT=$(jq -r '.subject[0].name' "$f")
-            SHA256=$(jq -r '.subject[0].digest.sha256' "$f")
-            TAG=$(jq -r '.predicate.metadata.tag // "untagged"' "$f")
-            BUILD_TYPE=$(jq -r '.buildType // "N/A"' "$f")
-            CREATED=$(jq -r '.predicate.metadata.buildStartedOn // "N/A"' "$f")
-            BUILDER_ID=$(jq -r '.builder.id // "N/A"' "$f")
-            CONFIG_URI=$(jq -r '.invocation.configSource.uri // "N/A"' "$f")
+          echo "💾 [mysqldump] Backing up to: $BACKUP_FILE"
+          mysqldump --defaults-file=~/.my.cnf --no-tablespaces "$DB_NAME" > "$BACKUP_FILE"
 
-            echo "$ARTIFACT,$SHA256,$TAG,$BUILD_TYPE,$CREATED,$BUILDER_ID,$CONFIG_URI" >> _data/metadata.csv
+          echo "✅ Backup completed: $BACKUP_FILE"
+          ls -lh "$BACKUP_FILE"
 
-            TAG_MD="index-${TAG}.md"
-            if [ ! -f "$TAG_MD" ]; then
-              echo "# 📦 Provenance Index for Tag: $TAG" > "$TAG_MD"
-              echo "" >> "$TAG_MD"
-              echo "| Artifact | SHA256 | Build Type | Created | Builder ID | Config URI |" >> "$TAG_MD"
-              echo "|----------|--------|------------|---------|------------|-------------|" >> "$TAG_MD"
-            fi
+          echo "📜 [verify] Running SHOW TABLES;"
+          mysql --defaults-file=~/.my.cnf -e "USE $DB_NAME; SHOW TABLES;"
 
-            echo "| $ARTIFACT | \`${SHA256:0:12}...\` | $BUILD_TYPE | $CREATED | $BUILDER_ID | $CONFIG_URI |" >> "$TAG_MD"
+          echo "📌 [env] Exporting backup file info"
+          echo "BACKUP_FILE_PATH=$BACKUP_FILE" >> $GITHUB_ENV
+          echo "BACKUP_FILE_NAME=backup-$TIMESTAMP.sql" >> $GITHUB_ENV
 
-            tag_map["$TAG"]=1
-            all_dates+=("$CREATED")
-          done
-
-          latest_date=$(printf '%s\n' "${all_dates[@]}" | grep -v 'N/A' | sort -r | head -n1)
-          total_files=$(ls _provenance/*.json | wc -l)
-
-          echo "# 🧾 Provenance Index Summary" > index.md
-          echo "" >> index.md
-          echo "- **Total Provenance Files**: \`$total_files\`" >> index.md
-          echo "- **Latest Build Date**: \`$latest_date\`" >> index.md
-          echo "" >> index.md
-          echo "## 📁 Tag-based Indexes" >> index.md
-          echo "" >> index.md
-
-          for tag in "${!tag_map[@]}"; do
-            echo "- [index-${tag}.md](index-${tag}.md) — Tag: \`$tag\`" >> index.md
-          done
-
-      - name: ✅ Commit and Push
+      - name: 🧹 4. MySQL 컨테이너 정리
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "bot@example.com"
-          git pull --rebase || echo "Nothing to pull"
-          git add _data index.md index-*.md _provenance || true
-          git commit -m "📌 Update provenance metadata and indexes" || echo "No changes to commit"
-          git push || echo "No changes to push"
+          echo "🧼 [docker stop] Stopping MySQL container..."
+          docker stop mysql-auto || echo "⚠️ MySQL container not running"
+
+      - name: 📦 5. GitHub Release 생성 및 백업 파일 업로드
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "backup-${{ env.BACKUP_FILE_NAME }}"
+          name: "MySQL Backup - ${{ env.BACKUP_FILE_NAME }}"
+          files: ${{ env.BACKUP_FILE_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
