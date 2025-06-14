@@ -1,18 +1,132 @@
-name: Docker Image CI
+name: Provenance Metadata with Tag Table
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  attestations: write
+
+env:
+  ARTIFACT_NAME: provenance-${{ github.run_id }}-${{ github.run_number }}
+  OUT_DIR: output
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
-
-  build:
-
+  provenance:
     runs-on: ubuntu-latest
+    steps:
+      - name: 📅 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔧 Build artifact
+        run: |
+          mkdir -p $OUT_DIR
+          echo "Generated at $(date -u)" > $OUT_DIR/build.txt
+
+      - name: 🔖 Attest build
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.OUT_DIR }}/build.txt
+
+      - name: 📁 Prepare _provenance directory
+        run: |
+          mkdir -p _provenance
+          # If provenance exists, copy, else generate dummy JSON
+          if [ -f .attestation/provenance.json ]; then
+            cp .attestation/provenance.json "_provenance/${ARTIFACT_NAME}.json"
+          else
+            echo '{"tag": "untagged"}' > "_provenance/${ARTIFACT_NAME}.json"
+          fi
+
+      - name: 📊 Generate metadata.csv
+        run: |
+          echo "filename,created_utc,tag" > metadata.csv
+          for file in _provenance/*.json; do
+            fname=$(basename "$file")
+            created=$(git log --diff-filter=A --follow --format=%aI -- "$file" | head -n 1)
+            tag=$(grep '"tag":' "$file" | sed -E 's/.*"tag": ?"([^"]+)".*/\1/' || echo "untagged")
+            echo "$fname,${created:-unknown},${tag:-untagged}" >> metadata.csv
+          done
+
+      - name: 🔄 Move metadata to _data
+        run: |
+          mkdir -p _data
+          mv metadata.csv _data/metadata.csv
+
+      - name: ✏️ Create index.md via echo
+        run: |
+          echo '---' > index.md
+          echo 'layout: default' >> index.md
+          echo 'title: Provenance Summary Table' >> index.md
+          echo '---' >> index.md
+          echo '' >> index.md
+          echo '# 📟 증명서 요약 목록 (tag 포함)' >> index.md
+          echo '' >> index.md
+          echo '<table>' >> index.md
+          echo '  <thead><tr><th>파일 이름</th><th>생성일 (UTC)</th><th>tag</th></tr></thead>' >> index.md
+          echo '  <tbody>' >> index.md
+          echo '  {% for row in site.data.metadata %}' >> index.md
+          echo '    <tr>' >> index.md
+          echo '      <td><a href="/_provenance/{{ row.filename }}">{{ row.filename }}</a></td>' >> index.md
+          echo '      <td>{{ row.created_utc }}</td>' >> index.md
+          echo '      <td>{{ row.tag }}</td>' >> index.md
+          echo '    </tr>' >> index.md
+          echo '  {% endfor %}' >> index.md
+          echo '  </tbody>' >> index.md
+          echo '</table>' >> index.md
+
+      - name: ⚙️ Generate _config.yml via echo
+        run: |
+          echo 'title: "Provenance Viewer"' > _config.yml
+          echo 'markdown: kramdown' >> _config.yml
+          echo 'theme: minima' >> _config.yml
+          echo 'include:' >> _config.yml
+          echo '  - _provenance' >> _config.yml
+          echo 'collections: {}' >> _config.yml
+
+      - name: 📄 Commit provenance files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "bot@example.com"
+          git pull --rebase
+          git add _provenance _data index.md _config.yml || true
+          git commit -m "📌 Add provenance metadata for $ARTIFACT_NAME" || echo "No changes to commit"
+          git push
+
+      - name: ⚙️ Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: 📈 Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./
+          destination: ./_site
+
+      - name: 📦 Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: provenance
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    permissions:
+      pages: write
+      id-token: write
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
