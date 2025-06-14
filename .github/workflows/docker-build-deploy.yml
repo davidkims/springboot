@@ -85,10 +85,11 @@ jobs:
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker || sudo service docker start
+          docker --version
 
       - name: 🐘 PostgreSQL 컨테이너 실행
         run: |
-          docker rm -f db || true
+          docker rm -f db || echo "ℹ️ 기존 db 컨테이너 없음"
           docker run -d \
             --name db \
             -e POSTGRES_DB=finance \
@@ -96,11 +97,22 @@ jobs:
             -e POSTGRES_PASSWORD=postgres123 \
             -p 5432:5432 \
             postgres:15
+          echo "⏳ DB 초기화 대기 중..."
           sleep 20
+
+      - name: 🏗️ Docker 이미지 빌드
+        run: |
+          echo "[✅] Docker 이미지 빌드 시작"
+          docker build -t finance-transactions:latest .
+          docker image ls
 
       - name: 🚀 Flask 앱 컨테이너 실행
         run: |
-          docker rm -f finance-transactions || true
+          docker rm -f finance-transactions || echo "ℹ️ 이전 컨테이너 없음"
+          if ! docker image inspect finance-transactions:latest >/dev/null 2>&1; then
+            echo "❌ finance-transactions 이미지가 존재하지 않아 실행 중단"
+            exit 1
+          fi
           docker run -d \
             --name finance-transactions \
             --link db \
@@ -108,7 +120,7 @@ jobs:
             -p 8080:5000 \
             finance-transactions:latest
 
-      - name: 📄 backup.sh 생성 (pg_dump)
+      - name: 📄 backup.sh 생성 및 실행 (pg_dump)
         run: |
           echo "#!/bin/bash" > backup.sh
           echo "mkdir -p backup" >> backup.sh
@@ -118,16 +130,16 @@ jobs:
           ./backup.sh
           ls -lh backup
 
-      - name: 📦 GitHub Release로 DB 백업 업로드
+      - name: 📦 GitHub Release에 DB 백업 업로드
         uses: softprops/action-gh-release@v2
         with:
-          name: "📦 DB Backup"
+          name: "📦 PostgreSQL DB Backup"
           tag_name: "db-backup-${{ github.run_id }}"
           files: backup/*.sql
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🧹 정리
+      - name: 🧹 컨테이너 정리 (Always)
         if: always()
         run: |
           docker rm -f finance-transactions || true
