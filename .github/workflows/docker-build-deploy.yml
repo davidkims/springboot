@@ -3,7 +3,7 @@ name: Build & Deploy finance-transactions with DB Backup
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"  # 매 5분 간격 실행 (UTC 기준)
+    - cron: "*/5 * * * *"
 
 jobs:
   build-and-deploy:
@@ -87,8 +87,13 @@ jobs:
           sudo systemctl start docker || sudo service docker start
           docker --version
 
-      - name: 🐘 PostgreSQL 컨테이너 실행 및 백업 파일 로드 확인
+      - name: 🐘 PostgreSQL 컨테이너 실행 및 백업 SQL 자동 적재
         run: |
+          echo "[+] 디렉토리 및 백업 파일 확인"
+          mkdir -p backup
+          ls -al backup || echo "[!] backup 디렉토리 없음"
+          ls backup/backup-*.sql 2>/dev/null || echo "[!] 백업 SQL 파일 없음"
+
           docker run -d --name db \
             -e POSTGRES_DB=finance \
             -e POSTGRES_USER=postgres \
@@ -96,12 +101,65 @@ jobs:
             -p 5432:5432 postgres:15
           sleep 20
           echo "[✔] PostgreSQL 컨테이너 실행 완료"
-          echo "[+] 기존 백업 SQL 파일 확인 및 적재 시도"
-          BACKUP_FILE=$(ls backup/backup-*.sql | sort | tail -n 1)
+
+          echo "[+] 최신 백업 SQL 파일을 찾아 컨테이너에 적재 시도"
+          BACKUP_FILE=$(ls -t backup/backup-*.sql 2>/dev/null | head -n 1)
           if [ -f "$BACKUP_FILE" ]; then
             echo "[✔] 백업 SQL 파일 발견: $BACKUP_FILE"
             docker cp "$BACKUP_FILE" db:/tmp/restore.sql
             docker exec db psql -U postgres -d finance -f /tmp/restore.sql && echo "[✔] 백업 SQL 적재 완료"
+            echo "[+] 테이블 목록:"
+            docker exec db psql -U postgres -d finance -c "\\dt"
+            echo "[+] transactions 테이블 행 수:"
+            docker exec db psql -U postgres -d finance -c "SELECT COUNT(*) FROM transactions;"
           else
             echo "[!] 백업 SQL 파일이 존재하지 않아 로드 생략"
           fi
+
+      - name: 📄 거래 데이터 시뮬레이션 (ledger.py)
+        run: |
+          mkdir -p backup
+          echo "import csv, random, datetime" > ledger.py
+          echo "with open('backup/transactions.csv', 'w', newline='') as f:" >> ledger.py
+          echo "    writer = csv.writer(f)" >> ledger.py
+          echo "    writer.writerow(['timestamp', 'amount', 'currency', 'status'])" >> ledger.py
+          echo "    for _ in range(60):" >> ledger.py
+          echo "        ts = datetime.datetime.now().isoformat()" >> ledger.py
+          echo "        amt = round(random.uniform(10.0, 1000.0), 2)" >> ledger.py
+          echo "        currency = random.choice(['USD', 'KRW', 'JPY'])" >> ledger.py
+          echo "        status = random.choice(['completed', 'pending', 'failed'])" >> ledger.py
+          echo "        writer.writerow([ts, amt, currency, status])" >> ledger.py
+          python3 ledger.py
+          test -f backup/transactions.csv && echo "[✔] transactions.csv 생성 완료" || (echo "[❌] transactions.csv 누락!" && exit 1)
+
+      - name: 🗃️ transactions.csv → PostgreSQL DB 적재
+        run: |
+          tail -n +2 backup/transactions.csv > backup/tmp_transactions.csv
+          test -f backup/tmp_transactions.csv && echo "[✔] tmp_transactions.csv 생성됨" || (echo "[❌] tmp_transactions.csv 누락!" && exit 1)
+          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
+          docker cp backup/tmp_transactions.csv db:/tmp/tmp_transactions.csv
+          docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp_transactions.csv' DELIMITER ',' CSV;"
+          echo "[✔] CSV → DB 적재 완료"
+
+      - name: 💾 DB 백업 수행 및 확인
+        run: |
+          echo "#!/bin/bash" > backup.sh
+          echo "TIMESTAMP=\$(date +%Y%m%d%H%M%S)" >> backup.sh
+          echo "docker exec db pg_dump -U postgres -d finance > backup/backup-\$TIMESTAMP.sql" >> backup.sh
+          chmod +x backup.sh
+          ./backup.sh
+          BACKUP_FILE=$(ls backup/backup-*.sql | sort | tail -n 1)
+          if [ -f "$BACKUP_FILE" ]; then
+            echo "[✔] 백업 완료: $BACKUP_FILE"
+          else
+            echo "[❌] 백업 파일 생성 실패!" && exit 1
+          fi
+
+      - name: 🧹 컨테이너 정리
+        if: always()
+        run: |
+          docker stop finance-transactions || true
+          docker stop db || true
+          docker rm finance-transactions || true
+          docker rm db || true
+          echo "[✔] 컨테이너 정리 완료"
