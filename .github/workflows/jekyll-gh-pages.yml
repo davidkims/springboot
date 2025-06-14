@@ -1,0 +1,78 @@
+name: Provenance + Jekyll GitHub Pages Deploy
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  ARTIFACT_NAME: provenance-${{ github.run_id }}-${{ github.run_number }}
+  OUT_DIR: output
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout source
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Generate attested file
+        run: |
+          mkdir -p $OUT_DIR
+          echo "Provenance generated at $(date -u)" > $OUT_DIR/build.txt
+
+      - name: 🧾 Attest provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.OUT_DIR }}/build.txt
+
+      - name: 📄 Copy provenance + SARIF to Jekyll site dir
+        run: |
+          mkdir -p _provenance
+          cp .attestation/provenance.json _provenance/${{ env.ARTIFACT_NAME }}.json || echo "No JSON"
+          echo '{
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "attestation-converter",
+                  "informationUri": "https://github.com/actions/attest-build-provenance",
+                  "version": "1.0.0"
+                }
+              },
+              "results": []
+            }]
+          }' > _provenance/${{ env.ARTIFACT_NAME }}.sarif
+
+      - name: ⚙️ Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: 🧱 Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./
+          destination: ./_site
+
+      - name: 📦 Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
