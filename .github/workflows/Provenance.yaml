@@ -1,14 +1,19 @@
-name: Provenance Attestation - Every Minute
+name: Provenance Attestation - Full
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # 매 1분마다 모든 요일
-  workflow_dispatch:       # 수동 실행도 허용
+    - cron: '*/1 * * * *'  # 매 1분 (실제는 5분 주기 작동)
+  workflow_dispatch:
 
 permissions:
+  contents: write
   id-token: write
-  contents: read
   attestations: write
+  pages: write
+
+env:
+  ARTIFACT_NAME: provenance-${{ github.run_id }}-${{ github.run_number }}
+  OUT_DIR: output
 
 jobs:
   build-and-attest:
@@ -20,10 +25,58 @@ jobs:
 
       - name: 🛠️ Build artifact
         run: |
-          mkdir -p output
-          echo "This build was attested at $(date -u)" > output/build.txt
+          mkdir -p $OUT_DIR
+          echo "Provenance generated at $(date -u)" > $OUT_DIR/build.txt
 
       - name: 🧾 Attest provenance
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: output/build.txt
+          subject-path: ${{ env.OUT_DIR }}/build.txt
+
+      - name: 📤 Copy attestation (raw JSON)
+        run: |
+          mkdir -p provenance-artifacts
+          cp .attestation/provenance.json provenance-artifacts/${{ env.ARTIFACT_NAME }}.json || echo "No attestation generated"
+
+      - name: 📄 Convert JSON to SARIF
+        run: |
+          mkdir -p provenance-artifacts
+          echo '{
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "attestation-converter",
+                  "informationUri": "https://github.com/actions/attest-build-provenance",
+                  "version": "1.0.0"
+                }
+              },
+              "results": []
+            }]
+          }' > provenance-artifacts/${{ env.ARTIFACT_NAME }}.sarif
+
+      - name: 📦 Upload artifacts (timestamped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: provenance-artifacts
+
+  deploy-pages:
+    needs: build-and-attest
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: ⬇️ Download provenance artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: site
+
+      - name: 🌐 Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
