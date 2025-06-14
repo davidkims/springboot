@@ -8,30 +8,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      # 1. 레포지토리 체크아웃
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. 디스크 슬롯 확보 (50GB)
-      - name: Reserve disk slot
-        run: |
-          sudo mkdir -p /opt/logistics/.disk_slot
-          echo "📦 Reserving disk space..."
-          if sudo fallocate -l 50G /opt/logistics/.disk_slot/reserve; then
-            echo "✅ fallocate success"
-          else
-            echo "⚠️ fallocate failed, falling back to dd"
-            sudo dd if=/dev/zero of=/opt/logistics/.disk_slot/reserve bs=1M count=51200 || echo "❌ dd failed"
-          fi
-          sudo chmod -R 777 /opt/logistics/.disk_slot
-
-      # 3. 운영 디렉터리 생성 & 권한 설정
       - name: Create directories
         run: |
           sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data}
           sudo chmod -R 775 /opt/logistics
 
-      # 4. 프로그래밍 언어 런타임 설치
       - name: Setup Python 3.10
         uses: actions/setup-python@v4
         with:
@@ -53,7 +37,6 @@ jobs:
         with:
           node-version: '18'
 
-      # 5. 데이터베이스 설치 및 기동
       - name: Install MySQL Server
         run: |
           sudo apt-get update
@@ -70,19 +53,30 @@ jobs:
       - name: Install MongoDB
         run: |
           wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo apt-key add -
-          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/6.0 multiverse" \
-            | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/6.0 multiverse" |
+            sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
           sudo apt-get update
           sudo apt-get install -y mongodb-org
           sudo systemctl enable mongod
           sudo systemctl start mongod
 
-      - name: Run Oracle XE in Docker
+      - name: Run Oracle XE in Docker (gvenzl/oracle-xe)
         run: |
-          sudo docker pull quay.io/license/oracle-xe:latest
-          sudo docker run -d --name oracle-xe -p 1521:1521 quay.io/license/oracle-xe:latest
+          echo "[+] Oracle XE 컨테이너 실행 준비"
+          docker pull gvenzl/oracle-xe:21-slim
+          docker run -d \
+            --name oracle-xe \
+            -e ORACLE_PASSWORD=oracle123 \
+            -p 1521:1521 \
+            gvenzl/oracle-xe:21-slim
+          echo "[✔] Oracle XE 컨테이너 실행 완료"
 
-      # 6. 워크플로우 엔진/플랫폼 설치
+      - name: Healthcheck - Oracle XE
+        run: |
+          echo "[🔍] Oracle XE 컨테이너 Healthcheck"
+          sleep 30
+          docker exec oracle-xe bash -c "echo 'SELECT * FROM v\$version;' | sqlplus -S system/oracle123@localhost:1521/XE" || echo "[❌] SQL*Plus 접속 실패"
+
       - name: Install Apache Airflow
         run: |
           python -m pip install --upgrade pip
@@ -92,8 +86,7 @@ jobs:
 
       - name: Install Camunda BPM Platform
         run: |
-          wget https://downloads.camunda.cloud/release/camunda-bpm/tomcat/7.19/camunda-bpm-tomcat-7.19.0.tar.gz \
-            -O camunda.tar.gz
+          wget https://downloads.camunda.cloud/release/camunda-bpm/tomcat/7.19/camunda-bpm-tomcat-7.19.0.tar.gz -O camunda.tar.gz
           sudo mkdir -p /opt/logistics/camunda
           sudo tar xzf camunda.tar.gz -C /opt/logistics/camunda --strip-components=1
 
@@ -102,16 +95,11 @@ jobs:
           npm install --global sfdx-cli
           sfdx update
 
-      # 7. 물류 DB(MySQL)에 가상 고객 데이터 및 카드 거래 테이블 생성 (echo 방식)
       - name: Initialize logistics MySQL DB
         run: |
           sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;"
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
-
-          # (재)생성 디렉터리 확인
           sudo mkdir -p $(dirname $SCRIPT)
-
-          # SQL 스크립트를 echo로 한 줄씩 작성
           echo "CREATE TABLE customers ("                                > $SCRIPT
           echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"         >> $SCRIPT
           echo "  name VARCHAR(100) NOT NULL"                          >> $SCRIPT
@@ -133,6 +121,4 @@ jobs:
           echo "  (1,'debit',50.00),"                                  >> $SCRIPT
           echo "  (2,'credit',120.00),"                                >> $SCRIPT
           echo "  (3,'debit',75.50);"                                  >> $SCRIPT
-
-          # 스크립트 실행
           sudo mysql logistics < $SCRIPT
