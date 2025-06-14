@@ -1,4 +1,4 @@
-name: Build & Deploy finance-transactions
+name: Build & Deploy finance-transactions with DB Backup
 
 on:
   workflow_dispatch:
@@ -17,7 +17,6 @@ jobs:
           echo "python-dotenv" >> requirements.txt
           echo "psycopg2-binary" >> requirements.txt
           echo "SQLAlchemy" >> requirements.txt
-          cat requirements.txt
 
       - name: ⚙️ .env 생성
         run: |
@@ -29,9 +28,8 @@ jobs:
           echo "POSTGRES_PASSWORD=postgres123" >> .env
           echo "DB_HOST=db" >> .env
           echo "DB_PORT=5432" >> .env
-          cat .env
 
-      - name: 📄 app.py 생성 (PostgreSQL 연동)
+      - name: 📄 app.py 생성
         run: |
           echo "from flask import Flask, request, jsonify" > app.py
           echo "from flask_sqlalchemy import SQLAlchemy" >> app.py
@@ -57,10 +55,7 @@ jobs:
           echo "" >> app.py
           echo "@app.route('/', methods=['GET'])" >> app.py
           echo "def index():" >> app.py
-          echo "    return jsonify({" >> app.py
-          echo "        'status': 'success'," >> app.py
-          echo "        'message': f'{os.getenv(\"APP_NAME\")} is running!'" >> app.py
-          echo "    })" >> app.py
+          echo "    return jsonify({'status': 'success', 'message': f'{os.getenv(\"APP_NAME\")} is running!'})" >> app.py
           echo "" >> app.py
           echo "@app.route('/transaction', methods=['POST'])" >> app.py
           echo "def transaction():" >> app.py
@@ -75,7 +70,6 @@ jobs:
           echo "" >> app.py
           echo "if __name__ == '__main__':" >> app.py
           echo "    app.run(host='0.0.0.0', port=5000)" >> app.py
-          cat app.py
 
       - name: 📄 Dockerfile 생성
         run: |
@@ -85,18 +79,12 @@ jobs:
           echo "RUN pip install --no-cache-dir -r requirements.txt" >> Dockerfile
           echo "EXPOSE 5000" >> Dockerfile
           echo "CMD [\"python\", \"app.py\"]" >> Dockerfile
-          cat Dockerfile
 
       - name: 🐳 Docker 설치
         run: |
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker || sudo service docker start
-          docker --version
-
-      - name: 🏗️ Docker 이미지 빌드
-        run: |
-          docker build -t finance-transactions:latest .
 
       - name: 🐘 PostgreSQL 컨테이너 실행
         run: |
@@ -108,11 +96,9 @@ jobs:
             -e POSTGRES_PASSWORD=postgres123 \
             -p 5432:5432 \
             postgres:15
-
-          echo "⏳ DB 초기화 대기 중..."
           sleep 20
 
-      - name: 🚀 앱 컨테이너 실행
+      - name: 🚀 Flask 앱 컨테이너 실행
         run: |
           docker rm -f finance-transactions || true
           docker run -d \
@@ -121,6 +107,25 @@ jobs:
             --env-file .env \
             -p 8080:5000 \
             finance-transactions:latest
+
+      - name: 📄 backup.sh 생성 (pg_dump)
+        run: |
+          echo "#!/bin/bash" > backup.sh
+          echo "mkdir -p backup" >> backup.sh
+          echo "TIMESTAMP=\$(date +%Y%m%d%H%M%S)" >> backup.sh
+          echo "docker exec db pg_dump -U postgres -d finance > backup/backup-\$TIMESTAMP.sql" >> backup.sh
+          chmod +x backup.sh
+          ./backup.sh
+          ls -lh backup
+
+      - name: 📦 GitHub Release로 DB 백업 업로드
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "📦 DB Backup"
+          tag_name: "db-backup-${{ github.run_id }}"
+          files: backup/*.sql
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 🧹 정리
         if: always()
