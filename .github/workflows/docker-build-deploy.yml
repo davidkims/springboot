@@ -33,45 +33,30 @@ jobs:
           echo "DB_HOST=db" >> .env
           echo "DB_PORT=5432" >> .env
 
-      - name: 🐍 거래 원장 및 입출금 발생 시뮬레이션
+      - name: 🐍 글로벌 거래 원장 및 입출금 시뮬레이션
         run: |
           mkdir -p backup
-          echo "import csv, random, datetime, time, shutil" > ledger.py
+          echo "import csv, random, datetime, time, os" > ledger.py
           echo "from faker import Faker" >> ledger.py
           echo "fake = Faker()" >> ledger.py
           echo "accounts = [[fake.name(), fake.bban(), round(random.uniform(1000,100000),2)] for _ in range(10)]" >> ledger.py
-          echo "with open('backup/accounts.csv', 'w', newline='') as f:" >> ledger.py
-          echo "    writer = csv.writer(f); writer.writerow(['name','account','balance']); writer.writerows(accounts)" >> ledger.py
 
-          echo "with open('backup/transactions.csv', 'a', newline='') as f:" >> ledger.py
-          echo "    writer = csv.writer(f);" >> ledger.py
-          echo "    try: f.seek(0); next(csv.reader(f))" >> ledger.py
-          echo "    except: writer.writerow(['timestamp','amount','currency','status'])" >> ledger.py
+          echo "ledger_file = 'backup/global_ledger.csv'" >> ledger.py
+          echo "is_new = not os.path.exists(ledger_file)" >> ledger.py
+          echo "with open(ledger_file, 'a', newline='') as f:" >> ledger.py
+          echo "    writer = csv.writer(f)" >> ledger.py
+          echo "    if is_new: writer.writerow(['timestamp','type','source','amount','currency','status'])" >> ledger.py
+
           echo "    for _ in range(20):" >> ledger.py
           echo "        ts = datetime.datetime.now().isoformat(); amt = round(random.uniform(1.0, 5000.0), 2)" >> ledger.py
           echo "        currency = random.choice(['USD','KRW','JPY']); status = random.choice(['completed','pending','failed'])" >> ledger.py
-          echo "        writer.writerow([ts, amt, currency, status]); print(f'💸 거래 발생: {amt} {currency} / 상태: {status}'); time.sleep(0.1)" >> ledger.py
+          echo "        writer.writerow([ts, 'transfer', 'transactions', amt, currency, status]); time.sleep(0.1)" >> ledger.py
 
-          echo "for card_type in ['credit_card', 'check_card']:" >> ledger.py
-          echo "    path = f'backup/{card_type}_transactions.csv'" >> ledger.py
-          echo "    with open(path, 'a', newline='') as f:" >> ledger.py
-          echo "        writer = csv.writer(f);" >> ledger.py
-          echo "        try: f.seek(0); next(csv.reader(f))" >> ledger.py
-          echo "        except: writer.writerow(['timestamp','card_number','amount','type','status'])" >> ledger.py
+          echo "    for card_type in ['credit_card', 'check_card']:" >> ledger.py
           echo "        for _ in range(15):" >> ledger.py
           echo "            ts = datetime.datetime.now().isoformat(); card = fake.credit_card_number(); amt = round(random.uniform(5.0, 300.0),2)" >> ledger.py
           echo "            t = random.choice(['withdrawal', 'deposit']); s = random.choice(['completed', 'pending', 'failed'])" >> ledger.py
-          echo "            writer.writerow([ts, card, amt, t, s])" >> ledger.py
-
-          echo "# 거래 재처리" >> ledger.py
-          echo "with open('backup/transactions.csv', 'r') as infile, open('backup/retries.csv', 'w', newline='') as retry_out:" >> ledger.py
-          echo "    reader = csv.reader(infile); header = next(reader); retry_out.write(','.join(header)+'\n')" >> ledger.py
-          echo "    writer = csv.writer(retry_out)" >> ledger.py
-          echo "    for row in reader:" >> ledger.py
-          echo "        if row[-1] in ['pending', 'failed']:" >> ledger.py
-          echo "            row[-1] = 'completed'; print(f'🔁 재처리 거래: {row}')" >> ledger.py
-          echo "        writer.writerow(row)" >> ledger.py
-          echo "shutil.move('backup/retries.csv', 'backup/transactions.csv')" >> ledger.py
+          echo "            writer.writerow([ts, t, card_type, amt, 'KRW', s])" >> ledger.py
 
           python3 ledger.py
 
@@ -105,23 +90,10 @@ jobs:
 
       - name: 🗃️ CSV → PostgreSQL 적재
         run: |
-          # transactions.csv
-          tail -n +2 backup/transactions.csv > backup/tmp.csv
-          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
+          tail -n +2 backup/global_ledger.csv > backup/tmp.csv
+          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS global_ledger (timestamp TIMESTAMP, type VARCHAR(20), source VARCHAR(30), amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
           docker cp backup/tmp.csv db:/tmp/tmp.csv
-          docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
-
-          # credit_card_transactions.csv
-          tail -n +2 backup/credit_card_transactions.csv > backup/tmp.csv
-          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS credit_card_transactions (timestamp TIMESTAMP, card_number VARCHAR(30), amount NUMERIC, type VARCHAR(20), status VARCHAR(20));"
-          docker cp backup/tmp.csv db:/tmp/tmp.csv
-          docker exec db psql -U postgres -d finance -c "COPY credit_card_transactions(timestamp, card_number, amount, type, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
-
-          # check_card_transactions.csv
-          tail -n +2 backup/check_card_transactions.csv > backup/tmp.csv
-          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS check_card_transactions (timestamp TIMESTAMP, card_number VARCHAR(30), amount NUMERIC, type VARCHAR(20), status VARCHAR(20));"
-          docker cp backup/tmp.csv db:/tmp/tmp.csv
-          docker exec db psql -U postgres -d finance -c "COPY check_card_transactions(timestamp, card_number, amount, type, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
+          docker exec db psql -U postgres -d finance -c "COPY global_ledger(timestamp, type, source, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
 
       - name: 💾 DB 백업
         run: |
