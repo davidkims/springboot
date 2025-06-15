@@ -87,7 +87,7 @@ jobs:
           sudo systemctl start docker || sudo service docker start
           docker --version
 
-      - name: 🐘 PostgreSQL 컨테이너 실행 및 백업 SQL 자동 적재
+      - name: 🐘 PostgreSQL 컨테이너 실행 및 SQL 적재
         run: |
           mkdir -p backup
           docker run -d --name db \
@@ -96,13 +96,8 @@ jobs:
             -e POSTGRES_PASSWORD=postgres123 \
             -p 5432:5432 postgres:15
           sleep 20
-          BACKUP_FILE=$(ls -t backup/backup-*.sql 2>/dev/null | head -n 1)
-          if [ -f "$BACKUP_FILE" ]; then
-            docker cp "$BACKUP_FILE" db:/tmp/restore.sql
-            docker exec db psql -U postgres -d finance -f /tmp/restore.sql
-          fi
 
-      - name: 📄 거래 데이터 시뮬레이션 (ledger.py)
+      - name: 📄 거래 시뮬레이션 데이터 생성
         run: |
           mkdir -p backup
           echo "import csv, random, datetime" > ledger.py
@@ -117,14 +112,14 @@ jobs:
           echo "        writer.writerow([ts, amt, currency, status])" >> ledger.py
           python3 ledger.py
 
-      - name: 🗃️ CSV → PostgreSQL DB 적재
+      - name: 🗃️ 거래 CSV → PostgreSQL 적재
         run: |
-          tail -n +2 backup/transactions.csv > backup/tmp_transactions.csv
+          tail -n +2 backup/transactions.csv > backup/tmp.csv
           docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
-          docker cp backup/tmp_transactions.csv db:/tmp/tmp_transactions.csv
-          docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp_transactions.csv' DELIMITER ',' CSV;"
+          docker cp backup/tmp.csv db:/tmp/tmp.csv
+          docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
 
-      - name: 💾 DB 백업 수행
+      - name: 💾 PostgreSQL DB 백업
         run: |
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           docker exec db pg_dump -U postgres -d finance > backup/backup-$TIMESTAMP.sql
@@ -134,7 +129,7 @@ jobs:
         run: |
           mkdir -p provenance
           TIMESTAMP=$(cat backup/latest.txt)
-          BACKUP_FILE=$(ls backup/backup-$TIMESTAMP.sql)
+          BACKUP_FILE="backup/backup-$TIMESTAMP.sql"
           HASH=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
           PROV_FILE="provenance/provenance-$TIMESTAMP.json"
           echo "{" > "$PROV_FILE"
@@ -145,6 +140,12 @@ jobs:
           echo "}" >> "$PROV_FILE"
           echo "[✔] 증명서 생성 완료: $PROV_FILE"
           cat "$PROV_FILE"
+
+      - name: ⬇️ Provenance 증명서 다운로드용 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-certificate
+          path: provenance/*.json
 
       - name: 🧹 컨테이너 정리
         if: always()
