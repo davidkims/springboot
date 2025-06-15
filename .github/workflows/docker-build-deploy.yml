@@ -1,4 +1,4 @@
-name: Build & Deploy finance-transactions with DB Backup + Provenance
+name: Build & Deploy finance-transactions with DB Backup + Provenance + Restart + Preserve
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📅 Checkout 코드
+      - name: 🗓 Checkout 코드
         uses: actions/checkout@v4
 
       - name: 📦 requirements.txt 생성 및 확인
@@ -20,7 +20,7 @@ jobs:
           echo "python-dotenv" >> requirements.txt
           echo "psycopg2-binary" >> requirements.txt
           echo "SQLAlchemy" >> requirements.txt
-          test -f requirements.txt && echo "[✔] requirements.txt 존재 확인" || (echo "[❌] requirements.txt 누락!" && exit 1)
+          test -f requirements.txt && echo "[\u2714] requirements.txt 존재 확인" || (echo "[❌] requirements.txt 누른!" && exit 1)
 
       - name: ⚙️ .env 파일 생성 및 확인
         run: |
@@ -32,9 +32,9 @@ jobs:
           echo "POSTGRES_PASSWORD=postgres123" >> .env
           echo "DB_HOST=db" >> .env
           echo "DB_PORT=5432" >> .env
-          test -f .env && echo "[✔] .env 존재 확인" || (echo "[❌] .env 누락!" && exit 1)
+          test -f .env && echo "[\u2714] .env 존재 확인" || (echo "[❌] .env 누른!" && exit 1)
 
-      - name: 🐍 app.py 생성 및 확인
+      - name: 🦖 app.py 생성 및 확인
         run: |
           echo "from flask import Flask, request, jsonify" > app.py
           echo "from flask_sqlalchemy import SQLAlchemy" >> app.py
@@ -68,7 +68,7 @@ jobs:
           echo "        return jsonify({'status': 'error', 'message': str(e)}), 400" >> app.py
           echo "if __name__ == '__main__':" >> app.py
           echo "    app.run(host='0.0.0.0', port=5000)" >> app.py
-          test -f app.py && echo "[✔] app.py 존재 확인" || (echo "[❌] app.py 누락!" && exit 1)
+          test -f app.py && echo "[\u2714] app.py 존재 확인" || (echo "[❌] app.py 누른!" && exit 1)
 
       - name: 🐳 Dockerfile 생성 및 확인
         run: |
@@ -78,7 +78,7 @@ jobs:
           echo "RUN pip install --no-cache-dir -r requirements.txt" >> Dockerfile
           echo "EXPOSE 5000" >> Dockerfile
           echo "CMD [\"python\", \"app.py\"]" >> Dockerfile
-          test -f Dockerfile && echo "[✔] Dockerfile 존재 확인" || (echo "[❌] Dockerfile 누락!" && exit 1)
+          test -f Dockerfile && echo "[\u2714] Dockerfile 존재 확인" || (echo "[❌] Dockerfile 누른!" && exit 1)
 
       - name: 🛠️ Docker 설치
         run: |
@@ -87,7 +87,7 @@ jobs:
           sudo systemctl start docker || sudo service docker start
           docker --version
 
-      - name: 🐘 PostgreSQL 컨테이너 실행 및 SQL 적재
+      - name: 🐐 PostgreSQL 커테이너 실행
         run: |
           mkdir -p backup
           docker run -d --name db \
@@ -97,7 +97,7 @@ jobs:
             -p 5432:5432 postgres:15
           sleep 20
 
-      - name: 📄 거래 시뮬레이션 데이터 생성
+      - name: 📄 거래 시뮬리언 데이터 생성
         run: |
           mkdir -p backup
           echo "import csv, random, datetime" > ledger.py
@@ -112,14 +112,14 @@ jobs:
           echo "        writer.writerow([ts, amt, currency, status])" >> ledger.py
           python3 ledger.py
 
-      - name: 🗃️ 거래 CSV → PostgreSQL 적재
+      - name: 🛃️ 거래 CSV → PostgreSQL 적재
         run: |
           tail -n +2 backup/transactions.csv > backup/tmp.csv
           docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
           docker cp backup/tmp.csv db:/tmp/tmp.csv
           docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
 
-      - name: 💾 PostgreSQL DB 백업
+      - name: 📀 DB 백업 수행
         run: |
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           docker exec db pg_dump -U postgres -d finance > backup/backup-$TIMESTAMP.sql
@@ -147,7 +147,41 @@ jobs:
           name: provenance-certificate
           path: provenance/*.json
 
-      - name: 🧹 컨테이너 정리
+      - name: ♻️ 커테이너 재기동 처리
+        run: |
+          echo "[🔁] PostgreSQL 커테이너 검사"
+          if ! docker ps | grep -q 'db'; then
+            echo "[⚠️] db 커테이너 건지지 않음. 재개 시도..."
+            docker start db || docker run -d --name db \
+              -e POSTGRES_DB=finance \
+              -e POSTGRES_USER=postgres \
+              -e POSTGRES_PASSWORD=postgres123 \
+              -p 5432:5432 postgres:15
+          fi
+
+          echo "[🔁] Flask 애플 커테이너 검사"
+          if ! docker ps | grep -q 'finance-transactions'; then
+            echo "[⚠️] finance-transactions 커테이너 건지지 않음. 리브더후 재시도..."
+            docker build -t finance-transactions .
+            docker run -d --name finance-transactions -p 5000:5000 finance-transactions
+          fi
+
+      - name: 📃 커테이너 정보 기본 .github에 보존
+        run: |
+          mkdir -p .github/container-info
+          docker ps -a > .github/container-info/containers.txt
+          docker images > .github/container-info/images.txt
+          docker inspect db > .github/container-info/db-inspect.json || echo "[⚠️] db 커테이너 없음"
+          docker inspect finance-transactions > .github/container-info/finance-inspect.json || echo "[⚠️] finance-transactions 커테이너 없음"
+          ls -lh .github/container-info/
+
+      - name: 📦 커테이너 정보 다운로드용 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-info
+          path: .github/container-info
+
+      - name: 🛉 커테이너 정리
         if: always()
         run: |
           docker stop finance-transactions || true
