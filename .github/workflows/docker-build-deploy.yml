@@ -35,61 +35,58 @@ jobs:
 
       - name: 🐍 거래 원장 및 입출금 발생 시뮬레이션
         run: |
-          mkdir -p backup .github/global
+          mkdir -p .github/global .github/provenance
           echo "import csv, random, datetime, time, shutil" > ledger.py
           echo "from faker import Faker" >> ledger.py
           echo "fake = Faker()" >> ledger.py
+
           echo "accounts = [[fake.name(), fake.bban(), round(random.uniform(1000,100000),2)] for _ in range(10)]" >> ledger.py
-          echo "with open('backup/accounts.csv', 'w', newline='') as f:" >> ledger.py
+          echo "with open('.github/global/accounts.csv', 'w', newline='') as f:" >> ledger.py
           echo "    writer = csv.writer(f); writer.writerow(['name','account','balance']); writer.writerows(accounts)" >> ledger.py
 
-          echo "with open('backup/transactions.csv', 'w', newline='') as f:" >> ledger.py
+          echo "with open('.github/global/transactions.csv', 'w', newline='') as f:" >> ledger.py
           echo "    writer = csv.writer(f); writer.writerow(['timestamp','amount','currency','status'])" >> ledger.py
-          echo "    for _ in range(20):" >> ledger.py
+          echo "    for _ in range(30):" >> ledger.py
           echo "        ts = datetime.datetime.now().isoformat(); amt = round(random.uniform(1.0, 5000.0), 2)" >> ledger.py
           echo "        currency = random.choice(['USD','KRW','JPY']); status = random.choice(['completed','pending','failed'])" >> ledger.py
-          echo "        writer.writerow([ts, amt, currency, status]); print(f'💸 거래 발생: {amt} {currency} / 상태: {status}'); time.sleep(0.1)" >> ledger.py
+          echo "        writer.writerow([ts, amt, currency, status]); time.sleep(0.05)" >> ledger.py
 
           echo "for card_type in ['credit_card', 'check_card']:" >> ledger.py
-          echo "    with open(f'backup/{card_type}_transactions.csv', 'w', newline='') as f:" >> ledger.py
+          echo "    with open(f'.github/global/{card_type}_transactions.csv', 'w', newline='') as f:" >> ledger.py
           echo "        writer = csv.writer(f); writer.writerow(['timestamp','card_number','amount','type','status'])" >> ledger.py
-          echo "        for _ in range(15):" >> ledger.py
+          echo "        for _ in range(20):" >> ledger.py
           echo "            ts = datetime.datetime.now().isoformat(); card = fake.credit_card_number(); amt = round(random.uniform(5.0, 300.0),2)" >> ledger.py
           echo "            t = random.choice(['withdrawal', 'deposit']); s = random.choice(['completed', 'pending', 'failed'])" >> ledger.py
           echo "            writer.writerow([ts, card, amt, t, s])" >> ledger.py
 
           echo "# 거래 재처리" >> ledger.py
-          echo "with open('backup/transactions.csv', 'r') as infile, open('backup/retries.csv', 'w', newline='') as retry_out:" >> ledger.py
-          echo "    reader = csv.reader(infile); header = next(reader); retry_out.write(','.join(header)+'\n')" >> ledger.py
-          echo "    writer = csv.writer(retry_out)" >> ledger.py
-          echo "    for row in reader:" >> ledger.py
-          echo "        if row[-1] in ['pending', 'failed']:" >> ledger.py
-          echo "            row[-1] = 'completed'; print(f'🔁 재처리 거래: {row}')" >> ledger.py
-          echo "        writer.writerow(row)" >> ledger.py
+          echo "def retry_transactions(path):" >> ledger.py
+          echo "    with open(path, 'r') as infile, open(path + '.tmp', 'w', newline='') as retry_out:" >> ledger.py
+          echo "        reader = csv.reader(infile); header = next(reader); retry_out.write(','.join(header)+'\n')" >> ledger.py
+          echo "        writer = csv.writer(retry_out)" >> ledger.py
+          echo "        for row in reader:" >> ledger.py
+          echo "            if row[-1] in ['pending', 'failed']:" >> ledger.py
+          echo "                row[-1] = 'completed'" >> ledger.py
+          echo "            writer.writerow(row)" >> ledger.py
+          echo "    shutil.move(path + '.tmp', path)" >> ledger.py
 
-          echo "shutil.move('backup/retries.csv', 'backup/transactions.csv')" >> ledger.py
+          echo "retry_transactions('.github/global/transactions.csv')" >> ledger.py
+          echo "retry_transactions('.github/global/credit_card_transactions.csv')" >> ledger.py
+          echo "retry_transactions('.github/global/check_card_transactions.csv')" >> ledger.py
+
           python3 ledger.py
-          cp backup/*.csv .github/global/
 
-      - name: 📜 Provenance 생성 (CSV 해시 및 증명)
+      - name: 📜 Provenance 증명서 생성
         run: |
-          mkdir -p provenance .github/provenance
           TS=$(date +%Y%m%d%H%M%S)
-          OUT="provenance/csv-metadata-$TS.json"
+          OUT=".github/provenance/csv-metadata-$TS.json"
           echo "[" > "$OUT"
-          for f in backup/*.csv; do
+          for f in .github/global/*.csv; do
             HASH=$(sha256sum "$f" | awk '{print $1}')
-            echo "  {\"file\": \"$f\", \"sha256\": \"$HASH\", \"description\": \"Generated CSV ledger file for finance transactions\" }," >> "$OUT"
+            echo "  {\"file\": \"$f\", \"sha256\": \"$HASH\" }," >> "$OUT"
           done
           sed -i '$ s/},/}/' "$OUT"
           echo "]" >> "$OUT"
-          cp "$OUT" .github/provenance/
-
-      - name: ⬇️ 증명서 업로드
-        uses: actions/upload-artifact@v4
-        with:
-          name: csv-provenance
-          path: provenance/*.json
 
       - name: 🐘 PostgreSQL 컨테이너 실행
         run: |
@@ -102,43 +99,34 @@ jobs:
 
       - name: 🗃️ CSV → PostgreSQL 적재
         run: |
-          tail -n +2 backup/transactions.csv > backup/tmp.csv
-          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
-          docker cp backup/tmp.csv db:/tmp/tmp.csv
-          docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
+          for f in transactions credit_card_transactions check_card_transactions; do
+            tail -n +2 .github/global/${f}.csv > /tmp/tmp.csv
+            docker cp /tmp/tmp.csv db:/tmp/tmp.csv
+            if [ "$f" = "transactions" ]; then
+              docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS $f (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(20), status VARCHAR(20));"
+              docker exec db psql -U postgres -d finance -c "COPY $f(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
+            else
+              docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS $f (timestamp TIMESTAMP, card_number VARCHAR(50), amount NUMERIC, type VARCHAR(20), status VARCHAR(20));"
+              docker exec db psql -U postgres -d finance -c "COPY $f(timestamp, card_number, amount, type, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
+            fi
+          done
 
       - name: 💾 DB 백업
         run: |
           TS=$(date +%Y%m%d%H%M%S)
-          docker exec db pg_dump -U postgres -d finance > backup/backup-$TS.sql
-          echo "$TS" > backup/latest.txt
+          docker exec db pg_dump -U postgres -d finance > .github/global/backup-$TS.sql
+          echo "$TS" > .github/global/latest.txt
 
-      - name: 🧾 Backup Provenance 생성
+      - name: 🧾 DB 백업 Provenance 생성
         run: |
-          mkdir -p provenance
-          TS=$(cat backup/latest.txt)
-          BACKUP_FILE="backup/backup-$TS.sql"
+          TS=$(cat .github/global/latest.txt)
+          BACKUP_FILE=".github/global/backup-$TS.sql"
           HASH=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
-          echo "{\"artifact\": \"$BACKUP_FILE\", \"sha256\": \"$HASH\", \"description\": \"PostgreSQL dump of finance transaction ledger\", \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > provenance/provenance-$TS.json
-          cp provenance/provenance-$TS.json .github/provenance/
+          echo "{\"artifact\": \"$BACKUP_FILE\", \"sha256\": \"$HASH\", \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > .github/provenance/provenance-$TS.json
 
-      - name: ⬇️ DB Backup 증명서 업로드
-        uses: actions/upload-artifact@v4
-        with:
-          name: db-provenance
-          path: provenance/provenance-*.json
-
-      - name: ♻️ 컨테이너 재시작 및 상태 확인
-        run: |
-          docker restart db || docker run -d --name db \
-            -e POSTGRES_DB=finance \
-            -e POSTGRES_USER=postgres \
-            -e POSTGRES_PASSWORD=postgres123 \
-            -p 5432:5432 postgres:15
-          sleep 5
-          docker exec db pg_isready || (echo "[❌] DB 컨테이너 기동 실패" && exit 1)
-
-      - name: 📤 GitHub Pages 푸시
+      - name: 🌐 GitHub Pages로 증명서 및 리포트 푸시
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions"
@@ -148,7 +136,16 @@ jobs:
           cd gh-pages
           git init
           git checkout -b gh-pages
+          git remote add origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}
           git add .
           git commit -m "📊 Add global ledgers and provenance"
-          git remote add origin https://github.com/${{ github.repository }}
           git push --force origin gh-pages
+
+      - name: ♻️ 컨테이너 재기동 보장
+        if: always()
+        run: |
+          docker start db || docker run -d --name db \
+            -e POSTGRES_DB=finance \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres123 \
+            -p 5432:5432 postgres:15
