@@ -1,4 +1,4 @@
-name: Build & Deploy finance-transactions with DB Backup
+name: Build & Deploy finance-transactions with DB Backup + Provenance
 
 on:
   workflow_dispatch:
@@ -89,31 +89,17 @@ jobs:
 
       - name: 🐘 PostgreSQL 컨테이너 실행 및 백업 SQL 자동 적재
         run: |
-          echo "[+] 디렉토리 및 백업 파일 확인"
           mkdir -p backup
-          ls -al backup || echo "[!] backup 디렉토리 없음"
-          ls backup/backup-*.sql 2>/dev/null || echo "[!] 백업 SQL 파일 없음"
-
           docker run -d --name db \
             -e POSTGRES_DB=finance \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres123 \
             -p 5432:5432 postgres:15
           sleep 20
-          echo "[✔] PostgreSQL 컨테이너 실행 완료"
-
-          echo "[+] 최신 백업 SQL 파일을 찾아 컨테이너에 적재 시도"
           BACKUP_FILE=$(ls -t backup/backup-*.sql 2>/dev/null | head -n 1)
           if [ -f "$BACKUP_FILE" ]; then
-            echo "[✔] 백업 SQL 파일 발견: $BACKUP_FILE"
             docker cp "$BACKUP_FILE" db:/tmp/restore.sql
-            docker exec db psql -U postgres -d finance -f /tmp/restore.sql && echo "[✔] 백업 SQL 적재 완료"
-            echo "[+] 테이블 목록:"
-            docker exec db psql -U postgres -d finance -c "\\dt"
-            echo "[+] transactions 테이블 행 수:"
-            docker exec db psql -U postgres -d finance -c "SELECT COUNT(*) FROM transactions;"
-          else
-            echo "[!] 백업 SQL 파일이 존재하지 않아 로드 생략"
+            docker exec db psql -U postgres -d finance -f /tmp/restore.sql
           fi
 
       - name: 📄 거래 데이터 시뮬레이션 (ledger.py)
@@ -130,30 +116,35 @@ jobs:
           echo "        status = random.choice(['completed', 'pending', 'failed'])" >> ledger.py
           echo "        writer.writerow([ts, amt, currency, status])" >> ledger.py
           python3 ledger.py
-          test -f backup/transactions.csv && echo "[✔] transactions.csv 생성 완료" || (echo "[❌] transactions.csv 누락!" && exit 1)
 
-      - name: 🗃️ transactions.csv → PostgreSQL DB 적재
+      - name: 🗃️ CSV → PostgreSQL DB 적재
         run: |
           tail -n +2 backup/transactions.csv > backup/tmp_transactions.csv
-          test -f backup/tmp_transactions.csv && echo "[✔] tmp_transactions.csv 생성됨" || (echo "[❌] tmp_transactions.csv 누락!" && exit 1)
           docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
           docker cp backup/tmp_transactions.csv db:/tmp/tmp_transactions.csv
           docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp_transactions.csv' DELIMITER ',' CSV;"
-          echo "[✔] CSV → DB 적재 완료"
 
-      - name: 💾 DB 백업 수행 및 확인
+      - name: 💾 DB 백업 수행
         run: |
-          echo "#!/bin/bash" > backup.sh
-          echo "TIMESTAMP=\$(date +%Y%m%d%H%M%S)" >> backup.sh
-          echo "docker exec db pg_dump -U postgres -d finance > backup/backup-\$TIMESTAMP.sql" >> backup.sh
-          chmod +x backup.sh
-          ./backup.sh
-          BACKUP_FILE=$(ls backup/backup-*.sql | sort | tail -n 1)
-          if [ -f "$BACKUP_FILE" ]; then
-            echo "[✔] 백업 완료: $BACKUP_FILE"
-          else
-            echo "[❌] 백업 파일 생성 실패!" && exit 1
-          fi
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          docker exec db pg_dump -U postgres -d finance > backup/backup-$TIMESTAMP.sql
+          echo "$TIMESTAMP" > backup/latest.txt
+
+      - name: 📜 Provenance 증명서 생성
+        run: |
+          mkdir -p provenance
+          TIMESTAMP=$(cat backup/latest.txt)
+          BACKUP_FILE=$(ls backup/backup-$TIMESTAMP.sql)
+          HASH=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
+          PROV_FILE="provenance/provenance-$TIMESTAMP.json"
+          echo "{" > "$PROV_FILE"
+          echo "  \"artifact\": \"$(basename $BACKUP_FILE)\"," >> "$PROV_FILE"
+          echo "  \"generated_on\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> "$PROV_FILE"
+          echo "  \"db\": \"finance\"," >> "$PROV_FILE"
+          echo "  \"sha256\": \"$HASH\"" >> "$PROV_FILE"
+          echo "}" >> "$PROV_FILE"
+          echo "[✔] 증명서 생성 완료: $PROV_FILE"
+          cat "$PROV_FILE"
 
       - name: 🧹 컨테이너 정리
         if: always()
@@ -162,4 +153,3 @@ jobs:
           docker stop db || true
           docker rm finance-transactions || true
           docker rm db || true
-          echo "[✔] 컨테이너 정리 완료"
