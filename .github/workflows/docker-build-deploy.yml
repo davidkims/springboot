@@ -33,36 +33,47 @@ jobs:
           echo "DB_HOST=db" >> .env
           echo "DB_PORT=5432" >> .env
 
-      - name: 🐍 거래 원장 및 입출금 발생 시뮬레이션
+      - name: 🐍 글로벌 거래 원장 및 국가별 거래 10건 시뮬레이션
         run: |
           mkdir -p backup
-          echo "import csv, random, datetime, time" > ledger.py
+          echo "import csv, random, datetime, time, shutil" > ledger.py
           echo "from faker import Faker" >> ledger.py
           echo "fake = Faker()" >> ledger.py
-          echo "countries = ['KR', 'US', 'JP', 'DE', 'FR']" >> ledger.py
-          echo "with open('backup/global_ledger.csv', 'a', newline='') as ledger, open('backup/error_log.csv', 'a', newline='') as errlog:" >> ledger.py
-          echo "    ledger_writer = csv.writer(ledger); err_writer = csv.writer(errlog)" >> ledger.py
-          echo "    ledger_writer.writerow(['timestamp','country','amount','currency','status'])" >> ledger.py
-          echo "    err_writer.writerow(['timestamp','country','amount','currency','status'])" >> ledger.py
+          echo "countries = ['KR', 'US', 'JP', 'CN', 'DE']" >> ledger.py
+
+          echo "with open('backup/global_ledger.csv', 'a', newline='') as f:" >> ledger.py
+          echo "    writer = csv.writer(f)" >> ledger.py
+          echo "    writer.writerow(['timestamp','country','amount','currency','status'])" >> ledger.py
           echo "    for country in countries:" >> ledger.py
           echo "        for _ in range(10):" >> ledger.py
-          echo "            ts = datetime.datetime.now().isoformat(); amt = round(random.uniform(10.0, 1000.0), 2)" >> ledger.py
-          echo "            currency = random.choice(['USD','KRW','EUR','JPY','GBP']); status = random.choice(['completed','pending','failed'])" >> ledger.py
-          echo "            row = [ts, country, amt, currency, status]" >> ledger.py
-          echo "            ledger_writer.writerow(row)" >> ledger.py
-          echo "            if status != 'completed': err_writer.writerow(row)" >> ledger.py
-          echo "            print(f'💱 거래 기록: {row}')" >> ledger.py
-          echo "            time.sleep(0.05)" >> ledger.py
+          echo "            ts = datetime.datetime.now().isoformat()" >> ledger.py
+          echo "            amt = round(random.uniform(10.0, 10000.0), 2)" >> ledger.py
+          echo "            currency = random.choice(['USD', 'KRW', 'JPY', 'EUR', 'CNY'])" >> ledger.py
+          echo "            status = random.choice(['completed', 'pending', 'failed'])" >> ledger.py
+          echo "            writer.writerow([ts, country, amt, currency, status])" >> ledger.py
 
-          echo "# 거래 상태별 통계 요약" >> ledger.py
+          echo "# 거래 재처리 및 에러 로그 저장" >> ledger.py
+          echo "with open('backup/global_ledger.csv', 'r') as infile, \
+                 open('backup/temp.csv', 'w', newline='') as outfile, \
+                 open('backup/error_log.csv', 'a', newline='') as errlog:" >> ledger.py
+          echo "    reader = csv.reader(infile); writer = csv.writer(outfile); error_writer = csv.writer(errlog)" >> ledger.py
+          echo "    rows = list(reader)" >> ledger.py
+          echo "    writer.writerow(rows[0])" >> ledger.py
+          echo "    for row in rows[1:]:" >> ledger.py
+          echo "        if row[-1] in ['pending', 'failed']:" >> ledger.py
+          echo "            row[-1] = 'completed'" >> ledger.py
+          echo "            print(f'🔁 재처리됨: {row}')" >> ledger.py
+          echo "        if row[-1] != 'completed': error_writer.writerow(row)" >> ledger.py
+          echo "        writer.writerow(row)" >> ledger.py
+          echo "shutil.move('backup/temp.csv', 'backup/global_ledger.csv')" >> ledger.py
+
+          echo "# 상태별 통계 요약" >> ledger.py
           echo "from collections import Counter" >> ledger.py
-          echo "with open('backup/global_ledger.csv', 'r') as f:" >> ledger.py
-          echo "    reader = csv.reader(f); next(reader)" >> ledger.py
-          echo "    statuses = [row[4] for row in reader]" >> ledger.py
-          echo "    count = Counter(statuses)" >> ledger.py
-          echo "    with open('backup/summary.csv', 'w', newline='') as summary:" >> ledger.py
-          echo "        writer = csv.writer(summary); writer.writerow(['status', 'count'])" >> ledger.py
-          echo "        for k, v in count.items(): writer.writerow([k, v])" >> ledger.py
+          echo "status_counter = Counter()" >> ledger.py
+          echo "with open('backup/global_ledger.csv', 'r') as f: reader = csv.reader(f); next(reader); [status_counter.update([row[-1]]) for row in reader]" >> ledger.py
+          echo "with open('backup/summary.csv', 'w', newline='') as sfile:" >> ledger.py
+          echo "    swriter = csv.writer(sfile); swriter.writerow(['status', 'count'])" >> ledger.py
+          echo "    for k, v in status_counter.items(): swriter.writerow([k, v])" >> ledger.py
 
           python3 ledger.py
 
@@ -96,10 +107,10 @@ jobs:
 
       - name: 🗃️ CSV → PostgreSQL 적재
         run: |
+          tail -n +2 backup/global_ledger.csv > backup/tmp.csv
           docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS global_ledger (timestamp TIMESTAMP, country VARCHAR(10), amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
-          tail -n +2 backup/global_ledger.csv > backup/tmp_global.csv
-          docker cp backup/tmp_global.csv db:/tmp/tmp_global.csv
-          docker exec db psql -U postgres -d finance -c "COPY global_ledger(timestamp, country, amount, currency, status) FROM '/tmp/tmp_global.csv' DELIMITER ',' CSV;"
+          docker cp backup/tmp.csv db:/tmp/tmp.csv
+          docker exec db psql -U postgres -d finance -c "COPY global_ledger(timestamp, country, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
 
       - name: 💾 DB 백업
         run: |
