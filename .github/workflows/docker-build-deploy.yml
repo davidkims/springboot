@@ -36,39 +36,43 @@ jobs:
       - name: 🐍 거래 원장 및 입출금 발생 시뮬레이션
         run: |
           mkdir -p backup
-          echo "import csv, random, datetime, time" > ledger.py
+          echo "import csv, random, datetime, time, os, shutil" > ledger.py
           echo "from faker import Faker" >> ledger.py
           echo "fake = Faker()" >> ledger.py
-          echo "accounts = [[fake.name(), fake.bban(), round(random.uniform(1000,100000),2)] for _ in range(10)]" >> ledger.py
-          echo "with open('backup/accounts.csv', 'w', newline='') as f:" >> ledger.py
-          echo "    writer = csv.writer(f); writer.writerow(['name','account','balance']); writer.writerows(accounts)" >> ledger.py
 
-          echo "with open('backup/transactions.csv', 'w', newline='') as f:" >> ledger.py
-          echo "    writer = csv.writer(f); writer.writerow(['timestamp','amount','currency','status'])" >> ledger.py
+          echo "accounts = [[fake.name(), fake.bban(), round(random.uniform(1000,100000),2)] for _ in range(10)]" >> ledger.py
+          echo "with open('backup/accounts.csv', 'a', newline='') as f:" >> ledger.py
+          echo "    writer = csv.writer(f);" >> ledger.py
+          echo "    if f.tell() == 0: writer.writerow(['name','account','balance'])" >> ledger.py
+          echo "    writer.writerows(accounts)" >> ledger.py
+
+          echo "with open('backup/transactions.csv', 'a', newline='') as f:" >> ledger.py
+          echo "    writer = csv.writer(f);" >> ledger.py
+          echo "    if f.tell() == 0: writer.writerow(['timestamp','amount','currency','status'])" >> ledger.py
           echo "    for _ in range(20):" >> ledger.py
           echo "        ts = datetime.datetime.now().isoformat(); amt = round(random.uniform(1.0, 5000.0), 2)" >> ledger.py
           echo "        currency = random.choice(['USD','KRW','JPY']); status = random.choice(['completed','pending','failed'])" >> ledger.py
           echo "        writer.writerow([ts, amt, currency, status]); print(f'💸 거래 발생: {amt} {currency} / 상태: {status}'); time.sleep(0.1)" >> ledger.py
 
           echo "for card_type in ['credit_card', 'check_card']:" >> ledger.py
-          echo "    with open(f'backup/{card_type}_transactions.csv', 'w', newline='') as f:" >> ledger.py
-          echo "        writer = csv.writer(f); writer.writerow(['timestamp','card_number','amount','type','status'])" >> ledger.py
+          echo "    filename = f'backup/{card_type}_transactions.csv'" >> ledger.py
+          echo "    with open(filename, 'a', newline='') as f:" >> ledger.py
+          echo "        writer = csv.writer(f);" >> ledger.py
+          echo "        if f.tell() == 0: writer.writerow(['timestamp','card_number','amount','type','status'])" >> ledger.py
           echo "        for _ in range(15):" >> ledger.py
           echo "            ts = datetime.datetime.now().isoformat(); card = fake.credit_card_number(); amt = round(random.uniform(5.0, 300.0),2)" >> ledger.py
           echo "            t = random.choice(['withdrawal', 'deposit']); s = random.choice(['completed', 'pending', 'failed'])" >> ledger.py
           echo "            writer.writerow([ts, card, amt, t, s])" >> ledger.py
 
           echo "# 거래 재처리" >> ledger.py
-          echo "with open('backup/transactions.csv', 'r') as infile, open('backup/retries.csv', 'w', newline='') as retry_out:" >> ledger.py
-          echo "    reader = csv.reader(infile); header = next(reader); retry_out.write(','.join(header)+'\n')" >> ledger.py
-          echo "    writer = csv.writer(retry_out)" >> ledger.py
-          echo "    for row in reader:" >> ledger.py
-          echo "        if row[-1] in ['pending', 'failed']:" >> ledger.py
-          echo "            row[-1] = 'completed'; print(f'🔁 재처리 거래: {row}')" >> ledger.py
-          echo "        writer.writerow(row)" >> ledger.py
-
-          echo "# 덮어쓰기" >> ledger.py
-          echo "import shutil; shutil.move('backup/retries.csv', 'backup/transactions.csv')" >> ledger.py
+          echo "for file in ['backup/transactions.csv', 'backup/credit_card_transactions.csv', 'backup/check_card_transactions.csv']:" >> ledger.py
+          echo "    with open(file, 'r') as infile, open(file+'.tmp', 'w', newline='') as outfile:" >> ledger.py
+          echo "        reader = csv.reader(infile); writer = csv.writer(outfile); header = next(reader); writer.writerow(header)" >> ledger.py
+          echo "        for row in reader:" >> ledger.py
+          echo "            if row[-1] in ['pending','failed']:" >> ledger.py
+          echo "                row[-1] = 'completed'; print(f'🔁 재처리: {row}')" >> ledger.py
+          echo "            writer.writerow(row)" >> ledger.py
+          echo "    shutil.move(file+'.tmp', file)" >> ledger.py
 
           python3 ledger.py
 
@@ -102,10 +106,13 @@ jobs:
 
       - name: 🗃️ CSV → PostgreSQL 적재
         run: |
-          tail -n +2 backup/transactions.csv > backup/tmp.csv
-          docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS transactions (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
-          docker cp backup/tmp.csv db:/tmp/tmp.csv
-          docker exec db psql -U postgres -d finance -c "COPY transactions(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
+          for f in transactions credit_card_transactions check_card_transactions; do
+            tail -n +2 backup/${f}.csv > backup/tmp.csv
+            docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS ${f} (timestamp TIMESTAMP, amount NUMERIC, currency_or_card VARCHAR(30), type_or_status VARCHAR(30), status VARCHAR(30));"
+            docker cp backup/tmp.csv db:/tmp/tmp.csv
+            docker exec db psql -U postgres -d finance -c "\
+              COPY ${f}(timestamp, amount, currency_or_card, type_or_status, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
+          done
 
       - name: 💾 DB 백업
         run: |
