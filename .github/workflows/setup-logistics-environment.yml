@@ -1,66 +1,89 @@
-name: Setup Logistics + Loans Environment
+name: Setup & Load Loans Ledger with Backup
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'  # 매시 정각 자동 실행
 
 jobs:
-  setup-loans:
+  setup-and-load:
     runs-on: ubuntu-latest
     steps:
 
-      # 1. 레포지토리 체크아웃
-      - name: Checkout Code
+      - name: 📁 Checkout Repo
         uses: actions/checkout@v4
 
-      # 2. PostgreSQL 설치 및 서비스 시작
-      - name: Install PostgreSQL
+      - name: 🐳 Setup Docker
         run: |
-          echo "[+] Installing PostgreSQL"
-          sudo apt-get update
-          sudo apt-get install -y postgresql postgresql-contrib
-          sudo systemctl enable postgresql
-          sudo systemctl start postgresql
-          echo "[✔] PostgreSQL started"
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo systemctl start docker
+          docker --version
 
-      # 3. loans 데이터베이스 및 거래 원장 테이블 생성
-      - name: Create loans DB and loan_ledger table
+      - name: 🐘 Run PostgreSQL Container
         run: |
-          echo "[+] Creating 'loans' database"
-          sudo -u postgres psql -c "CREATE DATABASE loans;" || echo "[i] Database already exists"
-          echo "[+] Creating loan_ledger table"
-          sudo -u postgres psql -d loans -c "\
-            CREATE TABLE IF NOT EXISTS loan_ledger (
-              loan_id SERIAL PRIMARY KEY,
-              customer_id INT NOT NULL,
-              amount NUMERIC(12, 2) NOT NULL,
-              currency VARCHAR(10) DEFAULT 'KRW',
-              interest_rate NUMERIC(5, 2),
-              start_date DATE,
-              end_date DATE,
-              status VARCHAR(20) DEFAULT 'active'
-            );"
-          echo "[✔] loan_ledger 테이블 생성 완료"
+          docker rm -f pg-loans || true
+          docker run -d \
+            --name pg-loans \
+            -e POSTGRES_DB=loans \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres123 \
+            -v pgdata:/var/lib/postgresql/data \
+            -p 5433:5432 postgres:15
+          echo "[✔] PostgreSQL Container Running"
+          sleep 15
 
-      # 4. Salesforce CLI 설치 - 안정적이고 최신 방식으로 대체
-      - name: Install Salesforce CLI (sf)
+      - name: 🔧 Create loans DB Schema
         run: |
-          echo "[+] Installing Salesforce CLI (@salesforce/cli)"
-          npm install --global @salesforce/cli || echo "[!] sf CLI 설치 실패"
-          sf --version || echo "[!] sf CLI 버전 확인 실패"
+          INIT_SQL=$(mktemp)
+          echo "CREATE TABLE IF NOT EXISTS loan_ledger (" > $INIT_SQL
+          echo "  id SERIAL PRIMARY KEY," >> $INIT_SQL
+          echo "  customer_id INT NOT NULL," >> $INIT_SQL
+          echo "  loan_amount DECIMAL(10,2) NOT NULL," >> $INIT_SQL
+          echo "  interest_rate DECIMAL(5,2)," >> $INIT_SQL
+          echo "  issue_date DATE," >> $INIT_SQL
+          echo "  due_date DATE," >> $INIT_SQL
+          echo "  status VARCHAR(20)" >> $INIT_SQL
+          echo ");" >> $INIT_SQL
+          docker cp "$INIT_SQL" pg-loans:/tmp/schema.sql
+          docker exec pg-loans psql -U postgres -d loans -f /tmp/schema.sql
 
-      # 5. 오류가 발생한 기존 sfdx CLI 경고 제거
-      - name: (Optional) Remove deprecated sfdx-cli
+      - name: 📄 Create loans.csv
         run: |
-          echo "[i] sfdx-cli 제거 (선택사항)"
-          npm uninstall --global sfdx-cli || echo "[!] 기존 sfdx-cli 제거 실패 (무시됨)"
+          mkdir -p data
+          echo "customer_id,loan_amount,interest_rate,issue_date,due_date,status" > data/loans.csv
+          echo "1,10000,5.5,2024-01-01,2025-01-01,active" >> data/loans.csv
+          echo "2,15000,4.2,2024-03-15,2025-03-15,active" >> data/loans.csv
+          echo "3,5000,6.8,2024-05-01,2024-12-01,closed" >> data/loans.csv
 
-      # 6. 초기 테스트 레코드 삽입 (예시)
-      - name: Insert test loans (optional)
+      - name: 📥 Load CSV to loan_ledger
         run: |
-          echo "[+] Test loan 데이터 삽입"
-          sudo -u postgres psql -d loans -c "\
-            INSERT INTO loan_ledger (customer_id, amount, interest_rate, start_date, end_date)
-            VALUES
-              (1, 1000000, 3.5, CURRENT_DATE, CURRENT_DATE + INTERVAL '365 days'),
-              (2, 500000, 2.9, CURRENT_DATE, CURRENT_DATE + INTERVAL '180 days');"
-          echo "[✔] Test 데이터 삽입 완료"
+          docker cp data/loans.csv pg-loans:/tmp/loans.csv
+          docker exec pg-loans bash -c "psql -U postgres -d loans -c \
+            \"COPY loan_ledger(customer_id, loan_amount, interest_rate, issue_date, due_date, status) \
+            FROM '/tmp/loans.csv' DELIMITER ',' CSV HEADER;\""
+          echo "[✔] CSV Loaded"
+
+      - name: 💾 Export SQL Backup
+        run: |
+          mkdir -p backup
+          TIMESTAMP=$(date +'%Y%m%d%H%M')
+          BACKUP_FILE=backup/loan_backup_$TIMESTAMP.sql
+          docker exec pg-loans pg_dump -U postgres -d loans > $BACKUP_FILE
+          echo "[✔] SQL Backup saved as $BACKUP_FILE"
+
+      - name: 🔁 Restore Latest Backup on New Container (Optional Test)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          LATEST_BACKUP=$(ls backup/loan_backup_*.sql | sort | tail -n1)
+          docker rm -f pg-restore || true
+          docker run -d \
+            --name pg-restore \
+            -e POSTGRES_DB=loans \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres123 \
+            -p 5434:5432 postgres:15
+          sleep 10
+          docker cp "$LATEST_BACKUP" pg-restore:/tmp/restore.sql
+          docker exec pg-restore psql -U postgres -d loans -f /tmp/restore.sql
+          echo "[✔] Restore completed from latest backup: $LATEST_BACKUP"
