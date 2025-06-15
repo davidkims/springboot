@@ -54,34 +54,28 @@ jobs:
           sudo systemctl enable postgresql
           sudo systemctl start postgresql
 
-      - name: Install MongoDB
+      - name: Run MongoDB via Docker
         run: |
-          # 1) Codename 확인 및 지원되지 않으면 jammy로 대체
-          DIST=$(lsb_release -cs)
-          case "$DIST" in
-            focal|jammy) ;;
-            *) DIST=jammy ;;
-          esac
-
-          # 2) MongoDB GPG 키 추가 (deprecation-safe)
-          wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc \
-            | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-org-archive-keyring.gpg
-
-          # 3) APT 소스 설정
-          echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-org-archive-keyring.gpg ] \
-            https://repo.mongodb.org/apt/ubuntu $DIST/mongodb-org/6.0 multiverse" \
-            | sudo tee /etc/apt/sources.list.d/mongodb-org.list
-
-          # 4) 설치 및 서비스 기동
-          sudo apt-get update
-          sudo apt-get install -y mongodb-org
-          sudo systemctl enable mongod
-          sudo systemctl start mongod
+          echo "[+] Docker로 MongoDB 6.0 실행"
+          docker run -d --name mongodb -p 27017:27017 mongo:6.0
 
       - name: Run Oracle XE in Docker
         run: |
-          sudo docker pull quay.io/license/oracle-xe:latest
-          sudo docker run -d --name oracle-xe -p 1521:1521 quay.io/license/oracle-xe:latest
+          echo "[+] Oracle XE 컨테이너 실행 준비"
+          docker pull gvenzl/oracle-xe:21-slim
+          docker run -d \
+            --name oracle-xe \
+            -e ORACLE_PASSWORD=oracle123 \
+            -p 1521:1521 \
+            gvenzl/oracle-xe:21-slim
+          echo "[✔] Oracle XE 컨테이너 실행 완료"
+
+      # Oracle XE Healthcheck 및 SQLPlus 접속 테스트
+      - name: Oracle XE Healthcheck
+        run: |
+          echo "[+] Oracle XE healthcheck"
+          sleep 20
+          docker exec oracle-xe bash -c 'echo exit | sqlplus -s system/oracle123@localhost:1521/XEPDB1' || echo "❗ SQL*Plus 접속 실패"
 
       # 5. 워크플로우 엔진/플랫폼 설치
       - name: Install Apache Airflow
@@ -109,7 +103,6 @@ jobs:
           sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;"
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
           sudo mkdir -p $(dirname $SCRIPT)
-
           echo "CREATE TABLE customers ("                                > $SCRIPT
           echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"         >> $SCRIPT
           echo "  name VARCHAR(100) NOT NULL"                          >> $SCRIPT
@@ -131,5 +124,4 @@ jobs:
           echo "  (1,'debit',50.00),"                                  >> $SCRIPT
           echo "  (2,'credit',120.00),"                                >> $SCRIPT
           echo "  (3,'debit',75.50);"                                  >> $SCRIPT
-
           sudo mysql logistics < $SCRIPT
