@@ -1,149 +1,105 @@
-name: Build & Deploy finance-transactions with DB Backup + Provenance + Restart
+name: Setup & Load Loans Ledger with Backup and Tags
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '0 * * * *'  # 매 시간 정각마다 실행
 
 jobs:
-  build-and-deploy:
+  setup-and-load:
     runs-on: ubuntu-latest
-    env:
-      GH_PAT: ${{ secrets.GH_PAT }}
 
     steps:
-      - name: 📅 Checkout 코드
+      - name: 📁 Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 📦 requirements.txt 생성 및 설치
+      - name: 🐳 [tag:docker-install] Install Docker
         run: |
-          echo "flask\nflask_sqlalchemy\npython-dotenv\npsycopg2-binary\nSQLAlchemy\nfaker" > requirements.txt
-          pip install -r requirements.txt
+          echo "[tag:docker-install] Installing Docker..."
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo systemctl start docker
+          docker --version
+          echo "[tag:docker-install] Docker 설치 완료"
 
-      - name: ⚙️ .env 파일 생성
+      - name: 🐘 [tag:pg-container] Start PostgreSQL Container
         run: |
-          echo "FLASK_ENV=production" > .env
-          echo "APP_NAME=FinanceTransactions" >> .env
-          echo "DEBUG=False" >> .env
-          echo "POSTGRES_DB=finance" >> .env
-          echo "POSTGRES_USER=postgres" >> .env
-          echo "POSTGRES_PASSWORD=postgres123" >> .env
-          echo "DB_HOST=db" >> .env
-          echo "DB_PORT=5432" >> .env
-
-      - name: 🐍 글로벌 거래 원장 및 시뮬레이션 생성
-        run: |
-          mkdir -p .github/global .github/provenance
-          python3 <<EOF
-import csv, random, datetime, time, shutil
-from faker import Faker
-fake = Faker()
-
-accounts = [[fake.name(), fake.bban(), round(random.uniform(1000,100000),2)] for _ in range(10)]
-with open('.github/global/accounts.csv', 'w', newline='') as f:
-    writer = csv.writer(f); writer.writerow(['name','account','balance']); writer.writerows(accounts)
-
-# 거래 생성 (국가별 10건씩)
-countries = ['KR', 'US', 'JP']
-with open('.github/global/transactions.csv', 'w', newline='') as f:
-    writer = csv.writer(f); writer.writerow(['timestamp','amount','currency','status'])
-    for country in countries:
-        for _ in range(10):
-            ts = datetime.datetime.now().isoformat()
-            amt = round(random.uniform(1.0, 5000.0), 2)
-            currency = {'KR': 'KRW', 'US': 'USD', 'JP': 'JPY'}[country]
-            status = random.choice(['completed','pending','failed'])
-            writer.writerow([ts, amt, currency, status])
-            time.sleep(0.01)
-
-# 카드 거래
-for card_type in ['credit_card', 'check_card']:
-    with open(f'.github/global/{card_type}_transactions.csv', 'w', newline='') as f:
-        writer = csv.writer(f); writer.writerow(['timestamp','card_number','amount','type','status'])
-        for _ in range(15):
-            ts = datetime.datetime.now().isoformat()
-            card = fake.credit_card_number()
-            amt = round(random.uniform(5.0, 300.0),2)
-            t = random.choice(['withdrawal', 'deposit'])
-            s = random.choice(['completed', 'pending', 'failed'])
-            writer.writerow([ts, card, amt, t, s])
-
-# 거래 재시도 처리
-def retry(file):
-    with open(file, 'r') as infile, open(file + '.tmp', 'w', newline='') as out:
-        reader = csv.reader(infile); header = next(reader)
-        writer = csv.writer(out); writer.writerow(header)
-        for row in reader:
-            if row[-1] in ['pending', 'failed']:
-                row[-1] = 'completed'
-            writer.writerow(row)
-    shutil.move(file + '.tmp', file)
-
-retry('.github/global/transactions.csv')
-retry('.github/global/credit_card_transactions.csv')
-retry('.github/global/check_card_transactions.csv')
-EOF
-
-      - name: 📊 거래 해시 기반 Provenance 생성
-        run: |
-          TS=$(date +%Y%m%d%H%M%S)
-          mkdir -p .github/provenance
-          OUT=".github/provenance/csv-metadata-$TS.json"
-          echo "[" > "$OUT"
-          for f in .github/global/*.csv; do
-            HASH=$(sha256sum "$f" | awk '{print $1}')
-            echo "  {\"file\": \"$f\", \"sha256\": \"$HASH\" }," >> "$OUT"
-          done
-          sed -i '$ s/},/}/' "$OUT"
-          echo "]" >> "$OUT"
-
-      - name: 🐘 PostgreSQL 컨테이너 실행 및 적재
-        run: |
-          docker run -d --name db \
-            -e POSTGRES_DB=finance \
+          echo "[tag:pg-container] PostgreSQL 컨테이너 시작 중..."
+          docker rm -f pg-loans || true
+          docker run -d \
+            --name pg-loans \
+            -e POSTGRES_DB=loans \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres123 \
-            -p 5432:5432 postgres:15
-          sleep 10
-          for f in transactions credit_card_transactions check_card_transactions; do
-            tail -n +2 .github/global/${f}.csv > .github/global/tmp.csv
-            if [ "$f" = "transactions" ]; then
-              docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS ${f} (timestamp TIMESTAMP, amount NUMERIC, currency VARCHAR(10), status VARCHAR(20));"
-              docker cp .github/global/tmp.csv db:/tmp/tmp.csv
-              docker exec db psql -U postgres -d finance -c "COPY ${f}(timestamp, amount, currency, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
-            else
-              docker exec db psql -U postgres -d finance -c "CREATE TABLE IF NOT EXISTS ${f} (timestamp TIMESTAMP, card_number VARCHAR(50), amount NUMERIC, type VARCHAR(30), status VARCHAR(20));"
-              docker cp .github/global/tmp.csv db:/tmp/tmp.csv
-              docker exec db psql -U postgres -d finance -c "COPY ${f}(timestamp, card_number, amount, type, status) FROM '/tmp/tmp.csv' DELIMITER ',' CSV;"
-            fi
-          done
+            -v pgdata:/var/lib/postgresql/data \
+            -p 5433:5432 postgres:15
+          echo "[tag:pg-container] PostgreSQL 컨테이너 실행 완료"
+          sleep 15
 
-      - name: 💾 DB 백업 및 증명서 작성
+      - name: 🧱 [tag:create-schema] Create loan_ledger Schema
         run: |
-          TS=$(date +%Y%m%d%H%M%S)
-          docker exec db pg_dump -U postgres -d finance > .github/global/backup-$TS.sql
-          echo "$TS" > .github/global/latest.txt
-          HASH=$(sha256sum .github/global/backup-$TS.sql | awk '{print $1}')
-          echo "{\"artifact\": \"backup-$TS.sql\", \"sha256\": \"$HASH\", \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > .github/provenance/provenance-$TS.json
+          echo "[tag:create-schema] loan_ledger 테이블 생성 중..."
+          INIT_SQL=$(mktemp)
+          echo "CREATE TABLE IF NOT EXISTS loan_ledger (" > $INIT_SQL
+          echo "  id SERIAL PRIMARY KEY," >> $INIT_SQL
+          echo "  customer_name TEXT NOT NULL," >> $INIT_SQL
+          echo "  loan_amount DECIMAL(10,2) NOT NULL," >> $INIT_SQL
+          echo "  issued_date DATE" >> $INIT_SQL
+          echo ");" >> $INIT_SQL
+          docker cp "$INIT_SQL" pg-loans:/tmp/schema.sql
+          docker exec pg-loans psql -U postgres -d loans -f /tmp/schema.sql
+          echo "[tag:create-schema] loan_ledger 스키마 생성 완료"
 
-      - name: 🚀 GitHub Pages로 ledger + 증명서 자동 푸시
-        if: env.GH_PAT != ''
+      - name: 📄 [tag:generate-csv] Generate loans.csv
         run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "github-actions"
-          mkdir -p gh-pages
-          cp .github/global/*.csv gh-pages/
-          cp .github/provenance/*.json gh-pages/
-          cd gh-pages
-          git init
-          git checkout -b gh-pages
-          git remote add origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}
-          git add .
-          git commit -m "📊 Add global ledgers and provenance"
-          git push --force origin gh-pages
+          echo "[tag:generate-csv] loans.csv 파일 생성 준비 중..."
+          mkdir -p data
+          echo "[tag:generate-csv] mkdir -p data"
+          echo "[tag:generate-csv] echo header"
+          echo "customer_name,loan_amount,issued_date" > data/loans.csv
+          echo "[tag:generate-csv] echo line 1"
+          echo "Alice,1000.00,2024-01-01" >> data/loans.csv
+          echo "[tag:generate-csv] echo line 2"
+          echo "Bob,2500.50,2024-02-15" >> data/loans.csv
+          echo "[tag:generate-csv] echo line 3"
+          echo "Charlie,3300.75,2024-03-10" >> data/loans.csv
+          echo "[tag:generate-csv] loans.csv 파일 작성 완료"
+          echo "[tag:generate-csv] loans.csv 파일 확인:"
+          head -n 5 data/loans.csv
+          if [ ! -f data/loans.csv ]; then echo "[tag:generate-csv] ❌ 파일이 없습니다" && exit 1; fi
 
-      - name: 🔁 PostgreSQL 컨테이너 재기동
-        if: always()
+      - name: 📥 [tag:load-csv] Load CSV to DB
         run: |
-          docker restart db || echo "[!] db 컨테이너 재시작 실패 (이미 종료됨)"
-          sleep 5
+          echo "[tag:load-csv] CSV 적재 중..."
+          docker cp data/loans.csv pg-loans:/tmp/loans.csv
+          docker exec pg-loans bash -c "psql -U postgres -d loans -c \
+            \"COPY loan_ledger(customer_name, loan_amount, issued_date) \
+            FROM '/tmp/loans.csv' DELIMITER ',' CSV HEADER;\""
+          echo "[tag:load-csv] CSV 적재 완료"
+
+      - name: 💾 [tag:backup-db] SQL Backup
+        run: |
+          echo "[tag:backup-db] SQL 백업 중..."
+          mkdir -p backup
+          TIMESTAMP=$(date +'%Y%m%d%H%M')
+          BACKUP_FILE=backup/loan_backup_$TIMESTAMP.sql
+          docker exec pg-loans pg_dump -U postgres -d loans > $BACKUP_FILE
+          echo "[tag:backup-db] 백업 완료 → $BACKUP_FILE"
+
+      - name: 🔁 [tag:restore-latest] Restore Latest Backup
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "[tag:restore-latest] 복원 테스트 시작..."
+          LATEST_BACKUP=$(ls backup/loan_backup_*.sql | sort | tail -n1)
+          echo "[tag:restore-latest] 최신 백업: $LATEST_BACKUP"
+          docker rm -f pg-restore || true
+          docker run -d \
+            --name pg-restore \
+            -e POSTGRES_DB=loans \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres123 \
+            -p 5434:5432 postgres:15
+          sleep 15
+          docker cp "$LATEST_BACKUP" pg-restore:/tmp/restore.sql
+          docker exec pg-restore psql -U postgres -d loans -f /tmp/restore.sql
+          echo "[tag:restore-latest] 복원 완료"
