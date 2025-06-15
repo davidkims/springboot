@@ -8,20 +8,23 @@ on:
 jobs:
   setup-and-load:
     runs-on: ubuntu-latest
-    steps:
 
+    steps:
       - name: 📁 Checkout Repo
         uses: actions/checkout@v4
 
       - name: 🐳 Setup Docker
         run: |
+          echo "[+] Installing Docker..."
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker
           docker --version
+          echo "[✔] Docker 설치 완료"
 
       - name: 🐘 Run PostgreSQL Container
         run: |
+          echo "[+] PostgreSQL 컨테이너 시작 중..."
           docker rm -f pg-loans || true
           docker run -d \
             --name pg-loans \
@@ -30,52 +33,70 @@ jobs:
             -e POSTGRES_PASSWORD=postgres123 \
             -v pgdata:/var/lib/postgresql/data \
             -p 5433:5432 postgres:15
-          echo "[✔] PostgreSQL Container Running"
+          echo "[✔] PostgreSQL 컨테이너 실행 완료"
           sleep 15
 
-      - name: 🔧 Create loans DB Schema
+      - name: 🧱 Create loan_ledger Schema
         run: |
+          echo "[+] loan_ledger 테이블 생성 중..."
           INIT_SQL=$(mktemp)
           echo "CREATE TABLE IF NOT EXISTS loan_ledger (" > $INIT_SQL
           echo "  id SERIAL PRIMARY KEY," >> $INIT_SQL
-          echo "  customer_id INT NOT NULL," >> $INIT_SQL
+          echo "  customer_name TEXT NOT NULL," >> $INIT_SQL
           echo "  loan_amount DECIMAL(10,2) NOT NULL," >> $INIT_SQL
-          echo "  interest_rate DECIMAL(5,2)," >> $INIT_SQL
-          echo "  issue_date DATE," >> $INIT_SQL
-          echo "  due_date DATE," >> $INIT_SQL
-          echo "  status VARCHAR(20)" >> $INIT_SQL
+          echo "  issued_date DATE" >> $INIT_SQL
           echo ");" >> $INIT_SQL
           docker cp "$INIT_SQL" pg-loans:/tmp/schema.sql
           docker exec pg-loans psql -U postgres -d loans -f /tmp/schema.sql
+          echo "[✔] loan_ledger 스키마 생성 완료"
 
-      - name: 📄 Create loans.csv
+      - name: 📄 Generate loans.csv
         run: |
+          echo "[+] loans.csv 파일 생성 준비 중..."
           mkdir -p data
-          echo "customer_id,loan_amount,interest_rate,issue_date,due_date,status" > data/loans.csv
-          echo "1,10000,5.5,2024-01-01,2025-01-01,active" >> data/loans.csv
-          echo "2,15000,4.2,2024-03-15,2025-03-15,active" >> data/loans.csv
-          echo "3,5000,6.8,2024-05-01,2024-12-01,closed" >> data/loans.csv
+          echo "[+] mkdir -p data"
+          echo "[+] echo header"
+          echo "customer_name,loan_amount,issued_date" > data/loans.csv
+
+          echo "[+] echo line 1"
+          echo "Alice,1000.00,2024-01-01" >> data/loans.csv
+
+          echo "[+] echo line 2"
+          echo "Bob,2500.50,2024-02-15" >> data/loans.csv
+
+          echo "[+] echo line 3"
+          echo "Charlie,3300.75,2024-03-10" >> data/loans.csv
+
+          echo "[✔] loans.csv 파일 작성 완료"
+          echo "[+] loans.csv 파일 확인:"
+          head -n 5 data/loans.csv
+          if [ ! -f data/loans.csv ]; then echo "[❌] loans.csv 파일이 없습니다." && exit 1; fi
 
       - name: 📥 Load CSV to loan_ledger
         run: |
+          echo "[+] CSV 파일을 loan_ledger 테이블로 적재 중..."
           docker cp data/loans.csv pg-loans:/tmp/loans.csv
           docker exec pg-loans bash -c "psql -U postgres -d loans -c \
-            \"COPY loan_ledger(customer_id, loan_amount, interest_rate, issue_date, due_date, status) \
+            \"COPY loan_ledger(customer_name, loan_amount, issued_date) \
             FROM '/tmp/loans.csv' DELIMITER ',' CSV HEADER;\""
-          echo "[✔] CSV Loaded"
+          echo "[✔] CSV 적재 완료"
 
       - name: 💾 Export SQL Backup
         run: |
+          echo "[+] SQL 백업 시작..."
           mkdir -p backup
           TIMESTAMP=$(date +'%Y%m%d%H%M')
           BACKUP_FILE=backup/loan_backup_$TIMESTAMP.sql
           docker exec pg-loans pg_dump -U postgres -d loans > $BACKUP_FILE
-          echo "[✔] SQL Backup saved as $BACKUP_FILE"
+          echo "[✔] SQL 백업 완료 → $BACKUP_FILE"
 
-      - name: 🔁 Restore Latest Backup on New Container (Optional Test)
+      - name: 🔁 Restore Latest Backup (Optional Test)
         if: github.event_name == 'workflow_dispatch'
         run: |
+          echo "[+] 최신 백업 복원 테스트 시작..."
           LATEST_BACKUP=$(ls backup/loan_backup_*.sql | sort | tail -n1)
+          echo "[+] 최신 백업 파일: $LATEST_BACKUP"
+
           docker rm -f pg-restore || true
           docker run -d \
             --name pg-restore \
@@ -83,7 +104,7 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres123 \
             -p 5434:5432 postgres:15
-          sleep 10
+          sleep 15
           docker cp "$LATEST_BACKUP" pg-restore:/tmp/restore.sql
           docker exec pg-restore psql -U postgres -d loans -f /tmp/restore.sql
-          echo "[✔] Restore completed from latest backup: $LATEST_BACKUP"
+          echo "[✔] 복원 완료 from $LATEST_BACKUP"
