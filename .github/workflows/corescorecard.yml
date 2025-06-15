@@ -1,0 +1,127 @@
+# File: .github/workflows/setup-logistics-environment.yml
+name: Setup Logistics Environment
+on:
+  workflow_dispatch:
+
+jobs:
+  build-environment:
+    runs-on: ubuntu-latest
+    steps:
+
+      # 1. 레포지토리 체크아웃
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. 운영 디렉터리 생성 & 권한 설정
+      - name: Create directories
+        run: |
+          sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data}
+          sudo chmod -R 775 /opt/logistics
+
+      # 3. 프로그래밍 언어 런타임 설치
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Setup Java 11 (Temurin)
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Setup .NET 7
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '7.0.x'
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      # 4. 데이터베이스 설치 및 기동
+      - name: Install MySQL Server
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+          sudo systemctl enable mysql
+          sudo systemctl start mysql
+
+      - name: Install PostgreSQL
+        run: |
+          sudo apt-get install -y postgresql postgresql-contrib
+          sudo systemctl enable postgresql
+          sudo systemctl start postgresql
+
+      - name: Run MongoDB via Docker
+        run: |
+          echo "[+] Docker로 MongoDB 6.0 실행"
+          docker run -d --name mongodb -p 27017:27017 mongo:6.0
+
+      - name: Run Oracle XE in Docker
+        run: |
+          echo "[+] Oracle XE 컨테이너 실행 준비"
+          docker pull gvenzl/oracle-xe:21-slim
+          docker run -d \
+            --name oracle-xe \
+            -e ORACLE_PASSWORD=oracle123 \
+            -p 1521:1521 \
+            gvenzl/oracle-xe:21-slim
+          echo "[✔] Oracle XE 컨테이너 실행 완료"
+
+      # Oracle XE Healthcheck 및 SQLPlus 접속 테스트
+      - name: Oracle XE Healthcheck
+        run: |
+          echo "[+] Oracle XE healthcheck"
+          sleep 20
+          docker exec oracle-xe bash -c 'echo exit | sqlplus -s system/oracle123@localhost:1521/XEPDB1' || echo "❗ SQL*Plus 접속 실패"
+
+      # 5. 워크플로우 엔진/플랫폼 설치
+      - name: Install Apache Airflow
+        run: |
+          python -m pip install --upgrade pip
+          pip install apache-airflow==2.6.0 \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.6.0/constraints-3.10.txt"
+          airflow db init
+
+      - name: Install Camunda BPM Platform
+        run: |
+          wget https://downloads.camunda.cloud/release/camunda-bpm/tomcat/7.19/camunda-bpm-tomcat-7.19.0.tar.gz \
+            -O camunda.tar.gz
+          sudo mkdir -p /opt/logistics/camunda
+          sudo tar xzf camunda.tar.gz -C /opt/logistics/camunda --strip-components=1
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global sfdx-cli
+          sfdx update
+
+      # 6. 물류 DB(MySQL)에 가상 고객 데이터 및 카드 거래 테이블 생성 (echo 방식)
+      - name: Initialize logistics MySQL DB
+        run: |
+          sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;"
+          SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
+          sudo mkdir -p $(dirname $SCRIPT)
+          echo "CREATE TABLE customers ("                                > $SCRIPT
+          echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"         >> $SCRIPT
+          echo "  name VARCHAR(100) NOT NULL"                          >> $SCRIPT
+          echo ");"                                                    >> $SCRIPT
+          echo ""                                                      >> $SCRIPT
+          echo "CREATE TABLE card_transactions ("                      >> $SCRIPT
+          echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT,"     >> $SCRIPT
+          echo "  customer_id INT NOT NULL,"                          >> $SCRIPT
+          echo "  card_type ENUM('credit','debit') NOT NULL,"         >> $SCRIPT
+          echo "  amount DECIMAL(10,2) NOT NULL,"                     >> $SCRIPT
+          echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> $SCRIPT
+          echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> $SCRIPT
+          echo ");"                                                    >> $SCRIPT
+          echo ""                                                      >> $SCRIPT
+          echo "INSERT INTO customers (name) VALUES ('Alice'),('Bob'),('Charlie');" >> $SCRIPT
+          echo ""                                                      >> $SCRIPT
+          echo "INSERT INTO card_transactions (customer_id, card_type, amount) VALUES" >> $SCRIPT
+          echo "  (1,'credit',250.00),"                                >> $SCRIPT
+          echo "  (1,'debit',50.00),"                                  >> $SCRIPT
+          echo "  (2,'credit',120.00),"                                >> $SCRIPT
+          echo "  (3,'debit',75.50);"                                  >> $SCRIPT
+          sudo mysql logistics < $SCRIPT

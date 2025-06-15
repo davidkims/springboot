@@ -1,0 +1,68 @@
+name: 📄 Provenance Index Generator
+
+on:
+  push:
+    paths:
+      - "_provenance/*.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Install Python & PyYAML
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3 python3-pip
+          pip3 install pyyaml
+
+      - name: 📦 Parse _provenance/*.json and generate metadata + index
+        run: |
+          mkdir -p _data
+          echo "artifact,sha256,tag,buildType,created" > _data/metadata.csv
+
+          declare -A tag_map
+
+          for f in _provenance/*.json; do
+            NAME=$(basename "$f" .json)
+            ARTIFACT=$(jq -r '.subject[0].name' "$f")
+            SHA256=$(jq -r '.subject[0].digest."sha256"' "$f")
+            TAG=$(jq -r '.predicate.metadata.tag // "untagged"' "$f")
+            BUILD_TYPE=$(jq -r '.buildType' "$f")
+            CREATED=$(jq -r '.predicate.metadata.buildStartedOn // "N/A"' "$f")
+
+            echo "$ARTIFACT,$SHA256,$TAG,$BUILD_TYPE,$CREATED" >> _data/metadata.csv
+
+            # Append table row to tag-specific index markdown file
+            TAG_MD="index-${TAG}.md"
+            if [ ! -f "$TAG_MD" ]; then
+              echo "# 📦 Provenance Index for Tag: $TAG" > "$TAG_MD"
+              echo "" >> "$TAG_MD"
+              echo "| Artifact | SHA256 | Build Type | Created |" >> "$TAG_MD"
+              echo "|----------|--------|------------|---------|" >> "$TAG_MD"
+            fi
+
+            echo "| $ARTIFACT | \`${SHA256:0:12}...\` | $BUILD_TYPE | $CREATED |" >> "$TAG_MD"
+
+            tag_map["$TAG"]=1
+          done
+
+          # Create master index.md
+          echo "# 🔗 Provenance Index" > index.md
+          echo "" >> index.md
+          for tag in "${!tag_map[@]}"; do
+            echo "- [index-${tag}.md](index-${tag}.md) - Tag: \`$tag\`" >> index.md
+          done
+
+      - name: ✅ Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "bot@example.com"
+          git add _data index.md index-*.md || true
+          git commit -m "📌 Update provenance index by tag" || echo "No changes to commit"
+          git push

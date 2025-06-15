@@ -1,0 +1,62 @@
+# .github/workflows/delete_workflow_file.yml
+name: Delete Specific Workflow File
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_to_delete:
+        description: '삭제할 워크플로우 파일의 경로 (예: .github/workflows/잘못된_파일_이름.yml)'
+        required: true
+        # >>>>> 여기를 GitHub에서 확인한 정확한 파일 경로와 이름으로 수정하세요. <<<<<
+        # 예시: 만약 실제 파일 이름이 'rust-ci.yml'이라면:
+        default: '.github/workflows/rust-ci.yml' # <--- 이 부분을 수정!
+        # 예시2: 만약 실제 파일 이름이 'spring-boot-build.yml'이라면:
+        # default: '.github/workflows/spring-boot-build.yml' # <--- 이 부분을 수정!
+
+jobs:
+  delete_file_job:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 파일 삭제를 위해 반드시 'contents: write' 권한이 필요합니다. (주의!)
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Get file SHA
+      id: get_sha
+      run: |
+        FILE_PATH="${{ github.event.inputs.file_to_delete }}"
+        REPO_OWNER="${{ github.repository_owner }}"
+        REPO_NAME="${{ github.event.repository.name }}"
+
+        SHA=$(curl --proto '=https' --tlsv1.2 -s \
+                   -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                   -H "Accept: application/vnd.github.v3+json" \
+                   "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$FILE_PATH?ref=refs/heads/main" | jq -r '.sha')
+
+        if [ "$SHA" == "null" ]; then
+          echo "::error::Error: 파일 '$FILE_PATH'을(를) 찾을 수 없거나 SHA를 가져올 수 없습니다. 경로가 정확한지, 파일이 존재하는지 확인하세요."
+          exit 1
+        fi
+        echo "Successfully retrieved SHA for $FILE_PATH: $SHA"
+        echo "file_sha=$SHA" >> "$GITHUB_OUTPUT"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Delete file via GitHub API
+      uses: octokit/request-action@v2.x
+      with:
+        route: DELETE /repos/{owner}/{repo}/contents/{path}
+        owner: ${{ github.repository_owner }}
+        repo: ${{ github.event.repository.name }}
+        path: ${{ github.event.inputs.file_to_delete }}
+        ref: ${{ github.ref }}
+        mediaType: '{"format": "json"}'
+        data: |
+          {
+            "message": "워크플로우를 통해 오류 파일 삭제: ${{ github.event.inputs.file_to_delete }}",
+            "sha": "${{ steps.get_sha.outputs.file_sha }}"
+          }
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

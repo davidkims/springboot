@@ -1,0 +1,71 @@
+name: 🐬 MySQL Backup with Dynamic Port & Persistent Containers
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mysql_backup:
+    runs-on: ubuntu-latest
+
+    env:
+      MYSQL_IMAGE: mysql:8.0
+      DB_NAME: example_db
+      DB_USER: root
+      DB_PASS: password
+      BACKUP_DIR: /opt/backup/sql
+
+    steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🕒 Generate Timestamp and Dynamic Port
+        id: vars
+        run: |
+          TS=$(date +%Y%m%d%H%M%S)
+          PORT=$((RANDOM%1000+3307))  # 3307~4306 사이 포트
+          echo "timestamp=$TS" >> $GITHUB_OUTPUT
+          echo "container=backup-mysql-$TS" >> $GITHUB_OUTPUT
+          echo "host_port=$PORT" >> $GITHUB_OUTPUT
+
+      - name: 🐳 Launch MySQL Backup Container
+        run: |
+          docker run -d \
+            --name ${{ steps.vars.outputs.container }} \
+            -e MYSQL_ROOT_PASSWORD=$DB_PASS \
+            -e MYSQL_DATABASE=$DB_NAME \
+            -p ${{ steps.vars.outputs.host_port }}:3306 \
+            $MYSQL_IMAGE
+
+          echo "⏳ 컨테이너 초기화 대기 중..."
+          sleep 30
+
+      - name: 🔐 Generate Secure MySQL Login File (.my.cnf)
+        run: |
+          echo "[client]" > ~/.my.cnf
+          echo "user=$DB_USER" >> ~/.my.cnf
+          echo "password=$DB_PASS" >> ~/.my.cnf
+          echo "host=127.0.0.1" >> ~/.my.cnf
+          echo "port=${{ steps.vars.outputs.host_port }}" >> ~/.my.cnf
+          chmod 600 ~/.my.cnf
+
+      - name: 📁 Create Backup Directory
+        run: |
+          sudo mkdir -p $BACKUP_DIR
+          sudo chmod -R 777 $BACKUP_DIR
+
+      - name: 💾 Run mysqldump Backup
+        run: |
+          TIMESTAMP=${{ steps.vars.outputs.timestamp }}
+          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
+          echo "🔁 백업 시작: $BACKUP_FILE"
+          mysqldump $DB_NAME > $BACKUP_FILE || {
+            echo "❌ 백업 실패"
+            exit 1
+          }
+          echo "✅ 백업 완료: $BACKUP_FILE"
+          ls -lh $BACKUP_DIR
+
+      - name: 🔍 Print Container Info
+        run: |
+          echo "📦 컨테이너 이름: ${{ steps.vars.outputs.container }}"
+          echo "🔌 연결된 포트: ${{ steps.vars.outputs.host_port }}"

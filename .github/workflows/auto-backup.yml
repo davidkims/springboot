@@ -1,0 +1,58 @@
+name: 🔁 Auto Finance Backup (Manual + Cron)
+
+on:
+  workflow_dispatch:  # ✅ 수동 실행 기능 추가됨
+  schedule:
+    - cron: "*/5 * * * *"  # ⏰ 매 5분마다 자동 실행
+
+jobs:
+  auto-finance-backup:
+    runs-on: ubuntu-latest
+
+    env:
+      DB_NAME: finance
+      DB_USER: root
+      DB_PASS: rootpass123
+      BACKUP_DIR: /opt/finance/backups
+      SQL_INIT_FILE: /opt/finance/init.sql
+
+    steps:
+      - name: 📁 디렉토리 생성 및 초기 SQL 파일 준비
+        run: |
+          sudo mkdir -p $BACKUP_DIR
+          echo "CREATE TABLE IF NOT EXISTS transactions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            type VARCHAR(30),
+            amount DECIMAL(10,2),
+            currency VARCHAR(10),
+            status VARCHAR(20),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );" > $SQL_INIT_FILE
+
+      - name: 🐬 MySQL 컨테이너 실행
+        run: |
+          docker run -d --rm \
+            --name mysql-auto \
+            -e MYSQL_ROOT_PASSWORD=$DB_PASS \
+            -e MYSQL_DATABASE=$DB_NAME \
+            -v $SQL_INIT_FILE:/docker-entrypoint-initdb.d/init.sql \
+            -p 3306:3306 \
+            mysql:8.0
+          echo "⏳ MySQL 초기화 대기 중..."
+          sleep 25
+
+      - name: 🔐 MySQL 로그인 구성 및 백업 실행
+        run: |
+          echo "[client]" > ~/.my.cnf
+          echo "user=$DB_USER" >> ~/.my.cnf
+          echo "password=$DB_PASS" >> ~/.my.cnf
+          echo "host=127.0.0.1" >> ~/.my.cnf
+          echo "port=3306" >> ~/.my.cnf
+          chmod 600 ~/.my.cnf
+
+          BACKUP_FILE=$BACKUP_DIR/backup-$(date +%Y%m%d%H%M%S).sql
+          mysqldump --defaults-file=~/.my.cnf --no-tablespaces $DB_NAME > $BACKUP_FILE
+          echo "✅ 백업 완료: $BACKUP_FILE"
+
+      - name: 🧹 MySQL 컨테이너 정리
+        run: docker stop mysql-auto || true

@@ -1,0 +1,76 @@
+name: 🐳 Docker Finance Backup with GHCR + Kafka-style Logging
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/finance-app
+  IMAGE_TAG: latest
+  BACKUP_VOLUME: finance_backup_vol
+  BACKUP_DIR_IN_CONTAINER: /backup
+  KAFKA_LOG: kafka.log
+
+jobs:
+  docker-finance-backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📁 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Dockerfile 생성 (가상 거래 시뮬레이션 포함)
+        run: |
+          echo 'FROM alpine:latest' > Dockerfile
+          echo 'RUN mkdir -p /app && echo "# 금융 거래 로그 시뮬레이션" > /app/transactions.log' >> Dockerfile
+          echo 'RUN echo "$(date) 거래 유형: 계좌이체, 금액: 100000KRW, 상태: 완료" >> /app/transactions.log' >> Dockerfile
+          echo 'RUN echo "$(date) 거래 유형: 신용카드, 금액: 250000KRW, 상태: 완료" >> /app/transactions.log' >> Dockerfile
+          echo 'RUN echo "$(date) 거래 유형: 비트코인, 금액: 0.03BTC, 상태: 완료" >> /app/transactions.log' >> Dockerfile
+          echo 'CMD ["sleep", "30"]' >> Dockerfile
+
+      - name: 🔐 Docker 로그인 (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏗️ Docker 이미지 빌드 및 푸시
+        run: |
+          docker build -t $IMAGE_NAME:$IMAGE_TAG .
+          docker push $IMAGE_NAME:$IMAGE_TAG
+
+      - name: 📦 Docker 볼륨 생성
+        run: docker volume create $BACKUP_VOLUME
+
+      - name: 🚀 컨테이너 실행 (거래 수행 및 백업 적재)
+        run: |
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          docker run --rm \
+            --name finance-container \
+            -v $BACKUP_VOLUME:$BACKUP_DIR_IN_CONTAINER \
+            $IMAGE_NAME:$IMAGE_TAG \
+            sh -c "
+              echo '📊 거래 로그 생성 중...' > $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
+              cat /app/transactions.log >> $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
+              echo '✅ 백업 완료' >> $BACKUP_DIR_IN_CONTAINER/backup-$TIMESTAMP.txt;
+              echo '$TIMESTAMP [backup] 거래 로그 백업 완료' >> /app/kafka.log;
+            "
+          echo "📝 백업 생성 시간: $TIMESTAMP" >> $KAFKA_LOG
+          echo "$TIMESTAMP [backup] 컨테이너 실행 후 백업 완료" >> $KAFKA_LOG
+
+      - name: 📂 볼륨 내 백업 확인
+        run: |
+          docker run --rm \
+            -v $BACKUP_VOLUME:$BACKUP_DIR_IN_CONTAINER \
+            alpine sh -c "ls -lh $BACKUP_DIR_IN_CONTAINER; cat $BACKUP_DIR_IN_CONTAINER/*.txt"
+
+      - name: 📄 Kafka-style 로그 출력
+        run: |
+          echo "🪵 Kafka-style 로그 출력:"
+          cat $KAFKA_LOG || echo "⚠️ 로그 없음"

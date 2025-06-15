@@ -1,0 +1,112 @@
+name: 🧾 고객 명함 생성 + 암호화 + 복호화 + 비교 자동화 (echo 완전 적용)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  customer-card-processing:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 📥 코드 체크아웃
+      uses: actions/checkout@v4
+
+    - name: 📁 디렉토리 및 로고 생성
+      run: |
+        sudo apt-get update && sudo apt-get install -y imagemagick || echo "ImageMagick 설치 실패 허용"
+        mkdir -p cards_encrypted cards_decrypted comparison
+
+        echo "🖼️ convert 또는 Pillow로 로고 생성 시도..."
+        if command -v convert &> /dev/null; then
+          convert -size 60x60 canvas:blue logo.png
+        else
+          echo "⚠️ convert 미설치. logo_gen.py 생성 후 실행 (echo 기반)"
+          echo "from PIL import Image" > logo_gen.py
+          echo "img = Image.new('RGB', (60, 60), color='blue')" >> logo_gen.py
+          echo "img.save('logo.png')" >> logo_gen.py
+          pip install pillow
+          python3 logo_gen.py
+        fi
+
+    - name: 🐍 명함 생성 및 암복호화 Python 스크립트 작성 (echo)
+      run: |
+        echo "from PIL import Image, ImageDraw, ImageChops" > generate.py
+        echo "import qrcode" >> generate.py
+        echo "from cryptography.fernet import Fernet" >> generate.py
+        echo "import os" >> generate.py
+        echo "key = Fernet.generate_key()" >> generate.py
+        echo "fernet = Fernet(key)" >> generate.py
+        echo "os.makedirs('/data/encrypted', exist_ok=True)" >> generate.py
+        echo "os.makedirs('/data/decrypted', exist_ok=True)" >> generate.py
+        echo "os.makedirs('/data/comparison', exist_ok=True)" >> generate.py
+        echo "customer_ids = ['CUST001', 'CUST002', 'CUST003']" >> generate.py
+        echo "with open('/data/encrypted/key.key', 'wb') as kf: kf.write(key)" >> generate.py
+        echo "logo = None" >> generate.py
+        echo "if os.path.exists('/app/logo.png'):" >> generate.py
+        echo "  logo = Image.open('/app/logo.png').resize((50,50))" >> generate.py
+        echo "for cid in customer_ids:" >> generate.py
+        echo "  img = Image.new('RGB', (400, 200), color=(230, 230, 250))" >> generate.py
+        echo "  d = ImageDraw.Draw(img)" >> generate.py
+        echo "  d.text((10, 10), f'고객 ID: {cid}', fill=(0, 0, 0))" >> generate.py
+        echo "  qr = qrcode.make(cid).resize((60, 60))" >> generate.py
+        echo "  img.paste(qr, (320, 10))" >> generate.py
+        echo "  if logo: img.paste(logo, (330, 130))" >> generate.py
+        echo "  tmp_path = f'/data/tmp_{cid}.png'" >> generate.py
+        echo "  img.save(tmp_path)" >> generate.py
+        echo "  with open(tmp_path, 'rb') as f: enc = fernet.encrypt(f.read())" >> generate.py
+        echo "  with open(f'/data/encrypted/{cid}.enc', 'wb') as ef: ef.write(enc)" >> generate.py
+        echo "  dec = fernet.decrypt(enc)" >> generate.py
+        echo "  dec_path = f'/data/decrypted/{cid}.decrypted.png'" >> generate.py
+        echo "  with open(dec_path, 'wb') as df: df.write(dec)" >> generate.py
+        echo "  img_dec = Image.open(dec_path)" >> generate.py
+        echo "  diff = ImageChops.difference(img, img_dec)" >> generate.py
+        echo "  diff_path = f'/data/comparison/{cid}_diff.png'" >> generate.py
+        echo "  diff.save(diff_path)" >> generate.py
+        echo "print('✅ 명함 생성, 암호화/복호화 및 시각 비교 완료')" >> generate.py
+
+        echo "FROM python:3.10-slim" > Dockerfile
+        echo "WORKDIR /app" >> Dockerfile
+        echo "COPY generate.py /app/" >> Dockerfile
+        echo "COPY logo.png /app/" >> Dockerfile
+        echo "RUN pip install pillow qrcode cryptography" >> Dockerfile
+        echo "CMD [\"python\", \"generate.py\"]" >> Dockerfile
+
+    - name: 🛠️ Docker 이미지 빌드
+      run: docker build -t customer-card-generator-full .
+
+    - name: 🏃 Docker 실행
+      run: |
+        docker run --rm \
+          -v $(pwd)/cards_encrypted:/data/encrypted \
+          -v $(pwd)/cards_decrypted:/data/decrypted \
+          -v $(pwd)/comparison:/data/comparison \
+          customer-card-generator-full
+
+    - name: 📂 결과 확인
+      run: |
+        echo "🔐 암호화된 명함:"
+        ls -l cards_encrypted
+        echo "🖼️ 복호화된 명함:"
+        ls -l cards_decrypted
+        echo "🧪 시각 비교:"
+        ls -l comparison
+
+    - name: 📤 아티팩트 업로드:암호화 명함
+      uses: actions/upload-artifact@v4
+      with:
+        name: encrypted-cards
+        path: cards_encrypted/
+
+    - name: 📤 아티팩트 업로드:복호화 명함
+      uses: actions/upload-artifact@v4
+      with:
+        name: decrypted-cards
+        path: cards_decrypted/
+
+    - name: 📤 아티팩트 업로드:이미지 비교 결과
+      uses: actions/upload-artifact@v4
+      with:
+        name: image-comparison
+        path: comparison/

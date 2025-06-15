@@ -1,0 +1,57 @@
+name: Codespace Security Configuration Check # 워크플로우의 이름
+
+on:
+  pull_request:
+    branches:
+      - main # 'main' 브랜치로 향하는 Pull Request에 대해 이 워크플로우를 실행합니다.
+    paths:
+      - '.devcontainer/**' # '.devcontainer' 디렉토리 내부의 파일이 변경될 때만 워크플로우를 트리거합니다.
+
+jobs:
+  check-devcontainer-config:
+    runs-on: ubuntu-latest # 이 Job을 실행할 GitHub 호스팅 러너 환경을 지정합니다.
+
+    steps:
+      - name: Checkout repository code # 리포지토리 코드를 러너에 체크아웃합니다.
+        uses: actions/checkout@v4
+
+      - name: Check devcontainer.json for insecure port forwarding # devcontainer.json 파일에서 안전하지 않은 포트 포워딩 설정을 검사합니다.
+        id: check_ports
+        run: |
+          if [ -f .devcontainer/devcontainer.json ]; then
+            # 'portsAttributes' 내에 'visibility": "public"' 설정이 있는지 확인합니다.
+            # 'public' 포트 포워딩은 인터넷 접근을 허용하여 보안 위험을 초래할 수 있습니다.
+            if grep -q '"portsAttributes": {.*"visibility": "public".*}' .devcontainer/devcontainer.json; then
+              echo "::error file=.devcontainer/devcontainer.json::Public port forwarding detected in devcontainer.json. Please review for security implications."
+              echo "Public port forwarding is generally not recommended unless strictly necessary and reviewed."
+              exit 1 # 공용 포트 포워딩이 발견되면 워크플로우를 실패시킵니다.
+            else
+              echo "No public port forwarding found in devcontainer.json. Good."
+            fi
+          else
+            echo ".devcontainer/devcontainer.json not found. Skipping port check."
+          fi
+
+      - name: Check Dockerfile for approved base image # Dockerfile이 승인된 기본 이미지를 사용하는지 검사합니다.
+        id: check_dockerfile_base
+        run: |
+          if [ -f .devcontainer/Dockerfile ]; then
+            # Codespaces의 Dockerfile이 특정 보안 베이스 이미지(여기서는 'universal:latest')를 사용하는지 강제합니다.
+            if ! grep -q '^FROM mcr.microsoft.com/vscode/devcontainers/universal:latest' .devcontainer/Dockerfile; then
+              echo "::error file=.devcontainer/Dockerfile::Unauthorized base image found in Dockerfile. Only 'mcr.microsoft.com/vscode/devcontainers/universal:latest' is allowed."
+              exit 1 # 승인되지 않은 베이스 이미지가 발견되면 워크플로우를 실패시킵니다.
+            else
+              echo "Dockerfile uses the approved base image. Good."
+            fi
+          else
+            echo ".devcontainer/Dockerfile not found. Skipping Dockerfile base image check."
+          fi
+
+      - name: Notify security team if checks fail # 위의 검사 중 하나라도 실패하면 보안 팀에 알립니다.
+        if: failure() # 이전 단계 중 하나라도 실패했을 때만 이 단계가 실행됩니다.
+        run: |
+          echo "Security checks for Codespace configuration failed. Please review the Pull Request #${ { github.event.pull_request.number } }."
+          echo "Repository: ${{ github.repository }}"
+          echo "Pull Request URL: ${{ github.event.pull_request.html_url }}"
+          # 실제 시나리오에서는 여기에 Slack, 이메일 등의 알림 서비스를 연동할 수 있습니다.
+          # 예: curl -X POST -H 'Content-type: application/json' --data '{"text":"Codespace config failed for PR # ${{ github.event.pull_request.number }}"}' YOUR_SLACK_WEBHOOK_URL

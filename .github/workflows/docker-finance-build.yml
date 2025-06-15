@@ -1,0 +1,94 @@
+name: 🔐 금융 거래 자동 백업
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: "*/5 * * * *"  # 5분 간격
+  workflow_dispatch:
+
+jobs:
+  finance-sql-backup:
+    runs-on: ubuntu-latest
+
+    env:
+      MYSQL_ROOT_PASSWORD: rootpass123
+      BACKUP_DIR: /opt/finance/backups
+      SQL_SCHEMA_PATH: ./finance-schema.sql
+
+    steps:
+      - name: 📂 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 📁 백업 디렉토리 생성
+        run: |
+          sudo mkdir -p $BACKUP_DIR
+          sudo chmod -R 777 $BACKUP_DIR
+
+      - name: 📜 Dockerfile 자동 생성
+        run: |
+          cat <<EOF > Dockerfile
+          FROM mysql:8.0
+          ENV MYSQL_ROOT_PASSWORD=\$MYSQL_ROOT_PASSWORD
+          COPY finance-schema.sql /docker-entrypoint-initdb.d/
+          EOF
+
+      - name: 📝 금융 스키마 작성
+        run: |
+          cat <<EOSQL > finance-schema.sql
+          CREATE DATABASE IF NOT EXISTS finance;
+          USE finance;
+          CREATE TABLE IF NOT EXISTS bank_transfers (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            account_number VARCHAR(30),
+            amount DECIMAL(12,2),
+            currency VARCHAR(5),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS stock_transfers (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            stock_symbol VARCHAR(10),
+            shares INT,
+            price DECIMAL(10,2),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS stock_infos (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            ticker VARCHAR(10),
+            company_name VARCHAR(100),
+            market VARCHAR(20)
+          );
+          CREATE TABLE IF NOT EXISTS card_transactions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            card_type ENUM('credit', 'check'),
+            amount DECIMAL(10,2),
+            merchant VARCHAR(100),
+            status VARCHAR(20),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          INSERT INTO bank_transfers(account_number, amount, currency) VALUES ('123456789', 500000, 'KRW');
+          INSERT INTO stock_transfers(stock_symbol, shares, price) VALUES ('AAPL', 10, 200.00);
+          INSERT INTO stock_infos(ticker, company_name, market) VALUES ('AAPL', 'Apple Inc.', 'NASDAQ');
+          INSERT INTO card_transactions(card_type, amount, merchant, status) VALUES ('credit', 120000, 'CoffeeShop', 'approved');
+          EOSQL
+
+      - name: 🐋 Docker 이미지 빌드
+        run: docker build -t finance-backup .
+
+      - name: 🚀 MySQL 컨테이너 시작 및 대기
+        run: |
+          docker run -d --name finance-db \
+            -e MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD \
+            -p 3307:3306 \
+            finance-backup
+
+          echo "⏳ MySQL 초기화 대기 중..."
+          sleep 30
+
+      - name: 💾 SQL 백업 실행
+        run: |
+          docker exec finance-db mysqldump -u root -p$MYSQL_ROOT_PASSWORD finance > $BACKUP_DIR/finance-backup-${{ github.run_id }}.sql
+          ls -lh $BACKUP_DIR
+
+      - name: 🧹 컨테이너 정리
+        run: docker rm -f finance-db || true
