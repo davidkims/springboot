@@ -13,9 +13,9 @@ jobs:
 
       - name: 📂 Create logistics directories
         run: |
-          echo "[+] Creating /opt/logistics directories"
           sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data}
           sudo chmod -R 775 /opt/logistics
+          mkdir -p .github/logs salesforce-project
 
       - name: 🐍 Setup Python 3.10
         uses: actions/setup-python@v4
@@ -38,9 +38,8 @@ jobs:
         with:
           node-version: '18'
 
-      - name: 🐬 Install MySQL 8.0 (Ubuntu 24.04 compatible)
+      - name: 🐬 Install MySQL 8.0
         run: |
-          echo "[+] Installing MySQL APT config for Ubuntu 22.04"
           wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
           echo "mysql-apt-config mysql-apt-config/select-server select mysql-8.0" | sudo debconf-set-selections
           sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
@@ -48,96 +47,109 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
           sudo systemctl enable mysql
           sudo systemctl start mysql
-          echo "[✔] MySQL Server installed"
+          echo "[✔] MySQL Server installed" > .github/logs/mysql_install.log
 
       - name: 🐘 Install PostgreSQL 15
         run: |
-          echo "[+] Adding PostgreSQL APT repo"
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
           sudo apt-get update
           sudo apt-get install -y postgresql-15
           sudo systemctl enable postgresql
           sudo systemctl start postgresql
-          echo "[✔] PostgreSQL 15 installed"
+          echo "[✔] PostgreSQL 15 installed" > .github/logs/postgres_install.log
 
-      - name: 🍃 Install MongoDB (use jammy repo)
+      - name: 🍃 Install MongoDB (jammy repo)
         run: |
-          echo "[+] Adding MongoDB public key"
           wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo tee /etc/apt/trusted.gpg.d/mongodb.asc
-          echo "[+] Adding MongoDB jammy repo"
           echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | \
             sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
           sudo apt-get update
           sudo apt-get install -y mongodb-org
           sudo systemctl enable mongod
           sudo systemctl start mongod
-          echo "[✔] MongoDB 6.0 installed"
+          echo "[✔] MongoDB 6.0 installed" > .github/logs/mongodb_install.log
 
       - name: 🟠 Run Oracle XE in Docker
         run: |
-          echo "[+] Pulling Oracle XE Docker image"
           docker pull gvenzl/oracle-xe:21-slim
           docker run -d \
             --name oracle-xe \
             -e ORACLE_PASSWORD=oracle123 \
             -p 1521:1521 \
             gvenzl/oracle-xe:21-slim
-          echo "[✔] Oracle XE container started"
+          echo "[✔] Oracle XE container started" > .github/logs/oracle_start.log
 
-      - name: 🔍 Healthcheck - Oracle XE
+      - name: 🔍 Oracle XE Healthcheck (Safe Check)
         run: |
-          echo "[🔍] Waiting for Oracle XE to initialize"
-          sleep 30
-          docker exec oracle-xe bash -c "echo 'SELECT * FROM v\$version;' | sqlplus -S system/oracle123@localhost:1521/XE" || echo "[❌] SQL*Plus connection failed"
+          echo "[+] Waiting for Oracle XE to become ready..."
+          for i in {1..10}; do
+            if docker exec oracle-xe bash -c "command -v sqlplus >/dev/null"; then
+              echo "[✔] sqlplus detected"
+              break
+            fi
+            echo "⏳ Waiting for sqlplus ($i)..."
+            sleep 10
+          done
+          docker exec oracle-xe bash -c '
+            export ORACLE_HOME=/opt/oracle/product/21c/dbhomeXE
+            export PATH=$ORACLE_HOME/bin:$PATH
+            echo "SELECT * FROM v\$version;" | sqlplus -S system/oracle123@//localhost:1521/XEPDB1
+          ' > .github/logs/oracle_healthcheck.log || echo "[❌] Oracle XE Healthcheck failed" >> .github/logs/oracle_healthcheck.log
 
       - name: 🌬 Install Apache Airflow
         run: |
-          echo "[+] Installing Apache Airflow"
           python -m pip install --upgrade pip
           pip install apache-airflow==2.6.0 \
             --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.6.0/constraints-3.10.txt"
           airflow db init
-          echo "[✔] Airflow initialized"
+          echo "[✔] Airflow installed & initialized" > .github/logs/airflow_setup.log
 
       - name: 🛠 Install Camunda BPM Platform
         run: |
-          echo "[+] Installing Camunda BPM"
           wget https://downloads.camunda.cloud/release/camunda-bpm/tomcat/7.19/camunda-bpm-tomcat-7.19.0.tar.gz -O camunda.tar.gz
           sudo mkdir -p /opt/logistics/camunda
           sudo tar xzf camunda.tar.gz -C /opt/logistics/camunda --strip-components=1
-          echo "[✔] Camunda installed"
+          echo "[✔] Camunda installed" > .github/logs/camunda_install.log
 
-      - name: 🧩 Install Salesforce CLI
+      - name: 🧩 Install Salesforce CLI (@salesforce/cli)
         run: |
-          echo "[+] Installing Salesforce CLI"
-          npm install --global sfdx-cli
-          sfdx update
+          echo "[+] Installing modern Salesforce CLI"
+          npm install --global @salesforce/cli
+          sf --version > .github/logs/salesforce_cli_install.log 2>&1 || echo "[❌] sf CLI 실행 실패" >> .github/logs/salesforce_cli_install.log
           echo "[✔] Salesforce CLI installed"
+
+      - name: 🔐 Salesforce CLI automation (project + org list)
+        run: |
+          cd salesforce-project
+          echo "[+] Initializing Salesforce project"
+          sf project generate --name logistics-project --no-git --loglevel warn
+          echo "[+] Showing available orgs (may fail if no login)"
+          sf org list > ../.github/logs/salesforce_org_list.log 2>&1 || echo "[!] No org connected" >> ../.github/logs/salesforce_org_list.log
+          echo "[✔] Salesforce project initialized"
 
       - name: 🗃 Initialize logistics MySQL DB
         run: |
-          echo "[+] Initializing logistics database"
           sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;"
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
           sudo mkdir -p $(dirname $SCRIPT)
-          echo "CREATE TABLE customers ("                                > $SCRIPT
-          echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"         >> $SCRIPT
-          echo "  name VARCHAR(100) NOT NULL"                          >> $SCRIPT
-          echo ");"                                                    >> $SCRIPT
-          echo "CREATE TABLE card_transactions ("                      >> $SCRIPT
-          echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT,"     >> $SCRIPT
-          echo "  customer_id INT NOT NULL,"                          >> $SCRIPT
-          echo "  card_type ENUM('credit','debit') NOT NULL,"         >> $SCRIPT
-          echo "  amount DECIMAL(10,2) NOT NULL,"                     >> $SCRIPT
+          echo "CREATE TABLE customers (customer_id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL);" > $SCRIPT
+          echo "CREATE TABLE card_transactions (" >> $SCRIPT
+          echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT," >> $SCRIPT
+          echo "  customer_id INT NOT NULL," >> $SCRIPT
+          echo "  card_type ENUM('credit','debit') NOT NULL," >> $SCRIPT
+          echo "  amount DECIMAL(10,2) NOT NULL," >> $SCRIPT
           echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> $SCRIPT
-          echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> $SCRIPT
-          echo ");"                                                    >> $SCRIPT
+          echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id));" >> $SCRIPT
           echo "INSERT INTO customers (name) VALUES ('Alice'),('Bob'),('Charlie');" >> $SCRIPT
-          echo "INSERT INTO card_transactions (customer_id, card_type, amount) VALUES" >> $SCRIPT
-          echo "  (1,'credit',250.00),"                                >> $SCRIPT
-          echo "  (1,'debit',50.00),"                                  >> $SCRIPT
-          echo "  (2,'credit',120.00),"                                >> $SCRIPT
-          echo "  (3,'debit',75.50);"                                  >> $SCRIPT
+          echo "INSERT INTO card_transactions (customer_id, card_type, amount) VALUES (1,'credit',250.00),(1,'debit',50.00),(2,'credit',120.00),(3,'debit',75.50);" >> $SCRIPT
           sudo mysql logistics < $SCRIPT
-          echo "[✔] Logistics DB setup complete"
+          echo "[✔] MySQL logistics DB initialized" > .github/logs/mysql_init.log
+
+      - name: 📦 Save Docker container status
+        run: docker ps -a > .github/logs/docker_status.log
+
+      - name: 📝 Save PostgreSQL init SQL
+        run: |
+          echo "CREATE DATABASE logistics;" > .github/logs/postgres_init.sql
+          echo "CREATE TABLE customers (id SERIAL PRIMARY KEY, name TEXT);" >> .github/logs/postgres_init.sql
