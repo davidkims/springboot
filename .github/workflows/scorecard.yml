@@ -1,102 +1,123 @@
-# File: .github/workflows/setup-logistics-environment.yml
 name: Setup Logistics Environment
+
 on:
   workflow_dispatch:
 
 jobs:
   build-environment:
     runs-on: ubuntu-latest
-    steps:
 
-      - name: Checkout code
+    steps:
+      - name: 📁 Checkout code
         uses: actions/checkout@v4
 
-      - name: Create directories
+      - name: 📂 Create logistics directories
         run: |
+          echo "[+] Creating /opt/logistics directories"
           sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data}
           sudo chmod -R 775 /opt/logistics
 
-      - name: Setup Python 3.10
+      - name: 🐍 Setup Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Setup Java 11 (Temurin)
+      - name: ☕ Setup Java 11 (Temurin)
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '11'
 
-      - name: Setup .NET 7
+      - name: 🟣 Setup .NET 7
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '7.0.x'
 
-      - name: Setup Node.js 18
+      - name: 🟢 Setup Node.js 18
         uses: actions/setup-node@v3
         with:
           node-version: '18'
 
-      - name: Install MySQL Server
+      - name: 🐬 Install MySQL 8.0 (Ubuntu 24.04 compatible)
         run: |
+          echo "[+] Installing MySQL APT config for Ubuntu 22.04"
+          wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
+          echo "mysql-apt-config mysql-apt-config/select-server select mysql-8.0" | sudo debconf-set-selections
+          sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
           sudo systemctl enable mysql
           sudo systemctl start mysql
+          echo "[✔] MySQL Server installed"
 
-      - name: Install PostgreSQL
+      - name: 🐘 Install PostgreSQL 15
         run: |
-          sudo apt-get install -y postgresql postgresql-contrib
+          echo "[+] Adding PostgreSQL APT repo"
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y postgresql-15
           sudo systemctl enable postgresql
           sudo systemctl start postgresql
+          echo "[✔] PostgreSQL 15 installed"
 
-      - name: Install MongoDB
+      - name: 🍃 Install MongoDB (use jammy repo)
         run: |
-          wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo apt-key add -
-          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/6.0 multiverse" |
+          echo "[+] Adding MongoDB public key"
+          wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo tee /etc/apt/trusted.gpg.d/mongodb.asc
+          echo "[+] Adding MongoDB jammy repo"
+          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | \
             sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
           sudo apt-get update
           sudo apt-get install -y mongodb-org
           sudo systemctl enable mongod
           sudo systemctl start mongod
+          echo "[✔] MongoDB 6.0 installed"
 
-      - name: Run Oracle XE in Docker (gvenzl/oracle-xe)
+      - name: 🟠 Run Oracle XE in Docker
         run: |
-          echo "[+] Oracle XE 컨테이너 실행 준비"
+          echo "[+] Pulling Oracle XE Docker image"
           docker pull gvenzl/oracle-xe:21-slim
           docker run -d \
             --name oracle-xe \
             -e ORACLE_PASSWORD=oracle123 \
             -p 1521:1521 \
             gvenzl/oracle-xe:21-slim
-          echo "[✔] Oracle XE 컨테이너 실행 완료"
+          echo "[✔] Oracle XE container started"
 
-      - name: Healthcheck - Oracle XE
+      - name: 🔍 Healthcheck - Oracle XE
         run: |
-          echo "[🔍] Oracle XE 컨테이너 Healthcheck"
+          echo "[🔍] Waiting for Oracle XE to initialize"
           sleep 30
-          docker exec oracle-xe bash -c "echo 'SELECT * FROM v\$version;' | sqlplus -S system/oracle123@localhost:1521/XE" || echo "[❌] SQL*Plus 접속 실패"
+          docker exec oracle-xe bash -c "echo 'SELECT * FROM v\$version;' | sqlplus -S system/oracle123@localhost:1521/XE" || echo "[❌] SQL*Plus connection failed"
 
-      - name: Install Apache Airflow
+      - name: 🌬 Install Apache Airflow
         run: |
+          echo "[+] Installing Apache Airflow"
           python -m pip install --upgrade pip
           pip install apache-airflow==2.6.0 \
             --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.6.0/constraints-3.10.txt"
           airflow db init
+          echo "[✔] Airflow initialized"
 
-      - name: Install Camunda BPM Platform
+      - name: 🛠 Install Camunda BPM Platform
         run: |
+          echo "[+] Installing Camunda BPM"
           wget https://downloads.camunda.cloud/release/camunda-bpm/tomcat/7.19/camunda-bpm-tomcat-7.19.0.tar.gz -O camunda.tar.gz
           sudo mkdir -p /opt/logistics/camunda
           sudo tar xzf camunda.tar.gz -C /opt/logistics/camunda --strip-components=1
+          echo "[✔] Camunda installed"
 
-      - name: Install Salesforce CLI
+      - name: 🧩 Install Salesforce CLI
         run: |
+          echo "[+] Installing Salesforce CLI"
           npm install --global sfdx-cli
           sfdx update
+          echo "[✔] Salesforce CLI installed"
 
-      - name: Initialize logistics MySQL DB
+      - name: 🗃 Initialize logistics MySQL DB
         run: |
+          echo "[+] Initializing logistics database"
           sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;"
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
           sudo mkdir -p $(dirname $SCRIPT)
@@ -104,7 +125,6 @@ jobs:
           echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"         >> $SCRIPT
           echo "  name VARCHAR(100) NOT NULL"                          >> $SCRIPT
           echo ");"                                                    >> $SCRIPT
-          echo ""                                                      >> $SCRIPT
           echo "CREATE TABLE card_transactions ("                      >> $SCRIPT
           echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT,"     >> $SCRIPT
           echo "  customer_id INT NOT NULL,"                          >> $SCRIPT
@@ -113,12 +133,11 @@ jobs:
           echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> $SCRIPT
           echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> $SCRIPT
           echo ");"                                                    >> $SCRIPT
-          echo ""                                                      >> $SCRIPT
           echo "INSERT INTO customers (name) VALUES ('Alice'),('Bob'),('Charlie');" >> $SCRIPT
-          echo ""                                                      >> $SCRIPT
           echo "INSERT INTO card_transactions (customer_id, card_type, amount) VALUES" >> $SCRIPT
           echo "  (1,'credit',250.00),"                                >> $SCRIPT
           echo "  (1,'debit',50.00),"                                  >> $SCRIPT
           echo "  (2,'credit',120.00),"                                >> $SCRIPT
           echo "  (3,'debit',75.50);"                                  >> $SCRIPT
           sudo mysql logistics < $SCRIPT
+          echo "[✔] Logistics DB setup complete"
