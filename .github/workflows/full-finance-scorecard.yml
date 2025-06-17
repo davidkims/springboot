@@ -7,6 +7,13 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  pages: write
+
+env:
+  ARTIFACT_NAME: ledger-${{ github.run_id }}-${{ github.run_number }}
+  OUT_DIR: output
 
 jobs:
   full-setup:
@@ -96,76 +103,50 @@ jobs:
           done
           echo "[simulate] 모든 거래 완료"
 
-      - name: 📄 금융 보고서 생성
+      - name: 🛠️ 거래 증명서 빌드 파일 생성
         run: |
-          echo "[report] 금융 보고서 생성 시작..."
-          for i in $(seq 1 10); do
-            echo "거래 요약 리포트 파일 $i" > .github/finance/files/report_$i.txt
-            echo "[report] report_$i.txt 생성 완료"
-          done
+          mkdir -p $OUT_DIR
+          echo "이 거래 증명서는 $(date -u)에 생성되었습니다." > $OUT_DIR/build.txt
 
-      - name: ✅ Scorecard CLI 설치
-        run: |
-          echo "[scorecard] CLI 설치 시작..."
-          curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
-          chmod +x scorecard-linux-amd64
-          sudo mv scorecard-linux-amd64 /usr/local/bin/scorecard
-          scorecard --version || echo "버전 확인 실패 시 무시"
-          echo "[scorecard] 설치 완료"
+      - name: 🧾 거래 증명서 생성
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.OUT_DIR }}/build.txt
 
-      - name: 📄 Scorecard 원장 생성
+      - name: 📄 증명서 SARIF 및 JSON 변환
         run: |
-          echo "[scorecard-ledger] Scorecard 원장 생성 시작..."
-          for i in $(seq 1 10); do
-            FILE=".github/scorecard/ledgers/scorecard_$i.csv"
-            echo "item,score,comment" > $FILE
-            for j in $(seq 1 20); do
-              ITEM="SecurityCheck${j}"
-              SCORE=$((RANDOM % 100))
-              COMMENT=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "양호"; else echo "개선필요"; fi)
-              echo "$ITEM,$SCORE,$COMMENT" >> $FILE
-            done
-            echo "[scorecard-ledger] scorecard_$i.csv 생성 완료"
-          done
+          mkdir -p site
+          cp .attestation/provenance.json site/${{ env.ARTIFACT_NAME }}.json || echo "JSON 없음"
+          echo '{
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "Provenance Converter",
+                  "informationUri": "https://github.com/actions/attest-build-provenance",
+                  "version": "1.0.0"
+                }
+              },
+              "results": []
+            }]
+          }' > site/${{ env.ARTIFACT_NAME }}.sarif
 
-      - name: 📊 Scorecard 시뮬레이션 (재시도 포함)
-        run: |
-          echo "[simulate-scorecard] 보안 점검 시뮬레이션 시작..."
-          for file in .github/scorecard/ledgers/*.csv; do
-            echo "[simulate-scorecard] 파일: $file"
-            tail -n +2 "$file" | while IFS=',' read -r item score comment; do
-              attempt=1
-              max_attempts=3
-              success=false
-              while [ $attempt -le $max_attempts ]; do
-                echo "🔍 시도 $attempt: $item | 점수: $score | $comment"
-                FAIL=$((RANDOM % 100))
-                if [[ $FAIL -lt 5 ]]; then
-                  echo "❌ [$item] 실패 (시도 $attempt)"
-                  attempt=$((attempt+1))
-                  sleep 0.2
-                else
-                  if [ "$score" -ge 80 ]; then
-                    echo "✅ [$item] 항목 적합 (Score $score)"
-                  else
-                    echo "⚠️ [$item] 항목 개선 필요 (Score $score)"
-                  fi
-                  success=true
-                  break
-                fi
-              done
-              if [[ $success == false ]]; then
-                echo "💥 [$item] 최종 실패"
-              fi
-              sleep 0.1
-            done
-          done
-          echo "[simulate-scorecard] 모든 보안 점검 완료"
+      - name: 📤 GitHub Pages용 증명서 업로드
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
 
-      - name: 📄 Scorecard 리포트 생성
-        run: |
-          echo "[scorecard-file] 리포트 생성 시작..."
-          for i in $(seq 1 10); do
-            echo "이 리포트는 Scorecard 보안 결과 요약입니다. 파일 번호: $i" > .github/scorecard/files/oss_report_$i.txt
-            echo "[scorecard-file] oss_report_$i.txt 생성 완료"
-          done
+  deploy-pages:
+    needs: full-setup
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: 🚀 GitHub Pages에 배포
+        uses: actions/deploy-pages@v4
