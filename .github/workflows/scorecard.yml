@@ -14,7 +14,7 @@ jobs:
       - name: 📂 Create logistics directories
         run: |
           echo "[LOG] Creating /opt/logistics directories"
-          sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data}
+          sudo mkdir -p /opt/logistics/{mysql,postgresql,oracle,mongodb,airflow,camunda,salesforce_flow,virtual_customer_data,aws,gcp,smtp}
           sudo chmod -R 775 /opt/logistics
           mkdir -p .github/logs
 
@@ -46,77 +46,85 @@ jobs:
           pip install apache-airflow==2.6.0 \
             apache-airflow-providers-postgres \
             apache-airflow-providers-docker \
+            apache-airflow-providers-amazon \
+            apache-airflow-providers-google \
+            apache-airflow-providers-smtp \
             --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.6.0/constraints-3.10.txt"
           airflow db init
           echo "[DONE] Airflow and providers initialized" > .github/logs/airflow_setup.log
+          sudo mkdir -p /opt/logistics/airflow
+          cp -r ~/airflow/* /opt/logistics/airflow/
 
       - name: 🌬 Configure Airflow Connections
         run: |
           echo "[CONFIG] Setting up Airflow Connections"
-          airflow connections add postgres_default \
+
+          airflow connections add --overwrite postgres_default \
             --conn-uri 'postgresql+psycopg2://postgres:postgres123@localhost:5432/logistics'
 
-          airflow connections add docker_default \
+          airflow connections add --overwrite docker_default \
             --conn-type docker \
             --conn-host unix:///var/run/docker.sock
 
-      - name: 🌬 Create Airflow DAG with Logging
-        run: |
-          echo "[LOG] Creating Airflow DAG"
-          mkdir -p ~/airflow/dags
+          airflow connections add --overwrite aws_default \
+            --conn-type aws \
+            --conn-extra '{"region_name": "us-east-1"}'
 
-          DAG_PATH=~/airflow/dags/logistics_dag.py
+          airflow connections add --overwrite google_cloud_default \
+            --conn-type google_cloud_platform \
+            --conn-extra '{"extra__google_cloud_platform__project": "demo-project"}'
+
+          airflow connections add --overwrite smtp_default \
+            --conn-type smtp \
+            --conn-host smtp.example.com \
+            --conn-login airflow \
+            --conn-password airflow123 \
+            --conn-port 587 \
+            --conn-extra '{"tls": true}'
+
+      - name: 🌬 Create Airflow Connection Check DAG
+        run: |
+          echo "[DAG] Creating connection check DAG"
+          mkdir -p ~/airflow/dags
+          DAG_PATH=~/airflow/dags/connection_check_dag.py
 
           echo "from airflow import DAG" | tee $DAG_PATH
           echo "from airflow.operators.bash import BashOperator" | tee -a $DAG_PATH
-          echo "from airflow.operators.python import PythonOperator" | tee -a $DAG_PATH
-          echo "from airflow.providers.postgres.operators.postgres import PostgresOperator" | tee -a $DAG_PATH
-          echo "from airflow.providers.docker.operators.docker import DockerOperator" | tee -a $DAG_PATH
           echo "from datetime import datetime" | tee -a $DAG_PATH
           echo "" | tee -a $DAG_PATH
 
-          echo "def sample_python_callable():" | tee -a $DAG_PATH
-          echo "    print('PythonOperator executed')" | tee -a $DAG_PATH
-          echo "" | tee -a $DAG_PATH
-
           echo "with DAG(" | tee -a $DAG_PATH
-          echo "    'logistics_pipeline'," | tee -a $DAG_PATH
+          echo "    'connection_check_dag'," | tee -a $DAG_PATH
           echo "    start_date=datetime(2023, 1, 1)," | tee -a $DAG_PATH
           echo "    schedule_interval='@daily'," | tee -a $DAG_PATH
           echo "    catchup=False" | tee -a $DAG_PATH
           echo ") as dag:" | tee -a $DAG_PATH
 
-          echo "    bash_task = BashOperator(" | tee -a $DAG_PATH
-          echo "        task_id='print_hello'," | tee -a $DAG_PATH
-          echo "        bash_command='echo Hello from logistics DAG'" | tee -a $DAG_PATH
+          echo "    check_postgres = BashOperator(" | tee -a $DAG_PATH
+          echo "        task_id='check_postgres'," | tee -a $DAG_PATH
+          echo "        bash_command='airflow connections get postgres_default'" | tee -a $DAG_PATH
           echo "    )" | tee -a $DAG_PATH
 
-          echo "    python_task = PythonOperator(" | tee -a $DAG_PATH
-          echo "        task_id='run_python_function'," | tee -a $DAG_PATH
-          echo "        python_callable=sample_python_callable" | tee -a $DAG_PATH
+          echo "    check_docker = BashOperator(" | tee -a $DAG_PATH
+          echo "        task_id='check_docker'," | tee -a $DAG_PATH
+          echo "        bash_command='airflow connections get docker_default'" | tee -a $DAG_PATH
           echo "    )" | tee -a $DAG_PATH
 
-          echo "    postgres_task = PostgresOperator(" | tee -a $DAG_PATH
-          echo "        task_id='create_postgres_table'," | tee -a $DAG_PATH
-          echo "        postgres_conn_id='postgres_default'," | tee -a $DAG_PATH
-          echo "        sql=\"CREATE TABLE IF NOT EXISTS test_table (id SERIAL PRIMARY KEY, name TEXT);\"" | tee -a $DAG_PATH
+          echo "    check_aws = BashOperator(" | tee -a $DAG_PATH
+          echo "        task_id='check_aws'," | tee -a $DAG_PATH
+          echo "        bash_command='airflow connections get aws_default'" | tee -a $DAG_PATH
           echo "    )" | tee -a $DAG_PATH
 
-          echo "    docker_task = DockerOperator(" | tee -a $DAG_PATH
-          echo "        task_id='docker_run_example'," | tee -a $DAG_PATH
-          echo "        image='alpine'," | tee -a $DAG_PATH
-          echo "        command='echo inside docker'," | tee -a $DAG_PATH
-          echo "        auto_remove=True," | tee -a $DAG_PATH
-          echo "        docker_url='unix://var/run/docker.sock'," | tee -a $DAG_PATH
-          echo "        network_mode='bridge'" | tee -a $DAG_PATH
+          echo "    check_gcp = BashOperator(" | tee -a $DAG_PATH
+          echo "        task_id='check_gcp'," | tee -a $DAG_PATH
+          echo "        bash_command='airflow connections get google_cloud_default'" | tee -a $DAG_PATH
           echo "    )" | tee -a $DAG_PATH
 
-          echo "    bash_task >> python_task >> postgres_task >> docker_task" | tee -a $DAG_PATH
+          echo "    check_smtp = BashOperator(" | tee -a $DAG_PATH
+          echo "        task_id='check_smtp'," | tee -a $DAG_PATH
+          echo "        bash_command='airflow connections get smtp_default'" | tee -a $DAG_PATH
+          echo "    )" | tee -a $DAG_PATH
 
-          echo "[DONE] Airflow DAG created with full operators" > .github/logs/airflow_dag_created.log
+          echo "    [check_postgres, check_docker, check_aws, check_gcp, check_smtp]" | tee -a $DAG_PATH
 
-      - name: 🌬 Test Airflow DAG Execution (bash task only)
-        run: |
-          echo "[TEST] Testing Airflow bash task execution"
-          airflow tasks test logistics_pipeline print_hello 2025-01-01
-          echo "[DONE] Airflow bash task tested" > .github/logs/airflow_dag_test.log
+          echo "[DONE] Connection check DAG created" > .github/logs/airflow_connection_check_dag.log
