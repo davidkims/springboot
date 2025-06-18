@@ -12,19 +12,40 @@ jobs:
     steps:
       - name: 📁 Create required directories
         run: |
+          echo "[INIT] Creating base directories"
           sudo mkdir -p /opt/logistics/airflow/dags
           sudo mkdir -p /opt/logistics/airflow/test_logs
+          sudo mkdir -p /opt/logistics/scorecard
           sudo chmod -R 777 /opt/logistics
+
+      - name: 🔄 Downgrade Python for Airflow Compatibility
+        run: |
+          echo "[PYTHON] Installing Python 3.10 for Airflow compatibility"
+          sudo apt-get update
+          sudo apt-get install -y python3.10 python3.10-venv python3.10-dev
+          sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+
+      - name: 📆 Setup Python Virtualenv
+        run: |
+          echo "[VENV] Creating and activating Python 3.10 virtual environment"
+          python3 -m venv /opt/logistics/airflow/venv
+          source /opt/logistics/airflow/venv/bin/activate
+          echo "source /opt/logistics/airflow/venv/bin/activate" >> $GITHUB_ENV
 
       - name: 🌀 Install Apache Airflow and Providers
         run: |
-          pip install apache-airflow==2.8.1 apache-airflow-providers-docker apache-airflow-providers-postgres apache-airflow-providers-smtp
+          echo "[AIRFLOW] Installing Airflow and Providers"
+          source /opt/logistics/airflow/venv/bin/activate
+          pip install --upgrade pip
+          pip install apache-airflow==2.8.0 \
+                      apache-airflow-providers-docker \
+                      apache-airflow-providers-postgres \
+                      apache-airflow-providers-smtp
           airflow db init
 
       - name: 🌬️ Add Airflow Healthcheck DAG
         run: |
-          echo "[DAG] Creating Airflow healthcheck DAG"
-          mkdir -p /opt/logistics/airflow/dags
+          echo "[DAG] Creating airflow_healthcheck_dag.py"
           cat << 'EOF' > /opt/logistics/airflow/dags/airflow_healthcheck_dag.py
           from airflow import DAG
           from airflow.operators.bash import BashOperator
@@ -32,7 +53,7 @@ jobs:
 
           with DAG(
               'airflow_healthcheck_dag',
-              start_date=datetime(2023, 1, 1),
+              start_date=datetime(2025, 1, 1),
               schedule_interval='@daily',
               catchup=False
           ) as dag:
@@ -42,12 +63,12 @@ jobs:
               )
           EOF
           echo "[✔] DAG saved to /opt/logistics/airflow/dags/airflow_healthcheck_dag.py"
-          echo "[📄] Contents of airflow_healthcheck_dag.py:"
-          cat /opt/logistics/airflow/dags/airflow_healthcheck_dag.py
+          cat /opt/logistics/airflow/dags/airflow_healthcheck_dag.py > /opt/logistics/airflow/test_logs/airflow_healthcheck_dag_create.log
 
       - name: ▶️ Test Airflow DAG execution
         run: |
-          echo "[TEST] Testing Airflow DAG airflow_healthcheck_dag"
+          echo "[TEST] Running Airflow DAG test"
+          source /opt/logistics/airflow/venv/bin/activate
           airflow dags list > /opt/logistics/airflow/test_logs/airflow_dags_list.log || echo "[❌] DAG list failed"
           airflow dags test airflow_healthcheck_dag 2025-01-01 > /opt/logistics/airflow/test_logs/airflow_healthcheck_dag_test.log || echo "[❌] DAG test failed"
 
@@ -55,12 +76,11 @@ jobs:
         run: |
           echo "[SECURITY] Installing Scorecard"
           SCORECARD_VERSION="v4.10.3"
-          wget https://github.com/ossf/scorecard/releases/download/$SCORECARD_VERSION/scorecard-linux-amd64 -O scorecard || echo "[❌] Scorecard download failed"
+          wget https://github.com/ossf/scorecard/releases/download/$SCORECARD_VERSION/scorecard-linux-amd64 -O scorecard
           chmod +x scorecard
-          mkdir -p /opt/logistics/scorecard
           mv scorecard /opt/logistics/scorecard/
-          echo "[SECURITY] Running Scorecard on DAGs"
-          /opt/logistics/scorecard/scorecard --repo=. --local --checks Vulnerabilities --format=json --show-details > /opt/logistics/scorecard/scorecard.result.json || echo "[❌] Scorecard run failed"
+          echo "[SECURITY] Running Scorecard"
+          /opt/logistics/scorecard/scorecard --repo=. --local --checks Vulnerabilities --format=json --show-details > /opt/logistics/scorecard/scorecard.result.json
 
       - name: 📦 Upload Logs as Artifacts
         uses: actions/upload-artifact@v4
