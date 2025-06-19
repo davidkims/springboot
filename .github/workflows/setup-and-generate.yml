@@ -1,4 +1,4 @@
-name: 🏗️ Setup & Generate Stress Ledger with Full Echo
+name: 🏗️ Setup & Generate Stress Ledger with Full Features
 
 on:
   workflow_dispatch:
@@ -11,9 +11,9 @@ jobs:
       - name: 📁 Create .github directory structure
         run: |
           echo "[+] Creating required directories..."
-          mkdir -p .github/db .github/scripts
+          mkdir -p .github/db .github/scripts backup
 
-      - name: 📜 Generate init_stress_loans.sql with echo
+      - name: 📜 Generate init_stress_loans.sql
         run: |
           echo "[+] Generating init_stress_loans.sql..."
           echo "CREATE TABLE IF NOT EXISTS stress_loans (" > .github/db/init_stress_loans.sql
@@ -22,28 +22,23 @@ jobs:
           echo "  loan_amount DECIMAL(10,2)," >> .github/db/init_stress_loans.sql
           echo "  loan_date DATE DEFAULT CURRENT_DATE" >> .github/db/init_stress_loans.sql
           echo ");" >> .github/db/init_stress_loans.sql
-          echo "[✔] init_stress_loans.sql 생성 완료:"
           cat .github/db/init_stress_loans.sql
 
       - name: 🐘 Install PostgreSQL CLI
         run: |
-          echo "[+] Installing PostgreSQL client..."
           sudo apt-get update
           sudo apt-get install -y postgresql-client
-          echo "[✔] PostgreSQL client version:"
           psql --version
 
       - name: 🧪 Install Scorecard CLI
         run: |
-          echo "[+] Installing OpenSSF Scorecard..."
           curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
           chmod +x scorecard-linux-amd64
           sudo mv scorecard-linux-amd64 /usr/local/bin/scorecard
-          scorecard --version || echo "[✔] Scorecard CLI installed"
+          scorecard --version || echo "Scorecard CLI installed"
 
       - name: 🐳 Install Docker
         run: |
-          echo "[+] Installing Docker..."
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker
@@ -51,7 +46,6 @@ jobs:
 
       - name: 🐘 Start PostgreSQL container
         run: |
-          echo "[+] Starting PostgreSQL container..."
           docker rm -f stress-pg || true
           docker run -d \
             --name stress-pg \
@@ -61,28 +55,18 @@ jobs:
             -p 5432:5432 \
             postgres:14
           sleep 10
-          echo "[✔] PostgreSQL container running"
 
       - name: 🐍 Create requirements.txt & install Python packages
         run: |
-          echo "[+] Creating requirements.txt..."
           echo "faker" > requirements.txt
-          echo "[✔] requirements.txt 내용:"
-          cat requirements.txt
-          echo "[+] Installing Python packages..."
           pip install -r requirements.txt
-          echo "[✔] Python 패키지 설치 완료"
 
-      - name: 🐍 Generate stress_ledger_generator.py with echo
+      - name: 🐍 Generate stress_ledger_generator.py
         run: |
-          echo "[+] Creating stress_ledger_generator.py..."
           echo "import csv, random" > .github/scripts/stress_ledger_generator.py
           echo "from faker import Faker" >> .github/scripts/stress_ledger_generator.py
-          echo "" >> .github/scripts/stress_ledger_generator.py
           echo "fake = Faker()" >> .github/scripts/stress_ledger_generator.py
           echo "output_file = \".github/db/stress_loans.csv\"" >> .github/scripts/stress_ledger_generator.py
-          echo "print(\"[+] Generating stress ledger...\")" >> .github/scripts/stress_ledger_generator.py
-          echo "" >> .github/scripts/stress_ledger_generator.py
           echo "with open(output_file, 'w', newline='') as f:" >> .github/scripts/stress_ledger_generator.py
           echo "    writer = csv.writer(f)" >> .github/scripts/stress_ledger_generator.py
           echo "    writer.writerow([\"customer_name\", \"loan_amount\", \"loan_date\"])" >> .github/scripts/stress_ledger_generator.py
@@ -92,34 +76,21 @@ jobs:
           echo "            round(random.uniform(1000.0, 50000.0), 2)," >> .github/scripts/stress_ledger_generator.py
           echo "            fake.date_between(start_date='-2y', end_date='today')" >> .github/scripts/stress_ledger_generator.py
           echo "        ])" >> .github/scripts/stress_ledger_generator.py
-          echo "" >> .github/scripts/stress_ledger_generator.py
-          echo "print(f\"[✔] Ledger generated at {output_file}\")" >> .github/scripts/stress_ledger_generator.py
-          echo "[✔] stress_ledger_generator.py 생성 완료:"
-          head -n 20 .github/scripts/stress_ledger_generator.py
 
-      - name: 🧪 Run ledger generator script
+      - name: 🧪 Run ledger generator
         run: |
-          echo "[+] Running ledger generator..."
           python3 .github/scripts/stress_ledger_generator.py
-          echo "[✔] File preview:"
           head -n 5 .github/db/stress_loans.csv
 
-      - name: 🗃️ Load CSV into PostgreSQL (via COPY)
+      - name: 🗃️ Load CSV into PostgreSQL
         run: |
-          echo "[+] Loading schema into DB..."
           docker cp .github/db/init_stress_loans.sql stress-pg:/init.sql
           docker exec -u postgres stress-pg psql -d stressdb -f /init.sql
-
-          echo "[+] Copying CSV to container..."
           docker cp .github/db/stress_loans.csv stress-pg:/stress_loans.csv
-
-          echo "[+] Loading CSV into table..."
           docker exec -u postgres stress-pg psql -d stressdb -c "\COPY stress_loans(customer_name, loan_amount, loan_date) FROM '/stress_loans.csv' DELIMITER ',' CSV HEADER;"
-          echo "[✔] Data loaded into PostgreSQL"
 
-      - name: 🔄 Simulate additional transactions (1000 rows)
+      - name: 🔄 Simulate additional loan rows
         run: |
-          echo "[+] Inserting simulated loan records..."
           docker exec -u postgres stress-pg psql -d stressdb -c "
             INSERT INTO stress_loans (customer_name, loan_amount, loan_date)
             SELECT 
@@ -127,19 +98,35 @@ jobs:
               ROUND(CAST(random() * 100000 + 1000 AS numeric), 2),
               CURRENT_DATE
             FROM generate_series(1, 1000) g;"
-          echo "[✔] Simulated additional transactions"
 
-      - name: 📈 Show summary:COUNT & SUM
+      - name: 💳 Create and populate transactions table
         run: |
-          echo "[+] Creating query.sql file for summary..."
+          echo "CREATE TABLE IF NOT EXISTS transactions (" > transactions.sql
+          echo "  transaction_id SERIAL PRIMARY KEY," >> transactions.sql
+          echo "  loan_id INTEGER REFERENCES stress_loans(loan_id)," >> transactions.sql
+          echo "  transaction_amount DECIMAL(10,2)," >> transactions.sql
+          echo "  transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> transactions.sql
+          echo ");" >> transactions.sql
+          docker cp transactions.sql stress-pg:/transactions.sql
+          docker exec -u postgres stress-pg psql -d stressdb -f /transactions.sql
+          docker exec -u postgres stress-pg psql -d stressdb -c "
+            INSERT INTO transactions (loan_id, transaction_amount)
+            SELECT loan_id,
+                   ROUND((loan_amount * (random() * 0.5 + 0.1))::numeric, 2)
+            FROM stress_loans, generate_series(1, 2)
+            WHERE loan_id % 5 = generate_series;"
+
+      - name: 📈 Show loan summary
+        run: |
           echo "SELECT" > query.sql
           echo "  COUNT(*) AS total_loans," >> query.sql
           echo "  ROUND(SUM(loan_amount), 2) AS total_amount" >> query.sql
           echo "FROM stress_loans;" >> query.sql
-
-          echo "[+] Copying query.sql to PostgreSQL container..."
           docker cp query.sql stress-pg:/query.sql
-
-          echo "[+] Executing query.sql inside container..."
           docker exec -u postgres stress-pg psql -d stressdb -f /query.sql
-          echo "[✔] Summary query executed"
+
+      - name: 💾 Backup PostgreSQL DB with pg_dump
+        run: |
+          docker exec -u postgres stress-pg pg_dump stressdb > backup/stress_backup.sql
+          echo "[✔] Backup stored in backup/stress_backup.sql"
+          head -n 10 backup/stress_backup.sql
