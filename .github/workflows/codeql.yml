@@ -1,0 +1,151 @@
+name: ✨ Full Tmax Code Generator & Deployer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 0'  # 매주 일요일 3시 실행
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  full-tmax-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📁 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ✨ Setup SSH Key
+        run: |
+          echo "[CALL] mkdir -p ~/.ssh"
+          mkdir -p ~/.ssh
+          echo "[CALL] Save JEUS SSH private key"
+          echo "$GITHUB_SECRET_JEUS_SSH_KEY" > ~/.ssh/id_rsa
+          echo "[CALL] Set permission 600"
+          chmod 600 ~/.ssh/id_rsa
+          echo "[CALL] SSH keyscan"
+          ssh-keyscan -p $GITHUB_SECRET_JEUS_SSH_PORT $GITHUB_SECRET_JEUS_SSH_HOST >> ~/.ssh/known_hosts
+
+      - name: 🚀 Generate Tibero Dockerfile
+        run: |
+          echo "[CALL] Create tibero-docker directory"
+          mkdir -p tibero-docker
+          cd tibero-docker
+
+          echo "[CALL] Generate Dockerfile content"
+          echo 'FROM centos:7' > Dockerfile
+          echo 'LABEL maintainer="Tmax"' >> Dockerfile
+          echo 'RUN yum install -y unzip java-1.8.0-openjdk' >> Dockerfile
+          echo 'ADD tibero6.tar.gz /opt/' >> Dockerfile
+          echo 'ENV TB_HOME=/opt/tibero6' >> Dockerfile
+          echo 'EXPOSE 8629' >> Dockerfile
+          echo 'CMD ["/opt/tibero6/bin/tibero", "start"]' >> Dockerfile
+          echo "[✔] Dockerfile created"
+
+      - name: 🌠 Generate JEUS WAR project
+        run: |
+          echo "[CALL] Create JEUS Spring Boot app directories"
+          mkdir -p jeus-springboot/src/main/java/com/tmax/jeus
+          mkdir -p jeus-springboot/src/main/webapp/WEB-INF
+
+          echo "[CALL] Generate build.gradle"
+          echo "plugins {" > jeus-springboot/build.gradle
+          echo "  id 'war'" >> jeus-springboot/build.gradle
+          echo "  id 'java'" >> jeus-springboot/build.gradle
+          echo "}" >> jeus-springboot/build.gradle
+          echo "repositories { mavenCentral() }" >> jeus-springboot/build.gradle
+          echo "dependencies {" >> jeus-springboot/build.gradle
+          echo "  providedCompile 'javax.servlet:javax.servlet-api:4.0.1'" >> jeus-springboot/build.gradle
+          echo "}" >> jeus-springboot/build.gradle
+
+          echo "[CALL] Generate HelloServlet.java"
+          cat <<EOF > jeus-springboot/src/main/java/com/tmax/jeus/HelloServlet.java
+package com.tmax.jeus;
+import javax.servlet.*;
+import javax.servlet.http.*;
+import java.io.*;
+
+public class HelloServlet extends HttpServlet {
+  protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+    resp.setContentType("text/plain");
+    resp.getWriter().write("Hello from JEUS WAR!");
+  }
+}
+EOF
+
+          echo "[CALL] Generate web.xml"
+          echo "<web-app><servlet>...</servlet></web-app>" > jeus-springboot/src/main/webapp/WEB-INF/web.xml
+          echo "[✔] JEUS WAR project files created"
+
+      - name: 📆 Generate OpenFrame COBOL & JCL
+        run: |
+          echo "[CALL] Create OpenFrame directories"
+          mkdir -p openframe/legacy/cobol openframe/legacy/jcl
+
+          echo "[CALL] Generate sample.cbl"
+          echo "IDENTIFICATION DIVISION." > openframe/legacy/cobol/sample.cbl
+          echo "PROGRAM-ID. LEGACY." >> openframe/legacy/cobol/sample.cbl
+          echo "PROCEDURE DIVISION." >> openframe/legacy/cobol/sample.cbl
+          echo "DISPLAY \"Running legacy simulation\"." >> openframe/legacy/cobol/sample.cbl
+          echo "STOP RUN." >> openframe/legacy/cobol/sample.cbl
+
+          echo "[CALL] Generate run.jcl"
+          echo "//SIM     JOB 123,'OPENFRAME JOB'" > openframe/legacy/jcl/run.jcl
+          echo "//STEP1   EXEC PGM=LEGACY" >> openframe/legacy/jcl/run.jcl
+          echo "//SYSOUT  DD  SYSOUT=*" >> openframe/legacy/jcl/run.jcl
+          echo "[✔] OpenFrame COBOL & JCL created"
+
+      - name: 📊 Generate ProFrame 금융 템플릿
+        run: |
+          echo "[CALL] Create ProFrame directories"
+          mkdir -p proframe/domain proframe/service
+
+          echo "[CALL] Generate customer.csv"
+          echo "고객번호,이름,계좌" > proframe/domain/customer.csv
+          echo "1001,김태백,123-456" >> proframe/domain/customer.csv
+
+          echo "[CALL] Generate account.txt"
+          echo "[프로프레임 로직]" > proframe/service/account.txt
+          echo "1. 고객 번호 입력" >> proframe/service/account.txt
+          echo "2. 계좌 유효성 검사" >> proframe/service/account.txt
+          echo "3. 조회 결과 출력" >> proframe/service/account.txt
+          echo "[✔] ProFrame domain and logic created"
+
+      - name: 📅 Archive WAR
+        run: |
+          echo "[CALL] zip jeus-war.zip"
+          cd jeus-springboot
+          zip -r jeus-war.zip .
+          echo "[✔] jeus-war.zip created"
+
+      - name: 🚢 Deploy WAR to JEUS via SSH
+        run: |
+          echo "[CALL] Send WAR to JEUS"
+          scp -P $GITHUB_SECRET_JEUS_SSH_PORT jeus-springboot/jeus-war.zip $GITHUB_SECRET_JEUS_SSH_USER@$GITHUB_SECRET_JEUS_SSH_HOST:/home/$GITHUB_SECRET_JEUS_SSH_USER/
+
+          echo "[CALL] Remote unzip and copy to JEUS webapps"
+          ssh -p $GITHUB_SECRET_JEUS_SSH_PORT $GITHUB_SECRET_JEUS_SSH_USER@$GITHUB_SECRET_JEUS_SSH_HOST <<'EOF'
+          echo "[CALL/REMOTE] Unzip jeus-war.zip"
+          cd ~/webapps
+          unzip -o ~/jeus-war.zip
+          echo "[CALL/REMOTE] Copy WAR to JEUS_HOME"
+          cp *.war $JEUS_HOME/webapps/
+          echo "[✔] WAR deployed to JEUS"
+EOF
+
+      - name: 👨‍💼 Commit All Generated Code
+        run: |
+          echo "[CALL] Setup Git config"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "[CALL] git add ."
+          git add .
+
+          echo "[CALL] git commit"
+          git commit -m "🌟 Full Tmax Code Auto Generated"
+
+          echo "[CALL] git push"
+          git push || echo "⚠️ No changes to commit"
