@@ -1,9 +1,9 @@
-name: 🚀 Init Slot Directory with Rotation, Logging, Tags, PR
+name: 🚀 Init Slot Directory with Tags, Logs, PR, Symlink
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/1 * * * *'  # 매 1분마다 실행
+    - cron: '*/1 * * * *'  # 매 1분 실행
 
 permissions:
   contents: write
@@ -18,30 +18,34 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       slot_name: ${{ steps.save-slot.outputs.slot }}
+      tag_name: ${{ steps.save-slot.outputs.tag }}
 
     steps:
-      - name: 📦 Checkout Repository
+      - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔁 Rotate and Create Slot
+      - name: 🔁 Rotate and Generate Unique Slot & Tag
         id: save-slot
         run: |
           mkdir -p disk
-          cd disk
-          if [ "$(ls -d slot-* 2>/dev/null | wc -l)" -ge 5 ]; then
-            OLDEST=$(ls -d slot-* | sort | head -n 1)
-            echo "[🗑️] Removing $OLDEST"
-            rm -rf "$OLDEST"
-          fi
+          git fetch --tags
 
-          LAST=$(ls -d slot-* 2>/dev/null | sed 's/slot-//' | sort -n | tail -n 1)
-          if [ -z "$LAST" ]; then LAST=0; fi
-          NEXT=$((10#$LAST + 1))
-          SLOT_NAME="slot-$(printf '%03d' $NEXT)"
-          mkdir -p "$SLOT_NAME"
-          echo "slot=$SLOT_NAME" >> $GITHUB_OUTPUT
+          TAG_PREFIX="slot"
+          DATE_SUFFIX=$(date -u +"%Y%m%dT%H%M%SZ")
+          i=1
+          while true; do
+            SLOT_BASE="${TAG_PREFIX}-$(printf '%03d' $i)"
+            TAG_NAME="${SLOT_BASE}-${DATE_SUFFIX}"
+            if [ ! -d "disk/$SLOT_BASE" ] && ! git tag | grep -q "^$TAG_NAME$"; then
+              mkdir -p "disk/$SLOT_BASE"
+              echo "slot=$SLOT_BASE" >> $GITHUB_OUTPUT
+              echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+              break
+            fi
+            i=$((i+1))
+          done
 
-      - name: 🧱 Create Files and Copy to Slot
+      - name: 🧱 Generate project files and copy to slot
         run: |
           SLOT=${{ steps.save-slot.outputs.slot }}
           mkdir -p .github/{workflows,logs}
@@ -49,12 +53,12 @@ jobs:
           mkdir -p docker/mysql
           mkdir -p site output
 
-          echo "workflow created at $(date)" > .github/workflows/example.yml
-          echo "log started" > .github/logs/workflow_start.log
-          echo "txn,amount" > data/transactions/test.csv
-          echo "info" > docker/mysql/info.txt
-          echo "html" > site/index.html
-          echo "output" > output/result.txt
+          echo "workflow $(date)" > .github/workflows/example.yml
+          echo "log start" > .github/logs/start.log
+          echo "id,amount" > data/transactions/record.csv
+          echo "db log" > docker/mysql/info.txt
+          echo "index" > site/index.html
+          echo "output result" > output/result.txt
 
           mkdir -p disk/$SLOT/{.github,data,docker,output,site,logs,workflows}
           cp -r .github disk/$SLOT/
@@ -64,7 +68,7 @@ jobs:
           cp -r site disk/$SLOT/
           cp .github/workflows/*.yml disk/$SLOT/workflows/ || true
 
-      - name: 📜 Log Execution Info
+      - name: 📜 Log execution details
         run: |
           SLOT=${{ steps.save-slot.outputs.slot }}
           LOGFILE="disk/$SLOT/logs/slot.log"
@@ -78,22 +82,32 @@ jobs:
             echo "========================================"
           } >> "$LOGFILE"
 
-      - name: 🏷️ Create Git Tag
+      - name: 🏷️ Create Git Tag (if not exists)
         run: |
-          SLOT=${{ steps.save-slot.outputs.slot }}
+          TAG=${{ steps.save-slot.outputs.tag }}
           git config --global user.name "github-actions[bot]"
           git config --global user.email "bot@example.com"
           git fetch --tags
-          git tag "$SLOT"
-          git push origin "$SLOT"
+          if git tag | grep -q "^$TAG$"; then
+            echo "[⚠️] Tag $TAG already exists. Skipping..."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
 
-      - name: 📦 Commit & Push to Branch
+      - name: 🔗 Update symlink for slot-latest
+        run: |
+          SLOT=${{ steps.save-slot.outputs.slot }}
+          ln -sfn "$SLOT" disk/slot-latest
+          echo "[✔] Updated symlink: disk/slot-latest → $SLOT"
+
+      - name: 📦 Commit and push to branch
         run: |
           SLOT=${{ steps.save-slot.outputs.slot }}
           BRANCH="slot-update-${SLOT}"
           git checkout -b "$BRANCH"
-          git add disk/$SLOT
-          git commit -m "📦 Add slot data: $SLOT"
+          git add disk/$SLOT disk/slot-latest
+          git commit -m "📦 Add slot: $SLOT"
           git push origin "$BRANCH"
 
   create-pr:
@@ -109,9 +123,9 @@ jobs:
           commit-message: "📦 Slot update: ${{ needs.setup-slot.outputs.slot_name }}"
           title: "📦 Slot update for ${{ needs.setup-slot.outputs.slot_name }}"
           body: |
-            This PR contains:
-            - Slot backup files
-            - Logs, Workflows, Data
-            - Auto-generated by workflow run
+            This PR includes backup files for:
+            - Slot: `${{ needs.setup-slot.outputs.slot_name }}`
+            - Tag: `${{ needs.setup-slot.outputs.tag_name }}`
+            - Auto-generated by GitHub Actions
           branch: slot-update-${{ needs.setup-slot.outputs.slot_name }}
           delete-branch: true
