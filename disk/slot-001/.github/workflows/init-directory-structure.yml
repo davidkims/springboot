@@ -1,0 +1,112 @@
+name: 🚀 Init Slot Directory with Rotation, Logs, Tags, PR
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/1 * * * *'  # 매 1분마다 실행
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: slot-dir-init-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  setup-slot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🔁 Rotate slot directories (keep max 5)
+        run: |
+          echo "[+] Rotating disk slots..."
+          cd disk || mkdir disk && cd disk
+          if [ "$(ls -d slot-* 2>/dev/null | wc -l)" -ge 5 ]; then
+            OLDEST=$(ls -d slot-* | sort | head -n 1)
+            echo "[🗑️] Removing $OLDEST"
+            rm -rf "$OLDEST"
+          fi
+          NEXT_NUM=$(ls -d slot-* 2>/dev/null | sed 's/slot-//' | sort -n | tail -n 1 | awk '{print $1+1}')
+          if [ -z "$NEXT_NUM" ]; then NEXT_NUM=1; fi
+          SLOT_NAME="slot-$(printf '%03d' $NEXT_NUM)"
+          echo "$SLOT_NAME" > ../.next_slot_name.txt
+          mkdir -p "$SLOT_NAME"
+
+      - name: 📁 Prepare and copy files into slot
+        run: |
+          SLOT=$(cat .next_slot_name.txt)
+          echo "[+] Setting up files for $SLOT"
+          mkdir -p disk/$SLOT/{.github,data,docker,output,site,logs,workflows}
+          mkdir -p .github/{workflows,logs}
+          mkdir -p data/transactions
+          mkdir -p docker/mysql
+          mkdir -p site
+          mkdir -p output
+
+          echo "workflow init $(date)" > .github/workflows/example.yml
+          echo "transaction data" > data/transactions/test.csv
+          echo "docker info" > docker/mysql/info.txt
+          echo "site index" > site/index.html
+          echo "output result" > output/result.txt
+          echo "workflow started at $(date)" > .github/logs/workflow_start.log
+
+          cp -r .github disk/$SLOT/
+          cp -r data disk/$SLOT/
+          cp -r docker disk/$SLOT/
+          cp -r output disk/$SLOT/
+          cp -r site disk/$SLOT/
+          cp .github/workflows/*.yml disk/$SLOT/workflows/ 2>/dev/null || true
+
+      - name: 📜 Write execution log
+        run: |
+          SLOT=$(cat .next_slot_name.txt)
+          LOGFILE="disk/$SLOT/logs/slot.log"
+          {
+            echo "========== SLOT LOG =========="
+            echo "Slot:         $SLOT"
+            echo "Time:         $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "Run ID:       ${{ github.run_id }}"
+            echo "Actor:        ${{ github.actor }}"
+            echo "Workflow:     ${{ github.workflow }}"
+            echo "=============================="
+          } >> "$LOGFILE"
+
+      - name: 🏷️ Create Git Tag
+        run: |
+          SLOT=$(cat .next_slot_name.txt)
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "bot@example.com"
+          git fetch --tags
+          TAG_NAME="$SLOT"
+          echo "[+] Creating tag: $TAG_NAME"
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+
+      - name: 📦 Commit and Push Changes
+        run: |
+          SLOT=$(cat .next_slot_name.txt)
+          BRANCH_NAME=slot-update-${SLOT}
+          git checkout -b "$BRANCH_NAME"
+          git add disk/$SLOT
+          git commit -m "📦 Add new slot: $SLOT"
+          git push origin "$BRANCH_NAME"
+
+      - name: 🔁 Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "📦 Slot update: $SLOT"
+          title: "📦 Slot update for $SLOT"
+          body: |
+            This PR contains the backup files for `$SLOT`.
+
+            - Logs
+            - Workflows
+            - Data
+            - Docker Info
+          branch: slot-update-${{ steps.setup-slot.outputs.SLOT_NAME }}
+          delete-branch: true

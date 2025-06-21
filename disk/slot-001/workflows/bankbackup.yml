@@ -1,0 +1,165 @@
+name: 🔄 Finance Smart Backup with PostgreSQL & Kafka
+
+on:
+  workflow_dispatch:
+
+jobs:
+  finance-backup:
+    runs-on: ubuntu-latest
+
+    env:
+      ROOT_PASS: rootpass123
+      SQL_DIR: /opt/finance/sql
+      BACKUP_DIR: /opt/finance/backups
+      KAFKA_LOG: /opt/finance/kafka.log
+      PG_DB: postgres_finance
+      PG_USER: postgres
+      PG_PASS: pgpass
+      TYPES: |
+        bank_transfer
+        check_card
+        credit_card
+        bitcoin
+        stock
+        futures
+
+    steps:
+      - name: 📁 Create Directories and Init SQL
+        run: |
+          sudo mkdir -p $SQL_DIR $BACKUP_DIR
+          sudo chmod -R 777 /opt/finance
+          echo "CREATE TABLE IF NOT EXISTS transfers (
+            id SERIAL PRIMARY KEY,
+            type VARCHAR(30),
+            amount NUMERIC,
+            currency VARCHAR(5),
+            status VARCHAR(20),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );" > $SQL_DIR/init.sql
+          echo "INSERT INTO transfers(type, amount, currency, status) VALUES
+            ('bank_transfer', 100000, 'KRW', 'completed'),
+            ('check_card', 20000, 'KRW', 'completed'),
+            ('credit_card', 150000, 'KRW', 'completed'),
+            ('bitcoin', 0.03, 'BTC', 'pending'),
+            ('stock', 1000000, 'KRW', 'completed'),
+            ('futures', 500000, 'KRW', 'pending');" >> $SQL_DIR/init.sql
+
+      - name: 🐐 Install and Start PostgreSQL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+          sudo systemctl start postgresql
+          sudo systemctl enable postgresql
+
+      - name: 🐐 Create PostgreSQL DB and Financial Tables
+        run: |
+          sudo -u postgres psql -c "CREATE DATABASE $PG_DB;"
+          sudo -u postgres psql -d $PG_DB -c "
+            CREATE TABLE IF NOT EXISTS logs (
+              type VARCHAR,
+              status VARCHAR,
+              backup_time TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS accounts (
+              id SERIAL PRIMARY KEY,
+              holder_name VARCHAR(100),
+              account_number VARCHAR(30),
+              account_type VARCHAR(30),
+              currency VARCHAR(10),
+              balance NUMERIC
+            );
+            CREATE TABLE IF NOT EXISTS transactions (
+              id SERIAL PRIMARY KEY,
+              account_id INT,
+              amount NUMERIC,
+              transaction_type VARCHAR(30),
+              status VARCHAR(20),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS cards (
+              id SERIAL PRIMARY KEY,
+              account_id INT,
+              card_type VARCHAR(20),
+              card_number VARCHAR(20),
+              expiry DATE,
+              active BOOLEAN
+            );
+            CREATE TABLE IF NOT EXISTS crypto_wallets (
+              id SERIAL PRIMARY KEY,
+              wallet_address VARCHAR(100),
+              currency VARCHAR(10),
+              balance NUMERIC
+            );
+            CREATE TABLE IF NOT EXISTS securities (
+              id SERIAL PRIMARY KEY,
+              ticker VARCHAR(10),
+              quantity INT,
+              purchase_price NUMERIC,
+              account_id INT
+            );
+          "
+
+      - name: ↺ Run Per-Type Backup Loop
+        run: |
+          for TYPE in $TYPES; do
+            DB_NAME="db_${TYPE}"
+            DB_USER="user_${TYPE}"
+            DB_PASS="pass_${TYPE}"
+            CONTAINER="mysql_${TYPE}"
+            PORT=$((3307 + RANDOM % 1000))
+
+            echo "🚀 Starting $TYPE container on port $PORT"
+            docker run -d --rm \
+              --name $CONTAINER \
+              -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
+              -e MYSQL_DATABASE=$DB_NAME \
+              -e MYSQL_USER=$DB_USER \
+              -e MYSQL_PASSWORD=$DB_PASS \
+              -v $SQL_DIR:/docker-entrypoint-initdb.d \
+              -p $PORT:3306 \
+              mysql:8.0
+
+            echo "⏳ Waiting for $TYPE container to initialize"
+            sleep 30
+
+            STATUS=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+            echo "🔍 $TYPE completed: $STATUS"
+
+            if [ "$STATUS" != "0" ]; then
+              BACKUP_FILE=$BACKUP_DIR/${TYPE}_backup.sql
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $BACKUP_FILE
+              echo "✅ Backup completed: $BACKUP_FILE"
+              TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+              sudo -u postgres psql -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'completed', '$TIMESTAMP');"
+              echo "$TIMESTAMP [$TYPE] backup done" >> $KAFKA_LOG
+            fi
+
+            echo "⚡ Updating pending transactions to completed for $TYPE"
+            mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -e "USE $DB_NAME; UPDATE transfers SET status='completed' WHERE type='$TYPE' AND status='pending';"
+
+            STATUS_AFTER=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+            if [ "$STATUS_AFTER" -gt "$STATUS" ]; then
+              REBACKUP=$BACKUP_DIR/${TYPE}_rebackup.sql
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $REBACKUP
+              echo "♻️ Re-backup done: $REBACKUP"
+              TIMESTAMP2=$(date +'%Y-%m-%d %H:%M:%S')
+              sudo -u postgres psql -d $PG_DB -c "INSERT INTO logs VALUES ('$TYPE', 'rebackup', '$TIMESTAMP2');"
+              echo "$TIMESTAMP2 [$TYPE] rebackup done" >> $KAFKA_LOG
+            fi
+
+            docker stop $CONTAINER
+          done
+
+      - name: 📦 Compress Backups
+        run: |
+          cd $BACKUP_DIR
+          tar -czf finance-backups-${{ github.run_id }}.tar.gz *.sql
+          ls -lh
+
+      - name: 📓 View PostgreSQL Logs
+        run: |
+          sudo -u postgres psql -d $PG_DB -c "SELECT * FROM logs;"
+
+      - name: 📄 Kafka-style Logs
+        run: |
+          cat $KAFKA_LOG || echo "No kafka-style logs generated"

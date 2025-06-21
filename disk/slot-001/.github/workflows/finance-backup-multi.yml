@@ -1,0 +1,78 @@
+name: 🧾 Multi-Transaction Backup (Per-Type Containers)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  finance:
+    runs-on: ubuntu-latest
+
+    env:
+      ROOT_PASS: rootpass123
+      SQL_DIR: /opt/finance/sql
+      BACKUP_DIR: /opt/finance/backups
+      TYPES: |
+        bank_transfer
+        check_card
+        credit_card
+        bitcoin
+        stock
+        futures
+
+    steps:
+      - name: 📁 Create SQL & Backup Directories
+        run: |
+          sudo mkdir -p $SQL_DIR $BACKUP_DIR
+          sudo chmod -R 777 /opt/finance
+          echo "CREATE TABLE IF NOT EXISTS transfers (id INT AUTO_INCREMENT PRIMARY KEY, type VARCHAR(30), amount DECIMAL(15,2), currency VARCHAR(5), status VARCHAR(20));" > $SQL_DIR/init.sql
+          echo "INSERT INTO transfers(type, amount, currency, status) VALUES
+            ('bank_transfer', 100000, 'KRW', 'completed'),
+            ('check_card', 20000, 'KRW', 'completed'),
+            ('credit_card', 150000, 'KRW', 'completed'),
+            ('bitcoin', 0.03, 'BTC', 'pending'),
+            ('stock', 1000000, 'KRW', 'completed'),
+            ('futures', 500000, 'KRW', 'pending');" >> $SQL_DIR/init.sql
+
+      - name: 🔁 Loop over Transaction Types
+        run: |
+          for TYPE in $TYPES; do
+            DB_NAME="db_${TYPE}"
+            DB_USER="user_${TYPE}"
+            DB_PASS="pass_${TYPE}"
+            CONTAINER="mysql_${TYPE}"
+            PORT=$((3307 + RANDOM % 1000)) # 동적 포트 방지용
+
+            echo "🚀 Starting container: $CONTAINER for $TYPE on port $PORT"
+            docker run -d --rm \
+              --name $CONTAINER \
+              -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
+              -e MYSQL_DATABASE=$DB_NAME \
+              -e MYSQL_USER=$DB_USER \
+              -e MYSQL_PASSWORD=$DB_PASS \
+              -v $SQL_DIR:/docker-entrypoint-initdb.d \
+              -p $PORT:3306 \
+              mysql:8.0
+
+            echo "⏳ Waiting for MySQL to initialize ($TYPE)..."
+            sleep 30
+
+            echo "🔍 Checking if status='completed' for $TYPE..."
+            STATUS=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+            echo "✅ Completed $TYPE transactions found: $STATUS"
+
+            if [ "$STATUS" != "0" ]; then
+              FILE="$BACKUP_DIR/${TYPE}_backup.sql"
+              echo "💾 Backing up $TYPE to $FILE"
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $FILE
+            else
+              echo "⏭️ No completed $TYPE transactions, skipping backup"
+            fi
+
+            docker stop $CONTAINER
+          done
+
+      - name: 🗜️ Compress All Backups
+        run: |
+          cd $BACKUP_DIR
+          tar -czf finance-backups-${{ github.run_id }}.tar.gz *.sql || echo "No backups to compress"
+          ls -lh
