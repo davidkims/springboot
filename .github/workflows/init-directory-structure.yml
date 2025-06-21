@@ -1,4 +1,4 @@
-name: 🚀 Init Full Directory Structure with Slot Integration
+name: 🚀 Init Slot Directory with Auto-Rotation & Logging
 
 on:
   workflow_dispatch:
@@ -9,58 +9,80 @@ permissions:
   contents: write
 
 concurrency:
-  group: init-directory-${{ github.workflow }}
+  group: slot-dir-init-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
-  setup-directories:
+  setup-slot:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🧱 Create Base Directory Structure
+      - name: 🔁 Rotate slot directories (keep max 5)
         run: |
-          echo "[+] Creating required directories..."
+          echo "[+] Rotating disk slots (max 5)..."
+          cd disk || mkdir disk && cd disk
+          if [ "$(ls -d slot-* 2>/dev/null | wc -l)" -ge 5 ]; then
+            OLDEST=$(ls -d slot-* | sort | head -n 1)
+            echo "[🗑️] Deleting oldest slot: $OLDEST"
+            rm -rf "$OLDEST"
+          fi
+          NEXT_SLOT_NUM=$(ls -d slot-* 2>/dev/null | sed 's/slot-//' | sort -n | tail -n 1 | awk '{print $1+1}')
+          if [ -z "$NEXT_SLOT_NUM" ]; then NEXT_SLOT_NUM=1; fi
+          SLOT_NAME="slot-$(printf '%03d' $NEXT_SLOT_NUM)"
+          echo "[+] Creating new slot: $SLOT_NAME"
+          mkdir -p "$SLOT_NAME"
+          echo "$SLOT_NAME" > ../.next_slot_name.txt
 
-          # 기본 디렉토리 생성
-          mkdir -p .github/{workflows,scripts,logs,global,provenance,artifacts}
-          mkdir -p data/{transactions,provenance}
-          mkdir -p docker/{mysql,postgres,logs}
-          mkdir -p site output
-
-          # 디스크 슬롯 구조 생성
-          mkdir -p disk/slot-001/{.github,data,docker,output,site,logs,workflows}
-
-          echo "[✔] Directory structure created"
-
-      - name: 📝 Generate Dummy Files
+      - name: 📁 Prepare directory structure and dummy files
         run: |
-          echo "Test log file" > .github/logs/test.log
-          echo "Sample data" > data/transactions/test.csv
-          echo "Sample docker info" > docker/mysql/info.txt
-          echo "Exported output" > output/result.txt
+          SLOT=$(cat .next_slot_name.txt)
+          echo "[+] Preparing directory structure for $SLOT"
+
+          mkdir -p disk/$SLOT/{.github,data,docker,output,site,logs,workflows}
+          mkdir -p .github/{workflows,logs}
+          mkdir -p data/transactions
+          mkdir -p docker/mysql
+          mkdir -p site
+          mkdir -p output
+
+          echo "Dummy workflow" > .github/workflows/example.yml
+          echo "Transaction data" > data/transactions/test.csv
+          echo "Docker log" > docker/mysql/info.txt
           echo "Site index" > site/index.html
-          echo "workflow example" > .github/workflows/example.yml
+          echo "Exported output" > output/result.txt
+          echo "Workflow init at $(date -u)" > .github/logs/workflow_start.log
 
-      - name: 📁 Copy All Project Files to disk/slot-001
+      - name: 🗃️ Copy all project files to slot
         run: |
-          echo "[+] Copying directories to slot..."
+          SLOT=$(cat .next_slot_name.txt)
+          echo "[+] Copying files into disk/$SLOT"
+          cp -r .github disk/$SLOT/
+          cp -r data disk/$SLOT/
+          cp -r docker disk/$SLOT/
+          cp -r output disk/$SLOT/
+          cp -r site disk/$SLOT/
+          cp .github/workflows/*.yml disk/$SLOT/workflows/ 2>/dev/null || true
 
-          cp -r .github disk/slot-001/
-          cp -r data disk/slot-001/
-          cp -r docker disk/slot-001/
-          cp -r output disk/slot-001/
-          cp -r site disk/slot-001/
-
-          echo "[+] Copying individual workflows to slot/workflows"
-          mkdir -p disk/slot-001/workflows
-          cp .github/workflows/*.yml disk/slot-001/workflows/ 2>/dev/null || echo "No workflow files found."
-
-          echo "[✔] All files copied to slot-001"
-
-      - name: 📂 Verify disk/slot-001 Structure
+      - name: 📜 Write execution log to slot.log
         run: |
-          echo "[+] Final directory tree:"
-          tree disk/slot-001 || ls -R disk/slot-001
+          SLOT=$(cat .next_slot_name.txt)
+          LOGFILE="disk/$SLOT/logs/slot.log"
+          {
+            echo "========== SLOT EXECUTION LOG =========="
+            echo "Slot Name:     $SLOT"
+            echo "Timestamp:     $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "Run ID:        ${{ github.run_id }}"
+            echo "Run Number:    ${{ github.run_number }}"
+            echo "Actor:         ${{ github.actor }}"
+            echo "Workflow:      ${{ github.workflow }}"
+            echo "========================================"
+          } >> "$LOGFILE"
+
+      - name: 📂 Show final slot structure
+        run: |
+          SLOT=$(cat .next_slot_name.txt)
+          echo "[+] Final structure for $SLOT"
+          tree disk/$SLOT || ls -R disk/$SLOT
