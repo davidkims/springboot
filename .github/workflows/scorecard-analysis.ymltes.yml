@@ -3,20 +3,21 @@ name: 🛡️ OpenSSF Scorecard Analysis
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 1 * * *' # 매일 오전 10시(KST 기준) 자동 실행
+    - cron: '0 1 * * *' # 매일 오전 10시(KST 기준) 실행
 
 permissions:
   contents: read
   security-events: write
   actions: read
 
-jobs:
-  setup-and-run-scorecard:
-    runs-on: ubuntu-latest
+env:
+  TARGET_REPO: davidkims/springboot
+  OUT_DIR: .github/scorecard
+  SCORECARD_VERSION: v4.13.0
 
-    env:
-      TARGET_REPO: davidkims/springboot
-      OUT_DIR: .github/scorecard
+jobs:
+  run-scorecard:
+    runs-on: ubuntu-latest
 
     steps:
       - name: 📁 리포지토리 체크아웃
@@ -26,16 +27,17 @@ jobs:
         run: |
           echo "[+] 디렉토리 생성 중: $OUT_DIR"
           mkdir -p $OUT_DIR/bin
-          echo "[+] 디렉토리 구조:"
+          echo "[✔] 디렉토리 구조:"
           tree .github || true
 
-      - name: 🧰 Scorecard CLI 설치 (Release에서 직접 다운로드)
+      - name: 🧰 Scorecard CLI 설치
         run: |
           echo "[+] Scorecard CLI 설치 시작"
-          curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
-          chmod +x scorecard-linux-amd64
-          mv scorecard-linux-amd64 $OUT_DIR/bin/scorecard
+          DOWNLOAD_URL="https://github.com/ossf/scorecard/releases/download/${SCORECARD_VERSION}/scorecard-linux-amd64"
+          curl -L -o $OUT_DIR/bin/scorecard "$DOWNLOAD_URL"
+          chmod +x $OUT_DIR/bin/scorecard
           echo "[✔] Scorecard 설치 완료: $OUT_DIR/bin/scorecard"
+          $OUT_DIR/bin/scorecard --version
 
       - name: 🧪 Scorecard 실행 (전체 평가)
         run: |
@@ -43,18 +45,19 @@ jobs:
           $OUT_DIR/bin/scorecard --repo=https://github.com/$TARGET_REPO --format=json --show-details > $OUT_DIR/scorecard-report.json
           echo "[✔] scorecard-report.json 생성 완료"
 
-      - name: 📄 결과 요약 저장 (Echo)
+      - name: 📄 주요 평가 요약 저장 (summary.json)
         run: |
-          echo "[+] 주요 Scorecard 평가 결과 요약:"
-          jq '.checks[] | {name: .name, score: .score, reason: .reason}' $OUT_DIR/scorecard-report.json | tee $OUT_DIR/scorecard-summary.json
+          echo "[+] 주요 Scorecard 평가 요약 추출 중..."
+          jq '.checks[] | {name: .name, score: .score, reason: .reason}' $OUT_DIR/scorecard-report.json > $OUT_DIR/scorecard-summary.json
+          echo "[✔] scorecard-summary.json 저장 완료"
 
-      - name: 📦 SARIF 파일 생성 (보안 점수 -> GitHub Code Scanning 연동용)
+      - name: 📦 SARIF 파일 생성
         run: |
           echo "[+] SARIF 파일 변환 시작"
           $OUT_DIR/bin/scorecard --repo=https://github.com/$TARGET_REPO --format=sarif > $OUT_DIR/scorecard-results.sarif
           echo "[✔] SARIF 파일 생성 완료: $OUT_DIR/scorecard-results.sarif"
 
-      - name: 📊 Scorecard SARIF 업로드 (Code Scanning Results)
+      - name: 📊 Scorecard SARIF 업로드 (Code Scanning)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ env.OUT_DIR }}/scorecard-results.sarif
