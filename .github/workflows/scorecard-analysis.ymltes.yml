@@ -3,7 +3,7 @@ name: 🛡️ OpenSSF Scorecard Analysis
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 1 * * *'  # 매일 오전 10시(KST)
+    - cron: '0 1 * * *' # 매일 오전 10시(KST)
 
 permissions:
   contents: read
@@ -13,7 +13,6 @@ permissions:
 env:
   TARGET_REPO: davidkims/springboot
   OUT_DIR: .github/scorecard
-  SCORECARD_VERSION: v4.12.0
 
 jobs:
   run-scorecard:
@@ -25,58 +24,73 @@ jobs:
 
       - name: 📂 디렉토리 생성
         run: |
-          echo "[+] 디렉토리 생성: $OUT_DIR/bin"
-          mkdir -p $OUT_DIR/bin
+          echo "[+] 디렉토리 생성: $OUT_DIR"
+          mkdir -p $OUT_DIR
           tree .github || true
 
-      - name: 🧰 Scorecard CLI 설치 (환경변수 명시적 처리)
+      - name: 🧰 Scorecard CLI 설치 (go install → Docker fallback)
+        id: install-scorecard
         run: |
-          echo "[+] Scorecard CLI 설치 시작"
-          
-          # 명시적으로 환경변수 재정의 (중요!)
-          TARGET_REPO="${{ env.TARGET_REPO }}"
-          OUT_DIR="${{ env.OUT_DIR }}"
-          SCORECARD_VERSION="${{ env.SCORECARD_VERSION }}"
-          DOWNLOAD_URL="https://github.com/ossf/scorecard/releases/download/${SCORECARD_VERSION}/scorecard-linux-amd64"
+          echo "[+] Scorecard 설치 시작 (go install)"
+          sudo apt-get update -y
+          sudo apt-get install -y golang
 
-          echo "[+] 다운로드 URL: $DOWNLOAD_URL"
-          curl -s -L -o "$OUT_DIR/bin/scorecard" "$DOWNLOAD_URL"
+          export GOPATH=$HOME/go
+          export PATH=$PATH:$GOPATH/bin
 
-          echo "[+] 설치 파일 확인 중..."
-          file "$OUT_DIR/bin/scorecard"
+          go install github.com/ossf/scorecard/v4/cmd/scorecard@latest
 
-          if file "$OUT_DIR/bin/scorecard" | grep -q "ELF 64-bit"; then
-            echo "[✔] 유효한 Scorecard 바이너리입니다."
+          if command -v scorecard &> /dev/null; then
+            echo "SCORECARD_METHOD=cli" >> $GITHUB_ENV
+            echo "[✔] Scorecard CLI 설치 완료"
+            scorecard --version
           else
-            echo "[❌] 잘못된 파일 다운로드됨 (HTML 등)"
-            head -n 10 "$OUT_DIR/bin/scorecard"
-            exit 1
+            echo "[❌] go install 실패, Docker fallback 사용"
+            echo "SCORECARD_METHOD=docker" >> $GITHUB_ENV
           fi
-
-          chmod +x "$OUT_DIR/bin/scorecard"
-          echo "[✔] 실행 권한 부여 완료"
-          "$OUT_DIR/bin/scorecard" --version
 
       - name: 🧪 Scorecard 실행
         run: |
-          ${{ env.OUT_DIR }}/bin/scorecard \
-            --repo=https://github.com/${{ env.TARGET_REPO }} \
-            --format=json --show-details \
-            > ${{ env.OUT_DIR }}/scorecard-report.json
+          echo "[+] Scorecard 실행 시작 (${SCORECARD_METHOD})"
 
-      - name: 📄 요약 저장
+          mkdir -p $OUT_DIR
+
+          if [[ "$SCORECARD_METHOD" == "cli" ]]; then
+            scorecard \
+              --repo=https://github.com/${TARGET_REPO} \
+              --format=json --show-details > $OUT_DIR/scorecard-report.json
+          else
+            docker run --rm \
+              -v $(pwd):/repo \
+              gcr.io/openssf/scorecard:stable \
+              --repo=https://github.com/${TARGET_REPO} \
+              --format=json --show-details > $OUT_DIR/scorecard-report.json
+          fi
+
+          echo "[✔] scorecard-report.json 생성 완료"
+
+      - name: 📄 요약 생성 (summary.json)
         run: |
           jq '[.checks[] | {name, score, reason}]' \
-            ${{ env.OUT_DIR }}/scorecard-report.json \
-            > ${{ env.OUT_DIR }}/scorecard-summary.json
+            $OUT_DIR/scorecard-report.json > $OUT_DIR/scorecard-summary.json
+          echo "[✔] scorecard-summary.json 생성 완료"
 
       - name: 📦 SARIF 생성
         run: |
-          ${{ env.OUT_DIR }}/bin/scorecard \
-            --repo=https://github.com/${{ env.TARGET_REPO }} \
-            --format=sarif > ${{ env.OUT_DIR }}/scorecard-results.sarif
+          if [[ "$SCORECARD_METHOD" == "cli" ]]; then
+            scorecard \
+              --repo=https://github.com/${TARGET_REPO} \
+              --format=sarif > $OUT_DIR/scorecard-results.sarif
+          else
+            docker run --rm \
+              -v $(pwd):/repo \
+              gcr.io/openssf/scorecard:stable \
+              --repo=https://github.com/${TARGET_REPO} \
+              --format=sarif > $OUT_DIR/scorecard-results.sarif
+          fi
+          echo "[✔] scorecard-results.sarif 생성 완료"
 
-      - name: 📊 SARIF 업로드
+      - name: 📊 SARIF 업로드 (GitHub Code Scanning)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ env.OUT_DIR }}/scorecard-results.sarif
