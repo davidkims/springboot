@@ -1,9 +1,9 @@
-name: 🛡️ OpenSSF Scorecard Analysis
+name: 🛡️ OpenSSF Scorecard Analysis (Docker Only)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 1 * * *' # 매일 오전 10시(KST)
+    - cron: '0 1 * * *'
 
 permissions:
   contents: read
@@ -19,78 +19,39 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📁 리포지토리 체크아웃
+      - name: 📁 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📂 디렉토리 생성
+      - name: 📂 Prepare output directory
         run: |
-          echo "[+] 디렉토리 생성: $OUT_DIR"
-          mkdir -p $OUT_DIR
-          tree .github || true
-
-      - name: 🧰 Scorecard CLI 설치 (go install → Docker fallback)
-        id: install-scorecard
-        run: |
-          echo "[+] Scorecard 설치 시작 (go install)"
-          sudo apt-get update -y
-          sudo apt-get install -y golang
-
-          export GOPATH=$HOME/go
-          export PATH=$PATH:$GOPATH/bin
-
-          go install github.com/ossf/scorecard/v4/cmd/scorecard@latest
-
-          if command -v scorecard &> /dev/null; then
-            echo "SCORECARD_METHOD=cli" >> $GITHUB_ENV
-            echo "[✔] Scorecard CLI 설치 완료"
-            scorecard --version
-          else
-            echo "[❌] go install 실패, Docker fallback 사용"
-            echo "SCORECARD_METHOD=docker" >> $GITHUB_ENV
-          fi
-
-      - name: 🧪 Scorecard 실행
-        run: |
-          echo "[+] Scorecard 실행 시작 (${SCORECARD_METHOD})"
-
+          echo "[+] Creating directory: $OUT_DIR"
           mkdir -p $OUT_DIR
 
-          if [[ "$SCORECARD_METHOD" == "cli" ]]; then
-            scorecard \
-              --repo=https://github.com/${TARGET_REPO} \
-              --format=json --show-details > $OUT_DIR/scorecard-report.json
-          else
-            docker run --rm \
-              -v $(pwd):/repo \
-              gcr.io/openssf/scorecard:stable \
-              --repo=https://github.com/${TARGET_REPO} \
-              --format=json --show-details > $OUT_DIR/scorecard-report.json
-          fi
-
-          echo "[✔] scorecard-report.json 생성 완료"
-
-      - name: 📄 요약 생성 (summary.json)
+      - name: 🧪 Run Scorecard (Docker)
         run: |
-          jq '[.checks[] | {name, score, reason}]' \
-            $OUT_DIR/scorecard-report.json > $OUT_DIR/scorecard-summary.json
-          echo "[✔] scorecard-summary.json 생성 완료"
+          echo "[+] Running Scorecard (Docker)"
+          docker run --rm \
+            -v "$(pwd)":/repo \
+            gcr.io/openssf/scorecard:stable \
+            --repo=https://github.com/${TARGET_REPO} \
+            --format=json --show-details > $OUT_DIR/scorecard-report.json
+          echo "[✔] JSON report created"
 
-      - name: 📦 SARIF 생성
+      - name: 📄 Extract summary (scorecard-summary.json)
         run: |
-          if [[ "$SCORECARD_METHOD" == "cli" ]]; then
-            scorecard \
-              --repo=https://github.com/${TARGET_REPO} \
-              --format=sarif > $OUT_DIR/scorecard-results.sarif
-          else
-            docker run --rm \
-              -v $(pwd):/repo \
-              gcr.io/openssf/scorecard:stable \
-              --repo=https://github.com/${TARGET_REPO} \
-              --format=sarif > $OUT_DIR/scorecard-results.sarif
-          fi
-          echo "[✔] scorecard-results.sarif 생성 완료"
+          jq '[.checks[] | {name, score, reason}]' $OUT_DIR/scorecard-report.json > $OUT_DIR/scorecard-summary.json
+          echo "[✔] Summary created"
 
-      - name: 📊 SARIF 업로드 (GitHub Code Scanning)
+      - name: 📦 Generate SARIF
+        run: |
+          docker run --rm \
+            -v "$(pwd)":/repo \
+            gcr.io/openssf/scorecard:stable \
+            --repo=https://github.com/${TARGET_REPO} \
+            --format=sarif > $OUT_DIR/scorecard-results.sarif
+          echo "[✔] SARIF file created"
+
+      - name: 📊 Upload SARIF (Code Scanning)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ env.OUT_DIR }}/scorecard-results.sarif
