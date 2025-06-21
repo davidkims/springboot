@@ -1,4 +1,4 @@
-name: 🚀 Init Slot Directory with Rotation, Logs, Tags, PR
+name: 🚀 Init Slot Directory with Rotation, Logging, Tags, PR
 
 on:
   workflow_dispatch:
@@ -16,97 +16,102 @@ concurrency:
 jobs:
   setup-slot:
     runs-on: ubuntu-latest
+    outputs:
+      slot_name: ${{ steps.save-slot.outputs.slot }}
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🔁 Rotate slot directories (keep max 5)
+      - name: 🔁 Rotate and Create Slot
+        id: save-slot
         run: |
-          echo "[+] Rotating disk slots..."
-          cd disk || mkdir disk && cd disk
+          mkdir -p disk
+          cd disk
           if [ "$(ls -d slot-* 2>/dev/null | wc -l)" -ge 5 ]; then
             OLDEST=$(ls -d slot-* | sort | head -n 1)
             echo "[🗑️] Removing $OLDEST"
             rm -rf "$OLDEST"
           fi
-          NEXT_NUM=$(ls -d slot-* 2>/dev/null | sed 's/slot-//' | sort -n | tail -n 1 | awk '{print $1+1}')
-          if [ -z "$NEXT_NUM" ]; then NEXT_NUM=1; fi
-          SLOT_NAME="slot-$(printf '%03d' $NEXT_NUM)"
-          echo "$SLOT_NAME" > ../.next_slot_name.txt
-          mkdir -p "$SLOT_NAME"
 
-      - name: 📁 Prepare and copy files into slot
+          LAST=$(ls -d slot-* 2>/dev/null | sed 's/slot-//' | sort -n | tail -n 1)
+          if [ -z "$LAST" ]; then LAST=0; fi
+          NEXT=$((10#$LAST + 1))
+          SLOT_NAME="slot-$(printf '%03d' $NEXT)"
+          mkdir -p "$SLOT_NAME"
+          echo "slot=$SLOT_NAME" >> $GITHUB_OUTPUT
+
+      - name: 🧱 Create Files and Copy to Slot
         run: |
-          SLOT=$(cat .next_slot_name.txt)
-          echo "[+] Setting up files for $SLOT"
-          mkdir -p disk/$SLOT/{.github,data,docker,output,site,logs,workflows}
+          SLOT=${{ steps.save-slot.outputs.slot }}
           mkdir -p .github/{workflows,logs}
           mkdir -p data/transactions
           mkdir -p docker/mysql
-          mkdir -p site
-          mkdir -p output
+          mkdir -p site output
 
-          echo "workflow init $(date)" > .github/workflows/example.yml
-          echo "transaction data" > data/transactions/test.csv
-          echo "docker info" > docker/mysql/info.txt
-          echo "site index" > site/index.html
-          echo "output result" > output/result.txt
-          echo "workflow started at $(date)" > .github/logs/workflow_start.log
+          echo "workflow created at $(date)" > .github/workflows/example.yml
+          echo "log started" > .github/logs/workflow_start.log
+          echo "txn,amount" > data/transactions/test.csv
+          echo "info" > docker/mysql/info.txt
+          echo "html" > site/index.html
+          echo "output" > output/result.txt
 
+          mkdir -p disk/$SLOT/{.github,data,docker,output,site,logs,workflows}
           cp -r .github disk/$SLOT/
           cp -r data disk/$SLOT/
           cp -r docker disk/$SLOT/
           cp -r output disk/$SLOT/
           cp -r site disk/$SLOT/
-          cp .github/workflows/*.yml disk/$SLOT/workflows/ 2>/dev/null || true
+          cp .github/workflows/*.yml disk/$SLOT/workflows/ || true
 
-      - name: 📜 Write execution log
+      - name: 📜 Log Execution Info
         run: |
-          SLOT=$(cat .next_slot_name.txt)
+          SLOT=${{ steps.save-slot.outputs.slot }}
           LOGFILE="disk/$SLOT/logs/slot.log"
           {
-            echo "========== SLOT LOG =========="
-            echo "Slot:         $SLOT"
-            echo "Time:         $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            echo "Run ID:       ${{ github.run_id }}"
-            echo "Actor:        ${{ github.actor }}"
-            echo "Workflow:     ${{ github.workflow }}"
-            echo "=============================="
+            echo "========== SLOT EXECUTION LOG =========="
+            echo "Slot Name:     $SLOT"
+            echo "Timestamp:     $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "Run ID:        ${{ github.run_id }}"
+            echo "Actor:         ${{ github.actor }}"
+            echo "Workflow:      ${{ github.workflow }}"
+            echo "========================================"
           } >> "$LOGFILE"
 
       - name: 🏷️ Create Git Tag
         run: |
-          SLOT=$(cat .next_slot_name.txt)
+          SLOT=${{ steps.save-slot.outputs.slot }}
           git config --global user.name "github-actions[bot]"
           git config --global user.email "bot@example.com"
           git fetch --tags
-          TAG_NAME="$SLOT"
-          echo "[+] Creating tag: $TAG_NAME"
-          git tag "$TAG_NAME"
-          git push origin "$TAG_NAME"
+          git tag "$SLOT"
+          git push origin "$SLOT"
 
-      - name: 📦 Commit and Push Changes
+      - name: 📦 Commit & Push to Branch
         run: |
-          SLOT=$(cat .next_slot_name.txt)
-          BRANCH_NAME=slot-update-${SLOT}
-          git checkout -b "$BRANCH_NAME"
+          SLOT=${{ steps.save-slot.outputs.slot }}
+          BRANCH="slot-update-${SLOT}"
+          git checkout -b "$BRANCH"
           git add disk/$SLOT
-          git commit -m "📦 Add new slot: $SLOT"
-          git push origin "$BRANCH_NAME"
+          git commit -m "📦 Add slot data: $SLOT"
+          git push origin "$BRANCH"
+
+  create-pr:
+    needs: setup-slot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: 🔁 Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "📦 Slot update: $SLOT"
-          title: "📦 Slot update for $SLOT"
+          commit-message: "📦 Slot update: ${{ needs.setup-slot.outputs.slot_name }}"
+          title: "📦 Slot update for ${{ needs.setup-slot.outputs.slot_name }}"
           body: |
-            This PR contains the backup files for `$SLOT`.
-
-            - Logs
-            - Workflows
-            - Data
-            - Docker Info
-          branch: slot-update-${{ steps.setup-slot.outputs.SLOT_NAME }}
+            This PR contains:
+            - Slot backup files
+            - Logs, Workflows, Data
+            - Auto-generated by workflow run
+          branch: slot-update-${{ needs.setup-slot.outputs.slot_name }}
           delete-branch: true
