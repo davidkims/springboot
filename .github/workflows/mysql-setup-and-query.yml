@@ -1,13 +1,14 @@
-name: 🐬 MySQL Cron + Secure Query Execution (MYSQL_PWD 방식)
+name: 🔍 MySQL Migration + Echo SQL Generator
 
 on:
   schedule:
-    - cron: '*/5 * * * *'    # 매 5분 실행
-    - cron: '0 23 * * *'     # 매일 오전 08:00 (KST)
+    - cron: '*/5 * * * *'    # 매 5분마다 실행
+    - cron: '0 15 * * *'     # 한국시간 00:00
+    - cron: '0 23 * * *'     # 한국시간 08:00
   workflow_dispatch:
 
 jobs:
-  mysql:
+  mysql-migration:
     runs-on: ubuntu-latest
 
     services:
@@ -15,7 +16,6 @@ jobs:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: rootpass123
-          MYSQL_DATABASE: sample_db
         ports:
           - 3306:3306
         options: >-
@@ -25,123 +25,77 @@ jobs:
           --health-retries=5
 
     steps:
-      - name: 📦 Checkout
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Prepare Directories
+      - name: 🚑 Prepare Directories
         run: |
-          mkdir -p sql export .github/migration
+          mkdir -p .github/migration
+          mkdir -p sql
 
-      - name: 🧹 Daily 08:00 초기화 - 기존 쿼리 삭제 및 신규 생성
-        if: github.event.schedule == '0 23 * * *'
+      - name: 📊 Remove and Regenerate Daily Queries
+        if: |
+          github.event.schedule == '0 15 * * *' || github.event.schedule == '0 23 * * *'
         run: |
-          echo "[🌅] 초기화 실행"
+          echo "[🧼] Removing old files"
           rm -f .github/migration/*
-          echo "SELECT * FROM customers WHERE DATE(registered_at) = CURDATE();" > .github/migration/daily_customers.sql
-          echo "SELECT * FROM transactions WHERE DATE(transaction_time) = CURDATE();" > .github/migration/daily_transactions.sql
 
-      - name: 🩺 Wait for MySQL Health
+          echo "[🧾] checkcard_query.sql"
+          echo "-- 3-month checkcard query" > .github/migration/checkcard_query.sql
+          echo "SELECT c.customer_name, t.amount, t.transaction_time," >> .github/migration/checkcard_query.sql
+          echo "CASE WHEN t.amount >= 500000 THEN '고액결제' WHEN t.amount >= 100000 THEN '일반결제' ELSE '소액결제' END AS amount_category," >> .github/migration/checkcard_query.sql
+          echo "DATE_FORMAT(t.transaction_time, '%Y-%m') AS transaction_month," >> .github/migration/checkcard_query.sql
+          echo "COUNT(*) OVER(PARTITION BY c.customer_name) AS txn_count," >> .github/migration/checkcard_query.sql
+          echo "RANK() OVER (PARTITION BY c.customer_name ORDER BY t.amount DESC) AS rank_by_amount" >> .github/migration/checkcard_query.sql
+          echo "FROM customers c JOIN transactions t ON c.customer_id = t.customer_id" >> .github/migration/checkcard_query.sql
+          echo "WHERE t.transaction_time >= CURDATE() - INTERVAL 3 MONTH ORDER BY transaction_month DESC, amount DESC;" >> .github/migration/checkcard_query.sql
+
+          echo "SELECT COUNT(*) AS user_count FROM users;" > .github/migration/user_count.sql
+          echo "SELECT COUNT(*) AS txn_count FROM transactions;" > .github/migration/txn_count.sql
+
+      - name: 🛰 Wait for MySQL Health
         run: |
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          CID=$(docker ps -q --filter ancestor=mysql:8.0)
           for i in {1..30}; do
-            if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then exit 0; fi
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CID")
+            echo "MySQL 상태: $STATUS"
+            if [ "$STATUS" == "healthy" ]; then exit 0; fi
             sleep 2
           done
-          docker restart $CID
-          sleep 10
+          echo "⚠️ 재기동 시도" && docker restart "$CID" && sleep 10
 
-      - name: 📄 Generate init.sql
+      - name: ⚙️ Generate init.sql, customers.sql, join.sql (echo)
         run: |
-          echo "USE sample_db;" > sql/init.sql
+          export MYSQL_PWD=rootpass123
+
+          echo "[✏️] init.sql"
+          echo "CREATE DATABASE IF NOT EXISTS sample_db;" > sql/init.sql
+          echo "USE sample_db;" >> sql/init.sql
           echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100));" >> sql/init.sql
           echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
-          echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100), registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
-          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
-          echo "CREATE TABLE IF NOT EXISTS transactions (id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT, amount DECIMAL(10,2), transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
-          echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 100.0), (2, 200.5), (3, 510000);" >> sql/init.sql
 
-      - name: ⚙️ Run Migration (secure)
-        run: |
-          sudo apt-get update && sudo apt-get install -y mysql-client
-          export MYSQL_PWD=rootpass123
-          mysql -h 127.0.0.1 -u root < sql/init.sql || {
-            docker restart $(docker ps -q --filter "ancestor=mysql:8.0")
-            sleep 10
-            mysql -h 127.0.0.1 -u root < sql/init.sql || exit 1
-          }
+          echo "[✏️] customers.sql"
+          echo "USE sample_db;" > sql/customers.sql
+          echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100));" >> sql/customers.sql
+          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob');" >> sql/customers.sql
 
-      - name: 🧾 Generate SQL Queries via echo
+          echo "[✏️] join.sql"
+          echo "USE sample_db;" > sql/join.sql
+          echo "CREATE TABLE IF NOT EXISTS transactions (id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT, amount DECIMAL(10,2), transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/join.sql
+          echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 300000), (2, 150000);" >> sql/join.sql
+
+      - name: 🚀 Run All SQLs & Export CSVs
         run: |
           export MYSQL_PWD=rootpass123
-          # checkcard_query.sql
-          {
-            echo "-- 최근 3개월간 체크카드 고액결제 분석"
-            echo "SELECT"
-            echo "  c.customer_name,"
-            echo "  t.amount,"
-            echo "  t.transaction_time,"
-            echo "  CASE"
-            echo "    WHEN t.amount >= 500000 THEN '고액결제'"
-            echo "    WHEN t.amount >= 100000 THEN '일반결제'"
-            echo "    ELSE '소액결제'"
-            echo "  END AS amount_category,"
-            echo "  DATE_FORMAT(t.transaction_time, '%Y-%m') AS transaction_month,"
-            echo "  COUNT(*) OVER(PARTITION BY c.customer_name) AS total_transactions_per_customer,"
-            echo "  RANK() OVER (PARTITION BY c.customer_name ORDER BY t.amount DESC) AS rank_by_amount"
-            echo "FROM customers c"
-            echo "JOIN transactions t ON c.customer_id = t.customer_id"
-            echo "WHERE t.transaction_time >= CURDATE() - INTERVAL 3 MONTH"
-            echo "ORDER BY transaction_month DESC, amount DESC;"
-          } > .github/migration/checkcard_query.sql
-
-          # users_query.sql
-          echo "SELECT id, name FROM users ORDER BY id ASC;" > .github/migration/users_query.sql
-
-          # transactions_summary.sql
-          {
-            echo "SELECT"
-            echo "  DATE_FORMAT(transaction_time, '%Y-%m') AS month,"
-            echo "  COUNT(*) AS total_transactions,"
-            echo "  SUM(amount) AS total_amount,"
-            echo "  AVG(amount) AS avg_amount"
-            echo "FROM transactions"
-            echo "GROUP BY month"
-            echo "ORDER BY month DESC;"
-          } > .github/migration/transactions_summary.sql
-
-          # monthly_analysis.sql
-          {
-            echo "SELECT"
-            echo "  c.customer_name,"
-            echo "  DATE_FORMAT(t.transaction_time, '%Y-%m') AS month,"
-            echo "  COUNT(*) AS txn_count,"
-            echo "  SUM(t.amount) AS total_amount,"
-            echo "  RANK() OVER (PARTITION BY DATE_FORMAT(t.transaction_time, '%Y-%m') ORDER BY SUM(t.amount) DESC) AS monthly_rank"
-            echo "FROM customers c"
-            echo "JOIN transactions t ON c.customer_id = t.customer_id"
-            echo "GROUP BY c.customer_name, month"
-            echo "ORDER BY month DESC, monthly_rank ASC;"
-          } > .github/migration/monthly_analysis.sql
-
-      - name: ▶️ Run All Queries and Save .log/.csv (secure)
-        run: |
-          export MYSQL_PWD=rootpass123
-          for sql in .github/migration/*.sql; do
-            name=$(basename "$sql" .sql)
-            log=".github/migration/${name}.log"
-            csv=".github/migration/${name}.csv"
-
-            echo "[▶️] Running: $sql → $log"
-            mysql -h 127.0.0.1 -u root -D sample_db < "$sql" > "$log"
-
-            echo "[💾] Exporting to CSV: $csv"
-            head -n 1 "$sql" | grep -q "SELECT" && {
-              mysql -h 127.0.0.1 -u root -D sample_db -B -e "$(cat "$sql")" | tail -n +2 > "$csv"
-            }
+          for f in sql/*.sql .github/migration/*.sql; do
+            base=$(basename "$f" .sql)
+            echo "[▶️] Running: $base"
+            mysql -h 127.0.0.1 -u root < "$f" > ".github/migration/${base}.log"
+            mysql -h 127.0.0.1 -u root -B -e "$(cat $f)" | tail -n +2 > ".github/migration/${base}.csv"
           done
 
-      - name: 📤 Upload Migration Artifacts
+      - name: 📄 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: migration-sql-log-csv
-          path: .github/migration
+          name: migration-outputs
+          path: .github/migration/
