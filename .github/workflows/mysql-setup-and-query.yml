@@ -1,4 +1,4 @@
-name: 🐬 MySQL + Healthcheck + Auto-Restart Workflow
+name: 🐬 Full MySQL Workflow with Restart, Healthcheck, Export, Logging
 
 on:
   workflow_dispatch:
@@ -22,37 +22,41 @@ jobs:
           --health-retries=5
 
     steps:
-      - name: 📦 Checkout
+      - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🩺 Function:Wait for MySQL Healthcheck
+      - name: 📁 Prepare Directories
+        run: |
+          mkdir -p sql
+          mkdir -p export
+          mkdir -p .github/queries
+          echo "[✔] 디렉토리 구조 생성 완료"
+
+      - name: 🩺 Wait for MySQL Health or Restart
         id: wait
         run: |
-          echo "[🩺] Checking MySQL health..."
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
             if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
-              echo "[✔] MySQL container is healthy"
+              echo "[✔] MySQL is healthy"
               exit 0
             fi
             echo "[..] Waiting for MySQL container health (attempt $i)..."
             sleep 2
           done
-
-          echo "[❌] Healthcheck failed. Restarting container..."
+          echo "[❌] MySQL healthcheck failed. Restarting..."
           docker logs $CID
           docker restart $CID
           sleep 10
           if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
-            echo "[✔] MySQL healthy after restart"
+            echo "[✔] Healthy after restart"
           else
-            echo "[❌] Restarted container still unhealthy."
+            echo "[❌] Still unhealthy after restart"
             exit 1
           fi
 
-      - name: 📄 Generate init.sql via echo
+      - name: 📄 Generate init.sql using echo
         run: |
-          mkdir -p sql
           echo "USE sample_db;" > sql/init.sql
 
           echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
@@ -69,65 +73,62 @@ jobs:
           echo ");" >> sql/init.sql
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
 
-          echo "[✔] init.sql generated"
+          echo "[✔] init.sql 내용:"
           cat sql/init.sql
 
-      - name: ⚙️ Run Migration with Retry & Healthcheck
+      - name: ⚙️ Run Migration with Retry
         run: |
           sudo apt-get update && sudo apt-get install -y mysql-client
-
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-          echo "[⚙️] Running migration..."
+
+          echo "[⚙️] Applying init.sql..."
           if ! mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql; then
-            echo "[❌] Migration failed. Attempting restart..."
+            echo "[❌] Migration failed. Restarting container..."
             docker logs $CID
             docker restart $CID
             sleep 10
             mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
-              echo "[❌] Migration failed again after restart"
+              echo "[❌] Migration failed again"
               exit 1
             }
           fi
-          echo "[✔] Migration applied"
+          echo "[✔] Migration complete"
 
-      - name: 🔍 Run SELECT & JOIN Queries with Healthcheck
+      - name: 🧾 Write and Run Queries (SELECT, JOIN, GROUP)
         run: |
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-          if ! docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
-            echo "[⚠️] Container unhealthy. Restarting before queries..."
-            docker restart $CID
-            sleep 10
-          fi
 
-          echo "[🔍] SELECT users count"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) FROM users;"
+          echo "SELECT COUNT(*) AS user_count FROM users;" > .github/queries/select_users.sql
+          echo "SELECT COUNT(*) AS customer_count FROM customers;" > .github/queries/select_customers.sql
+          echo "SELECT customer_name, COUNT(*) AS count FROM customers GROUP BY customer_name;" > .github/queries/group_by_customers.sql
+          echo "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;" > .github/queries/join_users_customers.sql
 
-          echo "[🔍] SELECT customers count"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) FROM customers;"
+          echo "[▶️] Running queries and saving results to logs..."
 
-          echo "[🔍] GROUP BY customers"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT customer_name, COUNT(*) FROM customers GROUP BY customer_name;"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_users.sql > .github/queries/select_users.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_customers.sql > .github/queries/select_customers.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/group_by_customers.sql > .github/queries/group_by_customers.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/join_users_customers.sql > .github/queries/join_users_customers.log
 
-          echo "[🔍] JOIN users/customers"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e \
-            "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;"
+          echo "[✔] All query results saved to .github/queries/"
 
-      - name: 📤 Export customers.csv with Healthcheck
+      - name: 📤 Export customers.csv
         run: |
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-          docker inspect --format='{{.State.Health.Status}}' $CID
-
-          mkdir -p export
           echo "customer_id,customer_name,registered_at" > export/customers.csv
           mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
             "SELECT customer_id, customer_name, registered_at FROM customers;" \
             | tail -n +2 >> export/customers.csv
-
-          echo "[✔] CSV generated:"
+          echo "[✔] customers.csv 내용:"
           cat export/customers.csv
 
-      - name: 📁 Upload customers.csv
+      - name: 📁 Upload CSV Artifact
         uses: actions/upload-artifact@v4
         with:
           name: customers-csv
           path: export/customers.csv
+
+      - name: 📁 Upload Queries and Logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-queries-and-logs
+          path: .github/queries
