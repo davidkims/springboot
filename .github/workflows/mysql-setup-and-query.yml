@@ -1,14 +1,10 @@
-name: 🐬 MySQL Setup & Echo-Based Migration + SELECT COUNT
+name: 🐬 Full MySQL Workflow with Retry, Healthcheck, Export
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/mysql-setup-and-query.yml
-      - sql/init.sql
 
 jobs:
-  mysql-setup:
+  mysql-job:
     runs-on: ubuntu-latest
 
     services:
@@ -16,48 +12,99 @@ jobs:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: rootpass123
+          MYSQL_DATABASE: sample_db
         ports:
           - 3306:3306
         options: >-
           --health-cmd="mysqladmin ping --silent"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=5
+          --health-retries=10
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🕒 Wait for MySQL to be Ready
+      - name: 🕒 Wait for MySQL Healthcheck & Retry
         run: |
-          echo "[🕒] MySQL 컨테이너가 준비될 때까지 대기 중..."
-          sleep 20
+          echo "[🕒] Waiting for MySQL to accept connections..."
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -u root -prootpass123 --silent; then
+              echo "[✔] MySQL is ready!"
+              exit 0
+            fi
+            echo "[..] MySQL not ready (attempt $i), retrying..."
+            sleep 2
+          done
+          echo "[❌] MySQL failed to start within 60 seconds"
+          docker logs $(docker ps -q --filter "ancestor=mysql:8.0")
+          exit 1
 
-      - name: 📄 Create Migration Script (echo 방식)
+      - name: 📄 Generate init.sql (echo 방식)
         run: |
-          echo "[📄] init.sql 생성 중..."
           mkdir -p sql
-          echo "CREATE DATABASE IF NOT EXISTS sample_db;" > sql/init.sql
-          echo "USE sample_db;" >> sql/init.sql
-          echo "" >> sql/init.sql
+          echo "[📄] Creating init.sql..."
+
+          echo "USE sample_db;" > sql/init.sql
+
           echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
           echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
           echo "  name VARCHAR(100) NOT NULL" >> sql/init.sql
           echo ");" >> sql/init.sql
-          echo "" >> sql/init.sql
           echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
-          echo "[✔] init.sql 생성 완료:"
+          echo "" >> sql/init.sql
+
+          echo "CREATE TABLE IF NOT EXISTS customers (" >> sql/init.sql
+          echo "  customer_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
+          echo "  customer_name VARCHAR(100) NOT NULL," >> sql/init.sql
+          echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/init.sql
+          echo ");" >> sql/init.sql
+          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
+
+          echo "[✔] init.sql created:"
           cat sql/init.sql
 
-      - name: ⚙️ Run Migration
+      - name: ⚙️ Run Migration with Logging
         run: |
-          echo "[⚙️] 마이그레이션 시작..."
+          echo "[⚙️] Installing MySQL client"
           sudo apt-get update && sudo apt-get install -y mysql-client
-          mysql -h 127.0.0.1 -P 3306 -u root -prootpass123 < sql/init.sql
-          echo "[✔] 마이그레이션 완료"
 
-      - name: 🔎 Run SELECT COUNT Query
+          echo "[⚙️] Applying migration script..."
+          if ! mysql -h 127.0.0.1 -P 3306 -u root -prootpass123 < sql/init.sql; then
+            echo "[❌] Migration failed. Dumping logs:"
+            docker logs $(docker ps -q --filter "ancestor=mysql:8.0")
+            exit 1
+          fi
+          echo "[✔] Migration completed"
+
+      - name: 🔍 Run Queries (COUNT, GROUP BY, JOIN)
         run: |
-          echo "[🔎] SELECT COUNT 쿼리 실행 중..."
-          mysql -h 127.0.0.1 -P 3306 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) AS user_count FROM users;"
-          echo "[✔] SELECT 완료"
+          echo "[🔍] SELECT COUNT FROM users"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) AS user_count FROM users;"
+
+          echo "[🔍] SELECT COUNT FROM customers"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) AS customer_count FROM customers;"
+
+          echo "[🔍] GROUP BY customer_name"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT customer_name, COUNT(*) AS count FROM customers GROUP BY customer_name;"
+
+          echo "[🔍] INNER JOIN users ↔ customers"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e \
+            "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;"
+
+      - name: 📤 Export customers to CSV
+        run: |
+          mkdir -p export
+          echo "[📤] Exporting customers to CSV..."
+          echo "customer_id,customer_name,registered_at" > export/customers.csv
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
+            "SELECT customer_id, customer_name, registered_at FROM customers;" \
+            | tail -n +2 >> export/customers.csv
+          echo "[✔] CSV Export Done"
+          cat export/customers.csv
+
+      - name: 📁 Upload CSV Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: customers-csv
+          path: export/customers.csv
