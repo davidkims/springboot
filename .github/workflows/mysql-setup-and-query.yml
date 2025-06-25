@@ -1,10 +1,13 @@
-name: 🐬 Full MySQL Workflow with Restart, Healthcheck, Export, Logging
+name: 🐬 MySQL Cron Migration & Daily Query Regeneration
 
 on:
+  schedule:
+    - cron: '*/5 * * * *'        # 매 5분마다 실행
+    - cron: '0 23 * * *'         # (KST 기준) 다음날 08:00 → UTC 23:00 전일 실행
   workflow_dispatch:
 
 jobs:
-  mysql-job:
+  mysql:
     runs-on: ubuntu-latest
 
     services:
@@ -22,18 +25,32 @@ jobs:
           --health-retries=5
 
     steps:
-      - name: 📦 Checkout Repository
+      - name: 📦 Checkout
         uses: actions/checkout@v4
 
       - name: 📁 Prepare Directories
         run: |
           mkdir -p sql
           mkdir -p export
-          mkdir -p .github/queries
-          echo "[✔] 디렉토리 구조 생성 완료"
+          mkdir -p .github/migration
+          echo "[✔] 디렉토리 생성 완료"
+
+      - name: 🧹 Daily 08:00 초기화 시 기존 쿼리 삭제 및 새로 생성
+        if: github.event.schedule == '0 23 * * *'
+        run: |
+          echo "[🌅] 아침 08시: 기존 쿼리 삭제 후 재생성"
+          rm -f .github/migration/*.sql .github/migration/*.log
+
+          # 신규 고객 정보 쿼리
+          echo "SELECT * FROM customers WHERE DATE(registered_at) = CURDATE();" > .github/migration/daily_customers.sql
+
+          # 신규 거래 정보 쿼리 (샘플: 거래 테이블이 있다 가정)
+          echo "SELECT * FROM transactions WHERE DATE(transaction_time) = CURDATE();" > .github/migration/daily_transactions.sql
+
+          echo "[✔] 신규 고객/거래 쿼리 생성 완료"
+          ls -al .github/migration/
 
       - name: 🩺 Wait for MySQL Health or Restart
-        id: wait
         run: |
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
@@ -41,76 +58,45 @@ jobs:
               echo "[✔] MySQL is healthy"
               exit 0
             fi
-            echo "[..] Waiting for MySQL container health (attempt $i)..."
             sleep 2
           done
-          echo "[❌] MySQL healthcheck failed. Restarting..."
+          echo "[❌] Healthcheck failed. Restarting..."
           docker logs $CID
           docker restart $CID
           sleep 10
-          if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
-            echo "[✔] Healthy after restart"
-          else
-            echo "[❌] Still unhealthy after restart"
-            exit 1
-          fi
 
-      - name: 📄 Generate init.sql using echo
+      - name: 📄 Generate init.sql
         run: |
           echo "USE sample_db;" > sql/init.sql
-
-          echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
-          echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
-          echo "  name VARCHAR(100) NOT NULL" >> sql/init.sql
-          echo ");" >> sql/init.sql
+          echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100));" >> sql/init.sql
           echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
           echo "" >> sql/init.sql
-
-          echo "CREATE TABLE IF NOT EXISTS customers (" >> sql/init.sql
-          echo "  customer_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
-          echo "  customer_name VARCHAR(100) NOT NULL," >> sql/init.sql
-          echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/init.sql
-          echo ");" >> sql/init.sql
+          echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100), registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
+          echo "" >> sql/init.sql
+          echo "CREATE TABLE IF NOT EXISTS transactions (id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT, amount DECIMAL(10,2), transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
+          echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 100.0), (2, 200.5);" >> sql/init.sql
 
-          echo "[✔] init.sql 내용:"
-          cat sql/init.sql
-
-      - name: ⚙️ Run Migration with Retry
+      - name: ⚙️ Run Migration
         run: |
           sudo apt-get update && sudo apt-get install -y mysql-client
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-
-          echo "[⚙️] Applying init.sql..."
-          if ! mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql; then
-            echo "[❌] Migration failed. Restarting container..."
-            docker logs $CID
-            docker restart $CID
+          mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
+            docker restart $(docker ps -q --filter "ancestor=mysql:8.0")
             sleep 10
-            mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
-              echo "[❌] Migration failed again"
-              exit 1
-            }
-          fi
-          echo "[✔] Migration complete"
+            mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || exit 1
+          }
 
-      - name: 🧾 Write and Run Queries (SELECT, JOIN, GROUP)
+      - name: 🔍 Generate Standard Queries + Logs
         run: |
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          echo "SELECT COUNT(*) FROM users;" > .github/migration/select_users.sql
+          echo "SELECT COUNT(*) FROM customers;" > .github/migration/select_customers.sql
+          echo "SELECT customer_name, COUNT(*) FROM customers GROUP BY customer_name;" > .github/migration/group_by_customers.sql
+          echo "SELECT u.name, c.customer_name FROM users u JOIN customers c ON u.name = c.customer_name;" > .github/migration/join_users_customers.sql
 
-          echo "SELECT COUNT(*) AS user_count FROM users;" > .github/queries/select_users.sql
-          echo "SELECT COUNT(*) AS customer_count FROM customers;" > .github/queries/select_customers.sql
-          echo "SELECT customer_name, COUNT(*) AS count FROM customers GROUP BY customer_name;" > .github/queries/group_by_customers.sql
-          echo "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;" > .github/queries/join_users_customers.sql
-
-          echo "[▶️] Running queries and saving results to logs..."
-
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_users.sql > .github/queries/select_users.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_customers.sql > .github/queries/select_customers.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/group_by_customers.sql > .github/queries/group_by_customers.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/join_users_customers.sql > .github/queries/join_users_customers.log
-
-          echo "[✔] All query results saved to .github/queries/"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/select_users.sql > .github/migration/select_users.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/select_customers.sql > .github/migration/select_customers.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/group_by_customers.sql > .github/migration/group_by_customers.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/join_users_customers.sql > .github/migration/join_users_customers.log
 
       - name: 📤 Export customers.csv
         run: |
@@ -118,17 +104,15 @@ jobs:
           mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
             "SELECT customer_id, customer_name, registered_at FROM customers;" \
             | tail -n +2 >> export/customers.csv
-          echo "[✔] customers.csv 내용:"
-          cat export/customers.csv
 
-      - name: 📁 Upload CSV Artifact
+      - name: 📁 Upload CSV
         uses: actions/upload-artifact@v4
         with:
           name: customers-csv
           path: export/customers.csv
 
-      - name: 📁 Upload Queries and Logs
+      - name: 📁 Upload Migration Queries + Logs
         uses: actions/upload-artifact@v4
         with:
-          name: sql-queries-and-logs
-          path: .github/queries
+          name: migration-sql-and-logs
+          path: .github/migration
