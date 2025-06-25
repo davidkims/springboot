@@ -1,9 +1,9 @@
-name: 🐬 MySQL Cron Migration & Daily Query Regeneration
+name: 🐬 MySQL Cron + Full Query Automation
 
 on:
   schedule:
-    - cron: '*/5 * * * *'        # 매 5분마다 실행
-    - cron: '0 23 * * *'         # (KST 기준) 다음날 08:00 → UTC 23:00 전일 실행
+    - cron: '*/5 * * * *'    # 매 5분
+    - cron: '0 23 * * *'     # 매일 KST 오전 08:00
   workflow_dispatch:
 
 jobs:
@@ -30,52 +30,39 @@ jobs:
 
       - name: 📁 Prepare Directories
         run: |
-          mkdir -p sql
-          mkdir -p export
-          mkdir -p .github/migration
-          echo "[✔] 디렉토리 생성 완료"
+          mkdir -p sql export .github/migration
 
-      - name: 🧹 Daily 08:00 초기화 시 기존 쿼리 삭제 및 새로 생성
+      - name: 🧹 Daily 08:00 초기화 - 기존 쿼리 삭제 및 신규 생성
         if: github.event.schedule == '0 23 * * *'
         run: |
-          echo "[🌅] 아침 08시: 기존 쿼리 삭제 후 재생성"
-          rm -f .github/migration/*.sql .github/migration/*.log
+          echo "[🌅] 초기화 실행"
+          rm -f .github/migration/*
 
-          # 신규 고객 정보 쿼리
           echo "SELECT * FROM customers WHERE DATE(registered_at) = CURDATE();" > .github/migration/daily_customers.sql
-
-          # 신규 거래 정보 쿼리 (샘플: 거래 테이블이 있다 가정)
           echo "SELECT * FROM transactions WHERE DATE(transaction_time) = CURDATE();" > .github/migration/daily_transactions.sql
 
-          echo "[✔] 신규 고객/거래 쿼리 생성 완료"
-          ls -al .github/migration/
-
-      - name: 🩺 Wait for MySQL Health or Restart
+      - name: 🩺 Wait for MySQL Health
         run: |
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
-            if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
-              echo "[✔] MySQL is healthy"
-              exit 0
-            fi
+            if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then exit 0; fi
             sleep 2
           done
-          echo "[❌] Healthcheck failed. Restarting..."
-          docker logs $CID
           docker restart $CID
           sleep 10
 
       - name: 📄 Generate init.sql
         run: |
           echo "USE sample_db;" > sql/init.sql
+
           echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100));" >> sql/init.sql
           echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
-          echo "" >> sql/init.sql
+
           echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100), registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
-          echo "" >> sql/init.sql
+
           echo "CREATE TABLE IF NOT EXISTS transactions (id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT, amount DECIMAL(10,2), transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
-          echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 100.0), (2, 200.5);" >> sql/init.sql
+          echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 100.0), (2, 200.5), (3, 510000);" >> sql/init.sql
 
       - name: ⚙️ Run Migration
         run: |
@@ -86,33 +73,76 @@ jobs:
             mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || exit 1
           }
 
-      - name: 🔍 Generate Standard Queries + Logs
+      - name: 🧾 Generate Multiple SQL Queries via echo
         run: |
-          echo "SELECT COUNT(*) FROM users;" > .github/migration/select_users.sql
-          echo "SELECT COUNT(*) FROM customers;" > .github/migration/select_customers.sql
-          echo "SELECT customer_name, COUNT(*) FROM customers GROUP BY customer_name;" > .github/migration/group_by_customers.sql
-          echo "SELECT u.name, c.customer_name FROM users u JOIN customers c ON u.name = c.customer_name;" > .github/migration/join_users_customers.sql
+          # checkcard_query.sql
+          {
+            echo "-- 최근 3개월간 체크카드 고액결제 분석"
+            echo "SELECT"
+            echo "  c.customer_name,"
+            echo "  t.amount,"
+            echo "  t.transaction_time,"
+            echo "  CASE"
+            echo "    WHEN t.amount >= 500000 THEN '고액결제'"
+            echo "    WHEN t.amount >= 100000 THEN '일반결제'"
+            echo "    ELSE '소액결제'"
+            echo "  END AS amount_category,"
+            echo "  DATE_FORMAT(t.transaction_time, '%Y-%m') AS transaction_month,"
+            echo "  COUNT(*) OVER(PARTITION BY c.customer_name) AS total_transactions_per_customer,"
+            echo "  RANK() OVER (PARTITION BY c.customer_name ORDER BY t.amount DESC) AS rank_by_amount"
+            echo "FROM customers c"
+            echo "JOIN transactions t ON c.customer_id = t.customer_id"
+            echo "WHERE t.transaction_time >= CURDATE() - INTERVAL 3 MONTH"
+            echo "ORDER BY transaction_month DESC, amount DESC;"
+          } > .github/migration/checkcard_query.sql
 
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/select_users.sql > .github/migration/select_users.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/select_customers.sql > .github/migration/select_customers.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/group_by_customers.sql > .github/migration/group_by_customers.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/migration/join_users_customers.sql > .github/migration/join_users_customers.log
+          # users_query.sql
+          echo "SELECT id, name FROM users ORDER BY id ASC;" > .github/migration/users_query.sql
 
-      - name: 📤 Export customers.csv
+          # transactions_summary.sql
+          {
+            echo "SELECT"
+            echo "  DATE_FORMAT(transaction_time, '%Y-%m') AS month,"
+            echo "  COUNT(*) AS total_transactions,"
+            echo "  SUM(amount) AS total_amount,"
+            echo "  AVG(amount) AS avg_amount"
+            echo "FROM transactions"
+            echo "GROUP BY month"
+            echo "ORDER BY month DESC;"
+          } > .github/migration/transactions_summary.sql
+
+          # monthly_analysis.sql
+          {
+            echo "SELECT"
+            echo "  c.customer_name,"
+            echo "  DATE_FORMAT(t.transaction_time, '%Y-%m') AS month,"
+            echo "  COUNT(*) AS txn_count,"
+            echo "  SUM(t.amount) AS total_amount,"
+            echo "  RANK() OVER (PARTITION BY DATE_FORMAT(t.transaction_time, '%Y-%m') ORDER BY SUM(t.amount) DESC) AS monthly_rank"
+            echo "FROM customers c"
+            echo "JOIN transactions t ON c.customer_id = t.customer_id"
+            echo "GROUP BY c.customer_name, month"
+            echo "ORDER BY month DESC, monthly_rank ASC;"
+          } > .github/migration/monthly_analysis.sql
+
+      - name: ▶️ Run All Queries and Save .log/.csv
         run: |
-          echo "customer_id,customer_name,registered_at" > export/customers.csv
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
-            "SELECT customer_id, customer_name, registered_at FROM customers;" \
-            | tail -n +2 >> export/customers.csv
+          for sql in .github/migration/*.sql; do
+            name=$(basename "$sql" .sql)
+            log=".github/migration/${name}.log"
+            csv=".github/migration/${name}.csv"
 
-      - name: 📁 Upload CSV
+            echo "[▶️] Running: $sql → $log"
+            mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < "$sql" > "$log"
+
+            echo "[💾] Exporting to CSV: $csv"
+            head -n 1 "$sql" | grep -q "SELECT" && {
+              mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e "$(cat "$sql")" | tail -n +2 > "$csv"
+            }
+          done
+
+      - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: customers-csv
-          path: export/customers.csv
-
-      - name: 📁 Upload Migration Queries + Logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: migration-sql-and-logs
+          name: migration-queries-logs-csv
           path: .github/migration
