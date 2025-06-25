@@ -1,4 +1,4 @@
-name: 🐬 Full MySQL Workflow with Retry, Healthcheck, Export
+name: 🐬 MySQL + Healthcheck + Auto-Restart Workflow
 
 on:
   workflow_dispatch:
@@ -19,32 +19,40 @@ jobs:
           --health-cmd="mysqladmin ping --silent"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=10
+          --health-retries=5
 
     steps:
-      - name: 📦 Checkout Repository
+      - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🕒 Wait for MySQL Healthcheck & Retry
+      - name: 🩺 Function: Wait for MySQL Healthcheck
+        id: wait
         run: |
-          echo "[🕒] Waiting for MySQL to accept connections..."
+          echo "[🩺] Checking MySQL health..."
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
-            if mysqladmin ping -h 127.0.0.1 -u root -prootpass123 --silent; then
-              echo "[✔] MySQL is ready!"
+            if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
+              echo "[✔] MySQL container is healthy"
               exit 0
             fi
-            echo "[..] MySQL not ready (attempt $i), retrying..."
+            echo "[..] Waiting for MySQL container health (attempt $i)..."
             sleep 2
           done
-          echo "[❌] MySQL failed to start within 60 seconds"
-          docker logs $(docker ps -q --filter "ancestor=mysql:8.0")
-          exit 1
 
-      - name: 📄 Generate init.sql (echo 방식)
+          echo "[❌] Healthcheck failed. Restarting container..."
+          docker logs $CID
+          docker restart $CID
+          sleep 10
+          if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
+            echo "[✔] MySQL healthy after restart"
+          else
+            echo "[❌] Restarted container still unhealthy."
+            exit 1
+          fi
+
+      - name: 📄 Generate init.sql via echo
         run: |
           mkdir -p sql
-          echo "[📄] Creating init.sql..."
-
           echo "USE sample_db;" > sql/init.sql
 
           echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
@@ -61,49 +69,64 @@ jobs:
           echo ");" >> sql/init.sql
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
 
-          echo "[✔] init.sql created:"
+          echo "[✔] init.sql generated"
           cat sql/init.sql
 
-      - name: ⚙️ Run Migration with Logging
+      - name: ⚙️ Run Migration with Retry & Healthcheck
         run: |
-          echo "[⚙️] Installing MySQL client"
           sudo apt-get update && sudo apt-get install -y mysql-client
 
-          echo "[⚙️] Applying migration script..."
-          if ! mysql -h 127.0.0.1 -P 3306 -u root -prootpass123 < sql/init.sql; then
-            echo "[❌] Migration failed. Dumping logs:"
-            docker logs $(docker ps -q --filter "ancestor=mysql:8.0")
-            exit 1
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          echo "[⚙️] Running migration..."
+          if ! mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql; then
+            echo "[❌] Migration failed. Attempting restart..."
+            docker logs $CID
+            docker restart $CID
+            sleep 10
+            mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
+              echo "[❌] Migration failed again after restart"
+              exit 1
+            }
           fi
-          echo "[✔] Migration completed"
+          echo "[✔] Migration applied"
 
-      - name: 🔍 Run Queries (COUNT, GROUP BY, JOIN)
+      - name: 🔍 Run SELECT & JOIN Queries with Healthcheck
         run: |
-          echo "[🔍] SELECT COUNT FROM users"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) AS user_count FROM users;"
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          if ! docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
+            echo "[⚠️] Container unhealthy. Restarting before queries..."
+            docker restart $CID
+            sleep 10
+          fi
 
-          echo "[🔍] SELECT COUNT FROM customers"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) AS customer_count FROM customers;"
+          echo "[🔍] SELECT users count"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) FROM users;"
 
-          echo "[🔍] GROUP BY customer_name"
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT customer_name, COUNT(*) AS count FROM customers GROUP BY customer_name;"
+          echo "[🔍] SELECT customers count"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT COUNT(*) FROM customers;"
 
-          echo "[🔍] INNER JOIN users ↔ customers"
+          echo "[🔍] GROUP BY customers"
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e "SELECT customer_name, COUNT(*) FROM customers GROUP BY customer_name;"
+
+          echo "[🔍] JOIN users/customers"
           mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -e \
             "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;"
 
-      - name: 📤 Export customers to CSV
+      - name: 📤 Export customers.csv with Healthcheck
         run: |
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          docker inspect --format='{{.State.Health.Status}}' $CID
+
           mkdir -p export
-          echo "[📤] Exporting customers to CSV..."
           echo "customer_id,customer_name,registered_at" > export/customers.csv
           mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
             "SELECT customer_id, customer_name, registered_at FROM customers;" \
             | tail -n +2 >> export/customers.csv
-          echo "[✔] CSV Export Done"
+
+          echo "[✔] CSV generated:"
           cat export/customers.csv
 
-      - name: 📁 Upload CSV Artifact
+      - name: 📁 Upload customers.csv
         uses: actions/upload-artifact@v4
         with:
           name: customers-csv
