@@ -1,9 +1,9 @@
-name: 🐬 MySQL Cron + Full Query Automation
+name: 🐬 MySQL Cron + Secure Query Execution (MYSQL_PWD 방식)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'    # 매 5분
-    - cron: '0 23 * * *'     # 매일 KST 오전 08:00
+    - cron: '*/5 * * * *'    # 매 5분 실행
+    - cron: '0 23 * * *'     # 매일 오전 08:00 (KST)
   workflow_dispatch:
 
 jobs:
@@ -37,7 +37,6 @@ jobs:
         run: |
           echo "[🌅] 초기화 실행"
           rm -f .github/migration/*
-
           echo "SELECT * FROM customers WHERE DATE(registered_at) = CURDATE();" > .github/migration/daily_customers.sql
           echo "SELECT * FROM transactions WHERE DATE(transaction_time) = CURDATE();" > .github/migration/daily_transactions.sql
 
@@ -54,27 +53,26 @@ jobs:
       - name: 📄 Generate init.sql
         run: |
           echo "USE sample_db;" > sql/init.sql
-
           echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100));" >> sql/init.sql
           echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
-
           echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100), registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
-
           echo "CREATE TABLE IF NOT EXISTS transactions (id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT, amount DECIMAL(10,2), transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/init.sql
           echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 100.0), (2, 200.5), (3, 510000);" >> sql/init.sql
 
-      - name: ⚙️ Run Migration
+      - name: ⚙️ Run Migration (secure)
         run: |
           sudo apt-get update && sudo apt-get install -y mysql-client
-          mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
+          export MYSQL_PWD=rootpass123
+          mysql -h 127.0.0.1 -u root < sql/init.sql || {
             docker restart $(docker ps -q --filter "ancestor=mysql:8.0")
             sleep 10
-            mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || exit 1
+            mysql -h 127.0.0.1 -u root < sql/init.sql || exit 1
           }
 
-      - name: 🧾 Generate Multiple SQL Queries via echo
+      - name: 🧾 Generate SQL Queries via echo
         run: |
+          export MYSQL_PWD=rootpass123
           # checkcard_query.sql
           {
             echo "-- 최근 3개월간 체크카드 고액결제 분석"
@@ -125,24 +123,25 @@ jobs:
             echo "ORDER BY month DESC, monthly_rank ASC;"
           } > .github/migration/monthly_analysis.sql
 
-      - name: ▶️ Run All Queries and Save .log/.csv
+      - name: ▶️ Run All Queries and Save .log/.csv (secure)
         run: |
+          export MYSQL_PWD=rootpass123
           for sql in .github/migration/*.sql; do
             name=$(basename "$sql" .sql)
             log=".github/migration/${name}.log"
             csv=".github/migration/${name}.csv"
 
             echo "[▶️] Running: $sql → $log"
-            mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < "$sql" > "$log"
+            mysql -h 127.0.0.1 -u root -D sample_db < "$sql" > "$log"
 
             echo "[💾] Exporting to CSV: $csv"
             head -n 1 "$sql" | grep -q "SELECT" && {
-              mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e "$(cat "$sql")" | tail -n +2 > "$csv"
+              mysql -h 127.0.0.1 -u root -D sample_db -B -e "$(cat "$sql")" | tail -n +2 > "$csv"
             }
           done
 
-      - name: 📤 Upload Artifacts
+      - name: 📤 Upload Migration Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: migration-queries-logs-csv
+          name: migration-sql-log-csv
           path: .github/migration
