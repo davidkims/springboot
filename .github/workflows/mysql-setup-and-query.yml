@@ -97,105 +97,26 @@ jobs:
           echo "SELECT customer_id, SUM(amount) AS total_amount FROM credit_card_transactions GROUP BY customer_id;" > .github/queries/credit_sum_by_customer.sql
           echo "SELECT card_number, COUNT(*) AS txn_count FROM credit_card_transactions GROUP BY card_number;" > .github/queries/credit_count_by_card.sql
 
-      - name: 📄 Generate bulk_ledger.sql and Retry Logic
+      - name: 💳 Simulate Transactions with Retry
         run: |
-          echo "[+] Generating bulk_ledger.sql..."
-          echo "USE sample_db;" > sql/bulk_ledger.sql
-          echo "CREATE TABLE IF NOT EXISTS bulk_ledger (" >> sql/bulk_ledger.sql
-          echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/bulk_ledger.sql
-          echo "  customer_id INT NOT NULL," >> sql/bulk_ledger.sql
-          echo "  amount DECIMAL(10,2) NOT NULL," >> sql/bulk_ledger.sql
-          echo "  ledger_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/bulk_ledger.sql
-          echo ");" >> sql/bulk_ledger.sql
-
-          echo "INSERT INTO bulk_ledger (customer_id, amount) VALUES" >> sql/bulk_ledger.sql
-          for i in $(seq 1 20); do
-            echo "($((RANDOM % 3 + 1)), ROUND(RAND() * 10000, 2))," >> sql/bulk_ledger.sql
-          done
-          sed -i '$ s/,$/;/' sql/bulk_ledger.sql
-
-      - name: ⚙️ Run Migration with Retry
-        run: |
-          sudo apt-get update && sudo apt-get install -y mysql-client
-
-          for script in sql/init.sql sql/credit_card_transactions.sql sql/bulk_ledger.sql; do
-            echo "[>] Executing $script"
-            for retry in {1..3}; do
-              if MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER < $script; then
-                echo "[✔] $script succeeded"
-                break
-              else
-                echo "[!] $script failed on attempt $retry"
-                sleep 2
-              fi
-              if [ $retry -eq 3 ]; then
-                echo "[x] $script failed after 3 attempts"
-                exit 1
-              fi
-            done
+          echo "[+] Simulating credit card transactions..."
+          echo "USE sample_db;" > sql/simulate_transactions.sql
+          for i in $(seq 1 10); do
+            cid=$(( (RANDOM % 3) + 1 ))
+            amount=$(( (RANDOM % 100000) + 1000 ))
+            echo "INSERT INTO credit_card_transactions (customer_id, card_number, amount) VALUES ($cid, '4111111111111111', $amount);" >> sql/simulate_transactions.sql
           done
 
-      - name: 🔄 Restart MySQL Container
-        run: |
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-          docker restart $CID
-          sleep 5
-
-      - name: 🧹 Remove Old Queries
-        run: |
-          rm -f .github/queries/*.log
-
-      - name: ▶️ Run Queries and Save Logs
-        run: |
-          for file in .github/queries/*.sql; do
-            out=${file/.sql/.log}
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB < "$file" > "$out"
+          for retry in {1..3}; do
+            if MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER < sql/simulate_transactions.sql; then
+              echo "[✔] Transaction simulation succeeded"
+              break
+            else
+              echo "[!] Transaction simulation failed on attempt $retry"
+              sleep 2
+            fi
+            if [ $retry -eq 3 ]; then
+              echo "[x] Simulation failed after 3 attempts"
+              exit 1
+            fi
           done
-
-      - name: 📄 Export CSVs (Various Conditions)
-        run: |
-          echo "customer_name" > export/customers_like_kim.csv
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e \
-            "SELECT customer_name FROM customers WHERE customer_name LIKE '%김%';" \
-            | tail -n +2 >> export/customers_like_kim.csv
-
-          echo "customer_name,registered_at" > export/customers_latest_3.csv
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e \
-            "SELECT customer_name, registered_at FROM customers ORDER BY registered_at DESC LIMIT 3;" \
-            | tail -n +2 >> export/customers_latest_3.csv
-
-          echo "customer_id,customer_name,registered_at" > export/customers_all_sorted.csv
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e \
-            "SELECT customer_id, customer_name, registered_at FROM customers ORDER BY customer_name;" \
-            | tail -n +2 >> export/customers_all_sorted.csv
-
-      - name: 📂 Backup .env, .yml, .sql
-        run: |
-          TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-          BACKUP_DIR=backup/config_backup_$TIMESTAMP
-          mkdir -p $BACKUP_DIR
-          echo "MYSQL_HOST=127.0.0.1" > .env
-          echo "MYSQL_USER=$MYSQL_USER" >> .env
-          echo "MYSQL_PASSWORD=$MYSQL_PASSWORD" >> .env
-          echo "MYSQL_DATABASE=$MYSQL_DB" >> .env
-          cp .env $BACKUP_DIR/.env
-          find .github/workflows -name "*.yml" -exec cp {} $BACKUP_DIR/ \;
-          find sql -name "*.sql" -exec cp {} $BACKUP_DIR/ \;
-
-      - name: 📁 Upload All CSVs
-        uses: actions/upload-artifact@v4
-        with:
-          name: all-customer-csvs
-          path: export/*.csv
-
-      - name: 📁 Upload Queries and Logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: refreshed-customer-queries-and-logs
-          path: .github/queries
-
-      - name: 📁 Upload Full Config Backup
-        uses: actions/upload-artifact@v4
-        with:
-          name: full-env-yml-sql-backup
-          path: backup/**
