@@ -1,4 +1,4 @@
-name: 🐬 Full MySQL Workflow with Secure Password Handling
+name: 🐬 Full MySQL Workflow with Auto Recovery & Backup
 
 on:
   schedule:
@@ -34,7 +34,6 @@ jobs:
 
       - name: 📁 Prepare Directories
         run: |
-          echo "[+] Creating directories..."
           mkdir -p sql export .github/queries backup
 
       - name: 🩺 Wait for MySQL Health or Restart
@@ -81,28 +80,33 @@ jobs:
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('김철수'), ('김민지'), ('David');" >> sql/init.sql
           cp sql/init.sql backup/init.sql.backup
 
-      - name: 🏦 Generate credit_card_transactions.sql
+      - name: 🔁 Check and Create Missing Tables
         run: |
-          echo "USE sample_db;" > sql/credit_card_transactions.sql
-          echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (" >> sql/credit_card_transactions.sql
-          echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/credit_card_transactions.sql
-          echo "  customer_id INT NOT NULL," >> sql/credit_card_transactions.sql
-          echo "  card_number VARCHAR(20) NOT NULL," >> sql/credit_card_transactions.sql
-          echo "  amount DECIMAL(10,2) NOT NULL," >> sql/credit_card_transactions.sql
-          echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> sql/credit_card_transactions.sql
-          echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> sql/credit_card_transactions.sql
-          echo ");" >> sql/credit_card_transactions.sql
-          echo "INSERT INTO credit_card_transactions (customer_id, card_number, amount) VALUES" >> sql/credit_card_transactions.sql
-          echo "(1, '4111111111111111', 12000.50)," >> sql/credit_card_transactions.sql
-          echo "(2, '5500000000000004', 8300.75)," >> sql/credit_card_transactions.sql
-          echo "(3, '340000000000009', 42000.00)," >> sql/credit_card_transactions.sql
-          echo "(1, '4111111111111111', 5500.00);" >> sql/credit_card_transactions.sql
+          echo "[+] Checking and creating required tables if missing..."
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e "SHOW TABLES LIKE 'customers';" | grep customers || {
+            echo "[⚠️] 'customers' table missing. Creating..."
+            echo "CREATE TABLE IF NOT EXISTS customers (" > sql/fix_customers.sql
+            echo "  customer_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/fix_customers.sql
+            echo "  customer_name VARCHAR(100) NOT NULL," >> sql/fix_customers.sql
+            echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/fix_customers.sql
+            echo ");" >> sql/fix_customers.sql
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_customers.sql
+            echo "[✔] 'customers' table created."
+          }
 
-      - name: 🧾 Generate Queries
-        run: |
-          echo "SELECT * FROM credit_card_transactions;" > .github/queries/credit_all.sql
-          echo "SELECT customer_id, SUM(amount) AS total_amount FROM credit_card_transactions GROUP BY customer_id;" > .github/queries/credit_sum_by_customer.sql
-          echo "SELECT card_number, COUNT(*) AS txn_count FROM credit_card_transactions GROUP BY card_number;" > .github/queries/credit_count_by_card.sql
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || {
+            echo "[⚠️] 'credit_card_transactions' table missing. Creating..."
+            echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (" > sql/fix_credit_card_transactions.sql
+            echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/fix_credit_card_transactions.sql
+            echo "  customer_id INT NOT NULL," >> sql/fix_credit_card_transactions.sql
+            echo "  card_number VARCHAR(20) NOT NULL," >> sql/fix_credit_card_transactions.sql
+            echo "  amount DECIMAL(10,2) NOT NULL," >> sql/fix_credit_card_transactions.sql
+            echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> sql/fix_credit_card_transactions.sql
+            echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> sql/fix_credit_card_transactions.sql
+            echo ");" >> sql/fix_credit_card_transactions.sql
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_credit_card_transactions.sql
+            echo "[✔] 'credit_card_transactions' table created."
+          }
 
       - name: 💳 Simulate Transactions with Retry
         run: |
@@ -119,23 +123,6 @@ jobs:
               break
             else
               echo "[!] Transaction simulation failed on attempt $retry"
-              echo "[!] Checking if credit_card_transactions table exists..."
-              TABLE_EXISTS=$(MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e \
-                "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || true)
-
-              if [ -z "$TABLE_EXISTS" ]; then
-                echo "[⚠️] Table 'credit_card_transactions' does not exist. Creating table..."
-                echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (" > sql/fix_credit_card_transactions.sql
-                echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/fix_credit_card_transactions.sql
-                echo "  customer_id INT NOT NULL," >> sql/fix_credit_card_transactions.sql
-                echo "  card_number VARCHAR(20) NOT NULL," >> sql/fix_credit_card_transactions.sql
-                echo "  amount DECIMAL(10,2) NOT NULL," >> sql/fix_credit_card_transactions.sql
-                echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> sql/fix_credit_card_transactions.sql
-                echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> sql/fix_credit_card_transactions.sql
-                echo ");" >> sql/fix_credit_card_transactions.sql
-                MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_credit_card_transactions.sql
-                echo "[✔] Table created"
-              fi
               sleep 2
             fi
             if [ $retry -eq 3 ]; then
@@ -143,3 +130,12 @@ jobs:
               exit 1
             fi
           done
+
+      - name: 🧷 Backup SQL Dump using mysqldump
+        run: |
+          echo "[+] Performing mysqldump backup..."
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          BACKUP_FILE=sql/backup_dump_$TIMESTAMP.sql
+          MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > $BACKUP_FILE
+          echo "[✔] Backup created at $BACKUP_FILE"
+          ln -sf $BACKUP_FILE sql/backup_dump.sql
