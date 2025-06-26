@@ -37,7 +37,7 @@ jobs:
           echo "[+] Creating directories..."
           mkdir -p sql export .github/queries backup
 
-      - name: 🧼 Wait for MySQL Health or Restart
+      - name: 🩺 Wait for MySQL Health or Restart
         run: |
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
@@ -54,9 +54,18 @@ jobs:
           docker restart $CID
           sleep 10
 
+      - name: 🗃️ Load SQL DB from Dump if Exists
+        run: |
+          if [ -f "sql/backup_dump.sql" ]; then
+            echo "[+] Loading existing SQL dump into database..."
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/backup_dump.sql
+            echo "[✔] SQL dump loaded"
+          else
+            echo "[!] No backup_dump.sql found to load. Skipping."
+          fi
+
       - name: 📄 Generate init.sql and Backup
         run: |
-          echo "[+] Generating init.sql..."
           echo "USE sample_db;" > sql/init.sql
           echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
           echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
@@ -72,11 +81,9 @@ jobs:
           echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('김철수'), ('김민지'), ('David');" >> sql/init.sql
           cp sql/init.sql backup/init.sql.backup
 
-      - name: 📄 Generate credit_card_transactions.sql and Query
+      - name: 🏦 Generate credit_card_transactions.sql
         run: |
-          echo "[+] Generating credit_card_transactions.sql..."
           echo "USE sample_db;" > sql/credit_card_transactions.sql
-
           echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (" >> sql/credit_card_transactions.sql
           echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/credit_card_transactions.sql
           echo "  customer_id INT NOT NULL," >> sql/credit_card_transactions.sql
@@ -85,21 +92,20 @@ jobs:
           echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> sql/credit_card_transactions.sql
           echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> sql/credit_card_transactions.sql
           echo ");" >> sql/credit_card_transactions.sql
-
           echo "INSERT INTO credit_card_transactions (customer_id, card_number, amount) VALUES" >> sql/credit_card_transactions.sql
           echo "(1, '4111111111111111', 12000.50)," >> sql/credit_card_transactions.sql
           echo "(2, '5500000000000004', 8300.75)," >> sql/credit_card_transactions.sql
           echo "(3, '340000000000009', 42000.00)," >> sql/credit_card_transactions.sql
           echo "(1, '4111111111111111', 5500.00);" >> sql/credit_card_transactions.sql
 
-          echo "[+] Generating credit_card queries..."
+      - name: 🧾 Generate Queries
+        run: |
           echo "SELECT * FROM credit_card_transactions;" > .github/queries/credit_all.sql
           echo "SELECT customer_id, SUM(amount) AS total_amount FROM credit_card_transactions GROUP BY customer_id;" > .github/queries/credit_sum_by_customer.sql
           echo "SELECT card_number, COUNT(*) AS txn_count FROM credit_card_transactions GROUP BY card_number;" > .github/queries/credit_count_by_card.sql
 
       - name: 💳 Simulate Transactions with Retry
         run: |
-          echo "[+] Simulating credit card transactions..."
           echo "USE sample_db;" > sql/simulate_transactions.sql
           for i in $(seq 1 10); do
             cid=$(( (RANDOM % 3) + 1 ))
@@ -108,11 +114,28 @@ jobs:
           done
 
           for retry in {1..3}; do
-            if MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER < sql/simulate_transactions.sql; then
+            if MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/simulate_transactions.sql; then
               echo "[✔] Transaction simulation succeeded"
               break
             else
               echo "[!] Transaction simulation failed on attempt $retry"
+              echo "[!] Checking if credit_card_transactions table exists..."
+              TABLE_EXISTS=$(MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e \
+                "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || true)
+
+              if [ -z "$TABLE_EXISTS" ]; then
+                echo "[⚠️] Table 'credit_card_transactions' does not exist. Creating table..."
+                echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (" > sql/fix_credit_card_transactions.sql
+                echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/fix_credit_card_transactions.sql
+                echo "  customer_id INT NOT NULL," >> sql/fix_credit_card_transactions.sql
+                echo "  card_number VARCHAR(20) NOT NULL," >> sql/fix_credit_card_transactions.sql
+                echo "  amount DECIMAL(10,2) NOT NULL," >> sql/fix_credit_card_transactions.sql
+                echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> sql/fix_credit_card_transactions.sql
+                echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> sql/fix_credit_card_transactions.sql
+                echo ");" >> sql/fix_credit_card_transactions.sql
+                MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_credit_card_transactions.sql
+                echo "[✔] Table created"
+              fi
               sleep 2
             fi
             if [ $retry -eq 3 ]; then
