@@ -1,80 +1,119 @@
-- name: 🚑 MySQL Healthcheck & Auto-Restart
-  run: |
-    echo "[HEALTHCHECK] Waiting for MySQL health..."
-    CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-    for i in {1..30}; do
-      STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CID")
-      echo "[HEALTH] Status: $STATUS"
-      if [ "$STATUS" == "healthy" ]; then exit 0; fi
-      sleep 2
-    done
-    echo "[RESTART] Restarting unhealthy container..."
-    docker restart "$CID"
-    sleep 15
+name: 🐬 Full MySQL Workflow with Restart, Healthcheck, Export, Logging
 
-- name: 🔧 Install mysql-client
-  run: |
-    echo "[INSTALL] Installing mysql-client"
-    sudo apt-get update && sudo apt-get install -y mysql-client
+on:
+  workflow_dispatch:
 
-- name: 📂 Prepare Directories
-  run: |
-    echo "[DIR] Creating .github/migration and sql directories"
-    mkdir -p .github/migration sql
+jobs:
+  mysql-job:
+    runs-on: ubuntu-latest
 
-- name: 🔋 Echo init.sql
-  run: |
-    echo "[ECHO] Generating sql/init.sql"
-    cat <<'EOF' > sql/init.sql
-CREATE DATABASE IF NOT EXISTS sample_db;
-USE sample_db;
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpass123
+          MYSQL_DATABASE: sample_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
 
-CREATE TABLE IF NOT EXISTS users (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(100)
-);
-INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');
+      - name: 📁 Prepare Directories
+        run: |
+          mkdir -p sql
+          mkdir -p export
+          mkdir -p .github/queries
+          echo "[✔] 디렉토리 구조 생성 완료"
+      - name: 🩺 Wait for MySQL Health or Restart
+        id: wait
+        run: |
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          for i in {1..30}; do
+            if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
+              echo "[✔] MySQL is healthy"
+              exit 0
+            fi
+            echo "[..] Waiting for MySQL container health (attempt $i)..."
+            sleep 2
+          done
+          echo "[❌] MySQL healthcheck failed. Restarting..."
+          docker logs $CID
+          docker restart $CID
+          sleep 10
+          if docker inspect --format='{{.State.Health.Status}}' $CID | grep -q "healthy"; then
+            echo "[✔] Healthy after restart"
+          else
+            echo "[❌] Still unhealthy after restart"
+            exit 1
+          fi
+      - name: 📄 Generate init.sql using echo
+        run: |
+          echo "USE sample_db;" > sql/init.sql
+          echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
+          echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
+          echo "  name VARCHAR(100) NOT NULL" >> sql/init.sql
+          echo ");" >> sql/init.sql
+          echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
+          echo "" >> sql/init.sql
+          echo "CREATE TABLE IF NOT EXISTS customers (" >> sql/init.sql
+          echo "  customer_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
+          echo "  customer_name VARCHAR(100) NOT NULL," >> sql/init.sql
+          echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/init.sql
+          echo ");" >> sql/init.sql
+          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
+          echo "[✔] init.sql 내용:"
+          cat sql/init.sql
+      - name: ⚙️ Run Migration with Retry
+        run: |
+          sudo apt-get update && sudo apt-get install -y mysql-client
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          echo "[⚙️] Applying init.sql..."
+          if ! mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql; then
+            echo "[❌] Migration failed. Restarting container..."
+            docker logs $CID
+            docker restart $CID
+            sleep 10
+            mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
+              echo "[❌] Migration failed again"
+              exit 1
+            }
+          fi
+          echo "[✔] Migration complete"
+      - name: 🧾 Write and Run Queries (SELECT, JOIN, GROUP)
+        run: |
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          echo "SELECT COUNT(*) AS user_count FROM users;" > .github/queries/select_users.sql
+          echo "SELECT COUNT(*) AS customer_count FROM customers;" > .github/queries/select_customers.sql
+          echo "SELECT customer_name, COUNT(*) AS count FROM customers GROUP BY customer_name;" > .github/queries/group_by_customers.sql
+          echo "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;" > .github/queries/join_users_customers.sql
+          echo "[▶️] Running queries and saving results to logs..."
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_users.sql > .github/queries/select_users.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_customers.sql > .github/queries/select_customers.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/group_by_customers.sql > .github/queries/group_by_customers.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/join_users_customers.sql > .github/queries/join_users_customers.log
+          echo "[✔] All query results saved to .github/queries/"
+      - name: 📤 Export customers.csv
+        run: |
+          echo "customer_id,customer_name,registered_at" > export/customers.csv
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
+            "SELECT customer_id, customer_name, registered_at FROM customers;" \
+            | tail -n +2 >> export/customers.csv
+          echo "[✔] customers.csv 내용:"
+          cat export/customers.csv
+      - name: 📁 Upload CSV Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: customers-csv
+          path: export/customers.csv
 
-CREATE TABLE IF NOT EXISTS customers (
-  customer_id INT AUTO_INCREMENT PRIMARY KEY,
-  customer_name VARCHAR(100),
-  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob');
-
-CREATE TABLE IF NOT EXISTS transactions (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  customer_id INT,
-  amount DECIMAL(10,2),
-  transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-INSERT INTO transactions (customer_id, amount)
-VALUES (1, 300000), (2, 150000);
-EOF
-
-- name: 🔄 Remove and Regenerate Daily Queries (00:00, 08:00)
-  if: github.event.schedule == '0 0 * * *' || github.event.schedule == '0 8 * * *'
-  run: |
-    echo "[CLEAN] Removing old migration files"
-    rm -f .github/migration/*.{sql,log,csv}
-
-    echo "[ECHO] checkcard_query.sql"
-    cat <<'EOF' > .github/migration/checkcard_query.sql
--- Recent 3 months check card transactions
-SELECT 
-  c.customer_name,
-  t.amount,
-  t.transaction_time,
-  CASE
-    WHEN t.amount >= 500000 THEN 'High'
-    WHEN t.amount >= 100000 THEN 'Medium'
-    ELSE 'Low'
-  END AS amount_category,
-  DATE_FORMAT(t.transaction_time, '%Y-%m') AS month,
-  COUNT(*) OVER(PARTITION BY c.customer_name) AS txn_count,
-  RANK() OVER(PARTITION BY c.customer_name ORDER BY t.amount DESC) AS rank_amt
-FROM customers c
-JOIN transactions t ON c.customer_id = t.customer_id
-WHERE t.transaction_time >= CURDATE() - INTERVAL 3 MONTH
-ORDER BY month DESC, t.amount DESC;
-EOF
+      - name: 📁 Upload Queries and Logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-queries-and-logs
+          path: .github/queries
