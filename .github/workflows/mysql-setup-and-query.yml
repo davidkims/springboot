@@ -2,7 +2,7 @@ name: 🐬 Full MySQL Workflow with Restart, Healthcheck, Export, Logging
 
 on:
   schedule:
-    - cron: '*/1 * * * *'
+    - cron: '*/1 * * * *'  # 매 1분마다 실행
   workflow_dispatch:
 
 jobs:
@@ -33,10 +33,10 @@ jobs:
           mkdir -p sql
           mkdir -p export
           mkdir -p .github/queries
+          mkdir -p backup
           echo "[✔] 디렉토리 구조 생성 완료"
 
       - name: 🩺 Wait for MySQL Health or Restart
-        id: wait
         run: |
           echo "[+] MySQL 컨테이너 상태 확인 중..."
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
@@ -53,18 +53,10 @@ jobs:
           docker logs $CID
           docker restart $CID
           sleep 10
-          STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CID)
-          echo "[..] 재시작 후 상태: $STATUS"
-          if echo "$STATUS" | grep -q "healthy"; then
-            echo "[✔] 재시작 후 정상 작동"
-          else
-            echo "[❌] 재시작 후에도 상태 비정상"
-            exit 1
-          fi
 
-      - name: 📄 Generate init.sql using echo
+      - name: 📄 Generate init.sql and Backup
         run: |
-          echo "[+] init.sql 생성 중..."
+          echo "[+] init.sql 생성 및 백업 중..."
           echo "USE sample_db;" > sql/init.sql
           echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
           echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
@@ -77,70 +69,76 @@ jobs:
           echo "  customer_name VARCHAR(100) NOT NULL," >> sql/init.sql
           echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/init.sql
           echo ");" >> sql/init.sql
-          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob'), ('David');" >> sql/init.sql
-          echo "[✔] init.sql 파일 내용:"
-          cat sql/init.sql
+          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('김철수'), ('김민지'), ('David');" >> sql/init.sql
+          cp sql/init.sql backup/init.sql.backup
+          echo "[✔] init.sql 생성 및 backup/init.sql.backup 백업 완료"
 
       - name: ⚙️ Run Migration with Retry
         run: |
           echo "[+] MySQL Client 설치 중..."
           sudo apt-get update && sudo apt-get install -y mysql-client
-          echo "[+] init.sql 적용 시도..."
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-          if ! mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql; then
-            echo "[❌] 초기 마이그레이션 실패. 재시도 중..."
-            docker logs $CID
-            docker restart $CID
-            sleep 10
-            mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql || {
-              echo "[❌] 두 번째 마이그레이션도 실패"
-              exit 1
-            }
-          fi
+          echo "[+] init.sql 적용 중..."
+          mysql -h 127.0.0.1 -u root -prootpass123 < sql/init.sql
           echo "[✔] 마이그레이션 완료"
 
-      - name: 🧾 Write and Run Queries (SELECT, JOIN, GROUP)
+      - name: 🔄 Restart MySQL Container After Completion
         run: |
-          echo "[+] SQL 쿼리 파일 생성 및 실행..."
-          echo "SELECT COUNT(*) AS user_count FROM users;" > .github/queries/select_users.sql
-          echo "SELECT COUNT(*) AS customer_count FROM customers;" > .github/queries/select_customers.sql
-          echo "SELECT customer_name, COUNT(*) AS count FROM customers GROUP BY customer_name;" > .github/queries/group_by_customers.sql
-          echo "SELECT u.name AS user_name, c.customer_name FROM users u INNER JOIN customers c ON u.name = c.customer_name;" > .github/queries/join_users_customers.sql
-          
-          echo "[▶️] 쿼리 실행 및 로그 저장..."
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_users.sql > .github/queries/select_users.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/select_customers.sql > .github/queries/select_customers.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/group_by_customers.sql > .github/queries/group_by_customers.log
-          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/join_users_customers.sql > .github/queries/join_users_customers.log
-          echo "[✔] 쿼리 로그 저장 완료"
+          echo "[+] 컨테이너 재시작 중..."
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          docker restart $CID
+          sleep 5
+          echo "[✔] 컨테이너 재시작 완료"
 
-      - name: 📤 Export customers.csv
+      - name: 🧹 Remove Old Query Files
         run: |
-          echo "[+] customers.csv 생성 중..."
-          echo "customer_id,customer_name,registered_at" > export/customers.csv
+          echo "[🧹] 기존 쿼리 및 로그 삭제 중..."
+          rm -f .github/queries/*.sql
+          rm -f .github/queries/*.log
+          echo "[✔] 삭제 완료"
+
+      - name: 🆕 Recreate Customer Query Files using echo
+        run: |
+          echo "[+] 신규 고객 쿼리 파일 생성 중..."
+          echo "SELECT * FROM customers;" > .github/queries/customers_all.sql
+          echo "SELECT COUNT(*) AS total_customers FROM customers;" > .github/queries/customers_count.sql
+          echo "SELECT customer_name FROM customers WHERE customer_name LIKE '%김%';" > .github/queries/customers_like_kim.sql
+          echo "SELECT customer_name, registered_at FROM customers ORDER BY registered_at DESC;" > .github/queries/customers_latest.sql
+          echo "[✔] 생성된 쿼리 목록:"
+          ls -l .github/queries/*.sql
+
+      - name: ▶️ Run Customer Queries and Save Logs
+        run: |
+          echo "[▶️] 쿼리 실행 및 로그 저장 중..."
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/customers_all.sql > .github/queries/customers_all.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/customers_count.sql > .github/queries/customers_count.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/customers_like_kim.sql > .github/queries/customers_like_kim.log
+          mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db < .github/queries/customers_latest.sql > .github/queries/customers_latest.log
+          echo "[✔] 로그 저장 완료"
+
+      - name: 📤 Export customers_like_kim.csv
+        run: |
+          echo "[+] '%김%' 고객 검색 결과를 CSV로 저장 중..."
+          echo "customer_name" > export/customers_like_kim.csv
           mysql -h 127.0.0.1 -u root -prootpass123 -D sample_db -B -e \
-            "SELECT customer_id, customer_name, registered_at FROM customers;" \
-            | tail -n +2 >> export/customers.csv
-          echo "[✔] customers.csv 내용:"
-          cat export/customers.csv
+            "SELECT customer_name FROM customers WHERE customer_name LIKE '%김%';" \
+            | tail -n +2 >> export/customers_like_kim.csv
+          echo "[✔] export/customers_like_kim.csv 생성 완료"
+          cat export/customers_like_kim.csv
 
       - name: 📁 Upload CSV Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: customers-csv
-          path: export/customers.csv
+          name: customers-like-kim-csv
+          path: export/customers_like_kim.csv
 
       - name: 📁 Upload Queries and Logs
         uses: actions/upload-artifact@v4
         with:
-          name: sql-queries-and-logs
+          name: refreshed-customer-queries-and-logs
           path: .github/queries
 
-      - name: 🔄 Restart MySQL Container After Completion
-        run: |
-          echo "[+] 모든 작업 완료 후 MySQL 컨테이너 재시작 중..."
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
-          docker restart $CID
-          sleep 5
-          echo "[✔] 컨테이너 재시작 완료. 상태:"
-          docker ps -a --filter "id=$CID"
+      - name: 📁 Upload init.sql Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: init-sql-backup
+          path: backup/init.sql.backup
