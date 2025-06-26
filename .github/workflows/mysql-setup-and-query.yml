@@ -41,8 +41,8 @@ jobs:
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
             STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CID)
-            echo "[..] MySQL status: $STATUS (attempt $i)"
-            if echo "$STATUS" | grep -q "healthy"; then
+            echo "Health status: $STATUS (attempt $i)"
+            if [[ "$STATUS" == "healthy" ]]; then
               echo "[✔] MySQL is healthy"
               exit 0
             fi
@@ -56,11 +56,10 @@ jobs:
       - name: 🗃️ Load SQL DB from Dump if Exists
         run: |
           if [ -f "sql/backup_dump.sql" ]; then
-            echo "[+] Loading existing SQL dump into database..."
+            echo "[+] Loading SQL dump..."
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/backup_dump.sql
-            echo "[✔] SQL dump loaded"
           else
-            echo "[!] No backup_dump.sql found to load. Skipping."
+            echo "[!] No backup dump found."
           fi
 
       - name: 📄 Generate init.sql and Backup
@@ -77,42 +76,40 @@ jobs:
           echo "  customer_name VARCHAR(100) NOT NULL," >> sql/init.sql
           echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/init.sql
           echo ");" >> sql/init.sql
-          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('김철수'), ('김민지'), ('David');" >> sql/init.sql
+          echo "INSERT INTO customers (customer_name) VALUES ('고객A'), ('고객B'), ('고객C');" >> sql/init.sql
           cp sql/init.sql backup/init.sql.backup
 
       - name: 🔁 Check and Create Missing Tables
         run: |
-          echo "[+] Checking and creating required tables if missing..."
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e "SHOW TABLES LIKE 'customers';" | grep customers || {
-            echo "[⚠️] 'customers' table missing. Creating..."
-            echo "CREATE TABLE IF NOT EXISTS customers (" > sql/fix_customers.sql
-            echo "  customer_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/fix_customers.sql
-            echo "  customer_name VARCHAR(100) NOT NULL," >> sql/fix_customers.sql
-            echo "  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" >> sql/fix_customers.sql
-            echo ");" >> sql/fix_customers.sql
+          echo "[+] Checking and creating tables..."
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e \
+            "SHOW TABLES LIKE 'customers';" | grep customers || {
+            echo "CREATE TABLE IF NOT EXISTS customers (
+              customer_id INT AUTO_INCREMENT PRIMARY KEY,
+              customer_name VARCHAR(100) NOT NULL,
+              registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );" > sql/fix_customers.sql
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_customers.sql
-            echo "[✔] 'customers' table created."
           }
 
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || {
-            echo "[⚠️] 'credit_card_transactions' table missing. Creating..."
-            echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (" > sql/fix_credit_card_transactions.sql
-            echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY," >> sql/fix_credit_card_transactions.sql
-            echo "  customer_id INT NOT NULL," >> sql/fix_credit_card_transactions.sql
-            echo "  card_number VARCHAR(20) NOT NULL," >> sql/fix_credit_card_transactions.sql
-            echo "  amount DECIMAL(10,2) NOT NULL," >> sql/fix_credit_card_transactions.sql
-            echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> sql/fix_credit_card_transactions.sql
-            echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)" >> sql/fix_credit_card_transactions.sql
-            echo ");" >> sql/fix_credit_card_transactions.sql
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e \
+            "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || {
+            echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (
+              transaction_id INT AUTO_INCREMENT PRIMARY KEY,
+              customer_id INT NOT NULL,
+              card_number VARCHAR(20) NOT NULL,
+              amount DECIMAL(10,2) NOT NULL,
+              transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+            );" > sql/fix_credit_card_transactions.sql
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_credit_card_transactions.sql
-            echo "[✔] 'credit_card_transactions' table created."
           }
 
-      - name: 💳 Simulate Transactions with Retry
+      - name: 💳 Simulate Transactions with Valid Customers
         run: |
+          CUSTOMER_IDS=$(MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -Bse "SELECT customer_id FROM customers;")
           echo "USE sample_db;" > sql/simulate_transactions.sql
-          for i in $(seq 1 10); do
-            cid=$(( (RANDOM % 3) + 1 ))
+          for cid in $CUSTOMER_IDS; do
             amount=$(( (RANDOM % 100000) + 1000 ))
             echo "INSERT INTO credit_card_transactions (customer_id, card_number, amount) VALUES ($cid, '4111111111111111', $amount);" >> sql/simulate_transactions.sql
           done
@@ -131,11 +128,23 @@ jobs:
             fi
           done
 
+      - name: 📤 Export customers.csv
+        run: |
+          echo "customer_id,customer_name,registered_at" > export/customers.csv
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e \
+            "SELECT customer_id, customer_name, registered_at FROM customers;" \
+            | tail -n +2 >> export/customers.csv
+
+      - name: 📁 Upload CSV Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: customers-csv
+          path: export/customers.csv
+
       - name: 🧷 Backup SQL Dump using mysqldump
         run: |
           echo "[+] Performing mysqldump backup..."
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
           BACKUP_FILE=sql/backup_dump_$TIMESTAMP.sql
           MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > $BACKUP_FILE
-          echo "[✔] Backup created at $BACKUP_FILE"
           ln -sf $BACKUP_FILE sql/backup_dump.sql
