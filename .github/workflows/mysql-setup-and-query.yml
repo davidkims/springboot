@@ -1,101 +1,80 @@
-name: 🔍 MySQL Migration + Echo SQL Generator
+- name: 🚑 MySQL Healthcheck & Auto-Restart
+  run: |
+    echo "[HEALTHCHECK] Waiting for MySQL health..."
+    CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+    for i in {1..30}; do
+      STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CID")
+      echo "[HEALTH] Status: $STATUS"
+      if [ "$STATUS" == "healthy" ]; then exit 0; fi
+      sleep 2
+    done
+    echo "[RESTART] Restarting unhealthy container..."
+    docker restart "$CID"
+    sleep 15
 
-on:
-  schedule:
-    - cron: '*/5 * * * *'    # 매 5분마다 실행
-    - cron: '0 15 * * *'     # 한국시간 00:00
-    - cron: '0 23 * * *'     # 한국시간 08:00
-  workflow_dispatch:
+- name: 🔧 Install mysql-client
+  run: |
+    echo "[INSTALL] Installing mysql-client"
+    sudo apt-get update && sudo apt-get install -y mysql-client
 
-jobs:
-  mysql-migration:
-    runs-on: ubuntu-latest
+- name: 📂 Prepare Directories
+  run: |
+    echo "[DIR] Creating .github/migration and sql directories"
+    mkdir -p .github/migration sql
 
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: rootpass123
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping --silent"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
+- name: 🔋 Echo init.sql
+  run: |
+    echo "[ECHO] Generating sql/init.sql"
+    cat <<'EOF' > sql/init.sql
+CREATE DATABASE IF NOT EXISTS sample_db;
+USE sample_db;
 
-    steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100)
+);
+INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');
 
-      - name: 🚑 Prepare Directories
-        run: |
-          mkdir -p .github/migration
-          mkdir -p sql
+CREATE TABLE IF NOT EXISTS customers (
+  customer_id INT AUTO_INCREMENT PRIMARY KEY,
+  customer_name VARCHAR(100),
+  registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob');
 
-      - name: 📊 Remove and Regenerate Daily Queries
-        if: |
-          github.event.schedule == '0 15 * * *' || github.event.schedule == '0 23 * * *'
-        run: |
-          echo "[🧼] Removing old files"
-          rm -f .github/migration/*
+CREATE TABLE IF NOT EXISTS transactions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  customer_id INT,
+  amount DECIMAL(10,2),
+  transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO transactions (customer_id, amount)
+VALUES (1, 300000), (2, 150000);
+EOF
 
-          echo "[🧾] checkcard_query.sql"
-          echo "-- 3-month checkcard query" > .github/migration/checkcard_query.sql
-          echo "SELECT c.customer_name, t.amount, t.transaction_time," >> .github/migration/checkcard_query.sql
-          echo "CASE WHEN t.amount >= 500000 THEN '고액결제' WHEN t.amount >= 100000 THEN '일반결제' ELSE '소액결제' END AS amount_category," >> .github/migration/checkcard_query.sql
-          echo "DATE_FORMAT(t.transaction_time, '%Y-%m') AS transaction_month," >> .github/migration/checkcard_query.sql
-          echo "COUNT(*) OVER(PARTITION BY c.customer_name) AS txn_count," >> .github/migration/checkcard_query.sql
-          echo "RANK() OVER (PARTITION BY c.customer_name ORDER BY t.amount DESC) AS rank_by_amount" >> .github/migration/checkcard_query.sql
-          echo "FROM customers c JOIN transactions t ON c.customer_id = t.customer_id" >> .github/migration/checkcard_query.sql
-          echo "WHERE t.transaction_time >= CURDATE() - INTERVAL 3 MONTH ORDER BY transaction_month DESC, amount DESC;" >> .github/migration/checkcard_query.sql
+- name: 🔄 Remove and Regenerate Daily Queries (00:00, 08:00)
+  if: github.event.schedule == '0 0 * * *' || github.event.schedule == '0 8 * * *'
+  run: |
+    echo "[CLEAN] Removing old migration files"
+    rm -f .github/migration/*.{sql,log,csv}
 
-          echo "SELECT COUNT(*) AS user_count FROM users;" > .github/migration/user_count.sql
-          echo "SELECT COUNT(*) AS txn_count FROM transactions;" > .github/migration/txn_count.sql
-
-      - name: 🛰 Wait for MySQL Health
-        run: |
-          CID=$(docker ps -q --filter ancestor=mysql:8.0)
-          for i in {1..30}; do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CID")
-            echo "MySQL 상태: $STATUS"
-            if [ "$STATUS" == "healthy" ]; then exit 0; fi
-            sleep 2
-          done
-          echo "⚠️ 재기동 시도" && docker restart "$CID" && sleep 10
-
-      - name: ⚙️ Generate init.sql, customers.sql, join.sql (echo)
-        run: |
-          export MYSQL_PWD=rootpass123
-
-          echo "[✏️] init.sql"
-          echo "CREATE DATABASE IF NOT EXISTS sample_db;" > sql/init.sql
-          echo "USE sample_db;" >> sql/init.sql
-          echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100));" >> sql/init.sql
-          echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
-
-          echo "[✏️] customers.sql"
-          echo "USE sample_db;" > sql/customers.sql
-          echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100));" >> sql/customers.sql
-          echo "INSERT INTO customers (customer_name) VALUES ('Alice'), ('Bob');" >> sql/customers.sql
-
-          echo "[✏️] join.sql"
-          echo "USE sample_db;" > sql/join.sql
-          echo "CREATE TABLE IF NOT EXISTS transactions (id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT, amount DECIMAL(10,2), transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" >> sql/join.sql
-          echo "INSERT INTO transactions (customer_id, amount) VALUES (1, 300000), (2, 150000);" >> sql/join.sql
-
-      - name: 🚀 Run All SQLs & Export CSVs
-        run: |
-          export MYSQL_PWD=rootpass123
-          for f in sql/*.sql .github/migration/*.sql; do
-            base=$(basename "$f" .sql)
-            echo "[▶️] Running: $base"
-            mysql -h 127.0.0.1 -u root < "$f" > ".github/migration/${base}.log"
-            mysql -h 127.0.0.1 -u root -B -e "$(cat $f)" | tail -n +2 > ".github/migration/${base}.csv"
-          done
-
-      - name: 📄 Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: migration-outputs
-          path: .github/migration/
+    echo "[ECHO] checkcard_query.sql"
+    cat <<'EOF' > .github/migration/checkcard_query.sql
+-- Recent 3 months check card transactions
+SELECT 
+  c.customer_name,
+  t.amount,
+  t.transaction_time,
+  CASE
+    WHEN t.amount >= 500000 THEN 'High'
+    WHEN t.amount >= 100000 THEN 'Medium'
+    ELSE 'Low'
+  END AS amount_category,
+  DATE_FORMAT(t.transaction_time, '%Y-%m') AS month,
+  COUNT(*) OVER(PARTITION BY c.customer_name) AS txn_count,
+  RANK() OVER(PARTITION BY c.customer_name ORDER BY t.amount DESC) AS rank_amt
+FROM customers c
+JOIN transactions t ON c.customer_id = t.customer_id
+WHERE t.transaction_time >= CURDATE() - INTERVAL 3 MONTH
+ORDER BY month DESC, t.amount DESC;
+EOF
