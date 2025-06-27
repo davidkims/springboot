@@ -2,7 +2,7 @@ name: 🐬 MySQL Full Setup, Migration & Auto Backup
 
 on:
   schedule:
-    - cron: '*/1 * * * *'
+    - cron: '*/1 * * * *'  # every minute
   workflow_dispatch:
 
 jobs:
@@ -25,14 +25,14 @@ jobs:
 
       - name: 📁 Prepare Directories
         run: |
-          echo "[+] Creating migration, backup, and ledger directories..."
+          echo "[+] Creating directories..."
           sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR"
           sudo chmod -R 777 /opt/mysql /opt/backup
 
-      - name: 🗞️ Create SQL Migration File
+      - name: 📜 Create SQL Migration File
         run: |
-          echo "[+] Writing SQL migration file..."
-          echo "
+          echo "[+] Generating migration SQL..."
+          cat <<EOF | sudo tee "$MIGRATION_DIR/migrate.sql"
           CREATE TABLE IF NOT EXISTS accounts (
               id INT AUTO_INCREMENT PRIMARY KEY,
               name VARCHAR(50),
@@ -46,39 +46,47 @@ jobs:
               transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP
           );
           INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
-          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('ABC Corporation', 'Purchase', 500000);
-          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('XYZ Inc.', 'Sale', 250000);
-          " | sudo tee "$MIGRATION_DIR/migrate.sql"
+          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES
+            ('ABC Corporation', 'Purchase', 500000),
+            ('XYZ Inc.', 'Sale', 250000);
+          EOF
 
-      - name: 🚪 Upgrade All & Install MySQL Server
+      - name: 🧪 Upgrade All Packages
         run: |
-          echo "[+] Updating and upgrading all packages..."
-          sudo apt-get update && sudo apt-get dist-upgrade -y || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server || { echo "❌ MySQL 설치 실패"; exit 1; }
-          sudo find /etc/firefox /etc/apport/native-origins.d /etc/apport/blacklist.d -type d -empty -delete || true
+          echo "[+] Upgrading all packages..."
+          sudo apt-get update && sudo apt-get upgrade -y
+
+      - name: 🦖 Install MySQL Server
+        run: |
+          echo "[+] Installing MySQL server..."
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
 
       - name: 🔐 Reset Root Password in Safe Mode
         run: |
-          echo "[+] Resetting MySQL root password..."
+          echo "[+] Resetting root password in safe mode..."
           sudo systemctl stop mysql
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
           sudo mysqld_safe --skip-networking --skip-grant-tables &
           sleep 10
-          echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PASS}'; FLUSH PRIVILEGES;" | sudo mysql -u root
+          echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ env.ROOT_PASS }}'; FLUSH PRIVILEGES;" | sudo mysql -u root
           sudo killall mysqld
           sleep 5
-          sudo systemctl start mysql || { echo "❌ MySQL 시작 실패"; exit 1; }
+          sudo systemctl start mysql
 
-      - name: 🛠️ Setup Database and User
+      - name: 🛠️ Configure Database and User
         run: |
-          echo "[+] Creating database and granting permissions..."
+          echo "[+] Configuring DB and user..."
           mysql -u root -p"$ROOT_PASS" -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
           mysql -u root -p"$ROOT_PASS" -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
-          mysql -u root -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
+          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;"
 
-      - name: 📅 Simulate Bulk Transactions
+      - name: 📅 Run Migration
+        run: |
+          echo "[+] Running migrations..."
+          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
+
+      - name: 📊 Generate Transaction Simulation SQL
         run: |
           echo "[+] Generating transaction simulation SQL..."
           echo "USE $DB_NAME;" > simulate_transactions.sql
@@ -88,68 +96,45 @@ jobs:
             amount=$(( RANDOM % 100000 + 10000 ))
             echo "INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('$company', '$type', $amount);" >> simulate_transactions.sql
           done
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql
+          for retry in {1..3}; do
+            if mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql; then
+              echo "[✔] Transaction simulation succeeded"
+              break
+            else
+              echo "[!] Transaction simulation failed on attempt $retry"
+              sleep 2
+            fi
+            if [ $retry -eq 3 ]; then
+              echo "[x] Simulation failed after 3 attempts"
+              exit 1
+            fi
+          done
 
-      - name: 📊 Run SQL Migration
+      - name: 📃 Export Ledger to CSV
         run: |
-          echo "[+] Running migration SQL..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
+          echo "[+] Exporting ledger..."
+          echo "transaction_id,corporate_name,transaction_type,amount,transaction_date" > "$LEDGER_DIR/ledger.csv"
+          mysql -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -B -e "SELECT * FROM corporate_transactions;" | tail -n +2 >> "$LEDGER_DIR/ledger.csv"
+          gzip -f "$LEDGER_DIR/ledger.csv"
 
-      - name: ✅ Verify Data
+      - name: 📊 Backup MySQL with Compression
         run: |
-          echo "[+] Verifying data..."
-          mysql -u "$DB_USER" -p"$DB_PASS" -e "USE $DB_NAME; SHOW TABLES; SELECT * FROM accounts; SELECT COUNT(*) FROM corporate_transactions;"
+          echo "[+] Backing up MySQL DB..."
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
+          mysqldump "$DB_NAME" > "$BACKUP_FILE"
+          gzip -f "$BACKUP_FILE"
 
-      - name: 🕒 Generate Timestamp and Port
-        id: vars
-        run: |
-          echo "[+] Generating timestamp and port..."
-          echo "timestamp=$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
-          echo "container=backup-mysql-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
-          echo "host_port=$((RANDOM%1000+3307))" >> "$GITHUB_OUTPUT"
-
-      - name: 🚣 Launch MySQL Backup Container
-        run: |
-          echo "[+] Launching container..."
-          docker run -d \
-            --name "${{ steps.vars.outputs.container }}" \
-            -e MYSQL_ROOT_PASSWORD="$DB_PASS" \
-            -e MYSQL_DATABASE="$DB_NAME" \
-            -p "${{ steps.vars.outputs.host_port }}:3306" \
-            "$MYSQL_IMAGE"
-          sleep 30 || { echo "❌ 컨테이너 시작 실패"; exit 1; }
-
-      - name: 🔐 Create .my.cnf
-        run: |
-          echo "[+] Creating ~/.my.cnf file..."
-          echo "[client]" > ~/.my.cnf
-          echo "user=$DB_USER" >> ~/.my.cnf
-          echo "password=$DB_PASS" >> ~/.my.cnf
-          echo "host=127.0.0.1" >> ~/.my.cnf
-          echo "port=${{ steps.vars.outputs.host_port }}" >> ~/.my.cnf
-          chmod 600 ~/.my.cnf
-
-      - name: 📂 mysqldump and Compress
-        run: |
-          echo "[+] Dumping and compressing backup..."
-          TIMESTAMP="${{ steps.vars.outputs.timestamp }}"
-          BACKUP_FILE="$BACKUP_DIR/backup-${TIMESTAMP}.sql"
-          gzip -c <(mysqldump "$DB_NAME") > "${BACKUP_FILE}.gz" || { echo "❌ 백업 실패"; exit 1; }
-          ls -lh "$BACKUP_DIR"
-
-      - name: 🔍 Print Container Info
-        run: |
-          echo "📦 Container Name: ${{ steps.vars.outputs.container }}"
-
-      - name: 📤 Generate Ledger File
-        run: |
-          echo "[+] Creating ledger file..."
-          mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions INTO OUTFILE '$LEDGER_DIR/corporate_ledger.csv' FIELDS TERMINATED BY ',' ENCLOSED BY '"' LINES TERMINATED BY '\n';" || echo "(로컬 컨테이너에서만 사용 가능 - 무시 가능)"
-
-      - name: 📅 Upload Backup and Ledger
+      - name: 🔍 Upload Ledger & Backup
         uses: actions/upload-artifact@v4
         with:
           name: mysql-ledger-and-backup
           path: |
+            ${{ env.LEDGER_DIR }}/*.gz
             ${{ env.BACKUP_DIR }}/*.gz
-            ${{ env.LEDGER_DIR }}/*.csv
+
+      - name: 📄 Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ env.LEDGER_DIR }}
