@@ -1,8 +1,8 @@
-name: 🐬 MySQL Full Setup, Migration & Auto Backup
+name: 🐬 MySQL 전체 설정, 마이그레이션, 시뮬레이션 및 GitHub Pages 백업
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # every minute
+    - cron: '*/1 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -18,21 +18,22 @@ jobs:
       MIGRATION_DIR: /opt/mysql/migrations
       BACKUP_DIR: /opt/backup/sql
       LEDGER_DIR: /opt/backup/ledgers
+      SITE_DIR: site
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 Prepare Directories
+      - name: 📁 디렉토리 준비
         run: |
           echo "[+] Creating directories..."
-          sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR"
-          sudo chmod -R 777 /opt/mysql /opt/backup
+          sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR" "$SITE_DIR"
+          sudo chmod -R 777 /opt/mysql /opt/backup "$SITE_DIR"
 
-      - name: 📜 Create SQL Migration File
+      - name: 🧾 SQL 마이그레이션 파일 생성
         run: |
-          echo "[+] Generating migration SQL..."
-          cat <<EOF | sudo tee "$MIGRATION_DIR/migrate.sql"
+          echo "[+] Creating SQL migration file..."
+          echo "
           CREATE TABLE IF NOT EXISTS accounts (
               id INT AUTO_INCREMENT PRIMARY KEY,
               name VARCHAR(50),
@@ -46,47 +47,41 @@ jobs:
               transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP
           );
           INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
-          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES
-            ('ABC Corporation', 'Purchase', 500000),
-            ('XYZ Inc.', 'Sale', 250000);
-          EOF
+          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('ABC Corporation', 'Purchase', 500000);
+          INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('XYZ Inc.', 'Sale', 250000);
+          " | sudo tee "$MIGRATION_DIR/migrate.sql"
 
-      - name: 🧪 Upgrade All Packages
+      - name: 🧪 MySQL 서버 설치 및 업그레이드
         run: |
-          echo "[+] Upgrading all packages..."
+          echo "[+] Installing and upgrading MySQL..."
           sudo apt-get update && sudo apt-get upgrade -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server || { echo "❌ MySQL 설치 실패"; exit 1; }
 
-      - name: 🦖 Install MySQL Server
+      - name: 🔐 루트 비밀번호 재설정 및 안전 모드
         run: |
-          echo "[+] Installing MySQL server..."
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-
-      - name: 🔐 Reset Root Password in Safe Mode
-        run: |
-          echo "[+] Resetting root password in safe mode..."
+          echo "[+] Resetting root password..."
           sudo systemctl stop mysql
-          sudo mkdir -p /var/run/mysqld
-          sudo chown mysql:mysql /var/run/mysqld
+          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
           sudo mysqld_safe --skip-networking --skip-grant-tables &
           sleep 10
-          echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ env.ROOT_PASS }}'; FLUSH PRIVILEGES;" | sudo mysql -u root
+          echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '$ROOT_PASS'; FLUSH PRIVILEGES;" | sudo mysql -u root
           sudo killall mysqld
           sleep 5
-          sudo systemctl start mysql
+          sudo systemctl start mysql || { echo "❌ MySQL 시작 실패"; exit 1; }
 
-      - name: 🛠️ Configure Database and User
+      - name: 🛠️ 데이터베이스 및 사용자 설정
         run: |
-          echo "[+] Configuring DB and user..."
+          echo "[+] Creating database and user..."
           mysql -u root -p"$ROOT_PASS" -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
-          mysql -u root -p"$ROOT_PASS" -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;"
+          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+          mysql -u root -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
 
-      - name: 📅 Run Migration
+      - name: 📥 마이그레이션 실행
         run: |
-          echo "[+] Running migrations..."
+          echo "[+] Running migration..."
           mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
 
-      - name: 📊 Generate Transaction Simulation SQL
+      - name: 💳 거래 시뮬레이션 SQL 생성 및 실행
         run: |
           echo "[+] Generating transaction simulation SQL..."
           echo "USE $DB_NAME;" > simulate_transactions.sql
@@ -96,45 +91,36 @@ jobs:
             amount=$(( RANDOM % 100000 + 10000 ))
             echo "INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('$company', '$type', $amount);" >> simulate_transactions.sql
           done
-          for retry in {1..3}; do
-            if mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql; then
-              echo "[✔] Transaction simulation succeeded"
-              break
-            else
-              echo "[!] Transaction simulation failed on attempt $retry"
-              sleep 2
-            fi
-            if [ $retry -eq 3 ]; then
-              echo "[x] Simulation failed after 3 attempts"
-              exit 1
-            fi
-          done
+          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql
 
-      - name: 📃 Export Ledger to CSV
+      - name: 📊 거래 원장 CSV 생성
         run: |
-          echo "[+] Exporting ledger..."
+          echo "[+] Exporting ledger to CSV..."
           echo "transaction_id,corporate_name,transaction_type,amount,transaction_date" > "$LEDGER_DIR/ledger.csv"
-          mysql -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -B -e "SELECT * FROM corporate_transactions;" | tail -n +2 >> "$LEDGER_DIR/ledger.csv"
+          mysql -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -B -e \
+            "SELECT transaction_id, corporate_name, transaction_type, amount, transaction_date FROM corporate_transactions;" \
+            | tail -n +2 >> "$LEDGER_DIR/ledger.csv"
           gzip -f "$LEDGER_DIR/ledger.csv"
 
-      - name: 📊 Backup MySQL with Compression
+      - name: 💾 MySQL 백업 및 압축
         run: |
           echo "[+] Backing up MySQL DB..."
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
-          mysqldump "$DB_NAME" > "$BACKUP_FILE"
+          mysqldump -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_FILE"
           gzip -f "$BACKUP_FILE"
 
-      - name: 🔍 Upload Ledger & Backup
-        uses: actions/upload-artifact@v4
-        with:
-          name: mysql-ledger-and-backup
-          path: |
-            ${{ env.LEDGER_DIR }}/*.gz
-            ${{ env.BACKUP_DIR }}/*.gz
-
-      - name: 📄 Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: 🚀 GitHub Pages 배포
+        uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ${{ env.LEDGER_DIR }}
+          publish_dir: $LEDGER_DIR
+          destination_dir: ledgers
+
+      - name: 📤 CSV 및 백업 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-and-ledger
+          path: |
+            $LEDGER_DIR/ledger.csv.gz
+            $BACKUP_DIR/*.sql.gz
