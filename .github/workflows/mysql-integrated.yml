@@ -1,4 +1,4 @@
-name: 🐬 MySQL Full Setup, Migration & Auto Backup
+name: 🐬 MySQL Full Setup, Migration, Simulation & Pages Deployment
 
 on:
   schedule:
@@ -26,13 +26,13 @@ jobs:
 
       - name: 📁 Prepare Directories
         run: |
-          echo "[+] Creating required directories..."
+          echo "[+] Preparing directories..."
           sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR" "$SITE_DIR"
           sudo chmod -R 777 /opt/mysql /opt/backup "$SITE_DIR"
 
-      - name: 🧾 Create SQL Migration File
+      - name: 📜 Create Migration SQL
         run: |
-          echo "[+] Creating SQL migration file..."
+          echo "[+] Creating migration SQL..."
           echo "
           CREATE TABLE IF NOT EXISTS accounts (
               id INT AUTO_INCREMENT PRIMARY KEY,
@@ -49,16 +49,17 @@ jobs:
           INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
           " | sudo tee "$MIGRATION_DIR/migrate.sql"
 
-      - name: 🧪 Install MySQL Server & Upgrade All
+      - name: 🧪 Install & Upgrade MySQL
         run: |
-          echo "[+] Installing and upgrading MySQL server..."
+          echo "[+] Installing and upgrading MySQL..."
           sudo apt-get update
-          sudo apt-get dist-upgrade -y || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server || { echo "❌ MySQL install failed"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+          sudo apt-get -y dist-upgrade
+          sudo find /etc/apport /etc/firefox -type d -empty -delete || true
 
-      - name: 🔐 Reset MySQL Root Password
+      - name: 🔐 Reset Root Password (Safe Mode)
         run: |
-          echo "[+] Resetting MySQL root password in safe mode..."
+          echo "[+] Resetting MySQL root password..."
           sudo systemctl stop mysql
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
@@ -67,36 +68,23 @@ jobs:
           echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$ROOT_PASS'; FLUSH PRIVILEGES;" | sudo mysql -u root
           sudo killall mysqld
           sleep 5
-          sudo systemctl start mysql || { echo "❌ Failed to start MySQL"; exit 1; }
+          sudo systemctl start mysql
 
-      - name: 🛠️ Create Database and User
+      - name: 🛠️ Create DB and Grant Privileges
         run: |
           echo "[+] Creating database and user..."
           mysql -u root -p"$ROOT_PASS" -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
-          mysql -u root -p"$ROOT_PASS" -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_PASS';"
-          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_PASS';"
           mysql -u root -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
 
-      - name: 📥 Run Migration
+      - name: 📅 Apply Migration
         run: |
-          echo "[+] Running migration..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql" || { echo "❌ Migration failed"; exit 1; }
+          echo "[+] Applying migration SQL..."
+          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
 
-      - name: 📄 Ensure Simulation Table Exists
+      - name: 🤝 Simulate Transactions
         run: |
-          echo "[+] Ensuring simulation table exists..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "
-          CREATE TABLE IF NOT EXISTS corporate_transactions (
-              transaction_id INT AUTO_INCREMENT PRIMARY KEY,
-              corporate_name VARCHAR(100) NOT NULL,
-              transaction_type VARCHAR(50) NOT NULL,
-              amount DECIMAL(12,2) NOT NULL,
-              transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP
-          );"
-
-      - name: 💼 Simulate Bulk Transactions
-        run: |
-          echo "[+] Generating and running transaction simulation SQL..."
+          echo "[+] Generating transaction simulation SQL..."
           echo "USE $DB_NAME;" > simulate_transactions.sql
           for i in $(seq 1 60); do
             company="SimCorp_$i"
@@ -104,28 +92,16 @@ jobs:
             amount=$(( RANDOM % 100000 + 10000 ))
             echo "INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('$company', '$type', $amount);" >> simulate_transactions.sql
           done
-          for retry in {1..3}; do
-            if mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql; then
-              echo "[✔] Transaction simulation succeeded"
-              break
-            else
-              echo "[!] Simulation failed (attempt $retry)"
-              sleep 2
-            fi
-            if [ $retry -eq 3 ]; then
-              echo "[x] Simulation failed after 3 attempts"
-              exit 1
-            fi
-          done
+          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql
 
-      - name: 📊 Generate Ledger CSV
+      - name: 📋 Create Ledger CSV
         run: |
           echo "[+] Generating ledger CSV..."
           mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions INTO OUTFILE '/tmp/ledger.csv' FIELDS TERMINATED BY ',' ENCLOSED BY '"' LINES TERMINATED BY '\n';"
           sudo mv /tmp/ledger.csv "$LEDGER_DIR/ledger.csv"
           gzip -f "$LEDGER_DIR/ledger.csv"
 
-      - name: 💾 Backup MySQL DB
+      - name: 📃 Backup MySQL
         run: |
           echo "[+] Backing up MySQL DB..."
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
@@ -133,18 +109,22 @@ jobs:
           mysqldump -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_FILE"
           gzip -f "$BACKUP_FILE"
 
-      - name: 🌐 Deploy to GitHub Pages
-        run: |
-          echo "[+] Deploying to GitHub Pages..."
-          cp "$LEDGER_DIR"/*.csv.gz "$SITE_DIR"/
-          echo "ledger files" > "$SITE_DIR/index.html"
-          ls -lh "$SITE_DIR"
-
       - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: db-and-ledger-artifacts
+          name: backup-and-ledger
           path: |
-            $BACKUP_DIR/*.gz
-            $LEDGER_DIR/*.gz
-            $SITE_DIR/*
+            ${{ env.BACKUP_DIR }}/*.gz
+            ${{ env.LEDGER_DIR }}/*.gz
+
+      - name: 🌐 Deploy Ledger to GitHub Pages
+        run: |
+          echo "[+] Copying ledger to GitHub Pages site directory..."
+          mkdir -p "$SITE_DIR"
+          cp "$LEDGER_DIR"/ledger.csv.gz "$SITE_DIR/ledger.csv.gz"
+
+      - name: 📉 GitHub Pages Deployment
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ env.SITE_DIR }}
