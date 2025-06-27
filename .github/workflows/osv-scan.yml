@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   osv-scan:
-    name: 🛡️ OSV-Scanner
+    name: 🛡️ OSV-Scanner Full Flow
     runs-on: ubuntu-latest
 
     steps:
@@ -31,37 +31,59 @@ jobs:
           echo "[+] Installing: jq curl unzip git gh"
           sudo apt-get install -y jq curl unzip git gh
 
-      - name: 🧪 Download and Run OSV Scanner with Retry + Fallback
+      - name: 🧪 Download and Run OSV Scanner (.tar.gz with retry, mirror, and gh fallback)
         run: |
-          echo "[🧪] Downloading osv-scanner binary..."
+          echo "[🧪] Starting OSV Scanner download..."
 
           VERSION="1.7.1"
-          FILENAME="osv-scanner_${VERSION}_linux_amd64"
+          FILENAME="osv-scanner_${VERSION}_linux_amd64.tar.gz"
+          BINARY_NAME="osv-scanner"
           PRIMARY_URL="https://github.com/google/osv-scanner/releases/download/v${VERSION}/${FILENAME}"
-          MIRROR_URL="https://mirror.example.com/${FILENAME}"  # ❗ 미러 필요 시 교체
+          MIRROR_URL="https://mirror.example.com/${FILENAME}"  # 🔁 미러 URL로 교체 가능
+
+          DOWNLOAD_SUCCESS=false
 
           for attempt in {1..3}; do
-            echo "[🌐] Attempt $attempt: Downloading from primary..."
-            if curl -sSL --fail "$PRIMARY_URL" -o osv-scanner; then
+            echo "[🌐] Attempt $attempt: Downloading from GitHub release..."
+            if curl -sSL --fail "$PRIMARY_URL" -o osv-scanner.tar.gz; then
               echo "[✔] Download succeeded from primary URL"
+              DOWNLOAD_SUCCESS=true
               break
             else
               echo "[!] Attempt $attempt failed"
-              if [ $attempt -eq 3 ]; then
-                echo "[⚠] Trying fallback mirror..."
-                if curl -sSL --fail "$MIRROR_URL" -o osv-scanner; then
-                  echo "[✔] Fallback download succeeded"
-                  break
-                else
-                  echo "[❌] Fallback failed. Exiting"
-                  exit 1
-                fi
-              fi
               sleep 2
             fi
           done
 
-          chmod +x osv-scanner
+          if [ "$DOWNLOAD_SUCCESS" = false ]; then
+            echo "[⚠] All primary attempts failed. Trying fallback mirror..."
+            if curl -sSL --fail "$MIRROR_URL" -o osv-scanner.tar.gz; then
+              echo "[✔] Fallback download succeeded"
+              DOWNLOAD_SUCCESS=true
+            fi
+          fi
+
+          if [ "$DOWNLOAD_SUCCESS" = false ]; then
+            echo "[🚨] Fallback failed. Trying gh release download..."
+
+            echo "[⬇️] Downloading using gh release..."
+            gh release download "v${VERSION}" \
+              --repo google/osv-scanner \
+              --pattern "${FILENAME}" \
+              --output osv-scanner.tar.gz
+
+            if [ ! -f osv-scanner.tar.gz ]; then
+              echo "[❌] gh release download failed. Aborting."
+              exit 1
+            else
+              echo "[✔] gh release download succeeded"
+            fi
+          fi
+
+          echo "[📦] Extracting osv-scanner..."
+          tar -xzf osv-scanner.tar.gz
+          chmod +x $BINARY_NAME
+
           echo "[🚀] Running osv-scanner..."
           ./osv-scanner -r --skip-git ./ | tee osv-results.txt
 
