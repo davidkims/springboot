@@ -30,10 +30,10 @@ jobs:
           sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR" "$SITE_DIR"
           sudo chmod -R 777 /opt/mysql /opt/backup "$SITE_DIR"
 
-      - name: 🦾 Create Migration SQL
+      - name: 🧾 Generate SQL Migration File
         run: |
-          echo "[+] Creating migration SQL..."
-          cat <<EOF | sudo tee "$MIGRATION_DIR/migrate.sql"
+          echo "[+] Creating SQL migration file..."
+          echo "
           CREATE TABLE IF NOT EXISTS accounts (
               id INT AUTO_INCREMENT PRIMARY KEY,
               name VARCHAR(50),
@@ -49,17 +49,17 @@ jobs:
           INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
           INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('ABC Corporation', 'Purchase', 500000);
           INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('XYZ Inc.', 'Sale', 250000);
-          EOF
+          " | sudo tee "$MIGRATION_DIR/migrate.sql"
 
       - name: 🧪 Install MySQL Server
         run: |
           echo "[+] Installing MySQL server..."
           sudo apt-get update && sudo apt-get upgrade -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server || { echo "❌ MySQL install failed"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server || { echo "❌ MySQL installation failed"; exit 1; }
 
       - name: 🔐 Reset Root Password in Safe Mode
         run: |
-          echo "[+] Resetting MySQL root password in safe mode..."
+          echo "[+] Resetting root password in safe mode..."
           sudo systemctl stop mysql
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
@@ -78,12 +78,12 @@ jobs:
           mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
           mysql -u root -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
 
-      - name: 📅 Run Migration
+      - name: 📥 Execute Migration
         run: |
-          echo "[+] Running migration script..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
+          echo "[+] Running migration..."
+          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql" || { echo "❌ Migration failed"; exit 1; }
 
-      - name: 📆 Simulate Transactions
+      - name: 🔁 Simulate Transactions
         run: |
           echo "[+] Simulating transactions..."
           echo "USE $DB_NAME;" > simulate_transactions.sql
@@ -95,28 +95,43 @@ jobs:
           done
           mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql
 
-      - name: 📊 Export Ledger to CSV
+      - name: ✅ Verify Data
         run: |
-          echo "[+] Generating ledger CSV..."
-          mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions \
-            INTO OUTFILE '/tmp/ledger.csv' \
-            FIELDS TERMINATED BY ',' ENCLOSED BY '\"' \
-            LINES TERMINATED BY '\n';"
-          sudo mv /tmp/ledger.csv "$LEDGER_DIR/ledger.csv"
-          gzip -f "$LEDGER_DIR/ledger.csv"
-          echo "[✔] Ledger file created: $LEDGER_DIR/ledger.csv.gz"
+          echo "[+] Verifying data..."
+          mysql -u "$DB_USER" -p"$DB_PASS" -e "USE $DB_NAME; SHOW TABLES; SELECT * FROM accounts; SELECT * FROM corporate_transactions;"
 
-      - name: 📃 Backup MySQL Database
+      - name: 💾 Backup Database
         run: |
           echo "[+] Backing up MySQL DB..."
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
           mysqldump -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_FILE"
           gzip -f "$BACKUP_FILE"
+          echo "[✔] Backup created: $BACKUP_FILE.gz"
 
-      - name: 🚀 Deploy Ledger to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ${{ env.LEDGER_DIR }}
-          publish_branch: gh-pages
+      - name: 📄 Generate Ledger CSV
+        run: |
+          echo "[+] Generating ledger CSV..."
+          sudo mkdir -p "$LEDGER_DIR"
+          mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions \
+            INTO OUTFILE '/var/lib/mysql-files/ledger.csv' \
+            FIELDS TERMINATED BY ',' ENCLOSED BY '"' \
+            LINES TERMINATED BY '\n';"
+          sudo mv /var/lib/mysql-files/ledger.csv "$LEDGER_DIR/ledger.csv"
+          gzip -f "$LEDGER_DIR/ledger.csv"
+          echo "[✔] Ledger file created: $LEDGER_DIR/ledger.csv.gz"
+
+      - name: 🚀 Deploy to GitHub Pages
+        run: |
+          echo "[+] Preparing GitHub Pages content..."
+          cp "$LEDGER_DIR/ledger.csv.gz" "$SITE_DIR/ledger.csv.gz"
+          cd "$SITE_DIR"
+          git init
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Deploy ledger to GitHub Pages"
+          git branch -M gh-pages
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          git push -f origin gh-pages
+          echo "[✔] GitHub Pages deployed."
