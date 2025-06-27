@@ -6,7 +6,7 @@ on:
   merge_group:
     branches: [ "main" ]
   schedule:
-    - cron: '34 20 * * 2'  # 매주 화요일 20:34 UTC
+    - cron: '34 20 * * 2'
   push:
     branches: [ "main" ]
 
@@ -15,8 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  prepare-and-scan:
-    name: 🛡️ Prepare & Run OSV Scan
+  osv-scan:
+    name: 🛡️ Run OSV-Scanner with Fallback and Retry
     runs-on: ubuntu-latest
 
     steps:
@@ -25,36 +25,51 @@ jobs:
 
       - name: 🔧 Install dependencies
         run: |
-          echo "[+] Installing dependencies: jq, curl, unzip, git, gh"
+          echo "[+] Installing tools: jq, curl, unzip, git, gh"
           sudo apt-get update -y
           sudo apt-get install -y jq curl unzip git gh
 
-          echo "[+] Checking installed versions"
-          jq --version
-          curl --version
-          unzip -v
-          git --version
-          gh --version
-
-      - name: 💡 Echo setup info
+      - name: 🧪 Download and Run OSV Scanner
         run: |
-          echo "[📁] Current directory: $(pwd)"
-          echo "[📄] Listing repo contents:"
-          ls -alh
+          echo "[🧪] Starting OSV Scanner download with retry and fallback..."
 
-      - name: 🧪 Run OSV-Scanner (manual)
-        run: |
-          echo "[🧪] Running osv-scanner..."
-          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner-linux-amd64 -o osv-scanner
+          PRIMARY_URL="https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_amd64_linux.tar.gz"
+          MIRROR_URL="https://mirror.example.com/osv-scanner_amd64_linux.tar.gz"  # <--- 실제 미러 URL로 교체하세요
+
+          for attempt in {1..3}; do
+            echo "[🌐] Attempt $attempt: Downloading from primary URL..."
+            if curl -sSL --fail "$PRIMARY_URL" -o osv-scanner.tar.gz; then
+              echo "[✔] Download succeeded from primary URL"
+              break
+            else
+              echo "[!] Primary download failed on attempt $attempt"
+              if [ $attempt -eq 3 ]; then
+                echo "[⚠] Trying fallback mirror URL..."
+                if curl -sSL --fail "$MIRROR_URL" -o osv-scanner.tar.gz; then
+                  echo "[✔] Fallback download succeeded"
+                  break
+                else
+                  echo "[❌] Fallback download failed. Exiting."
+                  exit 1
+                fi
+              fi
+              sleep 2
+            fi
+          done
+
+          echo "[📦] Extracting osv-scanner..."
+          tar -xzf osv-scanner.tar.gz
           chmod +x osv-scanner
+
+          echo "[🚀] Running osv-scanner..."
           ./osv-scanner -r --skip-git ./ | tee osv-results.txt
 
-      - name: 📁 Convert to SARIF format
+      - name: 📁 Convert to SARIF
         run: |
-          echo "[🧾] Converting results to SARIF..."
+          echo "[📄] Converting to SARIF format..."
           ./osv-scanner -r --skip-git ./ --format sarif > osv-results.sarif
-          echo "[✔] SARIF output created at osv-results.sarif"
-          head -n 20 osv-results.sarif
+          echo "[✔] SARIF generated at osv-results.sarif"
+          head -n 15 osv-results.sarif
 
       - name: 📤 Upload SARIF to GitHub Security Tab
         uses: github/codeql-action/upload-sarif@v3
