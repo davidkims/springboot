@@ -26,14 +26,14 @@ jobs:
 
       - name: 📁 Prepare Directories
         run: |
-          echo "[+] Creating directories..."
+          echo "[+] Creating required directories..."
           sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR" "$SITE_DIR"
           sudo chmod -R 777 /opt/mysql /opt/backup "$SITE_DIR"
 
-      - name: 🧾 Generate SQL Migration File
+      - name: 📋 Generate Migration SQL
         run: |
-          echo "[+] Creating SQL migration file..."
-          echo "
+          echo "[+] Generating SQL migration file..."
+          cat <<EOF | sudo tee "$MIGRATION_DIR/migrate.sql"
           CREATE TABLE IF NOT EXISTS accounts (
               id INT AUTO_INCREMENT PRIMARY KEY,
               name VARCHAR(50),
@@ -49,28 +49,27 @@ jobs:
           INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);
           INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('ABC Corporation', 'Purchase', 500000);
           INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('XYZ Inc.', 'Sale', 250000);
-          " | sudo tee "$MIGRATION_DIR/migrate.sql"
+EOF
 
       - name: 🧪 Install MySQL Server
         run: |
-          echo "[+] Installing MySQL server..."
+          echo "[+] Updating and installing MySQL server..."
           sudo apt-get update && sudo apt-get upgrade -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server || { echo "❌ MySQL installation failed"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
 
-      - name: 🔐 Reset Root Password in Safe Mode
+      - name: 🔐 Reset MySQL Root Password
         run: |
-          echo "[+] Resetting root password in safe mode..."
+          echo "[+] Resetting root password..."
           sudo systemctl stop mysql
-          sudo mkdir -p /var/run/mysqld
-          sudo chown mysql:mysql /var/run/mysqld
+          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
           sudo mysqld_safe --skip-networking --skip-grant-tables &
           sleep 10
           echo "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '$ROOT_PASS'; FLUSH PRIVILEGES;" | sudo mysql -u root
           sudo killall mysqld
           sleep 5
-          sudo systemctl start mysql || { echo "❌ MySQL failed to start"; exit 1; }
+          sudo systemctl start mysql
 
-      - name: 🛠️ Create Database and User
+      - name: 💧 Create Database and Grant Privileges
         run: |
           echo "[+] Creating database and user..."
           mysql -u root -p"$ROOT_PASS" -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
@@ -78,14 +77,14 @@ jobs:
           mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
           mysql -u root -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
 
-      - name: 📥 Execute Migration
+      - name: 📅 Run SQL Migration
         run: |
           echo "[+] Running migration..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql" || { echo "❌ Migration failed"; exit 1; }
+          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
 
-      - name: 🔁 Simulate Transactions
+      - name: 🔀 Simulate Transactions
         run: |
-          echo "[+] Simulating transactions..."
+          echo "[+] Generating transaction simulation SQL..."
           echo "USE $DB_NAME;" > simulate_transactions.sql
           for i in $(seq 1 60); do
             company="SimCorp_$i"
@@ -95,43 +94,38 @@ jobs:
           done
           mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql
 
-      - name: ✅ Verify Data
+      - name: 🔢 Generate Ledger CSV
         run: |
-          echo "[+] Verifying data..."
-          mysql -u "$DB_USER" -p"$DB_PASS" -e "USE $DB_NAME; SHOW TABLES; SELECT * FROM accounts; SELECT * FROM corporate_transactions;"
+          echo "[+] Generating ledger CSV..."
+          sudo mkdir -p "$LEDGER_DIR"
+          mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions \
+            INTO OUTFILE '/var/lib/mysql-files/ledger.csv' \
+            FIELDS TERMINATED BY ',' ENCLOSED BY '\"' \
+            LINES TERMINATED BY '\n';"
+          sudo mv /var/lib/mysql-files/ledger.csv "$LEDGER_DIR/ledger.csv"
+          gzip -f "$LEDGER_DIR/ledger.csv"
+          echo "[\u2714] Ledger file created: $LEDGER_DIR/ledger.csv.gz"
 
-      - name: 💾 Backup Database
+      - name: 📃 Backup MySQL
         run: |
           echo "[+] Backing up MySQL DB..."
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
           mysqldump -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_FILE"
           gzip -f "$BACKUP_FILE"
-          echo "[✔] Backup created: $BACKUP_FILE.gz"
 
-      - name: 📄 Generate Ledger CSV
+      - name: 🌐 Deploy to GitHub Pages
         run: |
-          echo "[+] Generating ledger CSV..."
-          sudo mkdir -p "$LEDGER_DIR"
-          mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions \
-            INTO OUTFILE '/var/lib/mysql-files/ledger.csv' \
-            FIELDS TERMINATED BY ',' ENCLOSED BY '"' \
-            LINES TERMINATED BY '\n';"
-          sudo mv /var/lib/mysql-files/ledger.csv "$LEDGER_DIR/ledger.csv"
-          gzip -f "$LEDGER_DIR/ledger.csv"
-          echo "[✔] Ledger file created: $LEDGER_DIR/ledger.csv.gz"
+          echo "[+] Deploying ledger to GitHub Pages..."
+          mkdir -p "$SITE_DIR"
+          cp "$LEDGER_DIR"/ledger.csv.gz "$SITE_DIR/ledger.csv.gz"
+          touch "$SITE_DIR/index.html"
+          echo "Ledger archive available." > "$SITE_DIR/index.html"
 
-      - name: 🚀 Deploy to GitHub Pages
-        run: |
-          echo "[+] Preparing GitHub Pages content..."
-          cp "$LEDGER_DIR/ledger.csv.gz" "$SITE_DIR/ledger.csv.gz"
-          cd "$SITE_DIR"
-          git init
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add .
-          git commit -m "Deploy ledger to GitHub Pages"
-          git branch -M gh-pages
-          git remote add origin "https://github.com/${{ github.repository }}.git"
-          git push -f origin gh-pages
-          echo "[✔] GitHub Pages deployed."
+      - name: 📉 Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "$SITE_DIR"
+
+      - name: 📊 Deploy GitHub Pages
+        uses: actions/deploy-pages@v4
