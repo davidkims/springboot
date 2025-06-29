@@ -1,4 +1,4 @@
-name: 🐬 Full MySQL Workflow with Auto Recovery & Backup
+name: 🐬 Full MySQL Workflow with Auto Recovery, GPG, CSV, ZIP
 
 on:
   schedule:
@@ -34,10 +34,12 @@ jobs:
 
       - name: 📁 Prepare Directories
         run: |
-          mkdir -p sql export .github/queries backup
+          echo "[📁] Creating directories..."
+          mkdir -p sql export backup .github/queries
 
       - name: 🩺 Wait for MySQL Health or Restart
         run: |
+          echo "[🩺] Checking MySQL health..."
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
             STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CID)
@@ -55,6 +57,7 @@ jobs:
 
       - name: 🗃️ Load SQL DB from Dump if Exists
         run: |
+          echo "[🗃️] Checking for SQL dump file..."
           if [ -f "sql/backup_dump.sql" ]; then
             echo "[+] Loading SQL dump..."
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/backup_dump.sql
@@ -64,6 +67,7 @@ jobs:
 
       - name: 📄 Generate init.sql and Backup
         run: |
+          echo "[📄] Creating init.sql..."
           echo "USE sample_db;" > sql/init.sql
           echo "CREATE TABLE IF NOT EXISTS users (" >> sql/init.sql
           echo "  id INT AUTO_INCREMENT PRIMARY KEY," >> sql/init.sql
@@ -78,12 +82,14 @@ jobs:
           echo ");" >> sql/init.sql
           echo "INSERT INTO customers (customer_name) VALUES ('고객A'), ('고객B'), ('고객C');" >> sql/init.sql
           cp sql/init.sql backup/init.sql.backup
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/init.sql
 
       - name: 🔁 Check and Create Missing Tables
         run: |
-          echo "[+] Checking and creating tables..."
+          echo "[🔁] Checking required tables..."
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e \
             "SHOW TABLES LIKE 'customers';" | grep customers || {
+            echo "[!] Creating missing customers table..."
             echo "CREATE TABLE IF NOT EXISTS customers (
               customer_id INT AUTO_INCREMENT PRIMARY KEY,
               customer_name VARCHAR(100) NOT NULL,
@@ -91,8 +97,10 @@ jobs:
             );" > sql/fix_customers.sql
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_customers.sql
           }
+
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e \
             "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || {
+            echo "[!] Creating missing credit_card_transactions table..."
             echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (
               transaction_id INT AUTO_INCREMENT PRIMARY KEY,
               customer_id INT NOT NULL,
@@ -106,12 +114,15 @@ jobs:
 
       - name: 💳 Simulate Transactions with Valid Customers
         run: |
+          echo "[💳] Generating simulated transactions..."
           CUSTOMER_IDS=$(MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -Bse "SELECT customer_id FROM customers;")
           echo "USE sample_db;" > sql/simulate_transactions.sql
           for cid in $CUSTOMER_IDS; do
             amount=$(( (RANDOM % 100000) + 1000 ))
             echo "INSERT INTO credit_card_transactions (customer_id, card_number, amount) VALUES ($cid, '4111111111111111', $amount);" >> sql/simulate_transactions.sql
           done
+
+          echo "[💳] Executing transaction inserts..."
           for retry in {1..3}; do
             if MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/simulate_transactions.sql; then
               echo "[✔] Transaction simulation succeeded"
@@ -128,21 +139,53 @@ jobs:
 
       - name: 📤 Export customers.csv
         run: |
+          echo "[📤] Exporting customers to CSV..."
           echo "customer_id,customer_name,registered_at" > export/customers.csv
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e \
             "SELECT customer_id, customer_name, registered_at FROM customers;" \
             | tail -n +2 >> export/customers.csv
+          echo "[✔] customers.csv created."
 
-      - name: 📁 Upload CSV Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: customers-csv
-          path: export/customers.csv
+      - name: 📈 Export credit_card_transactions.csv
+        run: |
+          echo "[📈] Exporting transaction records to CSV..."
+          echo "transaction_id,customer_id,card_number,amount,transaction_time" > export/credit_card_transactions.csv
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e \
+            "SELECT transaction_id, customer_id, card_number, amount, transaction_time FROM credit_card_transactions;" \
+            | tail -n +2 >> export/credit_card_transactions.csv
+          echo "[✔] transactions.csv created."
 
       - name: 🧷 Backup SQL Dump using mysqldump
         run: |
-          echo "[+] Performing mysqldump backup..."
+          echo "[🧷] Performing mysqldump..."
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
           BACKUP_FILE=sql/backup_dump_$TIMESTAMP.sql
           MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > $BACKUP_FILE
-          ln -sf $BACKUP_FILE sql/backup_dump.sql
+          rm -f sql/backup_dump.sql
+          ln -s $(basename $BACKUP_FILE) sql/backup_dump.sql
+          echo "[✔] SQL dump complete: $BACKUP_FILE"
+
+      - name: 🔐 GPG Encrypt SQL Backup (.sql → .gpg)
+        run: |
+          echo "[🔐] Encrypting latest SQL dump with GPG..."
+          BACKUP_PATH=$(readlink -f sql/backup_dump.sql)
+          gpg --batch --yes --passphrase 'gpgtest123' --symmetric --cipher-algo AES256 -o "${BACKUP_PATH}.gpg" "$BACKUP_PATH"
+          echo "[✔] Encrypted file: ${BACKUP_PATH}.gpg"
+
+      - name: 📦 Compress SQL files into ZIP (daily)
+        run: |
+          echo "[📦] Compressing SQL files into ZIP archive..."
+          TODAY=$(date +'%Y%m%d')
+          ZIP_FILE="backup/sql_backup_${TODAY}.zip"
+          zip -j "$ZIP_FILE" sql/*.sql
+          echo "[✔] ZIP archive created: $ZIP_FILE"
+
+      - name: 🚀 Upload Artifacts (CSV, GPG, ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-backup-artifacts
+          path: |
+            export/customers.csv
+            export/credit_card_transactions.csv
+            sql/*.gpg
+            backup/*.zip
