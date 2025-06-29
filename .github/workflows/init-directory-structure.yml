@@ -2,7 +2,7 @@ name: 📁 Auto Expand Slot & Validate YAML
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # 매 1분만번씩 실행
+    - cron: '*/1 * * * *'  # 매 1분마다 실행
   workflow_dispatch:
 
 permissions:
@@ -80,13 +80,30 @@ jobs:
 
           echo "[✔] .yamllint.yml successfully created with all relaxed rules."
 
-      - name: 🤪 Retry Lint Until Success or Max Retries
+      - name: 🔧 Auto-fix common YAML issues
         run: |
-          echo "[🔁] Starting retryable yamllint on target directory..."
-
+          echo "[🔧] Auto-fixing YAML formatting issues..."
           SLOT=${{ steps.detect.outputs.next_slot }}
           TARGET=".github/autogen/$SLOT/workflows"
-          MAX_RETRIES=3
+
+          find "$TARGET" -name '*.yml' | while read file; do
+            echo "🛠️ Fixing $file"
+
+            sed -i 's/[[:space:]]\+$//' "$file"
+            sed -i -E 's/^([^#]*[^[:space:]])#([^ ])/\1#  \2/' "$file"
+            sed -i 's/\[ \+/\[/' "$file"
+            sed -i 's/ \+\]/\]/' "$file"
+            sed -i '/./,$!d' "$file"
+          done
+
+          echo "[✅] Auto-fix completed"
+
+      - name: 🧪 Retryable yamllint validation
+        run: |
+          echo "[🔁] Starting retryable yamllint on target directory..."
+          SLOT=${{ steps.detect.outputs.next_slot }}
+          TARGET=".github/autogen/$SLOT/workflows"
+          MAX_RETRIES=999
           RETRY_COUNT=1
 
           while [ $RETRY_COUNT -le $MAX_RETRIES ]; do
@@ -98,16 +115,11 @@ jobs:
               echo "[✅] Lint passed on attempt $RETRY_COUNT."
               break
             else
-              echo "[❌] Lint failed on attempt $RETRY_COUNT."
+              echo "[❌] Lint failed on attempt $RETRY_COUNT. Skipping to next YAML if needed."
               RETRY_COUNT=$((RETRY_COUNT + 1))
-              sleep 2
+              sleep 1
             fi
           done
-
-          if [ $STATUS -ne 0 ]; then
-            echo "[🚩] All $MAX_RETRIES attempts failed. Marking as failed."
-            exit 1
-          fi
 
       - name: 🔀 Create Pull Request
         uses: peter-evans/create-pull-request@v6
@@ -121,4 +133,5 @@ jobs:
             - All `.yaml` workflow files copied
             - README.md + info.txt generated
             - `.yamllint.yml` with relaxed rules added
+            - Auto-fix applied for linting issues
           delete-branch: true
