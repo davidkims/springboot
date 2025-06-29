@@ -1,4 +1,4 @@
-name: 📁 Auto Generate Next Slot & PR (every minute)
+name: 📁 Auto Create Slot, PR & Merge
 
 on:
   schedule:
@@ -23,10 +23,10 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: 📊 현재 가장 최신 슬롯 번호 추출 및 신규 슬롯 계산
+      - name: 📊 슬롯 번호 자동 계산
         id: detect
         run: |
-          echo "[🔍] 슬롯 디렉토리 검색 중..."
+          echo "[📊] 기존 슬롯 목록 확인..."
           mkdir -p disk
           EXISTING=$(find disk -maxdepth 1 -type d -name 'slot-*' | sed 's|.*/slot-||' | sort -n)
           echo "$EXISTING" | sed 's/^/[📁] 기존 슬롯: slot-/'
@@ -38,42 +38,57 @@ jobs:
             NEXT_SLOT=$(printf "%03d" $((10#$LAST_SLOT + 1)))
           fi
           echo "[➡️] 다음 슬롯 번호: slot-$NEXT_SLOT"
-
           echo "next_slot=slot-${NEXT_SLOT}" >> $GITHUB_OUTPUT
 
-      - name: 📁 신규 슬롯 디렉토리 및 파일 생성 (echo 기반)
+      - name: 🕓 브랜치 이름 생성 (타임스탬프 포함)
+        id: timestamp
+        run: |
+          BRANCH_NAME="slot-update-$(date +'%Y%m%d-%H%M%S')"
+          echo "[🌿] 브랜치 이름: $BRANCH_NAME"
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+      - name: 📁 신규 슬롯 디렉토리 및 파일 생성
         run: |
           SLOT_NAME=${{ steps.detect.outputs.next_slot }}
           SLOT_DIR="disk/$SLOT_NAME"
 
-          echo "[📁] $SLOT_DIR 생성 중..."
+          echo "[📁] 디렉토리 생성: $SLOT_DIR"
           mkdir -p "$SLOT_DIR"
 
           echo "# $SLOT_NAME" > "$SLOT_DIR/README.md"
           echo "Slot: $SLOT_NAME" > "$SLOT_DIR/slot-info.txt"
           echo "Created: $(date -u)" >> "$SLOT_DIR/slot-info.txt"
+          echo "[✔] 슬롯 echo 파일 생성 완료."
 
-          echo "[✔] $SLOT_DIR/README.md, slot-info.txt 생성 완료"
-
-      - name: 🔗 심볼릭 링크 slot-latest → 새 슬롯
+      - name: 🔗 최신 심볼릭 링크 업데이트
         run: |
           SLOT_NAME=${{ steps.detect.outputs.next_slot }}
-          echo "[🔗] 최신 심볼릭 링크 업데이트: slot-latest → $SLOT_NAME"
+          echo "[🔗] 심볼릭 링크 업데이트: disk/slot-latest → $SLOT_NAME"
           rm -rf disk/slot-latest
           ln -s $SLOT_NAME disk/slot-latest
+          echo "[📂] 디스크 구조:"
           ls -l disk/
 
-      - name: 🔀 Pull Request 생성
+      - name: 🔀 PR 자동 생성
+        id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "🔁 Auto create ${{ steps.detect.outputs.next_slot }} & update symlink"
-          branch: slot-update-${{ steps.detect.outputs.next_slot }}
+          branch: ${{ steps.timestamp.outputs.branch }}
           title: "🔁 Create ${{ steps.detect.outputs.next_slot }} & Update slot-latest"
           body: |
             This PR was automatically generated:
-            - Created new slot `${{ steps.detect.outputs.next_slot }}`
-            - Added `README.md` and `slot-info.txt` using echo
-            - Updated `disk/slot-latest` symlink
-            - Auto-executed every 1 minute
+            - Created `${{ steps.detect.outputs.next_slot }}`
+            - Added README.md and slot-info.txt
+            - Updated symlink to slot-latest
           delete-branch: true
+
+      - name: ✅ PR 자동 승인 및 병합
+        if: steps.cpr.outputs.pull-request-url != ''
+        run: |
+          echo "[✅] PR 자동 승인 및 병합..."
+          gh pr review --approve "${{ steps.cpr.outputs.pull-request-url }}"
+          gh pr merge --auto --squash "${{ steps.cpr.outputs.pull-request-url }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
