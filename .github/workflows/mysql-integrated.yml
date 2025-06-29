@@ -1,142 +1,102 @@
-name: 🐬 MySQL 전체 설정, 마이그리언 및 자동 백업
+name: 🧾 Multi-Transaction Backup (Per-Type Containers)
 
 on:
   schedule:
-    - cron: '*/1 * * * *'
-  workflow_dispatch:
+    - cron: '*/1 * * * *'  # 매 1분마다 자동 실행
+  workflow_dispatch:        # 수동 실행도 가능
 
 jobs:
-  mysql_full_pipeline:
+  finance:
     runs-on: ubuntu-latest
 
     env:
-      MYSQL_IMAGE: mysql:8.0
-      DB_NAME: example_db
-      DB_USER: root
-      DB_PASS: rootpass123
       ROOT_PASS: rootpass123
-      MIGRATION_DIR: /opt/mysql/migrations
-      BACKUP_DIR: /opt/backup/sql
-      LEDGER_DIR: /opt/backup/ledgers
-      SITE_DIR: site
+      SQL_DIR: /opt/finance/sql
+      BACKUP_DIR: /opt/finance/backups
+      TYPES: |
+        bank_transfer
+        check_card
+        credit_card
+        bitcoin
+        stock
+        futures
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 Prepare Directories
+      - name: 📁 Create SQL & Backup Directories
         run: |
-          echo "[+] Creating required directories..."
-          sudo mkdir -p "$MIGRATION_DIR" "$BACKUP_DIR" "$LEDGER_DIR" "$SITE_DIR"
-          sudo chmod -R 777 /opt/mysql /opt/backup "$SITE_DIR"
+          echo "[+] Preparing SQL and backup directories..."
+          sudo mkdir -p $SQL_DIR $BACKUP_DIR
+          sudo chmod -R 777 /opt/finance
 
-      - name: 📋 Generate Migration SQL (echo-based)
-        run: |
-          echo "[+] Generating SQL migration file..."
-          {
-            echo "CREATE TABLE IF NOT EXISTS accounts ("
-            echo "  id INT AUTO_INCREMENT PRIMARY KEY,"
-            echo "  name VARCHAR(50),"
-            echo "  balance DECIMAL(12,2)"
-            echo ");"
-            echo ""
-            echo "CREATE TABLE IF NOT EXISTS corporate_transactions ("
-            echo "  transaction_id INT AUTO_INCREMENT PRIMARY KEY,"
-            echo "  corporate_name VARCHAR(100) NOT NULL,"
-            echo "  transaction_type VARCHAR(50) NOT NULL,"
-            echo "  amount DECIMAL(12,2) NOT NULL,"
-            echo "  transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP"
-            echo ");"
-            echo ""
-            echo "INSERT INTO accounts(name, balance) VALUES ('홍길동', 1000000);"
-            echo "INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES('ABC Corporation', 'Purchase', 500000);"
-            echo "INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES('XYZ Inc.', 'Sale', 250000);"
-          } | sudo tee "$MIGRATION_DIR/migrate.sql"
-          echo "[✔] Migration file generated at $MIGRATION_DIR/migrate.sql"
+          echo "[+] Creating base init.sql"
+          echo "CREATE TABLE IF NOT EXISTS transfers (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            type VARCHAR(30),
+            amount DECIMAL(15,2),
+            currency VARCHAR(5),
+            status VARCHAR(20)
+          );" > $SQL_DIR/init.sql
 
-      - name: 🧚 Install MySQL Server
-        run: |
-          echo "[+] Installing MySQL server..."
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-          echo "[✔] MySQL installed."
-
-      - name: 🔐 Reset MySQL Root Password
-        run: |
-          echo "[+] Resetting MySQL root password..."
-          sudo systemctl stop mysql
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
-          sudo mysqld_safe --skip-networking --skip-grant-tables &
-          sleep 10
-          echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$ROOT_PASS'; FLUSH PRIVILEGES;" | sudo mysql -u root
-          sudo killall mysqld
-          sleep 5
-          sudo systemctl start mysql
-          echo "[✔] Root password reset."
-
-      - name: 💧 Create Database and Grant Privileges
-        run: |
-          echo "[+] Creating database and granting privileges..."
-          mysql -u root -p"$ROOT_PASS" -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
-          mysql -u root -p"$ROOT_PASS" -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-          mysql -u root -p"$ROOT_PASS" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
-          mysql -u root -p"$ROOT_PASS" -e "FLUSH PRIVILEGES;"
-          echo "[✔] Database and user setup complete."
-
-      - name: 🗓 Run SQL Migration
-        run: |
-          echo "[+] Running migration..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$MIGRATION_DIR/migrate.sql"
-          echo "[✔] Migration executed."
-
-      - name: 🔀 Simulate Transactions
-        run: |
-          echo "[+] Generating transaction simulation SQL..."
-          echo "USE $DB_NAME;" > simulate_transactions.sql
-          for i in $(seq 1 60); do
-            company="SimCorp_$i"
-            type=$( [ $((i % 2)) -eq 0 ] && echo "Purchase" || echo "Sale" )
-            amount=$(( RANDOM % 100000 + 10000 ))
-            echo "INSERT INTO corporate_transactions(corporate_name, transaction_type, amount) VALUES ('$company', '$type', $amount);" >> simulate_transactions.sql
+          echo "[+] Generating per-type insert SQL files..."
+          for TYPE in $TYPES; do
+            echo "-- Inserts for $TYPE" > $SQL_DIR/${TYPE}_insert.sql
+            for i in $(seq 1 100); do
+              AMOUNT=$(( (RANDOM % 1000000) + 1000 ))
+              CURRENCY="KRW"
+              STATUS=$([ $((RANDOM % 2)) -eq 0 ] && echo "completed" || echo "pending")
+              echo "INSERT INTO transfers(type, amount, currency, status) VALUES('$TYPE', $AMOUNT, '$CURRENCY', '$STATUS');" >> $SQL_DIR/${TYPE}_insert.sql
+            done
+            cat $SQL_DIR/${TYPE}_insert.sql >> $SQL_DIR/init.sql
           done
-          echo "[+] Running transaction simulation..."
-          mysql -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" < simulate_transactions.sql
-          echo "[✔] Simulation complete."
+          echo "[✔] All insert SQL generated."
 
-      - name: 📉 Generate Ledger CSV
+      - name: 🔁 Loop over Transaction Types
         run: |
-          echo "[+] Generating ledger CSV..."
-          sudo mkdir -p "$LEDGER_DIR"
-          sudo chmod 777 /var/lib/mysql-files
-          mysql -u "$DB_USER" -p"$DB_PASS" -e "SELECT * FROM $DB_NAME.corporate_transactions \
-            INTO OUTFILE '/var/lib/mysql-files/ledger.csv' \
-            FIELDS TERMINATED BY ',' ENCLOSED BY '"' \
-            LINES TERMINATED BY '\n';"
-          sudo mv /var/lib/mysql-files/ledger.csv "$LEDGER_DIR/ledger.csv"
-          gzip -f "$LEDGER_DIR/ledger.csv"
-          echo "[✔] Ledger file created: $LEDGER_DIR/ledger.csv.gz"
+          echo "[🔁] Looping through transaction types..."
+          for TYPE in $TYPES; do
+            DB_NAME="db_${TYPE}"
+            DB_USER="user_${TYPE}"
+            DB_PASS="pass_${TYPE}"
+            CONTAINER="mysql_${TYPE}"
+            PORT=$((3307 + RANDOM % 1000))
 
-      - name: 📃 Backup MySQL DB
+            echo "🚀 Starting container: $CONTAINER for $TYPE on port $PORT"
+            docker run -d --rm \
+              --name $CONTAINER \
+              -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
+              -e MYSQL_DATABASE=$DB_NAME \
+              -e MYSQL_USER=$DB_USER \
+              -e MYSQL_PASSWORD=$DB_PASS \
+              -v $SQL_DIR:/docker-entrypoint-initdb.d \
+              -p $PORT:3306 \
+              mysql:8.0
+
+            echo "⏳ Waiting for MySQL to initialize for $TYPE..."
+            sleep 30
+
+            echo "🔍 Checking for completed transactions for $TYPE..."
+            STATUS=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
+            echo "✅ $STATUS completed $TYPE transactions found"
+
+            if [ "$STATUS" != "0" ]; then
+              FILE="$BACKUP_DIR/${TYPE}_backup.sql"
+              echo "💾 Backing up $TYPE to $FILE"
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $FILE
+              echo "[✔] Backup saved for $TYPE"
+            else
+              echo "⏭️ No completed $TYPE transactions. Skipping backup."
+            fi
+
+            docker stop $CONTAINER
+          done
+
+      - name: 🗜️ Compress All Backups
         run: |
-          echo "[+] Backing up MySQL DB..."
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
-          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
-          mysqldump -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" > "$BACKUP_FILE"
-          gzip -f "$BACKUP_FILE"
-          echo "[✔] Backup created: $BACKUP_FILE.gz"
-
-      - name: 🌐 Deploy to GitHub Pages
-        run: |
-          echo "[+] Deploying ledger to GitHub Pages..."
-          mkdir -p "$SITE_DIR"
-          cp "$LEDGER_DIR"/ledger.csv.gz "$SITE_DIR/ledger.csv.gz"
-          echo "Ledger archive available." > "$SITE_DIR/index.html"
-          echo "[✔] GitHub Pages content prepared."
-
-      - name: 📊 Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: "$SITE_DIR"
-
-      - name: 📊 Deploy GitHub Pages
-        uses: actions/deploy-pages@v4
+          echo "[🗜️] Compressing backup files..."
+          cd $BACKUP_DIR
+          ARCHIVE_NAME="finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
+          tar -czf $ARCHIVE_NAME *.sql
+          echo "[✔] Created archive: $ARCHIVE_NAME"
