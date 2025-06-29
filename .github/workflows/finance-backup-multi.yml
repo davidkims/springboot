@@ -20,10 +20,15 @@ jobs:
         futures
 
     steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+
       - name: 📁 Create SQL & Backup Directories
         run: |
+          echo "[📁] Creating directories..."
           sudo mkdir -p $SQL_DIR $BACKUP_DIR
           sudo chmod -R 777 /opt/finance
+          echo "[🛠️] Creating init.sql..."
           echo "CREATE TABLE IF NOT EXISTS transfers (id INT AUTO_INCREMENT PRIMARY KEY, type VARCHAR(30), amount DECIMAL(15,2), currency VARCHAR(5), status VARCHAR(20));" > $SQL_DIR/init.sql
           echo "INSERT INTO transfers(type, amount, currency, status) VALUES
             ('bank_transfer', 100000, 'KRW', 'completed'),
@@ -32,15 +37,17 @@ jobs:
             ('bitcoin', 0.03, 'BTC', 'pending'),
             ('stock', 1000000, 'KRW', 'completed'),
             ('futures', 500000, 'KRW', 'pending');" >> $SQL_DIR/init.sql
+          echo "[✔] SQL script prepared at $SQL_DIR/init.sql"
 
       - name: 🔁 Loop over Transaction Types
         run: |
+          echo "[🔁] Starting transaction loop..."
           for TYPE in $TYPES; do
             DB_NAME="db_${TYPE}"
             DB_USER="user_${TYPE}"
             DB_PASS="pass_${TYPE}"
             CONTAINER="mysql_${TYPE}"
-            PORT=$((3307 + RANDOM % 1000)) # 동적 포트 방지용
+            PORT=$((3307 + RANDOM % 1000))
 
             echo "🚀 Starting container: $CONTAINER for $TYPE on port $PORT"
             docker run -d --rm \
@@ -53,7 +60,7 @@ jobs:
               -p $PORT:3306 \
               mysql:8.0
 
-            echo "⏳ Waiting for MySQL to initialize ($TYPE)..."
+            echo "⏳ Waiting for MySQL to initialize for $TYPE..."
             sleep 30
 
             echo "🔍 Checking if status='completed' for $TYPE..."
@@ -62,17 +69,21 @@ jobs:
 
             if [ "$STATUS" != "0" ]; then
               FILE="$BACKUP_DIR/${TYPE}_backup.sql"
-              echo "💾 Backing up $TYPE to $FILE"
+              echo "💾 Backing up $TYPE transactions to $FILE"
               mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $FILE
+              echo "[✔] Backup saved: $FILE"
             else
-              echo "⏭️ No completed $TYPE transactions, skipping backup"
+              echo "⏭️ No completed $TYPE transactions. Skipping backup."
             fi
 
+            echo "🛑 Stopping container: $CONTAINER"
             docker stop $CONTAINER
           done
 
       - name: 🗜️ Compress All Backups
         run: |
+          echo "[🗜️] Compressing backups..."
           cd $BACKUP_DIR
-          tar -czf finance-backups-${{ github.run_id }}.tar.gz *.sql || echo "No backups to compress"
-          ls -lh
+          ARCHIVE="finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
+          tar -czf $ARCHIVE *.sql
+          echo "[✔] Backups compressed into: $ARCHIVE"
