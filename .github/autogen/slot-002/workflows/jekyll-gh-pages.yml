@@ -1,0 +1,79 @@
+name: 🔁 Auto Finance Backup (Manual + Cron)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"  # 매 5분마다 실행
+
+jobs:
+  auto-finance-backup:
+    runs-on: ubuntu-latest
+
+    env:
+      DB_NAME: finance
+      DB_USER: root
+      DB_PASS: rootpass123
+      BACKUP_DIR: /opt/finance/backups
+      SQL_INIT_FILE: /opt/finance/init.sql
+
+    steps:
+      - name: 📂 1. 디렉토리 및 SQL 초기화 파일 생성
+        run: |
+          echo "📁 [mkdir] 백업 디렉토리 생성: $BACKUP_DIR"
+          sudo mkdir -p "$BACKUP_DIR"
+          echo "📄 [echo] SQL 초기화 파일 작성: $SQL_INIT_FILE"
+          {
+            echo "CREATE TABLE IF NOT EXISTS transactions ("
+            echo "  id INT AUTO_INCREMENT PRIMARY KEY,"
+            echo "  type VARCHAR(30),"
+            echo "  amount DECIMAL(10,2),"
+            echo "  currency VARCHAR(10),"
+            echo "  status VARCHAR(20),"
+            echo "  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            echo ");"
+          } | tee "$SQL_INIT_FILE"
+          echo "📃 SQL 파일 내용:"
+          cat "$SQL_INIT_FILE"
+
+      - name: 🐬 2. MySQL 컨테이너 실행
+        run: |
+          echo "🐳 [docker run] MySQL 컨테이너 실행 중..."
+          docker run -d --rm \
+            --name mysql-auto \
+            -e MYSQL_ROOT_PASSWORD=$DB_PASS \
+            -e MYSQL_DATABASE=$DB_NAME \
+            -v "$SQL_INIT_FILE":/docker-entrypoint-initdb.d/init.sql \
+            -p 3306:3306 \
+            mysql:8.0
+          echo "⏳ [wait] DB 초기화를 위해 25초 대기"
+          sleep 25
+
+      - name: 🔐 3. 로그인 구성 및 백업 수행
+        run: |
+          echo "🔐 [auth] ~/.my.cnf 생성"
+          {
+            echo "[client]"
+            echo "user=$DB_USER"
+            echo "password=$DB_PASS"
+            echo "host=127.0.0.1"
+            echo "port=3306"
+          } > ~/.my.cnf
+          chmod 600 ~/.my.cnf
+
+          echo "🕐 [timestamp] 타임스탬프 생성"
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.sql"
+
+          echo "💾 [mysqldump] 백업 파일 생성: $BACKUP_FILE"
+          mysqldump --defaults-file=~/.my.cnf --no-tablespaces "$DB_NAME" > "$BACKUP_FILE"
+
+          echo "✅ 백업 완료. 파일 경로:"
+          ls -lh "$BACKUP_FILE"
+
+          echo "📜 [verify] SHOW TABLES 결과:"
+          mysql --defaults-file=~/.my.cnf -e "USE $DB_NAME; SHOW TABLES;"
+
+      - name: 🧹 4. MySQL 컨테이너 종료
+        run: |
+          echo "🧼 [docker stop] 컨테이너 중지 시도..."
+          docker stop mysql-auto || echo "⚠️ 컨테이너가 실행 중이 아님"
