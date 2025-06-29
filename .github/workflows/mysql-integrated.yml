@@ -11,8 +11,11 @@ jobs:
 
     env:
       ROOT_PASS: rootpass123
+      GIT_EMAIL: github-actions@users.noreply.github.com
+      GIT_NAME: github-actions
       SQL_DIR: /opt/finance/sql
       BACKUP_DIR: /opt/finance/backups
+      PROVENANCE_DIR: /opt/finance/provenance
       TYPES: |
         bank_transfer
         check_card
@@ -24,14 +27,16 @@ jobs:
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 📁 Prepare Directories & Unified init.sql
+      - name: 📁 Prepare Directories & init.sql
         run: |
-          echo "[📁] Creating directories..."
-          sudo mkdir -p $SQL_DIR $BACKUP_DIR
+          echo "[📁] Setting up directories..."
+          sudo mkdir -p $SQL_DIR $BACKUP_DIR $PROVENANCE_DIR
           sudo chmod -R 777 /opt/finance
 
-          echo "[📝] Writing init.sql..."
+          echo "[📝] Creating init.sql..."
           echo "CREATE TABLE IF NOT EXISTS transfers (
             id INT AUTO_INCREMENT PRIMARY KEY,
             type VARCHAR(30),
@@ -50,7 +55,7 @@ jobs:
           done
           echo "[✔] init.sql ready"
 
-      - name: 🔁 Launch MySQL containers and backup
+      - name: 🔁 Loop over types
         run: |
           for TYPE in $TYPES; do
             DB_NAME="db_${TYPE}"
@@ -59,7 +64,7 @@ jobs:
             CONTAINER="mysql_${TYPE}"
             PORT=$((3307 + RANDOM % 1000))
 
-            echo "🚀 Starting container $CONTAINER..."
+            echo "🚀 Starting $CONTAINER..."
             docker run -d \
               --name $CONTAINER \
               -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
@@ -77,35 +82,49 @@ jobs:
             echo "⏳ Waiting for $CONTAINER to be healthy..."
             for i in {1..10}; do
               if ! docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER$"; then
-                echo "[❌] Container $CONTAINER disappeared. Possibly failed init.sql."
+                echo "[❌] $CONTAINER crashed"
                 exit 1
               fi
-
               STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER || echo "notfound")
-              echo "  - Health check $i: $STATUS"
+              echo "  - Health $i: $STATUS"
               if [ "$STATUS" = "healthy" ]; then
-                echo "[✔] $CONTAINER is healthy."
+                echo "[✔] Healthy"
                 break
               fi
               sleep 6
-              if [ "$i" -eq 10 ]; then
-                echo "[❌] $CONTAINER failed to become healthy after 10 tries."
+              if [ $i -eq 10 ]; then
                 docker logs $CONTAINER
                 docker stop $CONTAINER
                 exit 1
               fi
             done
 
-            echo "🔍 Querying $TYPE for completed transactions..."
+            echo "🔍 Checking completed rows for $TYPE..."
             COUNT=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
-            echo "✅ Found $COUNT completed records"
+            echo "✅ Found $COUNT completed"
 
             if [ "$COUNT" != "0" ]; then
               FILE="$BACKUP_DIR/${TYPE}_backup.sql"
-              echo "💾 Backing up $TYPE to $FILE"
+              echo "💾 Backing up to $FILE"
               mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $FILE
+
+              PROV_FILE="$PROVENANCE_DIR/.provenance_${TYPE}.json"
+              echo "[📜] Creating provenance via echo to $PROV_FILE"
+              {
+                echo '{'
+                echo "  \"type\": \"$TYPE\","
+                echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+                echo "  \"status\": \"completed\","
+                echo "  \"backup_file\": \"$FILE\","
+                echo "  \"workflow\": \"${{ github.workflow }}\","
+                echo "  \"repository\": \"${{ github.repository }}\","
+                echo "  \"run_id\": \"${{ github.run_id }}\","
+                echo "  \"run_number\": \"${{ github.run_number }}\""
+                echo '}'
+              } > "$PROV_FILE"
+              echo "[✔] Provenance file created: $PROV_FILE"
             else
-              echo "⏭️ No completed records for $TYPE"
+              echo "⏭️ No data for $TYPE"
             fi
 
             docker stop $CONTAINER
@@ -117,4 +136,14 @@ jobs:
           cd $BACKUP_DIR
           ARCHIVE="finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
           tar -czf $ARCHIVE *.sql
-          echo "[✔] Created: $ARCHIVE"
+          echo "[✔] Archive: $ARCHIVE"
+
+      - name: 🏷️ Git Tag Push
+        run: |
+          TAG="v$(date +%Y%m%d-%H%M%S)"
+          echo "[🏷️] Tagging: $TAG"
+          git config --global user.email "${{ env.GIT_EMAIL }}"
+          git config --global user.name "${{ env.GIT_NAME }}"
+          git fetch origin
+          git tag "$TAG"
+          git push origin "$TAG"
