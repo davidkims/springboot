@@ -2,7 +2,7 @@ name: 📁 Auto Expand Slot & Validate YAML
 
 on:
   schedule:
-    - cron: '*/1 * * * *'
+    - cron: '*/1 * * * *'  # 매 1분만번씩 실행
   workflow_dispatch:
 
 permissions:
@@ -27,26 +27,28 @@ jobs:
           echo "next_slot=$NEXT" >> $GITHUB_OUTPUT
           echo "[➡️] Next slot: $NEXT"
 
-      - name: 🏗️ Create next slot directory and copy workflows
+      - name: 🏗️ Create next slot directory and workflows
         run: |
           SLOT=${{ steps.detect.outputs.next_slot }}
           SLOT_DIR=".github/autogen/$SLOT"
-          echo "[📁] Creating directory: $SLOT_DIR/workflows"
+          echo "[📁] Creating $SLOT_DIR/workflows..."
           mkdir -p "$SLOT_DIR/workflows"
 
-          echo "[📋] Copying .github/workflows/* -> $SLOT_DIR/workflows"
+          echo "[📋] Copying workflows from .github/workflows/..."
           cp -r .github/workflows/* "$SLOT_DIR/workflows/"
 
-          echo "[📄] Writing info.txt and README.md"
+          echo "[📄] Generating info.txt and README.md..."
           echo "Slot generated: $SLOT at $(date -u)" > "$SLOT_DIR/info.txt"
           echo "# Auto Slot: $SLOT" > "$SLOT_DIR/README.md"
 
-          echo "[🔗] Updating symlink to latest slot"
+          echo "[🔗] Updating symlink..."
           ln -sfn "$SLOT" .github/slot-latest
 
       - name: 🛠️ Create relaxed yamllint config
         run: |
-          echo "[🛠️] Creating .yamllint.yml..."
+          echo "[🛠️] Starting creation of .yamllint.yml..."
+          echo "[📄] Writing config to .yamllint.yml"
+
           echo "extends: default" > .yamllint.yml
           echo "" >> .yamllint.yml
           echo "rules:" >> .yamllint.yml
@@ -54,41 +56,58 @@ jobs:
           echo "  line-length:" >> .yamllint.yml
           echo "    max: 200" >> .yamllint.yml
           echo "    level: warning" >> .yamllint.yml
-          echo "[✅] line-length rule added"
+          echo "[✅] Rule added: line-length → max 200, level warning"
 
+          echo "" >> .yamllint.yml
           echo "  document-start:" >> .yamllint.yml
           echo "    present: false" >> .yamllint.yml
-          echo "[✅] document-start rule added"
+          echo "[✅] Rule added: document-start → present false"
 
+          echo "" >> .yamllint.yml
           echo "  truthy:" >> .yamllint.yml
           echo "    allowed-values: ['true', 'false', 'on', 'off', 'yes', 'no']" >> .yamllint.yml
-          echo "[✅] truthy rule added"
+          echo "[✅] Rule added: truthy → allowed values true/false/on/off/yes/no"
 
+          echo "" >> .yamllint.yml
           echo "  comments:" >> .yamllint.yml
           echo "    require-starting-space: false" >> .yamllint.yml
-          echo "[✅] comments rule added"
+          echo "[✅] Rule added: comments → no space required before comment"
 
+          echo "" >> .yamllint.yml
           echo "  trailing-spaces:" >> .yamllint.yml
           echo "    level: warning" >> .yamllint.yml
+          echo "[✅] Rule added: trailing-spaces → warning"
 
-          echo "  brackets:" >> .yamllint.yml
-          echo "    max-spaces-inside: 1" >> .yamllint.yml
-          echo "    level: warning" >> .yamllint.yml
+          echo "[✔] .yamllint.yml successfully created with all relaxed rules."
 
-          echo "[✔] .yamllint.yml created with all relaxed rules"
-
-      - name: 🧪 Run yamllint (non-blocking)
-        continue-on-error: true
+      - name: 🤪 Retry Lint Until Success or Max Retries
         run: |
-          echo "[🔍] Installing yamllint..."
-          pip install --quiet yamllint
+          echo "[🔁] Starting retryable yamllint on target directory..."
 
           SLOT=${{ steps.detect.outputs.next_slot }}
           TARGET=".github/autogen/$SLOT/workflows"
-          echo "[🧪] Linting copied files in $TARGET ..."
-          yamllint -c .yamllint.yml "$TARGET"
+          MAX_RETRIES=3
+          RETRY_COUNT=1
 
-          echo "[ℹ️] Lint completed — errors will NOT stop this workflow."
+          while [ $RETRY_COUNT -le $MAX_RETRIES ]; do
+            echo "[🤪] Attempt $RETRY_COUNT/$MAX_RETRIES: Running yamllint..."
+            yamllint -c .yamllint.yml "$TARGET"
+            STATUS=$?
+
+            if [ $STATUS -eq 0 ]; then
+              echo "[✅] Lint passed on attempt $RETRY_COUNT."
+              break
+            else
+              echo "[❌] Lint failed on attempt $RETRY_COUNT."
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              sleep 2
+            fi
+          done
+
+          if [ $STATUS -ne 0 ]; then
+            echo "[🚩] All $MAX_RETRIES attempts failed. Marking as failed."
+            exit 1
+          fi
 
       - name: 🔀 Create Pull Request
         uses: peter-evans/create-pull-request@v6
@@ -101,5 +120,5 @@ jobs:
             - New directory `.github/autogen/${{ steps.detect.outputs.next_slot }}`
             - All `.yaml` workflow files copied
             - README.md + info.txt generated
-            - `.yamllint.yml` added (relaxed rules)
+            - `.yamllint.yml` with relaxed rules added
           delete-branch: true
