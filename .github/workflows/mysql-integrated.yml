@@ -2,7 +2,7 @@ name: 🧾 Multi-Transaction Backup (Per-Type Containers)
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # 매 1분 자동 실행
+    - cron: '*/1 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -25,13 +25,13 @@ jobs:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 Create SQL & Backup Directories
+      - name: 📁 Prepare Directories & SQL
         run: |
-          echo "[+] Preparing SQL and backup directories..."
+          echo "[📁] Creating required directories..."
           sudo mkdir -p $SQL_DIR $BACKUP_DIR
           sudo chmod -R 777 /opt/finance
 
-          echo "[+] Creating init.sql..."
+          echo "[📝] Generating init.sql..."
           echo "CREATE TABLE IF NOT EXISTS transfers (
             id INT AUTO_INCREMENT PRIMARY KEY,
             type VARCHAR(30),
@@ -40,22 +40,19 @@ jobs:
             status VARCHAR(20)
           );" > $SQL_DIR/init.sql
 
-          echo "[+] Generating 100 inserts per type..."
           for TYPE in $TYPES; do
             echo "-- Inserts for $TYPE" > $SQL_DIR/${TYPE}_insert.sql
             for i in $(seq 1 100); do
               AMOUNT=$(( (RANDOM % 1000000) + 1000 ))
-              CURRENCY="KRW"
               STATUS=$([ $((RANDOM % 2)) -eq 0 ] && echo "completed" || echo "pending")
-              echo "INSERT INTO transfers(type, amount, currency, status) VALUES('$TYPE', $AMOUNT, '$CURRENCY', '$STATUS');" >> $SQL_DIR/${TYPE}_insert.sql
+              echo "INSERT INTO transfers(type, amount, currency, status) VALUES('$TYPE', $AMOUNT, 'KRW', '$STATUS');" >> $SQL_DIR/${TYPE}_insert.sql
             done
             cat $SQL_DIR/${TYPE}_insert.sql >> $SQL_DIR/init.sql
           done
-          echo "[✔] init.sql completed."
+          echo "[✔] SQL 준비 완료"
 
-      - name: 🔁 Loop over Transaction Types
+      - name: 🔁 Loop through types, launch MySQL, and backup
         run: |
-          echo "[🔁] Looping through transaction types..."
           for TYPE in $TYPES; do
             DB_NAME="db_${TYPE}"
             DB_USER="user_${TYPE}"
@@ -63,8 +60,8 @@ jobs:
             CONTAINER="mysql_${TYPE}"
             PORT=$((3307 + RANDOM % 1000))
 
-            echo "🚀 Launching container: $CONTAINER for $TYPE (PORT $PORT)"
-            docker run -d --rm \
+            echo "🚀 Starting $CONTAINER for $TYPE on port $PORT"
+            docker run -d \
               --name $CONTAINER \
               -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
               -e MYSQL_DATABASE=$DB_NAME \
@@ -72,49 +69,55 @@ jobs:
               -e MYSQL_PASSWORD=$DB_PASS \
               -v $SQL_DIR:/docker-entrypoint-initdb.d \
               -p $PORT:3306 \
-              --health-cmd="mysqladmin ping -h localhost -u$DB_USER -p$DB_PASS --silent" \
+              --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -p$ROOT_PASS --silent" \
               --health-interval=5s \
               --health-timeout=3s \
               --health-retries=10 \
               mysql:8.0
 
-            echo "⏳ Waiting for MySQL container ($TYPE) to become healthy..."
+            echo "⏳ Waiting for $CONTAINER to become healthy..."
             for i in {1..10}; do
-              STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER)
-              echo "  - Check $i: $STATUS"
-              if [ "$STATUS" == "healthy" ]; then
-                echo "[✔] MySQL $TYPE is healthy."
+              if ! docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER$"; then
+                echo "[❌] Container $CONTAINER does not exist (may have crashed)."
+                exit 1
+              fi
+
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER || echo "notfound")
+              echo "  - Health check $i: $STATUS"
+              if [ "$STATUS" = "healthy" ]; then
+                echo "[✔] $CONTAINER is healthy."
                 break
               fi
               sleep 6
-              if [ $i -eq 10 ]; then
-                echo "[❌] MySQL container $CONTAINER failed to become healthy."
+              if [ "$i" -eq 10 ]; then
+                echo "[❌] $CONTAINER failed to become healthy after 10 tries."
                 docker logs $CONTAINER
                 docker stop $CONTAINER
                 exit 1
               fi
             done
 
-            echo "🔍 Checking completed transactions in $TYPE..."
+            echo "🔍 Querying $TYPE for completed transactions..."
             COUNT=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
-            echo "✅ $COUNT completed $TYPE transactions"
+            echo "✅ Found $COUNT completed transactions for $TYPE"
 
             if [ "$COUNT" != "0" ]; then
               FILE="$BACKUP_DIR/${TYPE}_backup.sql"
-              echo "💾 Dumping to $FILE"
+              echo "💾 Backing up $TYPE to $FILE"
               mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $FILE
-              echo "[✔] Backup saved: $FILE"
+              echo "[✔] Backup saved for $TYPE"
             else
-              echo "⏭️ Skipping backup for $TYPE (no completed transactions)"
+              echo "⏭️ No completed transactions for $TYPE. Skipping backup."
             fi
 
+            echo "🛑 Stopping container $CONTAINER"
             docker stop $CONTAINER
           done
 
-      - name: 🗜️ Compress All Backups
+      - name: 🗜️ Compress Backups
         run: |
-          echo "[🗜️] Compressing all backups..."
+          echo "[🗜️] Compressing backups..."
           cd $BACKUP_DIR
-          ARCHIVE=finance-backups-$(date +%Y%m%d%H%M%S).tar.gz
-          tar -czf $ARCHIVE *.sql
-          echo "[✔] Archive created: $ARCHIVE"
+          ARCHIVE_NAME="finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
+          tar -czf $ARCHIVE_NAME *.sql
+          echo "[✔] Archive created: $ARCHIVE_NAME"
