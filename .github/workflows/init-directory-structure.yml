@@ -1,4 +1,4 @@
-name: 📁 Auto Expand Slot & Validate YAML
+name: 📁 Slot Autogen & PR
 
 on:
   schedule:
@@ -10,88 +10,81 @@ permissions:
   pull-requests: write
 
 jobs:
-  expand-slot:
+  slot-autogen:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔍 Detect next slot number
-        id: detect
+      - name: 🧮 Detect next slot number
+        id: slot
         run: |
-          echo "[🔢] Detecting next slot number..."
-          PREFIX=".github/autogen/slot-"
-          EXISTING=$(find .github/autogen -maxdepth 1 -type d -name "slot-*" | wc -l)
-          NEXT=$(printf "slot-%03d" $((EXISTING + 1)))
-          echo "next_slot=$NEXT" >> $GITHUB_OUTPUT
-          echo "[➡️] Next slot: $NEXT"
+          echo "[🔢] Finding next available slot..."
+          SLOT_NUM=$(find .github/autogen -maxdepth 1 -type d -name 'slot-*' | sed 's/.*slot-//' | sort -n | tail -n1)
+          NEXT_NUM=$(printf "%03d" $((10#$SLOT_NUM + 1)))
+          echo "next=slot-$NEXT_NUM" >> $GITHUB_OUTPUT
+          echo "[➡️] Next slot will be slot-$NEXT_NUM"
 
-      - name: 📁 Create slot directory and copy workflows
+      - name: 📁 Create new slot directory and copy workflows
         run: |
-          SLOT=${{ steps.detect.outputs.next_slot }}
-          SLOT_DIR=".github/autogen/$SLOT"
-          mkdir -p "$SLOT_DIR/workflows"
-          echo "[📂] Copying .github/workflows to $SLOT_DIR/workflows"
-          cp .github/workflows/*.yml "$SLOT_DIR/workflows/" || echo "[⚠️] No workflows copied"
+          SLOT=${{ steps.slot.outputs.next }}
+          mkdir -p ".github/autogen/$SLOT/workflows"
+          cp .github/workflows/*.yml ".github/autogen/$SLOT/workflows/" || echo "[⚠️] No .yml files found"
+          echo "[✅] Copied workflows to $SLOT"
 
-      - name: 🛠️ Create relaxed .yamllint.yml via echo
+      - name: 🛠️ Create .yamllint.yml
         run: |
-          echo "[🛠️] Creating .yamllint.yml with relaxed rules..."
+          echo "[🛠️] Creating relaxed lint config..."
           echo "extends: default" > .yamllint.yml
-          echo "" >> .yamllint.yml
           echo "rules:" >> .yamllint.yml
           echo "  line-length:" >> .yamllint.yml
           echo "    max: 300" >> .yamllint.yml
           echo "    level: warning" >> .yamllint.yml
           echo "  document-start:" >> .yamllint.yml
           echo "    present: false" >> .yamllint.yml
-          echo "  truthy:" >> .yamllint.yml
-          echo "    allowed-values: ['true', 'false', 'on', 'off', 'yes', 'no']" >> .yamllint.yml
           echo "  comments:" >> .yamllint.yml
           echo "    require-starting-space: false" >> .yamllint.yml
           echo "  trailing-spaces:" >> .yamllint.yml
           echo "    level: warning" >> .yamllint.yml
-          echo "[✔] .yamllint.yml created"
 
-      - name: 🧪 Retryable Lint with yamllint
+      - name: 🔍 Install yamllint
         run: |
-          echo "[🔍] Installing yamllint..."
           pip install --quiet yamllint
-          SLOT_NAME=${{ steps.detect.outputs.next_slot }}
-          TARGET=".github/autogen/$SLOT_NAME/workflows"
-          MAX_RETRIES=3
-          RETRY_COUNT=1
-          while [ $RETRY_COUNT -le $MAX_RETRIES ]; do
-            echo "[🤪] Attempt $RETRY_COUNT/$MAX_RETRIES: yamllint checking..."
+
+      - name: 🧪 Retryable yamllint (non-blocking)
+        continue-on-error: true
+        run: |
+          SLOT=${{ steps.slot.outputs.next }}
+          TARGET=".github/autogen/$SLOT/workflows"
+          MAX_RETRIES=5
+          COUNT=1
+          while [ $COUNT -le $MAX_RETRIES ]; do
+            echo "[🔁] Lint Try #$COUNT"
             yamllint -c .yamllint.yml "$TARGET" && break || {
-              echo "[❌] Lint failed on attempt $RETRY_COUNT"
-              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "[❌] Lint failed at try $COUNT"
               sleep 2
+              COUNT=$((COUNT + 1))
             }
           done
-          if [ $RETRY_COUNT -gt $MAX_RETRIES ]; then
-            echo "[🚩] All $MAX_RETRIES attempts failed — continuing anyway (non-blocking)"
-          fi
 
       - name: 📝 Add metadata files
         run: |
-          SLOT=${{ steps.detect.outputs.next_slot }}
-          echo "Slot generated at $(date -u)" > ".github/autogen/$SLOT/info.txt"
-          echo "# Auto Slot: $SLOT" > ".github/autogen/$SLOT/README.md"
+          SLOT=${{ steps.slot.outputs.next }}
+          echo "Created at $(date -u)" > ".github/autogen/$SLOT/info.txt"
+          echo "# Auto-generated Slot $SLOT" > ".github/autogen/$SLOT/README.md"
           ln -sfn "$SLOT" .github/slot-latest
-          echo "[📄] info.txt and README.md added"
 
-      - name: 🔀 Create Pull Request (no force-push)
+      - name: 🔀 Create Pull Request safely
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "📁 Slot Expand: ${{ steps.detect.outputs.next_slot }}"
-          branch: "slot-expand/${{ steps.detect.outputs.next_slot }}"
-          title: "📁 Auto Expand: ${{ steps.detect.outputs.next_slot }}"
+          commit-message: "📁 Add new slot: ${{ steps.slot.outputs.next }}"
+          branch: "slot-expand/${{ steps.slot.outputs.next }}"
+          title: "📁 Slot Auto Expand: ${{ steps.slot.outputs.next }}"
           body: |
-            This PR includes:
-            - All .yml copied from `.github/workflows`
-            - Slot created: `.github/autogen/${{ steps.detect.outputs.next_slot }}`
-            - Relaxed yamllint validation (non-blocking)
-            - README.md and info.txt generated
+            This PR adds:
+            - Slot: `${{ steps.slot.outputs.next }}`
+            - All workflows copied from `.github/workflows`
+            - Relaxed yamllint config
+            - Non-blocking lint validation
           delete-branch: true
