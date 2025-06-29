@@ -1,4 +1,4 @@
-name: 🗂️ Auto Expand .github + Copy Workflows (1min)
+name: 🗂️ Auto Expand .github + Copy & Lint Workflows
 
 on:
   schedule:
@@ -26,67 +26,70 @@ jobs:
         id: detect
         run: |
           mkdir -p .github/autogen
-          echo "[🔍] Scanning .github/autogen/slot-*..."
           EXISTING=$(find .github/autogen -maxdepth 1 -type d -name 'slot-*' | sed 's|.*/slot-||' | sort -n)
-          echo "$EXISTING" | sed 's/^/[📁] Found: slot-/'
-
-          LAST_SLOT=$(echo "$EXISTING" | sort -n | tail -n 1)
+          LAST_SLOT=$(echo "$EXISTING" | tail -n 1)
           if [ -z "$LAST_SLOT" ]; then
             NEXT_SLOT=001
           else
             NEXT_SLOT=$(printf "%03d" $((10#$LAST_SLOT + 1)))
           fi
-
           echo "next_slot=slot-$NEXT_SLOT" >> $GITHUB_OUTPUT
           echo "[➡️] Next slot: slot-$NEXT_SLOT"
 
       - name: ⏱️ Generate timestamp
         id: time
-        run: |
-          echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        run: echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
       - name: 📁 Create slot directory and echo files
         run: |
           SLOT_NAME=${{ steps.detect.outputs.next_slot }}
           DIR=".github/autogen/$SLOT_NAME"
-          echo "[📁] Creating: $DIR"
           mkdir -p "$DIR"
-
           echo "# $SLOT_NAME" > "$DIR/README.md"
           echo "Slot: $SLOT_NAME" > "$DIR/info.txt"
           echo "Generated: $(date -u)" >> "$DIR/info.txt"
-          echo "[✔] Created $DIR with echo files"
 
-      - name: 📋 Copy all .github/workflows/*.yaml and *.yml to slot
+      - name: 📋 Copy all .github/workflows YAMLs to slot
         run: |
           SLOT_NAME=${{ steps.detect.outputs.next_slot }}
           DEST=".github/autogen/$SLOT_NAME/workflows"
-          echo "[📋] Copying all .yaml/.yml files from .github/workflows → $DEST"
           mkdir -p "$DEST"
           find .github/workflows -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) -exec cp {} "$DEST/" \;
           echo "[✔] Files copied to: $DEST"
           ls -l "$DEST"
 
+      - name: 🧪 Lint copied YAML files with yamllint
+        run: |
+          echo "[🔍] Installing yamllint..."
+          pip install --quiet yamllint
+
+          SLOT_NAME=${{ steps.detect.outputs.next_slot }}
+          TARGET_DIR=".github/autogen/$SLOT_NAME/workflows"
+
+          echo "[🧪] Running yamllint on: $TARGET_DIR"
+          yamllint "$TARGET_DIR" || {
+            echo "[❌] YAML Lint failed"
+            exit 1
+          }
+
       - name: 🔗 Update symlink to latest slot
         run: |
           SLOT_NAME=${{ steps.detect.outputs.next_slot }}
-          echo "[🔗] Updating .github/slot-latest → autogen/$SLOT_NAME"
           rm -rf .github/slot-latest
           ln -s "autogen/$SLOT_NAME" .github/slot-latest
-          echo "[📂] Current layout:"
           ls -l .github/
 
       - name: 🔀 Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "🗂️ Add ${{ steps.detect.outputs.next_slot }} + copied workflows"
+          commit-message: "🗂️ Add ${{ steps.detect.outputs.next_slot }} + copied workflows + lint checked"
           branch: autogen-${{ steps.detect.outputs.next_slot }}-${{ steps.time.outputs.timestamp }}
-          title: "🗂️ Create ${{ steps.detect.outputs.next_slot }} & Copy Workflows"
+          title: "🗂️ Create ${{ steps.detect.outputs.next_slot }} & Lint Workflows"
           body: |
             This PR includes:
             - Created `.github/autogen/${{ steps.detect.outputs.next_slot }}`
-            - Copied all `.github/workflows/*.yaml` and `*.yml` to `workflows/`
-            - Echo-based README.md and info.txt
+            - Copied `.github/workflows/*.y[a]ml` files into `workflows/`
+            - Lint checked using `yamllint`
             - Updated `.github/slot-latest` symlink
           delete-branch: true
