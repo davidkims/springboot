@@ -20,22 +20,18 @@ jobs:
 
       - name: 📁 Prepare directories
         run: |
-          echo "[📁] Creating directories"
-          echo "sudo mkdir -p \"$TRANSFER_LOG_DIR\" \"$BACKUP_DIR\" \"$PROVENANCE_DIR\""
+          echo "[📁] Preparing required directories..."
           sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
-          echo "[🔐] Setting permissions"
-          echo "sudo chmod -R 777 \"$TRANSFER_LOG_DIR\" \"$BACKUP_DIR\" \"$PROVENANCE_DIR\""
           sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
 
       - name: 💾 Generate 60 corporate transfer logs
         run: |
-          echo "[🕒] Generating transfer logs"
-          echo "sudo rm -f \"$TRANSFER_LOG_DIR\"/*.txt"
-          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || echo "[ℹ️] No existing logs to clean."
+          echo "[🕒] Generating logs..."
+          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || echo "[ℹ️] No logs to remove."
           for i in $(seq 1 60); do
-            TS_HUMAN=$(date +'%Y-%m-%d %H:%M:%S')
+            TS=$(date +'%Y-%m-%d %H:%M:%S')
             AMOUNT=$((RANDOM % 900000 + 100000))
-            LOG="[TRANSFER] $TS_HUMAN | 기업거래ID:$i | 송금금액:₩${AMOUNT} 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
+            LOG="[TRANSFER] $TS | 기업거래ID:$i | 송금금액:₩$AMOUNT 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
             echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
           done
 
@@ -43,12 +39,9 @@ jobs:
         id: backup
         run: |
           TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
-          echo "→ TS_FOLDER=$TS_FOLDER"
           echo "ts_folder=$TS_FOLDER" >> $GITHUB_OUTPUT
-          DEST="${BACKUP_DIR}/$TS_FOLDER"
-          echo "sudo mkdir -p \"$DEST\""
+          DEST="$BACKUP_DIR/$TS_FOLDER"
           sudo mkdir -p "$DEST"
-          echo "sudo cp \"$TRANSFER_LOG_DIR\"/*.txt \"$DEST/\""
           sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
 
       - name: 📤 Upload generated logs
@@ -63,60 +56,38 @@ jobs:
           name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
 
-      - name: 📜 Generate provenance.json (echo 방식)
+      - name: 📜 Generate provenance.json (safe echo version)
         run: |
-          echo "[📜] Generating provenance.json using echo"
-
+          echo "[📜] Creating provenance JSON with echo..."
           TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          echo "→ Timestamp: $TS"
-
           FILE="transfer-backup-${{ steps.backup.outputs.ts_folder }}"
-          echo "→ Backup file: $FILE"
-
-          mkdir -p ${{ env.PROVENANCE_DIR }}
+          mkdir -p "${{ env.PROVENANCE_DIR }}"
           PROV_FILE="${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
 
-          echo "echo '{' > \$PROV_FILE"
-          echo '{' > $PROV_FILE
+          echo "→ Writing to: $PROV_FILE"
 
-          echo "echo '  \"type\": \"transfer_log_backup\",' >> \$PROV_FILE"
-          echo '  "type": "transfer_log_backup",' >> $PROV_FILE
+          echo '{'                          > "$PROV_FILE"
+          echo "  \"type\": \"transfer_log_backup\","      >> "$PROV_FILE"
+          echo "  \"timestamp\": \"$TS\","                >> "$PROV_FILE"
+          echo "  \"status\": \"completed\","             >> "$PROV_FILE"
+          echo "  \"backup_file\": \"$FILE\","            >> "$PROV_FILE"
+          echo "  \"workflow\": \"${{ github.workflow }}\","  >> "$PROV_FILE"
+          echo "  \"repository\": \"${{ github.repository }}\"," >> "$PROV_FILE"
+          echo "  \"run_id\": \"${{ github.run_id }}\","       >> "$PROV_FILE"
+          echo "  \"run_number\": \"${{ github.run_number }}\"" >> "$PROV_FILE"
+          echo '}'                          >> "$PROV_FILE"
 
-          echo "echo '  \"timestamp\": \"$TS\",' >> \$PROV_FILE"
-          echo "  \"timestamp\": \"$TS\"," >> $PROV_FILE
-
-          echo "echo '  \"status\": \"completed\",' >> \$PROV_FILE"
-          echo '  "status": "completed",' >> $PROV_FILE
-
-          echo "echo '  \"backup_file\": \"$FILE\",' >> \$PROV_FILE"
-          echo "  \"backup_file\": \"$FILE\"," >> $PROV_FILE
-
-          echo "echo '  \"workflow\": \"${{ github.workflow }}\",' >> \$PROV_FILE"
-          echo "  \"workflow\": \"${{ github.workflow }}\"," >> $PROV_FILE
-
-          echo "echo '  \"repository\": \"${{ github.repository }}\",' >> \$PROV_FILE"
-          echo "  \"repository\": \"${{ github.repository }}\"," >> $PROV_FILE
-
-          echo "echo '  \"run_id\": \"${{ github.run_id }}\",' >> \$PROV_FILE"
-          echo "  \"run_id\": \"${{ github.run_id }}\"," >> $PROV_FILE
-
-          echo "echo '  \"run_number\": \"${{ github.run_number }}\"' >> \$PROV_FILE"
-          echo "  \"run_number\": \"${{ github.run_number }}\"" >> $PROV_FILE
-
-          echo "echo '}' >> \$PROV_FILE"
-          echo '}' >> $PROV_FILE
-
-          echo "[📄] Contents of provenance.json:"
+          echo "[📄] File content:"
           cat "$PROV_FILE"
 
       - name: 📤 Upload provenance.json
+        if: ${{ hashFiles('provenance/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json
+          path: provenance/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json
 
       - name: 📂 Show backup structure
         run: |
-          echo "[🧾] Tree of backup directory"
           sudo apt-get update && sudo apt-get install -y tree
           tree ${{ env.BACKUP_DIR }} -L 2 || echo "[⚠️] tree command failed"
