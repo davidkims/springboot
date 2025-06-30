@@ -12,6 +12,7 @@ jobs:
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
+      PROVENANCE_DIR: provenance
 
     steps:
       - name: 📦 Checkout repository
@@ -19,55 +20,117 @@ jobs:
 
       - name: 📁 Prepare directories
         run: |
-          echo "[📁] Creating directories: $TRANSFER_LOG_DIR and $BACKUP_DIR"
-          sudo mkdir -p "$TRANSFER_LOG_DIR"
-          sudo mkdir -p "$BACKUP_DIR"
-          echo "[🔐] Setting permissions to 777"
-          sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR"
-          echo "[✔️] Directories ready."
+          echo "[📁] Creating directories"
+          echo "sudo mkdir -p \"$TRANSFER_LOG_DIR\" \"$BACKUP_DIR\" \"$PROVENANCE_DIR\""
+          sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
+
+          echo "[🔐] Setting permissions"
+          echo "sudo chmod -R 777 \"$TRANSFER_LOG_DIR\" \"$BACKUP_DIR\" \"$PROVENANCE_DIR\""
+          sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
 
       - name: 💾 Generate 60 corporate transfer logs
         run: |
           echo "[🕒] Generating 60 corporate transfer logs..."
-          echo "[🧹] Cleaning up existing logs in $TRANSFER_LOG_DIR"
+          echo "sudo rm -f \"$TRANSFER_LOG_DIR\"/*.txt"
           sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || echo "[ℹ️] No existing logs to clean."
 
           for i in $(seq 1 60); do
+            echo "  TS_HUMAN=\$(date +'%Y-%m-%d %H:%M:%S')"
             TS_HUMAN=$(date +'%Y-%m-%d %H:%M:%S')
+
+            echo "  AMOUNT=\$((RANDOM % 900000 + 100000))"
             AMOUNT=$((RANDOM % 900000 + 100000))
+
+            echo "  LOG=\"[TRANSFER] \$TS_HUMAN | 기업거래ID:\$i | 송금금액:₩\${AMOUNT} 완료 | 계좌:110-123-4567\$(printf '%02d' \$i)\""
             LOG="[TRANSFER] $TS_HUMAN | 기업거래ID:$i | 송금금액:₩${AMOUNT} 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
+
+            echo "  echo \"\$LOG\" | sudo tee \"$TRANSFER_LOG_DIR/transfer-log-\$i.txt\""
             if ! echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null; then
               echo "[❌] Failed to write transfer-log-$i.txt"
             fi
           done
-          echo "[✔️] All transfer logs generated."
 
       - name: 📦 Backup logs into timestamped folder
         id: backup
         run: |
+          echo "[📦] Creating timestamp folder..."
+          echo "TS_FOLDER=\$(date +'%Y%m%d_%H%M%S')"
           TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
+          echo "→ TS_FOLDER=$TS_FOLDER"
           echo "ts_folder=$TS_FOLDER" >> $GITHUB_OUTPUT
-          DEST="${{ env.BACKUP_DIR }}/$TS_FOLDER"
-          echo "[📦] Creating backup folder: $DEST"
-          sudo mkdir -p "$DEST"
-          echo "[📄] Copying logs to backup..."
-          sudo cp "${{ env.TRANSFER_LOG_DIR }}"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
-          echo "[✅] Backup complete at: $DEST"
 
-      - name: 📤 Upload generated logs as artifact
+          DEST="${{ env.BACKUP_DIR }}/$TS_FOLDER"
+          echo "sudo mkdir -p \"$DEST\""
+          sudo mkdir -p "$DEST"
+
+          echo "sudo cp \"${{ env.TRANSFER_LOG_DIR }}\"/*.txt \"$DEST/\""
+          sudo cp "${{ env.TRANSFER_LOG_DIR }}"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
+
+      - name: 📤 Upload generated logs
         uses: actions/upload-artifact@v4
         with:
           name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
 
-      - name: 📤 Upload backup folder as artifact
+      - name: 📤 Upload backup folder
         uses: actions/upload-artifact@v4
         with:
           name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
 
-      - name: 📂 Show recent backup state
+      - name: 📜 Generate provenance.json
         run: |
-          echo "[🧾] Showing backup directory structure..."
+          echo "[📜] Generating provenance.json..."
+
+          echo 'TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "→ Timestamp: $TS"
+
+          echo 'FILE="transfer-backup-${{ steps.backup.outputs.ts_folder }}"'
+          FILE="transfer-backup-${{ steps.backup.outputs.ts_folder }}"
+          echo "→ Backup file name: $FILE"
+
+          echo "mkdir -p ${{ env.PROVENANCE_DIR }}"
+          mkdir -p ${{ env.PROVENANCE_DIR }}
+
+          echo "[📝] Preview of provenance JSON content:"
+          echo "cat <<EOF > ${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
+          echo "{"
+          echo "  \"type\": \"transfer_log_backup\","
+          echo "  \"timestamp\": \"$TS\","
+          echo "  \"status\": \"completed\","
+          echo "  \"backup_file\": \"$FILE\","
+          echo "  \"workflow\": \"${{ github.workflow }}\","
+          echo "  \"repository\": \"${{ github.repository }}\","
+          echo "  \"run_id\": \"${{ github.run_id }}\","
+          echo "  \"run_number\": \"${{ github.run_number }}\""
+          echo "}"
+          echo "EOF"
+
+          cat <<EOF > "${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
+{
+  "type": "transfer_log_backup",
+  "timestamp": "$TS",
+  "status": "completed",
+  "backup_file": "$FILE",
+  "workflow": "${{ github.workflow }}",
+  "repository": "${{ github.repository }}",
+  "run_id": "${{ github.run_id }}",
+  "run_number": "${{ github.run_number }}"
+}
+EOF
+
+          echo "[📄] Final provenance.json content:"
+          cat "${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
+
+      - name: 📤 Upload provenance.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json
+
+      - name: 📂 Show backup structure
+        run: |
+          echo "[🧾] Tree of backup directory"
           sudo apt-get update && sudo apt-get install -y tree
           tree ${{ env.BACKUP_DIR }} -L 2 || echo "[⚠️] tree command failed"
