@@ -1,8 +1,13 @@
-name: 🏷️ Label and Comment on PR
+name: 🏷️ Label and Comment Automation
 
 on:
   pull_request_target:
     types: [opened]
+
+  schedule:
+    - cron: '0 * * * *'  # 매시간 정각 자동 실행 (UTC 기준)
+
+  workflow_dispatch:     # GitHub 수동 실행 버튼
 
 permissions:
   contents: write
@@ -23,7 +28,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const issueAuthor = context.payload.sender.login;
+            const issueAuthor = context.payload?.sender?.login || 'manual-trigger';
             const labelName = 'needs-review';
             const labelColor = '1D76DB';
             const labelDescription = 'Awaiting review by team';
@@ -32,7 +37,6 @@ jobs:
 
             let labelCreated = false;
             try {
-              // 라벨 생성 시도
               await github.rest.issues.getLabel({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -60,32 +64,35 @@ jobs:
               }
             }
 
-            // 라벨 부착
-            try {
-              await github.rest.issues.addLabels({
+            // PR에만 라벨 추가 + 댓글
+            if (context.eventName === 'pull_request_target') {
+              try {
+                await github.rest.issues.addLabels({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  labels: [labelName]
+                });
+                console.log(`[🏷️] '${labelName}' 라벨을 PR에 추가 완료`);
+              } catch (labelErr) {
+                console.warn(`⚠️ PR에 라벨 부착 실패: ${labelErr.message}`);
+              }
+
+              await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                labels: [labelName]
+                body: `👋 Thanks for contributing @${issueAuthor}!\n\n✅ Label: \`${labelName}\` 추가됨\n📝 팀에서 곧 리뷰 예정입니다!`
               });
-              console.log(`[🏷️] '${labelName}' 라벨을 PR에 추가 완료`);
-            } catch (labelErr) {
-              console.warn(`⚠️ PR에 라벨 부착 실패: ${labelErr.message}`);
+            } else {
+              console.log(`[ℹ️] PR 이벤트가 아니므로 라벨 부착 및 댓글은 생략됨`);
             }
 
-            // 감사 댓글 작성
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `👋 Thanks for contributing @${issueAuthor}!\n\n✅ Label: \`${labelName}\` 추가됨\n📝 팀에서 곧 리뷰 예정입니다!`
-            });
-
-            // echo 파일 저장
-            const msg = `label: ${labelName}\ncreated: ${labelCreated}\nby: github-actions[bot]\ntime: ${new Date().toISOString()}\n`;
+            // 로그 파일 저장
+            const msg = `label: ${labelName}\ncreated: ${labelCreated}\ntriggered-by: ${context.eventName}\ntime: ${new Date().toISOString()}\n`;
             fs.writeFileSync('label-log.txt', msg);
             console.log("[📄] label-log.txt 생성 완료");
-      
+
       - name: ⬆️ Upload label-log.txt
         uses: actions/upload-artifact@v4
         with:
