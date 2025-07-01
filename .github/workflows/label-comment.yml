@@ -1,13 +1,13 @@
-name: 🏷️ Label and Comment Automation (Dependabot Safe)
+name: 🏷️ Label and Comment Automation
 
 on:
   pull_request_target:
     types: [opened]
 
   schedule:
-    - cron: '0 * * * *'  # 매시간 정각 실행
+    - cron: '0 * * * *'  # 매시간 정각 실행 (UTC)
 
-  workflow_dispatch:
+  workflow_dispatch:     # 수동 실행 지원
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🏷️ Create Label if Missing + Comment (Dependabot-safe)
+      - name: 🏷️ Label 관리 및 댓글 작성
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -40,6 +40,8 @@ jobs:
             console.log(`[✅] 실행 주체: @${actor} / PR 작성자: @${issueAuthor}`);
 
             let labelCreated = false;
+
+            // 1. 라벨 존재 확인 또는 생성
             try {
               await github.rest.issues.getLabel({
                 owner: context.repo.owner,
@@ -61,15 +63,40 @@ jobs:
                   labelCreated = true;
                   console.log(`[✅] '${labelName}' 라벨 생성 완료`);
                 } catch (createErr) {
-                  console.warn(`⚠️ '${labelName}' 라벨 생성 실패 (권한 부족 가능): ${createErr.message}`);
+                  console.warn(`⚠️ 라벨 생성 실패 (권한 부족 가능): ${createErr.message}`);
                 }
               } else {
                 console.warn(`⚠️ 라벨 조회 실패: ${err.message}`);
               }
             }
 
-            // PR에 라벨 추가
+            // 2. PR 이벤트일 경우만 처리
             if (isPR) {
+              // 기존 라벨 모두 제거
+              try {
+                const labelsResponse = await github.rest.issues.listLabelsOnIssue({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo
+                });
+
+                const existingLabels = labelsResponse.data.map(l => l.name);
+                for (const label of existingLabels) {
+                  if (label !== labelName) {
+                    console.log(`[❌] 기존 라벨 제거 중: ${label}`);
+                    await github.rest.issues.removeLabel({
+                      issue_number: context.issue.number,
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name: label
+                    });
+                  }
+                }
+              } catch (removeErr) {
+                console.warn(`⚠️ 기존 라벨 제거 중 오류 발생: ${removeErr.message}`);
+              }
+
+              // 새 라벨 부착
               try {
                 await github.rest.issues.addLabels({
                   issue_number: context.issue.number,
@@ -77,9 +104,9 @@ jobs:
                   repo: context.repo.repo,
                   labels: [labelName]
                 });
-                console.log(`[🏷️] '${labelName}' 라벨을 PR에 부착했습니다.`);
+                console.log(`[🏷️] '${labelName}' 라벨을 PR에 단독 부착 완료`);
               } catch (labelErr) {
-                console.warn(`⚠️ PR 라벨 부착 실패: ${labelErr.message}`);
+                console.warn(`⚠️ 라벨 부착 실패: ${labelErr.message}`);
               }
 
               // 감사 댓글 작성
@@ -88,17 +115,17 @@ jobs:
                   issue_number: context.issue.number,
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  body: `👋 Thanks for contributing @${issueAuthor}!\n\n✅ Label: \`${labelName}\` added\n📝 Team will review it soon!`
+                  body: `👋 Thanks for contributing @${issueAuthor}!\n\n✅ All old labels cleared\n🏷️ New Label: \`${labelName}\` assigned\n📝 Team will review it soon!`
                 });
-                console.log(`[💬] 감사 댓글 작성 완료.`);
+                console.log(`[💬] 감사 댓글 작성 완료`);
               } catch (commentErr) {
                 console.warn(`⚠️ 댓글 작성 실패: ${commentErr.message}`);
               }
             } else {
-              console.log(`[ℹ️] PR 이벤트가 아니므로 라벨 부착/댓글 생략됨.`);
+              console.log(`[ℹ️] PR 이벤트가 아니므로 라벨 부착/댓글 생략됨`);
             }
 
-            // 로그 기록
+            // 3. 로그 파일 생성
             const msg = `label: ${labelName}\ncreated: ${labelCreated}\nactor: ${actor}\nauthor: ${issueAuthor}\ntrigger: ${context.eventName}\ntime: ${new Date().toISOString()}\n`;
             fs.writeFileSync('label-log.txt', msg);
             console.log("[📄] label-log.txt 생성 완료");
