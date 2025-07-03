@@ -1,9 +1,9 @@
-name: 🚀 Full Finance & Scorecard Setup (Stable with v5.1.1)
+name: 🚀 Full Finance & Scorecard Setup (Stable v5.1.1)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0' # 매주 일요일 정기 실행
+    - cron: '0 0 * * 0'
 
 permissions:
   contents: write
@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        name: 📥 Checkout
 
       - name: 📆 Set Date
         id: date
@@ -23,63 +23,38 @@ jobs:
 
       - name: 🐳 Docker & CLI 설치
         run: |
-          echo "[docker] Docker 설치..."
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker
           docker --version
-
-          echo "[cli] 필수 유틸 설치..."
           sudo apt-get update
           sudo apt-get install -y jq curl unzip bc file
-          echo "✅ CLI 유틸 설치 완료"
 
-      - name: 🗂️ 디렉토리 생성
-        run: |
-          mkdir -p .github/finance/ledgers
-          mkdir -p .github/finance/files
-          mkdir -p .github/scorecard/ledgers
-          mkdir -p .github/scorecard/files
-          mkdir -p .github/scorecard/sarif
+      - name: 🗂️ 디렉토리 준비
+        run: mkdir -p .github/finance/ledgers .github/finance/files .github/scorecard/ledgers .github/scorecard/files .github/scorecard/sarif
 
       - name: 🧾 금융 원장 생성
         run: |
-          FILE=".github/finance/ledgers/ledger_${{ steps.date.outputs.date }}.csv"
-          echo "name,date,amount,type,card_number" > "$FILE"
-          for i in $(seq 1 50); do
-            NAME="Customer${i}"
-            TXN_DATE=$(date -d "$i days ago" +%F)
-            AMOUNT=$(echo "scale=2; $((RANDOM % 9000 + 1000))" | bc)
-            TYPE=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "신용"; else echo "체크"; fi)
+          F=".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv"
+          echo "name,date,amount,type,card_number" > "$F"
+          for i in {1..50}; do
+            TXN=$(date -d "$i days ago" +%F)
+            TYPE=$( ((i%2)) && echo 신용 || echo 체크 )
             CARD="-"
-            if [ "$TYPE" = "신용" ]; then
-              CARD="4111$(printf "%012d" $((RANDOM % 1000000000000)))"
-            fi
-            echo "$NAME,$TXN_DATE,$AMOUNT,$TYPE,$CARD" >> "$FILE"
+            [[ "$TYPE" = "신용" ]] && CARD="4111$(printf "%012d" $RANDOM)"
+            echo "Customer$i,$TXN,$((RANDOM%9000+1000)).00,$TYPE,$CARD" >> "$F"
           done
 
-      - name: 📄 금융 보고서 생성
-        run: |
-          echo "금융 거래 요약 리포트 - ${{ steps.date.outputs.date }}" \
-            > ".github/finance/files/report_${{ steps.date.outputs.date }}.txt"
+      - name: 📄 보고서 생성 (Finance)
+        run: echo "금융 거래 요약 리포트 - ${{steps.date.outputs.date}}" > .github/finance/files/report_${{steps.date.outputs.date}}.txt
 
-      - name: ✅ Scorecard CLI 설치 및 검증 (v5.1.1)
+      - name: ✅ Scorecard CLI 설치 (v5.1.1)
         run: |
           VERSION="5.1.1"
-          BINARY="scorecard_${VERSION}_linux_amd64"
-          URL="https://github.com/ossf/scorecard/releases/download/v${VERSION}/${BINARY}"
-
-          echo "[scorecard] 다운로드 URL: $URL"
+          B="scorecard_${VERSION}_linux_amd64"
+          URL="https://github.com/ossf/scorecard/releases/download/v${VERSION}/${B}"
           curl -fsSL -o scorecard "$URL"
-
-          echo "[scorecard] 파일 타입 검사:"
-          file scorecard
-          if ! file scorecard | grep -q 'ELF'; then
-            echo "❌ 유효하지 않은 바이너리 (다운로드 실패)"
-            cat scorecard | head -n 10
-            exit 1
-          fi
-
+          file scorecard | grep ELF || (cat scorecard | head -20 && exit 1)
           chmod +x scorecard
           sudo mv scorecard /usr/local/bin/scorecard
           which scorecard
@@ -87,60 +62,34 @@ jobs:
 
       - name: 🧾 Scorecard 원장 생성
         run: |
-          FILE=".github/scorecard/ledgers/scorecard_${{ steps.date.outputs.date }}.csv"
-          echo "item,score,comment" > "$FILE"
-          for i in $(seq 1 20); do
-            ITEM="SecurityCheck${i}"
-            SCORE=$((RANDOM % 100))
-            COMMENT=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "양호"; else echo "개선필요"; fi)
-            echo "$ITEM,$SCORE,$COMMENT" >> "$FILE"
-          done
+          G=".github/scorecard/ledgers/scorecard_${{steps.date.outputs.date}}.csv"
+          echo "item,score,comment" > "$G"
+          for i in {1..20}; do
+            C=$(( RANDOM % 2 ))
+            COMMENT=$((C)) && echo "SecurityCheck$i,$((RANDOM%101)),${COMMENT:+개선필요}${COMMENT:-양호}"
+          done >> "$G"
 
-      - name: 📄 Scorecard 보고서 생성
-        run: |
-          echo "오픈소스 보안 점검 리포트 - ${{ steps.date.outputs.date }}" \
-            > ".github/scorecard/files/oss_report_${{ steps.date.outputs.date }}.txt"
+      - name: 📄 보고서 생성 (Scorecard)
+        run: echo "오픈소스 보안 점검 리포트 - ${{steps.date.outputs.date}}" > .github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt
 
-      - name: 📜 금융 provenance 생성
+      - name: 📜 Provenance 생성
         run: |
-          echo "{
-            \"type\": \"finance-ledger\",
-            \"date\": \"${{ steps.date.outputs.date }}\",
-            \"ledger\": \"ledger_${{ steps.date.outputs.date }}.csv\",
-            \"report\": \"report_${{ steps.date.outputs.date }}.txt\"
-          }" > ".github/finance/provenance_${{ steps.date.outputs.date }}.json"
-
-      - name: 📜 Scorecard provenance 생성
-        run: |
-          echo "{
-            \"type\": \"scorecard-report\",
-            \"date\": \"${{ steps.date.outputs.date }}\",
-            \"ledger\": \"scorecard_${{ steps.date.outputs.date }}.csv\",
-            \"report\": \"oss_report_${{ steps.date.outputs.date }}.txt\"
-          }" > ".github/scorecard/provenance_${{ steps.date.outputs.date }}.json"
+          echo "{\"type\":\"finance-ledger\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"ledger_${{steps.date.outputs.date}}.csv\",\"report\":\"report_${{steps.date.outputs.date}}.txt\"}" > .github/finance/provenance_${{steps.date.outputs.date}}.json
+          echo "{\"type\":\"scorecard-report\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"scorecard_${{steps.date.outputs.date}}.csv\",\"report\":\"oss_report_${{steps.date.outputs.date}}.txt\"}" > .github/scorecard/provenance_${{steps.date.outputs.date}}.json
 
       - name: 🧪 SARIF 생성
         run: |
-          scorecard --repo="${{ github.repository }}" \
-            --format sarif \
-            --output-file ".github/scorecard/sarif/scorecard_${{ steps.date.outputs.date }}.sarif" || echo "⚠️ scorecard 실패 무시"
+          scorecard --repo="${{github.repository}}" --format sarif --output-file ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" || echo "⚠️ 무시"
 
       - name: 🚀 SARIF 업로드
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: .github/scorecard/sarif/scorecard_${{ steps.date.outputs.date }}.sarif
+          sarif_file: .github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif
 
       - name: 🩺 헬스체크
         run: |
-          echo "🧪 Docker 상태 확인..."
-          docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker 실패" && exit 1)
-
-          echo "🧪 Scorecard CLI 확인..."
-          which scorecard && scorecard --version > /dev/null && echo "✅ Scorecard OK" || (echo "❌ Scorecard 오류" && exit 1)
-
-          echo "🧪 Ledger, SARIF, 보고서 확인..."
-          test -f ".github/finance/ledgers/ledger_${{ steps.date.outputs.date }}.csv" || exit 1
-          test -f ".github/scorecard/sarif/scorecard_${{ steps.date.outputs.date }}.sarif" || exit 1
-          grep -q "보안 점검" ".github/scorecard/files/oss_report_${{ steps.date.outputs.date }}.txt" || exit 1
-
-          echo "✅ 모든 헬스체크 완료"
+          docker info > /dev/null && echo ✅ Docker OK || exit 1
+          which scorecard && scorecard --version > /dev/null && echo ✅ Scorecard OK || exit 1
+          test -f ".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv" || exit 1
+          test -f ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" || exit 1
+          grep -q "보안 점검" ".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt" || exit 1
