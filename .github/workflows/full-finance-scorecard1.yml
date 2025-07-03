@@ -1,32 +1,33 @@
 name: 🚀 Full Finance & Scorecard Setup
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering from the GitHub UI
   schedule:
     - cron: '0 0 * * 0' # 매주 일요일 00:00 UTC에 실행 (KST 기준 일요일 오전 9시)
 
 jobs:
   full-setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # 최신 Ubuntu 환경 사용
     permissions:
-      contents: read
-      security-events: write
+      contents: read         # 리포지토리 코드 읽기 권한 (체크아웃 및 스코어카드 액션용)
+      security-events: write # SARIF 결과를 GitHub 보안 탭에 업로드하기 위한 권한
 
     steps:
       - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # 현재 리포지토리 코드 체크아웃
 
       - name: 📆 Set Date
-        id: date
-        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+        id: date # 이 step의 ID를 'date'로 설정하여 출력값을 참조할 수 있게 함
+        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT" # 현재 날짜를 YYYY-MM-DD 형식으로 GITHUB_OUTPUT에 저장
 
       - name: 🐳 CLI Tools 설치
         run: |
           echo "Installing necessary CLI tools..."
           sudo apt-get update
-          sudo apt-get install -y jq curl unzip bc file
+          sudo apt-get install -y jq curl unzip bc file # jq, curl, unzip, bc, file 설치
 
       - name: 🗂️ 디렉토리 준비
+        # 필요한 모든 디렉토리들을 미리 생성합니다.
         run: |
           echo "Preparing directories..."
           mkdir -p .github/finance/ledgers \
@@ -36,52 +37,49 @@ jobs:
                    .github/scorecard/sarif
 
       - name: 🧾 금융 원장 생성
+        # 가상의 금융 거래 원장 CSV 파일을 생성합니다.
         run: |
           F=".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv"
           echo "name,date,amount,type,card_number" > "$F"
           for i in {1..50}; do
-            TXN=$(date -d "$i days ago" +%F)
-            TYPE=$( ((i%2)) && echo 신용 || echo 체크 )
+            TXN=$(date -d "$i days ago" +%F) # i일 전 날짜
+            TYPE=$( ((i%2)) && echo 신용 || echo 체크 ) # 홀수일 경우 신용, 짝수일 경우 체크
             CARD="-"
-            [[ "$TYPE" = "신용" ]] && CARD="4111$(printf "%012d" $RANDOM)"
+            [[ "$TYPE" = "신용" ]] && CARD="4111$(printf "%012d" $RANDOM)" # 신용카드 번호 가상 생성
             echo "Customer$i,$TXN,$((RANDOM%9000+1000)).00,$TYPE,$CARD" >> "$F"
           done
           echo "Finance ledger created at: $F"
 
       - name: 📄 보고서 생성 (Finance)
+        # 가상의 금융 거래 요약 리포트 파일을 생성합니다.
         run: |
           REPORT_FILE=".github/finance/files/report_${{steps.date.outputs.date}}.txt"
           echo "금융 거래 요약 리포트 - ${{steps.date.outputs.date}}" > "$REPORT_FILE"
           echo "Finance report created at: $REPORT_FILE"
 
-      - name: 🧪 Run OpenSSF Scorecard and Generate SARIF
-        # Removed JSON specific output parameters to ensure SARIF is the primary output for results_file
-        uses: ossf/scorecard-action@v2.4.2
+      - name: 🧪 Run OpenSSF Scorecard and Generate Reports
+        # OpenSSF Scorecard 공식 GitHub Action을 사용하여 보안 점검을 수행합니다.
+        # 이 Action은 Scorecard CLI를 자동으로 다운로드하고, 실행하며, SARIF 및 JSON 형식으로
+        # 결과를 변환하여 저장합니다.
+        uses: ossf/scorecard-action@v2.4.2 # 현재 가장 안정적인 v2.x.y 버전 사용
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          results_file: .github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif # This should be the SARIF output
+          
+          # SARIF 결과 파일의 이름을 지정합니다.
+          # Action이 내부적으로 SARIF 형식으로 변환하여 저장합니다.
+          results_file: .github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif
+          
+          # JSON 형식의 보고서도 함께 생성하도록 다시 설정합니다.
+          results_format: json
+          output_file: .github/scorecard/files/results_${{steps.date.outputs.date}}.json # JSON 출력 파일 경로
 
-      # --- START: Add a separate step if you still need the raw JSON output ---
-      # This step requires the 'scorecard' binary to be in the PATH.
-      # The ossf/scorecard-action typically cleans up the binary after its run.
-      # If you need raw JSON, you might need to re-install it here OR
-      # reconsider if the JSON is strictly necessary for your pipeline.
-      # For now, let's assume the SARIF is the primary output.
-      # If you absolutely need the JSON, you might have to run Scorecard CLI manually
-      # in a separate step again, but only for JSON output, similar to your original attempt
-      # but without the SARIF error.
-      # For example:
-      # - name: 🧪 Run Scorecard JSON Scan (Optional, if SARIF is not enough)
-      #   run: |
-      #     # This assumes Scorecard CLI is in PATH, which it won't be after ossf/scorecard-action
-      #     # So, this part would be complex to re-add without re-downloading Scorecard CLI.
-      #     # Consider if the SARIF is sufficient or if the JSON can be extracted from SARIF later.
-      #     # Alternatively, the ossf/scorecard-action might have a way to generate both correctly.
-      #     # Given the SARIF validation error, let's prioritize getting SARIF working.
-      #     echo "Skipping direct JSON generation to prioritize SARIF fix."
-      # --- END: Add a separate step ---
+          # publish_results: true를 설정하면 Action이 직접 GitHub Code Scanning에
+          # 결과를 게시할 수 있습니다. 여기서는 명시적인 'upload-sarif' step을
+          # 사용하기 위해 주석 처리합니다.
+          # publish_results: true
 
       - name: 🧾 Scorecard 원장 생성
+        # 가상의 Scorecard 점검 원장 CSV 파일을 생성합니다.
         run: |
           G=".github/scorecard/ledgers/scorecard_${{steps.date.outputs.date}}.csv"
           echo "item,score,comment" > "$G"
@@ -93,12 +91,14 @@ jobs:
           echo "Scorecard ledger created at: $G"
 
       - name: 📄 보고서 생성 (Scorecard)
+        # 가상의 오픈소스 보안 점검 리포트 파일을 생성합니다.
         run: |
           OSS_REPORT_FILE=".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt"
           echo "오픈소스 보안 점검 리포트 - ${{steps.date.outputs.date}}" > "$OSS_REPORT_FILE"
           echo "Open-source security report created at: $OSS_REPORT_FILE"
 
       - name: 📜 Provenance 생성
+        # 금융 및 Scorecard 보고서에 대한 Provenance JSON 파일을 생성합니다.
         run: |
           FINANCE_PROVENANCE_FILE=".github/finance/provenance_${{steps.date.outputs.date}}.json"
           echo "{\"type\":\"finance-ledger\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"ledger_${{steps.date.outputs.date}}.csv\",\"report\":\"report_${{steps.date.outputs.date}}.txt\"}" > "$FINANCE_PROVENANCE_FILE"
@@ -109,52 +109,74 @@ jobs:
           echo "Scorecard provenance created at: $SCORECARD_PROVENANCE_FILE"
 
       - name: 🚀 SARIF 업로드
+        # 생성된 SARIF 파일을 GitHub 보안 탭에 업로드합니다.
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif
-          category: "OpenSSF Scorecard"
+          category: "OpenSSF Scorecard" # Code Scanning UI에서 스캔을 구분하기 위한 카테고리
 
-      - name: 📦 Upload JSON report as artifact (if generated)
-        # This step will only upload if results.json was successfully created by Scorecard Action.
-        # Given the previous SARIF error, we need to ensure this is handled carefully.
-        # If the Scorecard Action's SARIF generation works after this change,
-        # we can re-evaluate how to get the JSON output from the action.
-        # For now, it will look for .github/scorecard/files/results_DATE.json
-        # which might not be there if the action didn't produce it after our config change.
-        if: success() || failure() # Always run to check for file existence
-        run: |
-          JSON_FILE=".github/scorecard/files/results_${{steps.date.outputs.date}}.json"
-          if [ -f "$JSON_FILE" ]; then
-            echo "Uploading JSON report $JSON_FILE"
-            # Use upload-artifact directly here for the specific JSON file
-            # as the prior step within ossf/scorecard-action is removed.
-            # However, upload-artifact is an action, not a shell command.
-            # This requires a separate upload-artifact step.
-            # I will mark this for re-evaluation.
-            echo "JSON report path: $JSON_FILE"
-            # This 'run' block is for shell commands. The upload-artifact
-            # needs to be a separate 'uses' step.
-          else
-            echo "JSON report not found at $JSON_FILE, skipping upload as artifact."
-          fi
-      
-      # Re-adding the dedicated upload-artifact for JSON if it's still needed
-      - name: 📦 Re-upload JSON report as artifact (Dedicated Step)
+      - name: 📦 Upload JSON report as artifact
+        # Scorecard Action에서 생성된 JSON 보고서를 워크플로우 아티팩트로 업로드합니다.
+        # artifacts는 GitHub에 일정 기간 저장되며, 워크플로우 실행 요약 페이지에서 다운로드할 수 있습니다.
         uses: actions/upload-artifact@v4
         with:
           name: scorecard-json-report-${{steps.date.outputs.date}}
-          path: .github/scorecard/files/results_${{steps.date.outputs.date}}.json
-        if: always() && fileExists('.github/scorecard/files/results_${{steps.date.outputs.date}}.json') # Only run if file exists
+          path: .github/scorecard/files/results_${{steps.date.outputs.date}}.json # JSON 파일 경로
+          # retention-days: 7 # 선택 사항: 아티팩트 보존 기간 (기본값 90일)
+
+      - name: 📁 Create Custom Output Directory and Copy Reports
+        # 이 step은 특정 디렉토리를 생성하고, 생성된 보고서 파일들을 그 안으로 복사합니다.
+        run: |
+          CUSTOM_OUTPUT_DIR="custom_scan_reports"
+          echo "[📁] Creating custom directory: ${CUSTOM_OUTPUT_DIR}..."
+          mkdir -p "${CUSTOM_OUTPUT_DIR}"
+          
+          echo "[📄] Copying scorecard-results.sarif to ${CUSTOM_OUTPUT_DIR}/..."
+          # SARIF 파일이 존재하는지 확인 후 복사
+          if [ -f ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" ]; then
+            cp ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" "${CUSTOM_OUTPUT_DIR}/"
+            echo "scorecard-results.sarif copied successfully."
+          else
+            echo "Warning: scorecard-results.sarif not found, skipping copy to custom directory."
+          fi
+          
+          echo "[📄] Copying results.json to ${CUSTOM_OUTPUT_DIR}/..."
+          # JSON 파일이 존재하는지 확인 후 복사
+          if [ -f ".github/scorecard/files/results_${{steps.date.outputs.date}}.json" ]; then
+            cp ".github/scorecard/files/results_${{steps.date.outputs.date}}.json" "${CUSTOM_OUTPUT_DIR}/"
+            echo "results.json copied successfully."
+          else
+            echo "Warning: results.json not found, skipping copy to custom directory."
+          fi
+          
+          echo "[✅] Files copied to ${CUSTOM_OUTPUT_DIR}/. Listing contents:"
+          ls -l "${CUSTOM_OUTPUT_DIR}" # 새 디렉토리 내용 확인
+
+      - name: ⬆️ Upload Custom Reports Directory as Artifact
+        # 이 Action은 복사된 보고서가 포함된 전체 커스텀 디렉토리를 별도의 워크플로우 아티팩트로 업로드합니다.
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-scan-reports-archive-${{steps.date.outputs.date}} # 이 아티팩트의 이름
+          path: custom_scan_reports/       # 업로드할 디렉토리 경로
+          # retention-days: 7 # 선택 사항: 이 아티팩트의 보존 기간
 
       - name: 🩺 헬스체크
+        # 모든 필수 구성 요소 및 파일이 제대로 생성되었는지 확인합니다.
         run: |
           echo "Performing health checks..."
+          # Docker 데몬이 실행 중인지 확인 (runner에 이미 설치되어 있음)
           docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker check failed"; exit 1)
           
+          # Scorecard SARIF 파일 존재 여부 확인
           test -f ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" && echo "✅ Scorecard SARIF OK" || (echo "❌ Scorecard SARIF file not found"; exit 1)
           
+          # Scorecard JSON 파일 존재 여부 확인
+          test -f ".github/scorecard/files/results_${{steps.date.outputs.date}}.json" && echo "✅ Scorecard JSON OK" || (echo "❌ Scorecard JSON file not found"; exit 1)
+
+          # 금융 원장 파일 존재 여부 확인
           test -f ".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv" && echo "✅ Finance Ledger OK" || (echo "❌ Finance Ledger file not found"; exit 1)
           
-          grep -q "오픈소스 보안 점검" ".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt" && echo "✅ Scorecard Report OK" || (echo "❌ Scorecard Report content check failed"; exit 1)
+          # Scorecard 보고서 파일 내용 확인
+          grep -q "오픈소스 보안 점검" ".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt" && echo "✅ Scorecard Report Content OK" || (echo "❌ Scorecard Report content check failed"; exit 1)
           
           echo "All health checks passed successfully!"
