@@ -3,22 +3,23 @@ name: 🚀 Full Finance & Scorecard Setup (Safe Append Mode)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'  # 매주 일요일 자정 실행
+    - cron: '0 0 * * 0'
 
 permissions:
   contents: write
-  security-events: write  # SARIF 업로드 허용
+  security-events: write
 
 jobs:
   full-setup:
     runs-on: ubuntu-latest
 
-    env:
-      DATE: ${{ github.run_started_at || github.run_id }}
-
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
+
+      - name: 📆 Set Date
+        id: date
+        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: 🐳 Docker & CLI 설치
         run: |
@@ -30,7 +31,7 @@ jobs:
 
           echo "[cli] CLI 유틸 설치 중..."
           sudo apt-get update
-          sudo apt-get install -y jq curl unzip bc
+          sudo apt-get install -y jq curl unzip bc file
           echo "✅ CLI 유틸 설치 완료"
 
       - name: 🗂️ 누적 디렉토리 준비
@@ -43,8 +44,7 @@ jobs:
 
       - name: 🧾 금융 누적 원장 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          FILE=".github/finance/ledgers/ledger_${TODAY}.csv"
+          FILE=".github/finance/ledgers/ledger_${{ steps.date.outputs.date }}.csv"
           echo "name,date,amount,type,card_number" > "$FILE"
           for i in $(seq 1 50); do
             NAME="Customer${i}"
@@ -58,38 +58,35 @@ jobs:
             echo "$NAME,$TXN_DATE,$AMOUNT,$TYPE,$CARD" >> "$FILE"
           done
 
-      - name: 💳 거래 시뮬레이션
-        run: |
-          for file in .github/finance/ledgers/*.csv; do
-            echo "[simulate] 처리 중: $file"
-            tail -n +2 "$file" | while IFS=',' read -r name date amount type card; do
-              echo "🟢 $name ₩$amount $type ${card:0:4}****"
-              sleep 0.005
-            done
-          done
-
       - name: 📄 금융 보고서 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          echo "금융 거래 요약 리포트 - $TODAY" > ".github/finance/files/report_${TODAY}.txt"
+          echo "금융 거래 요약 리포트 - ${{ steps.date.outputs.date }}" \
+            > ".github/finance/files/report_${{ steps.date.outputs.date }}.txt"
 
       - name: ✅ Scorecard CLI 설치 및 검증
         run: |
-          echo "[scorecard] CLI 설치 중..."
-          curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
-          chmod +x scorecard-linux-amd64
-          sudo mv scorecard-linux-amd64 /usr/local/bin/scorecard
+          VERSION="v4.10.3"
+          URL="https://github.com/ossf/scorecard/releases/download/${VERSION}/scorecard-linux-amd64"
+          curl -fsSL -o scorecard "$URL"
 
-          echo "[scorecard] 바이너리 위치 확인:"
-          which scorecard || (echo "❌ scorecard not found in PATH" && exit 1)
+          echo "[scorecard] 파일 타입 확인:"
+          file scorecard
+          if ! file scorecard | grep -q 'ELF'; then
+            echo "❌ 유효하지 않은 바이너리 (다운로드 실패)"
+            cat scorecard | head -n 10
+            exit 1
+          fi
 
-          echo "[scorecard] CLI 버전 확인:"
-          scorecard --version || (echo "❌ scorecard 실행 실패" && exit 1)
+          chmod +x scorecard
+          sudo mv scorecard /usr/local/bin/scorecard
 
-      - name: 🧾 Scorecard 원장 생성
+          echo "[scorecard] 위치 및 버전 확인"
+          which scorecard
+          scorecard --version
+
+      - name: 🧾 Scorecard 누적 원장 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          FILE=".github/scorecard/ledgers/scorecard_${TODAY}.csv"
+          FILE=".github/scorecard/ledgers/scorecard_${{ steps.date.outputs.date }}.csv"
           echo "item,score,comment" > "$FILE"
           for i in $(seq 1 20); do
             ITEM="SecurityCheck${i}"
@@ -100,62 +97,55 @@ jobs:
 
       - name: 📄 Scorecard 보고서 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          echo "오픈소스 보안 점검 리포트 - $TODAY" > ".github/scorecard/files/oss_report_${TODAY}.txt"
+          echo "오픈소스 보안 점검 리포트 - ${{ steps.date.outputs.date }}" \
+            > ".github/scorecard/files/oss_report_${{ steps.date.outputs.date }}.txt"
 
       - name: 📜 금융 provenance 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
           echo "{
             \"type\": \"finance-ledger\",
-            \"date\": \"$TODAY\",
+            \"date\": \"${{ steps.date.outputs.date }}\",
             \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-            \"ledger\": \"ledger_${TODAY}.csv\",
-            \"report\": \"report_${TODAY}.txt\"
-          }" > ".github/finance/provenance_${TODAY}.json"
+            \"ledger\": \"ledger_${{ steps.date.outputs.date }}.csv\",
+            \"report\": \"report_${{ steps.date.outputs.date }}.txt\"
+          }" > ".github/finance/provenance_${{ steps.date.outputs.date }}.json"
 
       - name: 📜 Scorecard provenance 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
           echo "{
             \"type\": \"scorecard-report\",
-            \"date\": \"$TODAY\",
+            \"date\": \"${{ steps.date.outputs.date }}\",
             \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-            \"ledger\": \"scorecard_${TODAY}.csv\",
-            \"report\": \"oss_report_${TODAY}.txt\"
-          }" > ".github/scorecard/provenance_${TODAY}.json"
+            \"ledger\": \"scorecard_${{ steps.date.outputs.date }}.csv\",
+            \"report\": \"oss_report_${{ steps.date.outputs.date }}.txt\"
+          }" > ".github/scorecard/provenance_${{ steps.date.outputs.date }}.json"
 
       - name: 🧪 Scorecard SARIF 생성
         run: |
-          TODAY=$(date +%Y-%m-%d)
-          scorecard --repo="${{ github.repository }}" --format sarif \
-            --output-file ".github/scorecard/sarif/scorecard_${TODAY}.sarif" || echo "⚠️ scorecard 분석 실패 무시"
+          scorecard --repo="${{ github.repository }}" \
+            --format sarif \
+            --output-file ".github/scorecard/sarif/scorecard_${{ steps.date.outputs.date }}.sarif" || echo "⚠️ scorecard 실패 무시"
 
       - name: 🚀 SARIF 업로드
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: .github/scorecard/sarif/scorecard_${{ steps.date.outputs.date || 'manual' }}.sarif
+          sarif_file: .github/scorecard/sarif/scorecard_${{ steps.date.outputs.date }}.sarif
 
-      - name: 🩺 헬스체크 (강화됨)
+      - name: 🩺 헬스체크 (Docker, Scorecard, SARIF, 보고서)
         run: |
-          TODAY=$(date +%Y-%m-%d)
+          echo "[healthcheck] Docker..."
+          docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker 실패" && exit 1)
 
-          echo "[healthcheck] Docker 상태 확인 중..."
-          docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker 오류" && exit 1)
-
-          echo "[healthcheck] Scorecard CLI 확인 중..."
+          echo "[healthcheck] Scorecard CLI..."
           which scorecard && scorecard --version > /dev/null && echo "✅ Scorecard OK" || (echo "❌ Scorecard 오류" && exit 1)
 
-          echo "[healthcheck] 디렉토리/파일 체크..."
-          test -d .github/finance/ledgers && test -d .github/scorecard/files || (echo "❌ 디렉토리 누락" && exit 1)
+          echo "[healthcheck] Ledger 존재 확인..."
+          test -f ".github/finance/ledgers/ledger_${{ steps.date.outputs.date }}.csv" || (echo "❌ Ledger 없음" && exit 1)
 
-          echo "[healthcheck] 금융 ledger 파일 확인..."
-          test -f ".github/finance/ledgers/ledger_${TODAY}.csv" || (echo "❌ Ledger 파일 없음" && exit 1)
+          echo "[healthcheck] SARIF 존재 확인..."
+          test -f ".github/scorecard/sarif/scorecard_${{ steps.date.outputs.date }}.sarif" || (echo "❌ SARIF 없음" && exit 1)
 
-          echo "[healthcheck] Scorecard 보고서 유효성 검사..."
-          grep -q "보안 점검" ".github/scorecard/files/oss_report_${TODAY}.txt" && echo "✅ 보고서 OK" || (echo "❌ 보고서 이상" && exit 1)
-
-          echo "[healthcheck] SARIF 파일 확인..."
-          test -f ".github/scorecard/sarif/scorecard_${TODAY}.sarif" && echo "✅ SARIF OK" || (echo "❌ SARIF 누락" && exit 1)
+          echo "[healthcheck] 보고서 내용 확인..."
+          grep -q "보안 점검" ".github/scorecard/files/oss_report_${{ steps.date.outputs.date }}.txt" && echo "✅ 보고서 OK" || (echo "❌ 보고서 문제" && exit 1)
 
           echo "✅ 모든 헬스체크 통과 완료"
