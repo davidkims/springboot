@@ -1,51 +1,57 @@
-name: 🛡️ Scorecard Analysis
+name: 🛡️ Scorecard Binary Install + Copy + Scan
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'  # 매주 일요일 자정 UTC 실행
+    - cron: '0 0 * * 0'
 
 permissions:
   contents: read
 
 env:
   SCORECARD_VERSION: "4.10.5"
+  INSTALL_DIR: "/opt/scorecard"
+  OUT_DIR: .github/scorecard
   GITHUB_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   TARGET_REPO: ${{ github.repository }}
-  OUT_DIR: .github/scorecard
 
 jobs:
-  run-scorecard:
+  scorecard-job:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🛠️ Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: 🔧 Install Scorecard CLI
+      - name: 📁 Prepare install directory
         run: |
-          echo "[+] Installing Scorecard CLI version $SCORECARD_VERSION"
-          go install github.com/ossf/scorecard/v4@v$SCORECARD_VERSION
-          echo "$HOME/go/bin" >> $GITHUB_PATH
+          echo "[+] Creating install directory: $INSTALL_DIR"
+          sudo mkdir -p $INSTALL_DIR
+          sudo chmod -R 777 $INSTALL_DIR
 
-      - name: 📂 Create output directory
+      - name: 🧾 Download Scorecard CLI Binary
+        run: |
+          echo "[+] Downloading Scorecard CLI v${SCORECARD_VERSION}"
+          BINARY="scorecard_${SCORECARD_VERSION}_linux_amd64"
+          URL="https://github.com/ossf/scorecard/releases/download/v${SCORECARD_VERSION}/${BINARY}"
+          curl -fsSL -o scorecard "$URL"
+          file scorecard | grep ELF || (cat scorecard | head -20 && exit 1)
+          chmod +x scorecard
+          mv scorecard $INSTALL_DIR/
+          echo "$INSTALL_DIR" >> $GITHUB_PATH
+          scorecard --version
+
+      - name: 📂 Prepare Output Directory
         run: mkdir -p $OUT_DIR
 
-      - name: 🧪 Run Scorecard scan
+      - name: 🧪 Run Scorecard JSON Scan
         run: |
-          echo "[+] Running Scorecard for repo: $TARGET_REPO"
           scorecard --repo=https://github.com/$TARGET_REPO \
                     --format=json \
                     --show-details > $OUT_DIR/results.json
 
-      - name: 📄 Convert Scorecard JSON to SARIF
+      - name: 📄 Convert to SARIF
         run: |
-          echo "[+] Converting to SARIF..."
           scorecard --repo=https://github.com/$TARGET_REPO \
                     --format=sarif > $OUT_DIR/scorecard-results.sarif
 
@@ -54,7 +60,7 @@ jobs:
         with:
           sarif_file: ${{ env.OUT_DIR }}/scorecard-results.sarif
 
-      - name: 📦 Upload JSON results as artifact
+      - name: 📦 Upload JSON Results
         uses: actions/upload-artifact@v4
         with:
           name: scorecard-json
