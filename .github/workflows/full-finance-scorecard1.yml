@@ -1,16 +1,20 @@
-name: 🚀 Full Finance & Scorecard Setup
+name: 🚀 Full Finance & Scorecard Setup (Safe Append Mode)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'  # 매 시간마다 실행
+    - cron: '0 0 * * 0'  # 매주 일요일 자정 실행
 
 permissions:
   contents: write
+  security-events: write  # SARIF 업로드 허용
 
 jobs:
   full-setup:
     runs-on: ubuntu-latest
+
+    env:
+      DATE: ${{ github.run_started_at || github.run_id }}
 
     steps:
       - name: 📥 Checkout Repository
@@ -22,177 +26,136 @@ jobs:
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
           sudo systemctl start docker
-          docker --version
-          echo "[docker] Docker 설치 완료"
-          echo "[cli] CLI 도구 설치 중..."
+          docker --version && echo "✅ Docker 설치 완료"
+
+          echo "[cli] CLI 유틸 설치 중..."
           sudo apt-get update
           sudo apt-get install -y jq curl unzip bc
-          echo "[cli] jq, curl, unzip, bc 설치 완료"
+          echo "✅ CLI 유틸 설치 완료"
 
-      - name: 🗂️ 필수 디렉토리 생성
+      - name: 🗂️ 누적 디렉토리 준비
         run: |
-          echo "[mkdir] 디렉토리 생성 중..."
           mkdir -p .github/finance/ledgers
           mkdir -p .github/finance/files
           mkdir -p .github/scorecard/ledgers
           mkdir -p .github/scorecard/files
-          echo "[mkdir] 디렉토리 생성 완료"
+          mkdir -p .github/scorecard/sarif
 
-      - name: 🧾 금융 실거래 원장 대량 생성 (가상 카드번호 포함)
+      - name: 🧾 금융 누적 원장 생성
         run: |
-          echo "[ledger] 금융 원장 10개 생성 시작..."
-          for i in $(seq 1 10); do
-            FILE=".github/finance/ledgers/ledger_$i.csv"
-            echo "name,date,amount,type,card_number" > $FILE
-            for j in $(seq 1 50); do
-              NAME="Customer${j}"
-              DATE=$(date -d "$j days ago" +%F)
-              AMOUNT=$(echo "scale=2; $((RANDOM % 9000 + 1000))" | bc)
-              TYPE=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "신용"; else echo "체크"; fi)
-              if [ "$TYPE" = "신용" ]; then
-                BIN="4111"
-                RANDOM_NUM=$(printf "%012d" $((RANDOM % 1000000000000)))
-                CARD_NUMBER="${BIN}${RANDOM_NUM}"
-              else
-                CARD_NUMBER="-"
-              fi
-              echo "$NAME,$DATE,$AMOUNT,$TYPE,$CARD_NUMBER" >> $FILE
-            done
-            echo "[ledger] ledger_$i.csv 생성 완료"
+          TODAY=$(date +%Y-%m-%d)
+          FILE=".github/finance/ledgers/ledger_${TODAY}.csv"
+          echo "name,date,amount,type,card_number" > "$FILE"
+          for i in $(seq 1 50); do
+            NAME="Customer${i}"
+            TXN_DATE=$(date -d "$i days ago" +%F)
+            AMOUNT=$(echo "scale=2; $((RANDOM % 9000 + 1000))" | bc)
+            TYPE=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "신용"; else echo "체크"; fi)
+            CARD="-"
+            if [ "$TYPE" = "신용" ]; then
+              CARD="4111$(printf "%012d" $((RANDOM % 1000000000000)))"
+            fi
+            echo "$NAME,$TXN_DATE,$AMOUNT,$TYPE,$CARD" >> "$FILE"
           done
-          echo "[ledger] 모든 금융 원장 생성 완료"
 
-      - name: 💳 생성된 거래 원장 기반 거래 실행 시뮬레이션
+      - name: 💳 거래 시뮬레이션
         run: |
-          echo "[simulate] 원장 기반 거래 실행 시작..."
-          for file in .github/finance/ledgers/ledger_*.csv; do
-            echo "[simulate] 파일 처리 중: $file"
-            tail -n +2 "$file" | while IFS=',' read -r name date amount type card_number; do
-              echo "🟢 거래 실행 중: 고객=$name | 금액=₩$amount | 카드=$type | 번호=${card_number:0:4}****" 
-              if [[ "$type" == "신용" && "$card_number" != "-" ]]; then
-                echo "✅ [신용 승인] $name의 ₩$amount 거래 승인 완료"
-              else
-                echo "✅ [체크 이체] $name의 ₩$amount 이체 완료"
-              fi
-              sleep 0.1
+          for file in .github/finance/ledgers/*.csv; do
+            echo "[simulate] 처리 중: $file"
+            tail -n +2 "$file" | while IFS=',' read -r name date amount type card; do
+              echo "🟢 $name ₩$amount $type ${card:0:4}****"
+              sleep 0.005
             done
           done
-          echo "[simulate] 모든 거래 실행 완료"
 
-      - name: 📄 금융 보고서 파일 생성
+      - name: 📄 금융 보고서 생성
         run: |
-          echo "[file] 금융 보고서 파일 생성 시작..."
-          for i in $(seq 1 10); do
-            echo "이 보고서는 금융 거래 내역 요약본입니다. 파일 번호: $i" > .github/finance/files/report_$i.txt
-            echo "[file] report_$i.txt 생성 완료"
-          done
-          echo "[file] 모든 금융 보고서 생성 완료"
+          TODAY=$(date +%Y-%m-%d)
+          echo "금융 거래 요약 리포트 - $TODAY" > ".github/finance/files/report_${TODAY}.txt"
 
-      - name: ✅ OSSF Scorecard CLI 설치
+      - name: ✅ Scorecard CLI 설치 및 검증
         run: |
-          echo "[scorecard] Scorecard CLI 설치 시작..."
+          echo "[scorecard] CLI 설치 중..."
           curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
           chmod +x scorecard-linux-amd64
           sudo mv scorecard-linux-amd64 /usr/local/bin/scorecard
-          echo "[scorecard] 설치 완료"
-          scorecard --version || echo "[scorecard] 버전 확인 실패 - 무시"
 
-      - name: 🧾 Scorecard 원장 대량 생성
+          echo "[scorecard] 바이너리 위치 확인:"
+          which scorecard || (echo "❌ scorecard not found in PATH" && exit 1)
+
+          echo "[scorecard] CLI 버전 확인:"
+          scorecard --version || (echo "❌ scorecard 실행 실패" && exit 1)
+
+      - name: 🧾 Scorecard 원장 생성
         run: |
-          echo "[scorecard-ledger] Scorecard 원장 10개 생성 시작..."
-          for i in $(seq 1 10); do
-            FILE=".github/scorecard/ledgers/scorecard_$i.csv"
-            echo "item,score,comment" > $FILE
-            for j in $(seq 1 20); do
-              ITEM="SecurityCheck${j}"
-              SCORE=$((RANDOM % 100))
-              COMMENT=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "양호"; else echo "개선필요"; fi)
-              echo "$ITEM,$SCORE,$COMMENT" >> $FILE
-            done
-            echo "[scorecard-ledger] scorecard_$i.csv 생성 완료"
+          TODAY=$(date +%Y-%m-%d)
+          FILE=".github/scorecard/ledgers/scorecard_${TODAY}.csv"
+          echo "item,score,comment" > "$FILE"
+          for i in $(seq 1 20); do
+            ITEM="SecurityCheck${i}"
+            SCORE=$((RANDOM % 100))
+            COMMENT=$(if [ $((RANDOM % 2)) -eq 0 ]; then echo "양호"; else echo "개선필요"; fi)
+            echo "$ITEM,$SCORE,$COMMENT" >> "$FILE"
           done
-          echo "[scorecard-ledger] 모든 Scorecard 원장 생성 완료"
 
-      - name: 📄 Scorecard 보고서 파일 생성
+      - name: 📄 Scorecard 보고서 생성
         run: |
-          echo "[scorecard-file] Scorecard 보고서 파일 생성 시작..."
-          for i in $(seq 1 10); do
-            echo "이 리포트는 오픈소스 보안 점검 결과를 요약한 보고서입니다. 번호: $i" > .github/scorecard/files/oss_report_$i.txt
-            echo "[scorecard-file] oss_report_$i.txt 생성 완료"
-          done
-          echo "[scorecard-file] 모든 Scorecard 보고서 생성 완료"
+          TODAY=$(date +%Y-%m-%d)
+          echo "오픈소스 보안 점검 리포트 - $TODAY" > ".github/scorecard/files/oss_report_${TODAY}.txt"
 
-      - name: 📜 금융 provenance.json 생성
+      - name: 📜 금융 provenance 생성
         run: |
-          echo "[provenance] 금융 provenance.json 생성 시작..."
-          FILE=".github/finance/provenance.json"
+          TODAY=$(date +%Y-%m-%d)
           echo "{
             \"type\": \"finance-ledger\",
+            \"date\": \"$TODAY\",
             \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-            \"workflow\": \"${{ github.workflow }}\",
-            \"run_id\": \"${{ github.run_id }}\",
-            \"repository\": \"${{ github.repository }}\",
-            \"ledgers\": $(ls .github/finance/ledgers | jq -R -s -c 'split("\n")[:-1]'),
-            \"reports\": $(ls .github/finance/files | jq -R -s -c 'split("\n")[:-1]')
-          }" > "$FILE"
-          echo "[provenance] 금융 provenance.json 생성 완료"
+            \"ledger\": \"ledger_${TODAY}.csv\",
+            \"report\": \"report_${TODAY}.txt\"
+          }" > ".github/finance/provenance_${TODAY}.json"
 
-      - name: 📜 Scorecard provenance.json 생성
+      - name: 📜 Scorecard provenance 생성
         run: |
-          echo "[provenance] Scorecard provenance.json 생성 시작..."
-          FILE=".github/scorecard/provenance.json"
+          TODAY=$(date +%Y-%m-%d)
           echo "{
             \"type\": \"scorecard-report\",
+            \"date\": \"$TODAY\",
             \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-            \"workflow\": \"${{ github.workflow }}\",
-            \"run_id\": \"${{ github.run_id }}\",
-            \"repository\": \"${{ github.repository }}\",
-            \"ledgers\": $(ls .github/scorecard/ledgers | jq -R -s -c 'split("\n")[:-1]'),
-            \"reports\": $(ls .github/scorecard/files | jq -R -s -c 'split("\n")[:-1]')
-          }" > "$FILE"
-          echo "[provenance] Scorecard provenance.json 생성 완료"
+            \"ledger\": \"scorecard_${TODAY}.csv\",
+            \"report\": \"oss_report_${TODAY}.txt\"
+          }" > ".github/scorecard/provenance_${TODAY}.json"
 
-      - name: 🩺 시스템 헬스체크
+      - name: 🧪 Scorecard SARIF 생성
         run: |
-          echo "[healthcheck] Docker 동작 상태 확인 중..."
-          if docker info > /dev/null 2>&1; then
-            echo "✅ Docker 정상 동작 중"
-          else
-            echo "❌ Docker 비정상 상태"
-            exit 1
-          fi
+          TODAY=$(date +%Y-%m-%d)
+          scorecard --repo="${{ github.repository }}" --format sarif \
+            --output-file ".github/scorecard/sarif/scorecard_${TODAY}.sarif" || echo "⚠️ scorecard 분석 실패 무시"
 
-          echo "[healthcheck] Scorecard CLI 버전 확인 중..."
-          if scorecard --version > /dev/null 2>&1; then
-            echo "✅ Scorecard CLI 정상 설치됨"
-          else
-            echo "❌ Scorecard CLI 설치 실패 또는 누락"
-            exit 1
-          fi
+      - name: 🚀 SARIF 업로드
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: .github/scorecard/sarif/scorecard_${{ steps.date.outputs.date || 'manual' }}.sarif
 
-          echo "[healthcheck] 디렉토리 생성 확인 중..."
-          if [ -d ".github/finance/ledgers" ] && [ -d ".github/scorecard/files" ]; then
-            echo "✅ 디렉토리 정상 생성됨"
-          else
-            echo "❌ 디렉토리 생성 실패"
-            exit 1
-          fi
+      - name: 🩺 헬스체크 (강화됨)
+        run: |
+          TODAY=$(date +%Y-%m-%d)
 
-          echo "[healthcheck] 금융 ledger 개수 확인 중..."
-          COUNT=$(ls .github/finance/ledgers/*.csv 2>/dev/null | wc -l)
-          if [ "$COUNT" -ge 10 ]; then
-            echo "✅ 금융 ledger $COUNT개 생성됨"
-          else
-            echo "❌ 금융 ledger 부족 (현재 $COUNT개)"
-            exit 1
-          fi
+          echo "[healthcheck] Docker 상태 확인 중..."
+          docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker 오류" && exit 1)
 
-          echo "[healthcheck] Scorecard 보고서 유효성 확인 중..."
-          if grep -q "오픈소스 보안 점검" .github/scorecard/files/oss_report_1.txt; then
-            echo "✅ Scorecard 보고서 내용 정상"
-          else
-            echo "❌ Scorecard 보고서 내용 이상"
-            exit 1
-          fi
+          echo "[healthcheck] Scorecard CLI 확인 중..."
+          which scorecard && scorecard --version > /dev/null && echo "✅ Scorecard OK" || (echo "❌ Scorecard 오류" && exit 1)
 
-          echo "[healthcheck] 모든 헬스체크 통과 완료 ✅"
+          echo "[healthcheck] 디렉토리/파일 체크..."
+          test -d .github/finance/ledgers && test -d .github/scorecard/files || (echo "❌ 디렉토리 누락" && exit 1)
+
+          echo "[healthcheck] 금융 ledger 파일 확인..."
+          test -f ".github/finance/ledgers/ledger_${TODAY}.csv" || (echo "❌ Ledger 파일 없음" && exit 1)
+
+          echo "[healthcheck] Scorecard 보고서 유효성 검사..."
+          grep -q "보안 점검" ".github/scorecard/files/oss_report_${TODAY}.txt" && echo "✅ 보고서 OK" || (echo "❌ 보고서 이상" && exit 1)
+
+          echo "[healthcheck] SARIF 파일 확인..."
+          test -f ".github/scorecard/sarif/scorecard_${TODAY}.sarif" && echo "✅ SARIF OK" || (echo "❌ SARIF 누락" && exit 1)
+
+          echo "✅ 모든 헬스체크 통과 완료"
