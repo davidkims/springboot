@@ -1,6 +1,7 @@
-name: OpenSSF Scorecard Scan with Custom Directory Copy
+name: 🛡️ OpenSSF Scorecard Scan
 
 on:
+  workflow_dispatch: # Allows manual triggering from the GitHub UI
   push:
     branches:
       - main  # Adjust to your default branch name (e.g., master, develop)
@@ -8,70 +9,109 @@ on:
     branches:
       - main  # Adjust to your default branch name (e.g., master, develop)
   schedule:
-    - cron: '30 1 * * 0' # Runs every Sunday at 01:30 UTC
+    # Runs every Sunday at 00:00 UTC. (현재 시간 기준 KST 오전 9시)
+    # Cron format: minute hour day_of_month month day_of_week
+    # 0 0 * * 0 means at 00:00 on Sunday.
+    - cron: '0 0 * * 0'
 
 jobs:
-  scorecard:
+  scorecard-scan:
     name: Run OpenSSF Scorecard Analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # Uses a fresh Ubuntu environment for each run
     permissions:
-      contents: read         # Required for checkout and Scorecard action to read repo
-      security-events: write # Required for uploading SARIF results
+      contents: read         # Required for checkout and Scorecard action to read repository content
+      security-events: write # Required for uploading SARIF results to GitHub Code Scanning
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4 # Essential to have your code in the runner
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4 # Checks out your repository code into the runner environment
 
-      - name: Run OpenSSF Scorecard
-        uses: ossf/scorecard-action@v2.4.2 # Using the specific stable version
+      - name: 🧪 Run OpenSSF Scorecard and Generate Reports
+        # This action handles downloading the Scorecard CLI, running the scan,
+        # and generating reports in specified formats.
+        # It's the recommended way to use Scorecard in GitHub Actions.
+        uses: ossf/scorecard-action@v2.4.2 # Using the specific latest stable v2.x.y release (as of my last update).
+                                           # Always check https://github.com/ossf/scorecard-action/releases for the absolute latest version.
         with:
+          # repo_token is a GitHub Actions secret automatically provided.
+          # It grants permissions for the action to interact with GitHub's APIs
+          # (e.g., fetch repository metadata for analysis).
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          results_file: scorecard-results.sarif # This is where the SARIF output will be saved initially
 
-      - name: Create Custom Output Directory and Copy Files
-        run: |
-          # Define the target directory name
-          CUSTOM_DIR="scan_outputs"
-          
-          echo "[📁] Creating custom directory: ${CUSTOM_DIR}..."
-          mkdir -p "${CUSTOM_DIR}" # -p creates parent directories if they don't exist
-          
-          echo "[📄] Copying scorecard-results.sarif to ${CUSTOM_DIR}/..."
-          # Check if the SARIF file exists before copying
-          if [ -f "scorecard-results.sarif" ]; then
-            cp scorecard-results.sarif "${CUSTOM_DIR}/"
-            echo "scorecard-results.sarif copied successfully."
-          else
-            echo "Warning: scorecard-results.sarif not found, skipping copy."
-          fi
-          
-          echo "[📄] Copying a hypothetical README.md to ${CUSTOM_DIR}/..."
-          # Example: Copy another file from your repo. Adjust 'README.md' to your actual file.
-          # You can add more 'cp' commands here for other files/folders.
-          if [ -f "README.md" ]; then # Check if README.md exists in the repo root
-            cp README.md "${CUSTOM_DIR}/"
-            echo "README.md copied successfully."
-          else
-            echo "Note: README.md not found in repository root, skipping copy."
-          fi
-          
-          echo "[✅] Files copied to ${CUSTOM_DIR}/. Listing contents:"
-          ls -l "${CUSTOM_DIR}" # List contents of the new directory for verification
+          # Specify the output file name for the SARIF results.
+          # The action automatically handles converting its native output to SARIF.
+          results_file: scorecard-results.sarif
 
-      - name: Upload Scorecard results to GitHub Code Scanning
+          # Additionally, generate a JSON report.
+          # The action will output this to the specified path.
+          results_format: json
+          output_file: results.json # Path for the JSON output
+
+          # Uncomment the line below if you prefer the action to directly publish
+          # results to GitHub Code Scanning, instead of using the separate
+          # 'github/codeql-action/upload-sarif' step.
+          # publish_results: true
+
+      - name: 📤 Upload SARIF to GitHub Security
+        # This action uploads SARIF files to the Security tab in your GitHub repository,
+        # making the findings visible in Code Scanning alerts.
         uses: github/codeql-action/upload-sarif@v3
         with:
-          # The SARIF file is still expected at its original location by this action
-          # unless you moved it and updated this path. In this setup, we copy it,
-          # but the original still exists for the upload-sarif action.
-          # If you intend to delete the original, you'd change this path to "${CUSTOM_DIR}/scorecard-results.sarif"
+          # Path to the SARIF file generated by the Scorecard action.
           sarif_file: scorecard-results.sarif
+          # 'category' helps distinguish this scan from other potential scans
+          # in the GitHub Code Scanning UI.
           category: "OpenSSF Scorecard"
 
-      # Optional: Upload the entire custom directory as an artifact
-      - name: Upload Custom Output Directory as Artifact
+      - name: 📦 Upload JSON report as artifact
+        # This action uploads the generated JSON report as a workflow artifact.
+        # Artifacts are stored by GitHub for a period and can be downloaded
+        # from the workflow run summary page for review or further processing.
         uses: actions/upload-artifact@v4
         with:
-          name: custom-scan-artifacts
-          path: scan_outputs/
-          # retention-days: 7 # Optional: How long to keep the artifact (default is 90 days)
+          name: scorecard-json-report # Name for the downloadable artifact
+          path: results.json          # Path to the JSON file generated by the Scorecard action
+          # retention-days: 7 # Optional: Set retention period for the artifact (default is 90 days)
+
+      - name: 📁 Create Custom Output Directory and Copy Reports
+        # This step creates a specific directory and copies the generated report files into it.
+        run: |
+          # Define the name of your custom directory
+          CUSTOM_OUTPUT_DIR="custom_scan_reports"
+          
+          echo "[📁] Creating custom directory: ${CUSTOM_OUTPUT_DIR}..."
+          # 'mkdir -p' creates the directory if it doesn't exist, and also creates any necessary
+          # parent directories. It also suppresses errors if the directory already exists.
+          mkdir -p "${CUSTOM_OUTPUT_DIR}"
+          
+          echo "[📄] Copying scorecard-results.sarif to ${CUSTOM_OUTPUT_DIR}/..."
+          # Check if the SARIF file exists before attempting to copy it.
+          if [ -f "scorecard-results.sarif" ]; then
+            cp scorecard-results.sarif "${CUSTOM_OUTPUT_DIR}/"
+            echo "scorecard-results.sarif copied successfully."
+          else
+            echo "Warning: scorecard-results.sarif not found, skipping copy to custom directory."
+          fi
+          
+          echo "[📄] Copying results.json to ${CUSTOM_OUTPUT_DIR}/..."
+          # Check if the JSON file exists before attempting to copy it.
+          if [ -f "results.json" ]; then
+            cp results.json "${CUSTOM_OUTPUT_DIR}/"
+            echo "results.json copied successfully."
+          else
+            echo "Warning: results.json not found, skipping copy to custom directory."
+          fi
+          
+          echo "[✅] Files copied to ${CUSTOM_OUTPUT_DIR}/. Listing contents:"
+          # List the contents of the newly created directory to confirm the files are there.
+          ls -l "${CUSTOM_OUTPUT_DIR}"
+
+      - name: ⬆️ Upload Custom Reports Directory as Artifact
+        # This action uploads the entire custom directory (with the copied reports)
+        # as another separate workflow artifact. This can be useful for keeping
+        # consolidated copies of specific outputs.
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-scan-reports-archive # Name for this specific artifact
+          path: custom_scan_reports/       # Path to the directory to upload
+          # retention-days: 7 # Optional: Set retention period for this specific artifact
