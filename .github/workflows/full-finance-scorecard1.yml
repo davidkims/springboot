@@ -1,95 +1,149 @@
-name: 🚀 Full Finance & Scorecard Setup (Stable v5.1.1)
+name: 🚀 Full Finance & Scorecard Setup
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering from the GitHub UI
   schedule:
-    - cron: '0 0 * * 0'
-
-permissions:
-  contents: write
-  security-events: write
+    - cron: '0 0 * * 0' # 매주 일요일 00:00 UTC에 실행 (KST 기준 일요일 오전 9시)
 
 jobs:
   full-setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # 최신 Ubuntu 환경 사용
+    permissions:
+      contents: read         # 리포지토리 코드 읽기 권한 (체크아웃 및 스코어카드 액션용)
+      security-events: write # SARIF 결과를 GitHub 보안 탭에 업로드하기 위한 권한
 
     steps:
-      - uses: actions/checkout@v4
-        name: 📥 Checkout
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4 # 현재 리포지토리 코드 체크아웃
 
       - name: 📆 Set Date
-        id: date
-        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+        id: date # 이 step의 ID를 'date'로 설정하여 출력값을 참조할 수 있게 함
+        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT" # 현재 날짜를 YYYY-MM-DD 형식으로 GITHUB_OUTPUT에 저장
 
-      - name: 🐳 Docker & CLI 설치
+      - name: 🐳 CLI Tools 설치
+        # GitHub Actions runner에는 Docker가 이미 설치되어 있으므로 별도 설치 불필요.
+        # 필요한 기타 CLI 도구들만 설치합니다.
         run: |
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          sudo systemctl start docker
-          docker --version
+          echo "Installing necessary CLI tools..."
           sudo apt-get update
-          sudo apt-get install -y jq curl unzip bc file
+          sudo apt-get install -y jq curl unzip bc file # jq, curl, unzip, bc, file 설치
 
       - name: 🗂️ 디렉토리 준비
-        run: mkdir -p .github/finance/ledgers .github/finance/files .github/scorecard/ledgers .github/scorecard/files .github/scorecard/sarif
+        # 필요한 모든 디렉토리들을 미리 생성합니다.
+        run: |
+          echo "Preparing directories..."
+          mkdir -p .github/finance/ledgers \
+                   .github/finance/files \
+                   .github/scorecard/ledgers \
+                   .github/scorecard/files \
+                   .github/scorecard/sarif
 
       - name: 🧾 금융 원장 생성
+        # 가상의 금융 거래 원장 CSV 파일을 생성합니다.
         run: |
           F=".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv"
           echo "name,date,amount,type,card_number" > "$F"
           for i in {1..50}; do
-            TXN=$(date -d "$i days ago" +%F)
-            TYPE=$( ((i%2)) && echo 신용 || echo 체크 )
+            TXN=$(date -d "$i days ago" +%F) # i일 전 날짜
+            TYPE=$( ((i%2)) && echo 신용 || echo 체크 ) # 홀수일 경우 신용, 짝수일 경우 체크
             CARD="-"
-            [[ "$TYPE" = "신용" ]] && CARD="4111$(printf "%012d" $RANDOM)"
+            [[ "$TYPE" = "신용" ]] && CARD="4111$(printf "%012d" $RANDOM)" # 신용카드 번호 가상 생성
             echo "Customer$i,$TXN,$((RANDOM%9000+1000)).00,$TYPE,$CARD" >> "$F"
           done
+          echo "Finance ledger created at: $F"
 
       - name: 📄 보고서 생성 (Finance)
-        run: echo "금융 거래 요약 리포트 - ${{steps.date.outputs.date}}" > .github/finance/files/report_${{steps.date.outputs.date}}.txt
-
-      - name: ✅ Scorecard CLI 설치 (v5.1.1)
+        # 가상의 금융 거래 요약 리포트 파일을 생성합니다.
         run: |
-          VERSION="5.1.1"
-          B="scorecard_${VERSION}_linux_amd64"
-          URL="https://github.com/ossf/scorecard/releases/download/v${VERSION}/${B}"
-          curl -fsSL -o scorecard "$URL"
-          file scorecard | grep ELF || (cat scorecard | head -20 && exit 1)
-          chmod +x scorecard
-          sudo mv scorecard /usr/local/bin/scorecard
-          which scorecard
-          scorecard --version
+          REPORT_FILE=".github/finance/files/report_${{steps.date.outputs.date}}.txt"
+          echo "금융 거래 요약 리포트 - ${{steps.date.outputs.date}}" > "$REPORT_FILE"
+          echo "Finance report created at: $REPORT_FILE"
+
+      - name: 🧪 Run OpenSSF Scorecard and Generate Reports
+        # OpenSSF Scorecard 공식 GitHub Action을 사용하여 보안 점검을 수행합니다.
+        # 이 Action은 Scorecard CLI를 자동으로 다운로드하고, 실행하며, SARIF 및 JSON 형식으로
+        # 결과를 변환하여 저장합니다.
+        uses: ossf/scorecard-action@v2.4.2 # 현재 가장 안정적인 v2.x.y 버전 사용
+        with:
+          # repo_token은 GitHub Actions에 의해 자동으로 제공되는 시크릿 토큰입니다.
+          # 이 토큰은 Action이 GitHub API와 상호작용하여 리포지토리 메타데이터를
+          # 가져오는 데 필요한 권한을 부여합니다.
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          
+          # SARIF 결과 파일의 이름을 지정합니다.
+          # Action이 내부적으로 SARIF 형식으로 변환하여 저장합니다.
+          results_file: .github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif
+          
+          # JSON 형식의 보고서도 함께 생성하도록 지정합니다.
+          results_format: json
+          output_file: .github/scorecard/files/results_${{steps.date.outputs.date}}.json # JSON 출력 파일 경로
+
+          # publish_results: true를 설정하면 Action이 직접 GitHub Code Scanning에
+          # 결과를 게시할 수 있습니다. 여기서는 명시적인 'upload-sarif' step을
+          # 사용하기 위해 주석 처리합니다.
+          # publish_results: true
 
       - name: 🧾 Scorecard 원장 생성
+        # 가상의 Scorecard 점검 원장 CSV 파일을 생성합니다.
         run: |
           G=".github/scorecard/ledgers/scorecard_${{steps.date.outputs.date}}.csv"
           echo "item,score,comment" > "$G"
           for i in {1..20}; do
+            # 0 또는 1을 무작위로 생성하여 코멘트 결정
             C=$(( RANDOM % 2 ))
-            COMMENT=$((C)) && echo "SecurityCheck$i,$((RANDOM%101)),${COMMENT:+개선필요}${COMMENT:-양호}"
-          done >> "$G"
+            # C가 0이면 '양호', 1이면 '개선필요'
+            COMMENT=$([ "$C" -eq 0 ] && echo "양호" || echo "개선필요")
+            echo "SecurityCheck$i,$((RANDOM%101)),$COMMENT" >> "$G"
+          done
+          echo "Scorecard ledger created at: $G"
 
       - name: 📄 보고서 생성 (Scorecard)
-        run: echo "오픈소스 보안 점검 리포트 - ${{steps.date.outputs.date}}" > .github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt
+        # 가상의 오픈소스 보안 점검 리포트 파일을 생성합니다.
+        run: |
+          OSS_REPORT_FILE=".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt"
+          echo "오픈소스 보안 점검 리포트 - ${{steps.date.outputs.date}}" > "$OSS_REPORT_FILE"
+          echo "Open-source security report created at: $OSS_REPORT_FILE"
 
       - name: 📜 Provenance 생성
+        # 금융 및 Scorecard 보고서에 대한 Provenance JSON 파일을 생성합니다.
         run: |
-          echo "{\"type\":\"finance-ledger\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"ledger_${{steps.date.outputs.date}}.csv\",\"report\":\"report_${{steps.date.outputs.date}}.txt\"}" > .github/finance/provenance_${{steps.date.outputs.date}}.json
-          echo "{\"type\":\"scorecard-report\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"scorecard_${{steps.date.outputs.date}}.csv\",\"report\":\"oss_report_${{steps.date.outputs.date}}.txt\"}" > .github/scorecard/provenance_${{steps.date.outputs.date}}.json
+          FINANCE_PROVENANCE_FILE=".github/finance/provenance_${{steps.date.outputs.date}}.json"
+          echo "{\"type\":\"finance-ledger\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"ledger_${{steps.date.outputs.date}}.csv\",\"report\":\"report_${{steps.date.outputs.date}}.txt\"}" > "$FINANCE_PROVENANCE_FILE"
+          echo "Finance provenance created at: $FINANCE_PROVENANCE_FILE"
 
-      - name: 🧪 SARIF 생성
-        run: |
-          scorecard --repo="${{github.repository}}" --format sarif --output-file ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" || echo "⚠️ 무시"
+          SCORECARD_PROVENANCE_FILE=".github/scorecard/provenance_${{steps.date.outputs.date}}.json"
+          echo "{\"type\":\"scorecard-report\",\"date\":\"${{steps.date.outputs.date}}\",\"ledger\":\"scorecard_${{steps.date.outputs.date}}.csv\",\"report\":\"oss_report_${{steps.date.outputs.date}}.txt\"}" > "$SCORECARD_PROVENANCE_FILE"
+          echo "Scorecard provenance created at: $SCORECARD_PROVENANCE_FILE"
 
       - name: 🚀 SARIF 업로드
+        # 생성된 SARIF 파일을 GitHub 보안 탭에 업로드합니다.
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif
+          category: "OpenSSF Scorecard" # Code Scanning UI에서 스캔을 구분하기 위한 카테고리
+
+      - name: 📦 Upload JSON report as artifact
+        # Scorecard Action에서 생성된 JSON 보고서를 워크플로우 아티팩트로 업로드합니다.
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorecard-json-report-${{steps.date.outputs.date}}
+          path: .github/scorecard/files/results_${{steps.date.outputs.date}}.json
+          # retention-days: 7 # 선택 사항: 아티팩트 보존 기간 (기본값 90일)
 
       - name: 🩺 헬스체크
+        # 모든 필수 구성 요소 및 파일이 제대로 생성되었는지 확인합니다.
         run: |
-          docker info > /dev/null && echo ✅ Docker OK || exit 1
-          which scorecard && scorecard --version > /dev/null && echo ✅ Scorecard OK || exit 1
-          test -f ".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv" || exit 1
-          test -f ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" || exit 1
-          grep -q "보안 점검" ".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt" || exit 1
+          echo "Performing health checks..."
+          # Docker 데몬이 실행 중인지 확인 (runner에 이미 설치되어 있음)
+          docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker check failed"; exit 1)
+          
+          # Scorecard Action이 성공적으로 실행되었는지 확인 (SARIF 파일 존재 여부로 간접 확인)
+          test -f ".github/scorecard/sarif/scorecard_${{steps.date.outputs.date}}.sarif" && echo "✅ Scorecard SARIF OK" || (echo "❌ Scorecard SARIF file not found"; exit 1)
+          
+          # 금융 원장 파일 존재 여부 확인
+          test -f ".github/finance/ledgers/ledger_${{steps.date.outputs.date}}.csv" && echo "✅ Finance Ledger OK" || (echo "❌ Finance Ledger file not found"; exit 1)
+          
+          # Scorecard 보고서 파일 내용 확인
+          grep -q "오픈소스 보안 점검" ".github/scorecard/files/oss_report_${{steps.date.outputs.date}}.txt" && echo "✅ Scorecard Report OK" || (echo "❌ Scorecard Report content check failed"; exit 1)
+          
+          echo "All health checks passed successfully!"
