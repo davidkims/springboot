@@ -1,79 +1,62 @@
-name: 🛡️ Scorecard CLI Install + Run
+name: Scorecard CLI Download and Run
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * 0'  # 매주 일요일 실행
-
-permissions:
-  contents: read
-
-env:
-  SCORECARD_VERSION: "4.10.5"
-  INSTALL_DIR: "/opt/scorecard"
-  OUT_DIR: .github/scorecard
-  TARGET_REPO: ${{ github.repository }}
+on: [push, pull_request]
 
 jobs:
-  scorecard-job:
+  scorecard_scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📁 Create install directory
-        run: |
-          echo "[📁] Creating install directory: $INSTALL_DIR"
-          sudo mkdir -p $INSTALL_DIR
-          sudo chmod -R 777 $INSTALL_DIR
-
-      - name: 🔽 Download Scorecard binary + echo validation
+      - name: Set up Scorecard CLI
+        id: setup_scorecard
+        env:
+          SCORECARD_VERSION: 5.2.1 # Changed to a valid, recent version
+          INSTALL_DIR: /opt/scorecard
         run: |
           echo "[📦] Downloading Scorecard CLI v${SCORECARD_VERSION}..."
-          BINARY="scorecard_${SCORECARD_VERSION}_linux_amd64"
+          BINARY="scorecard_${SCORECARD_VERSION}_linux_amd64.tar.gz" # Added .tar.gz
           URL="https://github.com/ossf/scorecard/releases/download/v${SCORECARD_VERSION}/${BINARY}"
           echo "[🌐] Download URL: $URL"
           
-          curl -fsSL -o scorecard "$URL"
+          curl -fsSL -o "${BINARY}" "$URL"
           
           echo "[🧪] File type check:"
-          file scorecard || (echo "[❌] Download failed or invalid file"; exit 1)
-
+          file "${BINARY}" || (echo "[❌] Download failed or invalid file"; exit 1)
+          
+          echo "[📦] Extracting Scorecard CLI..."
+          tar -xzf "${BINARY}" # Extract the tar.gz archive
+          
+          # The extracted binary might be named 'scorecard' directly or inside a folder
+          # We'll assume it's directly named 'scorecard' after extraction for simplicity.
+          # If it's inside a folder, you'll need to adjust the mv command.
+          
           echo "[🔐] Making binary executable..."
           chmod +x scorecard
-
+          
           echo "[📁] Moving to $INSTALL_DIR..."
-          mv scorecard $INSTALL_DIR/
+          sudo mkdir -p $INSTALL_DIR
+          sudo mv scorecard $INSTALL_DIR/
           echo "$INSTALL_DIR" >> $GITHUB_PATH
-
+          
           echo "[✅] Version Check:"
           $INSTALL_DIR/scorecard --version
 
-      - name: 📂 Prepare output directory
+      - name: Run Scorecard
+        env:
+          OUT_DIR: .github/scorecard
+          TARGET_REPO: davidkims/springboot # Make sure this matches your repo
         run: |
-          echo "[📂] Creating output directory: $OUT_DIR"
-          mkdir -p $OUT_DIR
+          mkdir -p "${OUT_DIR}"
+          /opt/scorecard/scorecard --repo "github.com/${TARGET_REPO}" --format sarif --output "${OUT_DIR}/results.sarif"
+          echo "Scorecard scan completed. Results saved to ${OUT_DIR}/results.sarif"
 
-      - name: 🧪 Run Scorecard JSON Scan
-        run: |
-          echo "[🧪] Running JSON scan..."
-          scorecard --repo=https://github.com/${TARGET_REPO} \
-                    --format=json --show-details > $OUT_DIR/results.json
-
-      - name: 📄 Convert JSON to SARIF
-        run: |
-          echo "[📄] Converting to SARIF format..."
-          scorecard --repo=https://github.com/${TARGET_REPO} \
-                    --format=sarif > $OUT_DIR/scorecard-results.sarif
-
-      - name: 📤 Upload SARIF to GitHub Security
+      - name: Upload Scorecard results
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: ${{ env.OUT_DIR }}/scorecard-results.sarif
-
-      - name: 📦 Upload JSON report as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: scorecard-json
-          path: ${{ env.OUT_DIR }}/results.json
+          sarif_file: .github/scorecard/results.sarif
