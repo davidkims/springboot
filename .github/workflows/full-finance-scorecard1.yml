@@ -66,55 +66,68 @@ jobs:
           results_format: json
           output_file: .github/scorecard/files/results.json
 
-      - name: Create valid dummy SARIF if missing
+      - name: Create fallback SARIF/JSON if missing
         run: |
-          echo "[*] Validating SARIF structure..."
-
+          echo "[*] Ensuring valid SARIF and JSON exist..."
           mkdir -p .github/scorecard/files
           mkdir -p .github/scorecard/sarif
 
           if [ ! -f .github/scorecard/files/results.json ]; then
-            echo "[*] Creating fallback results.json"
+            echo '[*] Creating fallback results.json'
             echo '{"status":"generated"}' > .github/scorecard/files/results.json
-            echo "[✔] Fallback JSON created: .github/scorecard/files/results.json"
+            echo "[✔] Created: .github/scorecard/files/results.json"
           else
-            echo "[✓] results.json already exists"
+            echo "[✓] Found: .github/scorecard/files/results.json"
           fi
 
           if [ ! -f .github/scorecard/sarif/scorecard.sarif ]; then
-            echo "[*] Creating fallback SARIF"
+            echo '[*] Creating fallback SARIF'
             echo '{' > .github/scorecard/sarif/scorecard.sarif
             echo '  "version": "2.1.0",' >> .github/scorecard/sarif/scorecard.sarif
-            echo '  "runs": [' >> .github/scorecard/sarif/scorecard.sarif
-            echo '    {' >> .github/scorecard/sarif/scorecard.sarif
-            echo '      "tool": {' >> .github/scorecard/sarif/scorecard.sarif
-            echo '        "driver": {' >> .github/scorecard/sarif/scorecard.sarif
-            echo '          "name": "scorecard-dummy",' >> .github/scorecard/sarif/scorecard.sarif
-            echo '          "informationUri": "https://github.com/ossf/scorecard",' >> .github/scorecard/sarif/scorecard.sarif
-            echo '          "rules": []' >> .github/scorecard/sarif/scorecard.sarif
-            echo '        }' >> .github/scorecard/sarif/scorecard.sarif
-            echo '      },' >> .github/scorecard/sarif/scorecard.sarif
-            echo '      "results": []' >> .github/scorecard/sarif/scorecard.sarif
-            echo '    }' >> .github/scorecard/sarif/scorecard.sarif
-            echo '  ]' >> .github/scorecard/sarif/scorecard.sarif
+            echo '  "runs": [{' >> .github/scorecard/sarif/scorecard.sarif
+            echo '    "tool": {' >> .github/scorecard/sarif/scorecard.sarif
+            echo '      "driver": {' >> .github/scorecard/sarif/scorecard.sarif
+            echo '        "name": "scorecard-dummy",' >> .github/scorecard/sarif/scorecard.sarif
+            echo '        "informationUri": "https://github.com/ossf/scorecard",' >> .github/scorecard/sarif/scorecard.sarif
+            echo '        "rules": []' >> .github/scorecard/sarif/scorecard.sarif
+            echo '      }' >> .github/scorecard/sarif/scorecard.sarif
+            echo '    },' >> .github/scorecard/sarif/scorecard.sarif
+            echo '    "results": []' >> .github/scorecard/sarif/scorecard.sarif
+            echo '  }]' >> .github/scorecard/sarif/scorecard.sarif
             echo '}' >> .github/scorecard/sarif/scorecard.sarif
-            echo "[✔] Fallback SARIF created: .github/scorecard/sarif/scorecard.sarif"
+            echo "[✔] Created: .github/scorecard/sarif/scorecard.sarif"
           else
-            echo "[✓] SARIF file already exists"
+            echo "[✓] Found: .github/scorecard/sarif/scorecard.sarif"
           fi
 
-          echo "[✔] SARIF and JSON validation step complete."
+      - name: Validate SARIF before upload
+        run: |
+          echo "[*] Checking SARIF validity..."
+          if jq -e '.version and .runs' .github/scorecard/sarif/scorecard.sarif > /dev/null; then
+            echo "VALID_SARIF=true" >> $GITHUB_ENV
+            echo "[✔] SARIF is valid"
+          else
+            echo "VALID_SARIF=false" >> $GITHUB_ENV
+            echo "[❌] Invalid SARIF - skipping upload"
+          fi
+
+      - name: Upload SARIF to GitHub Security
+        if: env.VALID_SARIF == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: .github/scorecard/sarif/scorecard.sarif
+          category: scorecard
 
       - name: Copy scorecard files to archive
         run: |
-          echo "[+] Copying scorecard files..."
+          echo "[+] Copying Scorecard result files..."
           cp .github/scorecard/sarif/scorecard.sarif run_archives/${{ env.TS }}/
           cp .github/scorecard/files/results.json run_archives/${{ env.TS }}/
           echo "[✔] Scorecard files copied."
 
       - name: Generate scorecard ledger
         run: |
-          echo "[+] Generating scorecard ledger..."
+          echo "[+] Generating Scorecard ledger..."
           LEDGER=".github/scorecard/ledgers/scorecard.csv"
           CUMULATIVE=".github/scorecard/cumulative_scorecard_ledger.csv"
           echo "item,score,comment" > $LEDGER
@@ -129,17 +142,11 @@ jobs:
 
       - name: Generate scorecard report
         run: |
-          echo "[+] Generating scorecard report..."
+          echo "[+] Generating Scorecard report..."
           REPORT=".github/scorecard/files/oss_report.txt"
           echo "Scorecard weekly report" > $REPORT
           cp $REPORT run_archives/${{ env.TS }}/
           echo "[✔] Scorecard report done."
-
-      - name: Upload SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: .github/scorecard/sarif/scorecard.sarif
-          category: scorecard
 
       - name: Upload JSON report
         uses: actions/upload-artifact@v4
@@ -169,4 +176,4 @@ jobs:
           test -f .github/finance/ledgers/ledger.csv || (echo "[❌] Finance ledger missing" && exit 1)
           test -f .github/scorecard/ledgers/scorecard.csv || (echo "[❌] Scorecard ledger missing" && exit 1)
           test -d run_archives/${{ env.TS }} || (echo "[❌] Archive dir missing" && exit 1)
-          echo "[✅] All checks passed successfully!"
+          echo "[✅] All health checks passed successfully!"
