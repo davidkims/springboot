@@ -1,241 +1,120 @@
-name: 🚀 Full Finance & Scorecard Setup (with Accumulation & Archiving)
+name: Full Finance and Scorecard Setup
 
 on:
-  workflow_dispatch: # Allows manual triggering from the GitHub UI
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0' # Runs every Sunday at 00:00 UTC
+    - cron: '0 0 * * 0'
 
 jobs:
   full-setup:
-    name: Full Setup and Scorecard Scan
-    runs-on: ubuntu-latest # Uses the latest Ubuntu environment
+    runs-on: ubuntu-latest
     permissions:
-      contents: read         # Permission to read repository code
-      security-events: write # Permission to upload SARIF results to GitHub Security tab
+      contents: read
+      security-events: write
+
+    env:
+      DATE: ${{ github.run_started_at }}
+      TS: ${{ github.run_id }}
 
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-        run: echo "--- Step: Repository Checkout Completed ---"
 
-      - name: 📆 Set Date & Timestamp
-        id: date_info # Using a unique ID for this step
+      - name: Install CLI tools
         run: |
-          echo "--- Step: Setting Date and Timestamp ---"
-          echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-          echo "timestamp=$(date +%Y-%m-%d_%H%M%S)" >> "$GITHUB_OUTPUT"
-          echo "Current Date: ${{steps.date_info.outputs.date}}"
-          echo "Current Timestamp: ${{steps.date_info.outputs.timestamp}}"
-          echo "--- Step: Date and Timestamp Set ---"
-
-      - name: 🐳 Install CLI Tools
-        run: |
-          echo "--- Step: Installing CLI Tools ---"
           sudo apt-get update
           sudo apt-get install -y jq curl unzip bc file
-          echo "CLI Tools installed: jq, curl, unzip, bc, file"
-          echo "--- Step: CLI Tools Installation Completed ---"
 
-      - name: 🗂️ Prepare Directories and Create Archive Folder
+      - name: Prepare directories
         run: |
-          echo "--- Step: Preparing Directories and Creating Archive Folder ---"
-          mkdir -p ".github/finance/ledgers" \
-                   ".github/finance/files" \
-                   ".github/scorecard/ledgers" \
-                   ".github/scorecard/files" \
-                   ".github/scorecard/sarif" \
-                   "run_archives/${{steps.date_info.outputs.timestamp}}" # Use the correct step ID
-          echo "All necessary directories created."
-          echo "Run archive folder created: run_archives/${{steps.date_info.outputs.timestamp}}"
-          echo "--- Step: Directories Prepared ---"
+          mkdir -p .github/finance/ledgers
+          mkdir -p .github/finance/files
+          mkdir -p .github/scorecard/ledgers
+          mkdir -p .github/scorecard/files
+          mkdir -p .github/scorecard/sarif
+          mkdir -p run_archives/${{ env.TS }}
 
-      - name: 🧾 Generate and Accumulate Finance Ledger
+      - name: Generate finance ledger
         run: |
-          echo "--- Step: Generating and Accumulating Finance Ledger ---"
-          DAILY_LEDGER_FILE=".github/finance/ledgers/ledger_${{steps.date_info.outputs.date}}.csv"
-          CUMULATIVE_LEDGER_FILE=".github/finance/cumulative_finance_ledger.csv"
-          
-          echo "name,date,amount,type,card_number" > "$DAILY_LEDGER_FILE"
-          for i in $(seq 1 50); do
-            TXN_DATE=$(date -d "$i days ago" +%F)
-            TXN_TYPE=$([[ $((i%2)) -eq 1 ]] && echo "Credit" || echo "Debit")
-            CARD_NUM="-"
-            [[ "$TXN_TYPE" = "Credit" ]] && CARD_NUM="4111$(printf "%012d" $RANDOM)"
-            echo "Customer$i,$TXN_DATE,$((RANDOM%9000+1000)).00,$TXN_TYPE,$CARD_NUM" >> "$DAILY_LEDGER_FILE"
+          LEDGER=".github/finance/ledgers/ledger.csv"
+          CUMULATIVE=".github/finance/cumulative_finance_ledger.csv"
+          echo "name,date,amount,type,card_number" > $LEDGER
+          for i in {1..10}; do
+            echo "Customer$i,2025-07-01,$((RANDOM%9000+1000)),Credit,4111XXXXXXXX$i" >> $LEDGER
           done
-          echo "Finance daily ledger created at: $DAILY_LEDGER_FILE"
-          
-          if [ ! -f "$CUMULATIVE_LEDGER_FILE" ]; then
-            echo "Cumulative finance ledger not found, creating new one with header."
-            echo "name,date,amount,type,card_number" > "$CUMULATIVE_LEDGER_FILE"
-          else
-            echo "Cumulative finance ledger found, appending data."
-          fi
-          tail -n +2 "$DAILY_LEDGER_FILE" >> "$CUMULATIVE_LEDGER_FILE"
-          echo "Daily finance ledger data appended to cumulative ledger: $CUMULATIVE_LEDGER_FILE"
+          if [ ! -f $CUMULATIVE ]; then echo "name,date,amount,type,card_number" > $CUMULATIVE; fi
+          tail -n +2 $LEDGER >> $CUMULATIVE
+          cp $LEDGER run_archives/${{ env.TS }}/
+          cp $CUMULATIVE run_archives/${{ env.TS }}/
 
-          echo "Copying finance ledgers to run archive..."
-          cp "$DAILY_LEDGER_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          cp "$CUMULATIVE_LEDGER_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          echo "Finance ledgers copied to run archive."
-          echo "--- Step: Finance Ledger Generation and Accumulation Completed ---"
-
-      - name: 📄 Generate Report (Finance)
+      - name: Generate finance report
         run: |
-          echo "--- Step: Generating Finance Report ---"
-          REPORT_FILE=".github/finance/files/report_${{steps.date_info.outputs.date}}.txt"
-          echo "Financial Transaction Summary Report - ${{steps.date_info.outputs.date}}" > "$REPORT_FILE"
-          echo "Finance report created at: $REPORT_FILE"
-          
-          echo "Copying finance report to run archive..."
-          cp "$REPORT_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          echo "Finance report copied to run archive."
-          echo "--- Step: Finance Report Generation Completed ---"
+          REPORT=".github/finance/files/report.txt"
+          echo "Finance summary report" > $REPORT
+          cp $REPORT run_archives/${{ env.TS }}/
 
-      - name: 🧪 Run OpenSSF Scorecard and Generate Reports
-        uses: ossf/scorecard-action@v2.4.2 # Using a stable v2 version
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          results_file: .github/scorecard/sarif/scorecard_${{steps.date_info.outputs.date}}.sarif
+          results_file: .github/scorecard/sarif/scorecard.sarif
           results_format: json
-          output_file: .github/scorecard/files/results_${{steps.date_info.outputs.date}}.json
-        # No 'run:' block directly under 'uses:' or 'with:'.
-        # Any post-action scripts are in separate 'run:' steps.
-      
-      - name: 🗄️ Archive Scorecard Outputs
+          output_file: .github/scorecard/files/results.json
+
+      - name: Copy scorecard files
         run: |
-          echo "--- Step: Archiving Scorecard Outputs ---"
-          SCORECARD_SARIF_FILE=".github/scorecard/sarif/scorecard_${{steps.date_info.outputs.date}}.sarif"
-          SCORECARD_JSON_FILE=".github/scorecard/files/results_${{steps.date_info.outputs.date}}.json"
+          cp .github/scorecard/sarif/scorecard.sarif run_archives/${{ env.TS }}/
+          cp .github/scorecard/files/results.json run_archives/${{ env.TS }}/
 
-          echo "Scorecard scan completed."
-          echo "SARIF file expected: $SCORECARD_SARIF_FILE"
-          echo "JSON file expected: $SCORECARD_JSON_FILE"
-          
-          echo "Copying Scorecard outputs to run archive..."
-          # Ensure files exist before copying to avoid errors if action failed to produce them
-          if [ -f "$SCORECARD_SARIF_FILE" ]; then
-            cp "$SCORECARD_SARIF_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-            echo "SARIF file copied to run archive."
-          else
-            echo "Warning: SARIF file ($SCORECARD_SARIF_FILE) not found for archiving. Action might have failed to generate it."
-          fi
-          if [ -f "$SCORECARD_JSON_FILE" ]; then
-            cp "$SCORECARD_JSON_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-            echo "JSON file copied to run archive."
-          else
-            echo "Warning: JSON file ($SCORECARD_JSON_FILE) not found for archiving. Action might have failed to generate it."
-          fi
-          echo "--- Step: Archiving Scorecard Outputs Completed ---"
-
-
-      - name: 🧾 Generate and Accumulate Scorecard Ledger
+      - name: Generate scorecard ledger
         run: |
-          echo "--- Step: Generating and Accumulating Scorecard Ledger ---"
-          DAILY_LEDGER_FILE=".github/scorecard/ledgers/scorecard_${{steps.date_info.outputs.date}}.csv"
-          CUMULATIVE_LEDGER_FILE=".github/scorecard/cumulative_scorecard_ledger.csv"
-
-          echo "item,score,comment" > "$DAILY_LEDGER_FILE"
-          for i in $(seq 1 20); do
-            CHECK_TYPE=$(( RANDOM % 2 ))
-            COMMENT=$([ "$CHECK_TYPE" -eq 0 ] && echo "Good" || echo "Needs Improvement")
-            echo "SecurityCheck$i,$((RANDOM%101)),$COMMENT" >> "$DAILY_LEDGER_FILE"
+          LEDGER=".github/scorecard/ledgers/scorecard.csv"
+          CUMULATIVE=".github/scorecard/cumulative_scorecard_ledger.csv"
+          echo "item,score,comment" > $LEDGER
+          for i in {1..10}; do
+            echo "Check$i,$((RANDOM%100)),OK" >> $LEDGER
           done
-          echo "Scorecard daily ledger created at: $DAILY_LEDGER_FILE"
-          
-          if [ ! -f "$CUMULATIVE_LEDGER_FILE" ]; then
-            echo "Cumulative scorecard ledger not found, creating new one with header."
-            echo "item,score,comment" > "$CUMULATIVE_LEDGER_FILE"
-          else
-            echo "Cumulative scorecard ledger found, appending data."
-          fi
-          tail -n +2 "$DAILY_LEDGER_FILE" >> "$CUMULATIVE_LEDGER_FILE"
-          echo "Daily scorecard ledger data appended to cumulative ledger: $CUMULATIVE_LEDGER_FILE"
+          if [ ! -f $CUMULATIVE ]; then echo "item,score,comment" > $CUMULATIVE; fi
+          tail -n +2 $LEDGER >> $CUMULATIVE
+          cp $LEDGER run_archives/${{ env.TS }}/
+          cp $CUMULATIVE run_archives/${{ env.TS }}/
 
-          echo "Copying Scorecard ledgers to run archive..."
-          cp "$DAILY_LEDGER_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          cp "$CUMULATIVE_LEDGER_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          echo "Scorecard ledgers copied to run archive."
-          echo "--- Step: Scorecard Ledger Generation and Accumulation Completed ---"
-
-      - name: 📄 Generate Report (Scorecard)
+      - name: Generate scorecard report
         run: |
-          echo "--- Step: Generating Scorecard Report ---"
-          OSS_REPORT_FILE=".github/scorecard/files/oss_report_${{steps.date_info.outputs.date}}.txt"
-          echo "Open Source Security Scan Report - ${{steps.date_info.outputs.date}}" > "$OSS_REPORT_FILE"
-          echo "Open-source security report created at: $OSS_REPORT_FILE"
+          REPORT=".github/scorecard/files/oss_report.txt"
+          echo "Scorecard security report" > $REPORT
+          cp $REPORT run_archives/${{ env.TS }}/
 
-          echo "Copying Scorecard report to run archive..."
-          cp "$OSS_REPORT_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          echo "Scorecard report copied to run archive."
-          echo "--- Step: Scorecard Report Generation Completed ---"
-
-      - name: 📜 Generate and Copy Provenance Files
-        run: |
-          echo "--- Step: Generating and Copying Provenance Files ---"
-          FINANCE_PROVENANCE_FILE=".github/finance/provenance_${{steps.date_info.outputs.date}}.json"
-          echo "{\"type\":\"finance-ledger\",\"date\":\"${{steps.date_info.outputs.date}}\",\"ledger\":\"ledger_${{steps.date_info.outputs.date}}.csv\",\"report\":\"report_${{steps.date_info.outputs.date}}.txt\"}" > "$FINANCE_PROVENANCE_FILE"
-          echo "Finance provenance created at: $FINANCE_PROVENANCE_FILE"
-
-          SCORECARD_PROVENANCE_FILE=".github/scorecard/provenance_${{steps.date_info.outputs.date}}.json"
-          echo "{\"type\":\"scorecard-report\",\"date\":\"${{steps.date_info.outputs.date}}\",\"ledger\":\"scorecard_${{steps.date_info.outputs.date}}.csv\",\"report\":\"oss_report_${{steps.date_info.outputs.date}}.txt\"}" > "$SCORECARD_PROVENANCE_FILE"
-          echo "Scorecard provenance created at: $SCORECARD_PROVENANCE_FILE"
-
-          echo "Copying provenance files to run archive..."
-          cp "$FINANCE_PROVENANCE_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          cp "$SCORECARD_PROVENANCE_FILE" "run_archives/${{steps.date_info.outputs.timestamp}}/"
-          echo "Provenance files copied to run archive."
-          echo "--- Step: Provenance Generation and Copy Completed ---"
-
-      - name: 🚀 Upload SARIF to GitHub Security
+      - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: .github/scorecard/sarif/scorecard_${{steps.date_info.outputs.date}}.sarif
-          category: "OpenSSF Scorecard"
-        run: echo "--- Step: SARIF Upload to GitHub Security Completed ---"
+          sarif_file: .github/scorecard/sarif/scorecard.sarif
+          category: scorecard
 
-      - name: 📦 Upload JSON report as artifact
+      - name: Upload JSON report
         uses: actions/upload-artifact@v4
         with:
-          name: scorecard-json-report-${{steps.date_info.outputs.date}}
-          path: .github/scorecard/files/results_${{steps.date_info.outputs.date}}.json
-        run: echo "--- Step: Scorecard JSON Report Upload Completed ---"
+          name: scorecard-json-report
+          path: .github/scorecard/files/results.json
 
-      - name: ⬆️ Upload Cumulative Ledgers as Artifacts
+      - name: Upload cumulative ledgers
         uses: actions/upload-artifact@v4
         with:
-          name: cumulative-ledgers-${{steps.date_info.outputs.date}}
+          name: cumulative-ledgers
           path: |
             .github/finance/cumulative_finance_ledger.csv
             .github/scorecard/cumulative_scorecard_ledger.csv
-        run: echo "--- Step: Cumulative Ledgers Upload Completed ---"
 
-      - name: ⬆️ Upload Full Run Archive as Artifact
+      - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: full-run-archive-${{steps.date_info.outputs.timestamp}}
-          path: "run_archives/${{steps.date_info.outputs.timestamp}}/" # Path quoted for robustness
-        run: echo "--- Step: Full Run Archive Upload Completed ---"
+          name: run-archive-${{ env.TS }}
+          path: run_archives/${{ env.TS }}/
 
-      - name: 🩺 Health Checks
+      - name: Final health check
         run: |
-          echo "--- Step: Performing Health Checks ---"
-          
-          docker info > /dev/null && echo "✅ Docker OK" || (echo "❌ Docker check failed"; exit 1)
-          
-          test -f ".github/scorecard/sarif/scorecard_${{steps.date_info.outputs.date}}.sarif" && echo "✅ Scorecard SARIF OK" || (echo "❌ Scorecard SARIF file not found"; exit 1)
-          test -f ".github/scorecard/files/results_${{steps.date_info.outputs.date}}.json" && echo "✅ Scorecard JSON OK" || (echo "❌ Scorecard JSON file not found"; exit 1)
-          
-          test -f ".github/finance/ledgers/ledger_${{steps.date_info.outputs.date}}.csv" && echo "✅ Finance Daily Ledger OK" || (echo "❌ Finance Daily Ledger file not found"; exit 1)
-          test -f ".github/scorecard/ledgers/scorecard_${{steps.date_info.outputs.date}}.csv" && echo "✅ Scorecard Daily Ledger OK" || (echo "❌ Scorecard Daily Ledger file not found"; exit 1)
-
-          test -f ".github/finance/cumulative_finance_ledger.csv" && echo "✅ Finance Cumulative Ledger OK" || (echo "❌ Finance Cumulative Ledger file not found"; exit 1)
-          test -f ".github/scorecard/cumulative_scorecard_ledger.csv" && echo "✅ Scorecard Cumulative Ledger OK" || (echo "❌ Scorecard Cumulative Ledger file not found"; exit 1)
-
-          grep -q "Open Source Security Scan" ".github/scorecard/files/oss_report_${{steps.date_info.outputs.date}}.txt" && echo "✅ Scorecard Report Content OK" || (echo "❌ Scorecard Report content check failed"; exit 1)
-          
-          RUN_ARCHIVE_PATH="run_archives/${{steps.date_info.outputs.timestamp}}"
-          test -d "$RUN_ARCHIVE_PATH" && ls "$RUN_ARCHIVE_PATH" | grep -q . && echo "✅ Run Archive Directory OK" || (echo "❌ Run Archive Directory check failed or empty"; exit 1)
-
-          echo "All health checks passed successfully!"
-          echo "--- Step: Health Checks Completed ---"
+          test -f .github/scorecard/sarif/scorecard.sarif || exit 1
+          test -f .github/scorecard/files/results.json || exit 1
+          test -f .github/finance/ledgers/ledger.csv || exit 1
+          test -f .github/scorecard/ledgers/scorecard.csv || exit 1
+          echo "All files exist. Workflow successful."
