@@ -1,16 +1,18 @@
-name: 🧾 Update README with Portfolio and Workflows
+name: 🧾 Update README with Portfolio + Workflow Stats
 
 on:
   schedule:
-    - cron: '0 * * * *' # 매 시간 정각 (UTC)
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  generate_readme:
+  update_readme:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub CLI 인증용 (자동 설정됨)
 
     steps:
       - name: 📥 Checkout Repository
@@ -18,28 +20,46 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 📁 Read Workflow Files
-        id: workflows
+      - name: 🛠️ Install GitHub CLI
         run: |
-          echo "[📄] 워크플로우 파일 목록 수집 중..."
-          mkdir -p .tmp
-          WORKFLOW_LIST=".tmp/workflows.md"
-          echo "## ⚙️ GitHub Actions 워크플로우 목록" > $WORKFLOW_LIST
-          echo "" >> $WORKFLOW_LIST
+          echo "[🔧] GitHub CLI 설치 중..."
+          sudo apt-get update
+          sudo apt-get install -y gh
+          echo "[✅] 설치 완료"
 
-          for file in .github/workflows/*.yml; do
-            echo "[🔍] 처리 중: $file"
-            NAME=$(grep '^name:' "$file" | head -n1 | cut -d ':' -f2- | xargs)
-            DESC=$(grep '# ' "$file" | head -n1 | sed 's/# //')
-            echo "- **${NAME}**: ${DESC}" >> $WORKFLOW_LIST
+      - name: 📊 Collect Workflow Stats
+        run: |
+          echo "[📊] 워크플로우 통계 수집 중..."
+          mkdir -p .tmp
+          OUTPUT_FILE=".tmp/workflows.md"
+          echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계" > "$OUTPUT_FILE"
+          echo "" >> "$OUTPUT_FILE"
+          echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |" >> "$OUTPUT_FILE"
+          echo "|----------------|--------:|--------:|--------:|--------:|" >> "$OUTPUT_FILE"
+
+          for f in .github/workflows/*.yml; do
+            NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
+            FILENAME=$(basename "$f")
+            echo "[🔍] 처리 중: $NAME ($FILENAME)"
+
+            RUNS=$(gh run list --workflow="$FILENAME" --limit 100 --json conclusion -q '.[] | .conclusion' || echo "")
+            TOTAL=$(echo "$RUNS" | wc -l)
+            SUCCESS=$(echo "$RUNS" | grep -c "success" || true)
+            FAILURE=$(($TOTAL - $SUCCESS))
+            if [ "$TOTAL" -gt 0 ]; then
+              RATE=$(awk "BEGIN {printf \"%.1f\", ($SUCCESS/$TOTAL)*100}")
+            else
+              RATE="N/A"
+            fi
+
+            echo "| $NAME | $TOTAL | $SUCCESS | $FAILURE | $RATE% |" >> "$OUTPUT_FILE"
           done
 
-          cat $WORKFLOW_LIST
+          cat "$OUTPUT_FILE"
 
       - name: 🧾 Generate README.md
         run: |
-          echo "[🛠️] README.md 생성 중..."
-
+          echo "[📄] README.md 생성 중..."
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S KST')
           REPO="${{ github.repository }}"
           BRANCH="${{ github.ref_name }}"
@@ -47,46 +67,34 @@ jobs:
           {
             echo "# 👨‍💻 김병권 포트폴리오"
             echo ""
-            echo "이 리포지토리는 GitHub Actions를 사용하여 자동으로 관리되는 프로젝트입니다."
-            echo "매 시간마다 이 README는 자동으로 갱신되며 최신 정보를 반영합니다."
+            echo "자동으로 관리되는 프로젝트입니다. 매 시간 정각에 업데이트됩니다."
             echo ""
             echo "## 🧑‍💻 개발자 소개"
             echo "- 이름: 김병권"
-            echo "- 전문 분야: 백엔드 개발, GitHub Actions 자동화, 보안 자동화, DevOps"
-            echo "- 기술 스택: Python, Java, Spring Boot, FastAPI, Docker, GitHub Actions, PostgreSQL, MySQL"
-            echo "- 이메일: your-email@example.com"
-            echo ""
-            echo "## 🛠️ 주요 개발 스킬"
-            echo "- CI/CD 자동화 (GitHub Actions)"
-            echo "- 백엔드 REST API 설계 및 배포"
-            echo "- 보안 점검 자동화 (CodeQL, Scorecard, Bandit, pip-audit 등)"
-            echo "- 로그/백업 자동화 및 스케줄링"
-            echo "- 데이터베이스 마이그레이션 및 백업 관리"
+            echo "- 스택: Python, Java, FastAPI, Spring Boot, GitHub Actions 등"
             echo ""
             echo "## 📅 마지막 업데이트"
-            echo "- ${TIMESTAMP}"
+            echo "- $TIMESTAMP"
             echo ""
             echo "## ✅ 현재 브랜치"
-            echo "- ${BRANCH}"
+            echo "- $BRANCH"
             echo ""
             echo "## 🔧 빌드 상태 배지"
-            echo "![Build Status](https://github.com/${REPO}/actions/workflows/update-readme.yml/badge.svg)"
+            echo "![Build](https://github.com/${REPO}/actions/workflows/update-readme.yml/badge.svg)"
             echo ""
             cat .tmp/workflows.md
           } > README.md
 
-          echo "[✅] README.md 생성 완료"
-
-      - name: 📤 Commit & Push if Changed
+      - name: 📤 Commit & Push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if git diff --exit-code --quiet README.md; then
-            echo "[⏭️] 변경사항 없음 - 커밋 건너뜀"
+            echo "[⏭️] 변경사항 없음"
           else
-            echo "[✅] 변경사항 있음 - 커밋 & 푸시"
+            echo "[✅] 변경사항 감지됨 - 푸시 중"
             git add README.md
-            git commit -m "Docs: Auto-update README with portfolio and workflows [skip ci]"
+            git commit -m "Docs: Update README with workflow stats [skip ci]"
             git push
           fi
