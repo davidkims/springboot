@@ -20,29 +20,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🛠️ Install GitHub CLI
+      - name: 🛠️ Install or Update GitHub CLI
         run: |
-          echo "[🔧] GitHub CLI 설치 중..."
-          sudo apt-get update
-          sudo apt-get install -y gh
-          echo "[✅] 설치 완료"
+          echo "[🔧] GitHub CLI 설치 또는 업데이트 시작..."
+          sudo apt-get update -y
+          sudo apt-get install -y --only-upgrade gh || {
+            echo "[📎] gh 미설치 상태 → 새로 설치"
+            sudo apt-get install -y gh
+          }
+          echo "[✅] 설치 완료 - 현재 gh 버전:"
+          gh --version
 
       - name: 📊 Collect Workflow Stats
         run: |
           echo "[📊] 워크플로우 통계 수집 중..."
           mkdir -p .tmp
           OUTPUT_FILE=".tmp/workflows.md"
+          SUCCESS_LIST=".tmp/success_list.md"
+
           echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계" > "$OUTPUT_FILE"
           echo "" >> "$OUTPUT_FILE"
           echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |" >> "$OUTPUT_FILE"
           echo "|----------------|--------:|--------:|--------:|--------:|" >> "$OUTPUT_FILE"
+
+          echo "## ✅ 최근 정상 실행된 워크플로우" > "$SUCCESS_LIST"
+          echo "" >> "$SUCCESS_LIST"
 
           for f in .github/workflows/*.yml; do
             NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
             FILENAME=$(basename "$f")
             echo "[🔍] 처리 중: $NAME ($FILENAME)"
 
-            RUNS=$(gh run list --workflow="$FILENAME" --limit 100 --json conclusion -q '.[] | .conclusion' || echo "")
+            RUNS=$(gh run list --workflow="$FILENAME" --limit 20 --json conclusion -q '.[] | .conclusion' || echo "")
             TOTAL=$(echo "$RUNS" | wc -l)
             SUCCESS=$(echo "$RUNS" | grep -c "success" || true)
             FAILURE=$(($TOTAL - $SUCCESS))
@@ -53,9 +62,20 @@ jobs:
             fi
 
             echo "| $NAME | $TOTAL | $SUCCESS | $FAILURE | $RATE% |" >> "$OUTPUT_FILE"
+
+            if [ "$SUCCESS" -ge 1 ]; then
+              echo "- $NAME (\`$FILENAME\`)" >> "$SUCCESS_LIST"
+            fi
           done
 
+          echo "[📊] 통계 파일 요약:"
           cat "$OUTPUT_FILE"
+          cat "$SUCCESS_LIST"
+
+      - name: 📂 Ensure .tmp Directory
+        run: |
+          echo "[📁] .tmp 디렉토리 존재 여부 확인"
+          mkdir -p .tmp
 
       - name: 🧾 Generate README.md
         run: |
@@ -85,6 +105,8 @@ jobs:
             echo "## 🔧 빌드 상태 배지"
             echo "![Build](https://github.com/${REPO}/actions/workflows/generate_full_readme.yml/badge.svg)"
             echo ""
+            cat .tmp/success_list.md
+            echo ""
             cat .tmp/workflows.md
           } > README.md
 
@@ -110,4 +132,3 @@ jobs:
             git commit -m "Docs: Update README with workflow stats [skip ci]"
             git push
             echo "[🚀] Push 완료"
-          fi
