@@ -10,13 +10,175 @@
 - 스택: Python, Java, Spring Boot, FastAPI, Docker, PostgreSQL, MySQL
 
 ## 📅 마지막 업데이트
-- 2025-07-05 13:29:30 KST
+- 2025-07-05 13:34:36 KST
 
 ## ✅ 현재 브랜치
 - main
 
-## 🔧 빌드 상태 배지
-![Build](https://github.com/davidkims/springboot/actions/workflows/generate_full_readme.yml/badge.svg)
+## 🏷️ 워크플로우 상태 배지
+
+[![Provenance with Pages Deploy](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml)
+
+[![Create GitHub Release](https://github.com/davidkims/springboot/actions/workflows/Release.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Release.yml)
+
+[![🧾 Secure Finance Backup (w/ Stable TAR, .github Upload)](https://github.com/davidkims/springboot/actions/workflows/ScorecardAnalysis.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/ScorecardAnalysis.yml)
+
+[![🧠 Conda Setup & TradingAgents Run](https://github.com/davidkims/springboot/actions/workflows/TradingAgents.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/TradingAgents.yml)
+
+[![🗕️ Airflow Healthcheck DAG Setup & Test](https://github.com/davidkims/springboot/actions/workflows/airflow-healthcheck.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/airflow-healthcheck.yml)
+
+[![🔁 Auto Finance Backup (Manual + Cron)](https://github.com/davidkims/springboot/actions/workflows/auto-backup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/auto-backup.yml)
+
+[![💰 Generate Bulk Finance Ledger (Manual + Cron)](https://github.com/davidkims/springboot/actions/workflows/auto-backup2.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/auto-backup2.yml)
+
+[![Create GitHub Release](https://github.com/davidkims/springboot/actions/workflows/auto-rerun-all.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/auto-rerun-all.yml)
+
+[![🧱 Maven Build (echo 버전)](https://github.com/davidkims/springboot/actions/workflows/auto-transactions.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/auto-transactions.yml)
+
+[![Auto Create Workflow File](https://github.com/davidkims/springboot/actions/workflows/auto_create_workflow.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/auto_create_workflow.yml)
+
+[![🧩 Backup + API Speed Check with Gitignore Auto-Fix & Retry](https://github.com/davidkims/springboot/actions/workflows/backup-and-api-check.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/backup-and-api-check.yml)
+
+[![Project Source Code Backup](https://github.com/davidkims/springboot/actions/workflows/backup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/backup.yml)
+
+[![🔄 Finance Smart Backup with PostgreSQL & Kafka](https://github.com/davidkims/springboot/actions/workflows/bankbackup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/bankbackup.yml)
+
+[![키 가가이드 - PDF 영수증 포함](https://github.com/davidkims/springboot/actions/workflows/billing.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/billing.yml)
+
+[![♾️ Transfer Log Backup - Cron (60건 Infinite)](https://github.com/davidkims/springboot/actions/workflows/black-duck-security-scan-ci.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/black-duck-security-scan-ci.yml)
+
+[![Project Source Code Backup](https://github.com/davidkims/springboot/actions/workflows/build_and_test.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/build_and_test.yml)
+
+[![🧾 결제 자동화 - PDF 영수증 포함](https://github.com/davidkims/springboot/actions/workflows/cash.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/cash.yml)
+
+[![💰 Check Workflow Costs with Valid Completed Runs Only](https://github.com/davidkims/springboot/actions/workflows/check-expensive-workflows.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/check-expensive-workflows.yml)
+
+[![✨ Tmax 전체 코드 생성기 및 배포자](https://github.com/davidkims/springboot/actions/workflows/codeql.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/codeql.yml)
+
+[![Codespace Security Configuration Check # 워크플로우의 이름](https://github.com/davidkims/springboot/actions/workflows/codespace-security-check.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/codespace-security-check.yml)
+
+[![🐬 MySQL Root Setup and DB Init](https://github.com/davidkims/springboot/actions/workflows/corescorecard.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/corescorecard.yml)
+
+[![🧾 고객 명함 생성 + 암호화 + 복호화 + 비교 자동화 (echo 완전 적용)](https://github.com/davidkims/springboot/actions/workflows/customer-image-docker.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/customer-image-docker.yml)
+
+[![Install Java, Maven, NetBackup CLI & Ledger Generation](https://github.com/davidkims/springboot/actions/workflows/db.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/db.yml)
+
+[![Delete Failed Workflow Runs](https://github.com/davidkims/springboot/actions/workflows/delete-failed-workflow-runs.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/delete-failed-workflow-runs.yml)
+
+[![Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List](https://github.com/davidkims/springboot/actions/workflows/delete_workflows.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/delete_workflows.yml)
+
+[![🤖 Auto-Approve & Merge Dependabot PRs](https://github.com/davidkims/springboot/actions/workflows/dependabot-auto-merge.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/dependabot-auto-merge.yml)
+
+[![🛠️ Dependabot Recovery & Sanity Check](https://github.com/davidkims/springboot/actions/workflows/dependabot-rescue.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/dependabot-rescue.yml)
+
+[![DevSkim](https://github.com/davidkims/springboot/actions/workflows/devskim.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/devskim.yml)
+
+[![🐳 Docker Finance Backup with GHCR + Kafka-style Logging](https://github.com/davidkims/springboot/actions/workflows/docker-backup-workflow.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-backup-workflow.yml)
+
+[![📄 Provenance Index Generator](https://github.com/davidkims/springboot/actions/workflows/docker-backup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-backup.yml)
+
+[![Setup & Load Loans Ledger with Backup and Tags](https://github.com/davidkims/springboot/actions/workflows/docker-build-deploy.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-build-deploy.yml)
+
+[![Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload](https://github.com/davidkims/springboot/actions/workflows/docker-ci-cd.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-ci-cd.yml)
+
+[![🔐 금융 거래 자동 백업](https://github.com/davidkims/springboot/actions/workflows/docker-finance-build.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-finance-build.yml)
+
+[![📄 Provenance Index Generator](https://github.com/davidkims/springboot/actions/workflows/docker-image.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-image.yml)
+
+[![Hourly Docker Setup1](https://github.com/davidkims/springboot/actions/workflows/docker-setup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-setup.yml)
+
+[![Download Security Regulations](https://github.com/davidkims/springboot/actions/workflows/download-security-regulations.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/download-security-regulations.yml)
+
+[![🔐 암호화/복호화 + Codex 요금 추적](https://github.com/davidkims/springboot/actions/workflows/encrypt-decrypt-tag-label.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/encrypt-decrypt-tag-label.yml)
+
+[![🧾 Multi-Transaction Backup (Per-Type Containers)](https://github.com/davidkims/springboot/actions/workflows/finance-backup-multi.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/finance-backup-multi.yml)
+
+[![Build & Simulate Finance Transactions](https://github.com/davidkims/springboot/actions/workflows/finance-docker.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/finance-docker.yml)
+
+[![PostgreSQL DB 백업 및 S3 업로드](https://github.com/davidkims/springboot/actions/workflows/finance-smart-backup1.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/finance-smart-backup1.yml)
+
+[![🚀 Full Finance + Provenance + Pages Deployment](https://github.com/davidkims/springboot/actions/workflows/full-finance-provenance-pages.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/full-finance-provenance-pages.yml)
+
+[![Full Finance and Scorecard Setup](https://github.com/davidkims/springboot/actions/workflows/full-finance-scorecard1.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/full-finance-scorecard1.yml)
+
+[![🏦 Generate Customer Data + Provenance + Logs + Backup](https://github.com/davidkims/springboot/actions/workflows/generate-customers.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/generate-customers.yml)
+
+[![Install Java, Maven, NetBackup CLI & Ledger Generation](https://github.com/davidkims/springboot/actions/workflows/generate-workflow-log06.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/generate-workflow-log06.yml)
+
+[![Generate Repository Blog](https://github.com/davidkims/springboot/actions/workflows/generate_blog.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/generate_blog.yml)
+
+[![🧾 Update README with Portfolio + Workflow Stats](https://github.com/davidkims/springboot/actions/workflows/generate_full_readme.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/generate_full_readme.yml)
+
+[![실패한 워크플로 자동 재시도 # 이 워크플로우의 이름입니다.](https://github.com/davidkims/springboot/actions/workflows/gitlab-integration.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/gitlab-integration.yml)
+
+[![📃 Backup GitHub Workflows with Echo and Commit](https://github.com/davidkims/springboot/actions/workflows/init-directory-structure.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/init-directory-structure.yml)
+
+[![Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List](https://github.com/davidkims/springboot/actions/workflows/install-java-maven.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/install-java-maven.yml)
+
+[![🔁 Auto Finance Backup (Manual + Cron)](https://github.com/davidkims/springboot/actions/workflows/jekyll-gh-pages.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/jekyll-gh-pages.yml)
+
+[![🏷️ Label and Comment Automation](https://github.com/davidkims/springboot/actions/workflows/label-comment.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/label-comment.yml)
+
+[![🔁 Auto Finance Backup (No Manual Trigger)](https://github.com/davidkims/springboot/actions/workflows/label.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/label.yml)
+
+[![🦾 거래 자동화 - PDF 영수증 포함](https://github.com/davidkims/springboot/actions/workflows/ledger-generator.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/ledger-generator.yml)
+
+[![🌀 Resident Batch Log Backup](https://github.com/davidkims/springboot/actions/workflows/log-backup-container.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/log-backup-container.yml)
+
+[![♻️ Regenerate Workflow (Echo + Dependabot)](https://github.com/davidkims/springboot/actions/workflows/ml-setup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/ml-setup.yml)
+
+[![🧾 Multi-Transaction Backup (Per-Type Containers)](https://github.com/davidkims/springboot/actions/workflows/mysql-integrated.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-integrated.yml)
+
+[![🐬 Full MySQL Workflow with Auto Recovery, GPG, CSV, ZIP](https://github.com/davidkims/springboot/actions/workflows/mysql-setup-and-query.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-setup-and-query.yml)
+
+[![🐬 MySQL Setup & Migration](https://github.com/davidkims/springboot/actions/workflows/mysql-setup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-setup.yml)
+
+[![MySQL Latest Version Upgrade](https://github.com/davidkims/springboot/actions/workflows/mysql-upgrade.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-upgrade.yml)
+
+[![OSV-Scanner](https://github.com/davidkims/springboot/actions/workflows/osv-scan.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/osv-scan.yml)
+
+[![♾️ Transfer Log Backup - Cron (60건 Infinite)](https://github.com/davidkims/springboot/actions/workflows/puppet-lint.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/puppet-lint.yml)
+
+[![Download Security Regulations](https://github.com/davidkims/springboot/actions/workflows/python-ci.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/python-ci.yml)
+
+[![🐍 Secure Python Package Build](https://github.com/davidkims/springboot/actions/workflows/python-publish.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/python-publish.yml)
+
+[![📦 Create GitHub Release](https://github.com/davidkims/springboot/actions/workflows/release.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/release.yml)
+
+[![Create GitHub Release](https://github.com/davidkims/springboot/actions/workflows/release1.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/release1.yml)
+
+[![🧾 금융 거래 자동화 (PDF 영수증 포함)](https://github.com/davidkims/springboot/actions/workflows/retrigger-and-db-init.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/retrigger-and-db-init.yml)
+
+[![🛡️ OpenSSF Scorecard Analysis (Docker Only)](https://github.com/davidkims/springboot/actions/workflows/scorecard-analysis.ymltes.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/scorecard-analysis.ymltes.yml)
+
+[![🏗️ Full Loan Simulation & Document Generation](https://github.com/davidkims/springboot/actions/workflows/setup-and-generate.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/setup-and-generate.yml)
+
+[![🛡️ OPA 정책 자동화 및 Spring 연동](https://github.com/davidkims/springboot/actions/workflows/setup-java-opa.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/setup-java-opa.yml)
+
+[![Setup & Load Loans Ledger with Backup and Tags](https://github.com/davidkims/springboot/actions/workflows/setup-logistics-environment.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/setup-logistics-environment.yml)
+
+[![🐬 MySQL Backup with Dynamic Port & Persistent Containers](https://github.com/davidkims/springboot/actions/workflows/sql-backup-and-migrate.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/sql-backup-and-migrate.yml)
+
+[![💳 카드사별 거래 백업 + NetBackup + OCI 업로드](https://github.com/davidkims/springboot/actions/workflows/swift-backup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/swift-backup.yml)
+
+[![🐳 Docker Build & Run with Echo](https://github.com/davidkims/springboot/actions/workflows/test.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/test.yml)
+
+[![CI with OpenAI API Usage Logging via Echo](https://github.com/davidkims/springboot/actions/workflows/tokencheck.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/tokencheck.yml)
+
+[![💸 Transfer Log Backup (Resident Batch)](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup.yml)
+
+[![♾️ Transfer Log Backup - Cron (60건 Infinite)](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup1.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/transfer-log-backup1.yml)
+
+[![♾️ Infinite Transfer Log Backup (Resident)](https://github.com/davidkims/springboot/actions/workflows/transfer-log-infinite-backup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/transfer-log-infinite-backup.yml)
+
+[![Repo Analysis and README Update # 워크플로우의 이름](https://github.com/davidkims/springboot/actions/workflows/update_readme.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/update_readme.yml)
+
+[![Repo Analysis and README Update # 워크플로우의 이름 (기존 이름 유지)](https://github.com/davidkims/springboot/actions/workflows/update_readme1.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/update_readme1.yml)
+
+[![Welcome to the Microsoft Generative AI](https://github.com/davidkims/springboot/actions/workflows/welcome.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/welcome.yml)
+
+[![Update README](https://github.com/davidkims/springboot/actions/workflows/workflow-health-monitor.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/workflow-health-monitor.yml)
+
 
 ## ✅ 최근 정상 실행된 워크플로우
 
@@ -113,7 +275,7 @@
 | Codespace Security Configuration Check # 워크플로우의 이름 | 1 | 0 | 1 | 0.0% |
 | 🐬 MySQL Root Setup and DB Init | 14 | 0 | 14 | 0.0% |
 | 🧾 고객 명함 생성 + 암호화 + 복호화 + 비교 자동화 (echo 완전 적용) | 20 | 19 | 1 | 95.0% |
-| Install Java, Maven, NetBackup CLI & Ledger Generation | 20 | 19 | 1 | 95.0% |
+| Install Java, Maven, NetBackup CLI & Ledger Generation | 20 | 20 | 0 | 100.0% |
 | Delete Failed Workflow Runs | 14 | 14 | 0 | 100.0% |
 | Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List | 20 | 19 | 1 | 95.0% |
 | 🤖 Auto-Approve & Merge Dependabot PRs | 10 | 9 | 1 | 90.0% |
@@ -122,7 +284,7 @@
 | 🐳 Docker Finance Backup with GHCR + Kafka-style Logging | 20 | 20 | 0 | 100.0% |
 | 📄 Provenance Index Generator | 20 | 0 | 20 | 0.0% |
 | Setup & Load Loans Ledger with Backup and Tags | 20 | 20 | 0 | 100.0% |
-| Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload | 20 | 19 | 1 | 95.0% |
+| Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload | 20 | 20 | 0 | 100.0% |
 | 🔐 금융 거래 자동 백업 | 20 | 20 | 0 | 100.0% |
 | 📄 Provenance Index Generator | 17 | 0 | 17 | 0.0% |
 | Hourly Docker Setup1 | 20 | 19 | 1 | 95.0% |
@@ -134,19 +296,19 @@
 | 🚀 Full Finance + Provenance + Pages Deployment | 20 | 20 | 0 | 100.0% |
 | Full Finance and Scorecard Setup | 20 | 8 | 12 | 40.0% |
 | 🏦 Generate Customer Data + Provenance + Logs + Backup | 3 | 1 | 2 | 33.3% |
-| Install Java, Maven, NetBackup CLI & Ledger Generation | 20 | 19 | 1 | 95.0% |
+| Install Java, Maven, NetBackup CLI & Ledger Generation | 20 | 20 | 0 | 100.0% |
 | Generate Repository Blog | 3 | 0 | 3 | 0.0% |
 | 🧾 Update README with Portfolio + Workflow Stats | 20 | 14 | 6 | 70.0% |
 | 실패한 워크플로 자동 재시도 # 이 워크플로우의 이름입니다. | 20 | 0 | 20 | 0.0% |
 | 📃 Backup GitHub Workflows with Echo and Commit | 20 | 20 | 0 | 100.0% |
-| Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List | 20 | 20 | 0 | 100.0% |
+| Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List | 20 | 19 | 1 | 95.0% |
 | 🔁 Auto Finance Backup (Manual + Cron) | 20 | 20 | 0 | 100.0% |
 | 🏷️ Label and Comment Automation | 20 | 20 | 0 | 100.0% |
 | 🔁 Auto Finance Backup (No Manual Trigger) | 20 | 20 | 0 | 100.0% |
 | 🦾 거래 자동화 - PDF 영수증 포함 | 20 | 20 | 0 | 100.0% |
 | 🌀 Resident Batch Log Backup | 5 | 4 | 1 | 80.0% |
 | ♻️ Regenerate Workflow (Echo + Dependabot) | 20 | 10 | 10 | 50.0% |
-| 🧾 Multi-Transaction Backup (Per-Type Containers) | 20 | 20 | 0 | 100.0% |
+| 🧾 Multi-Transaction Backup (Per-Type Containers) | 20 | 19 | 1 | 95.0% |
 | 🐬 Full MySQL Workflow with Auto Recovery, GPG, CSV, ZIP | 20 | 20 | 0 | 100.0% |
 | 🐬 MySQL Setup & Migration | 5 | 2 | 3 | 40.0% |
 | MySQL Latest Version Upgrade | 4 | 3 | 1 | 75.0% |
@@ -162,7 +324,7 @@
 | 🛡️ OPA 정책 자동화 및 Spring 연동 | 9 | 9 | 0 | 100.0% |
 | Setup & Load Loans Ledger with Backup and Tags | 20 | 20 | 0 | 100.0% |
 | 🐬 MySQL Backup with Dynamic Port & Persistent Containers | 12 | 8 | 4 | 66.7% |
-| 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 | 20 | 19 | 1 | 95.0% |
+| 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 | 20 | 20 | 0 | 100.0% |
 | 🐳 Docker Build & Run with Echo | 20 | 20 | 0 | 100.0% |
 | CI with OpenAI API Usage Logging via Echo | 20 | 20 | 0 | 100.0% |
 | 💸 Transfer Log Backup (Resident Batch) | 4 | 4 | 0 | 100.0% |
