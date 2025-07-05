@@ -1,4 +1,4 @@
-name: 🧾 Multi-Transaction Backup (Per-Type Containers + Retention + Full Echo)
+name: 🧾 Multi-Transaction Backup (Under /opt/finance + Auto Clean + Echo + Full Backup)
 
 on:
   schedule:
@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      FINANCE_ROOT: /opt/finance
       ROOT_PASS: rootpass123
       SQL_DIR: /opt/finance/sql
       BACKUP_DIR: /opt/finance/backups
@@ -29,23 +30,23 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧹 Cleanup Old Files (Retention Policy:1 day)
+      - name: 📁 Create and Prepare /opt/finance
         run: |
-          echo "[🧹] Deleting files older than $RETENTION_DAYS day(s)..."
-          find /opt/finance -type f -mtime +$RETENTION_DAYS -print -delete || echo "[⚠️] No old files found"
+          echo "[📁] Creating root finance directory: $FINANCE_ROOT"
+          sudo mkdir -p "$SQL_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$LOG_DIR" "$HEALTH_DIR"
+          sudo chmod -R 777 "$FINANCE_ROOT"
+          echo "[✅] Directory structure:"
+          tree "$FINANCE_ROOT" || ls -R "$FINANCE_ROOT"
 
-      - name: 📁 Prepare All Directories
+      - name: 🧹 Delete Files Older Than 1 Day
         run: |
-          echo "[📁] Creating all required directories..."
-          sudo mkdir -p $SQL_DIR $BACKUP_DIR $PROVENANCE_DIR $LOG_DIR $HEALTH_DIR
-          sudo chmod -R 777 /opt/finance
-          echo "[✅] Directory tree:"
-          tree /opt/finance || ls -R /opt/finance
+          echo "[🧹] Cleaning old files (>$RETENTION_DAYS day)..."
+          find "$FINANCE_ROOT" -type f -mtime +$RETENTION_DAYS -print -delete || echo "[✅] No old files"
 
-      - name: 📝 Generate init.sql
+      - name: 📝 Generate init.sql under /opt/finance/sql
         run: |
           INIT_FILE="$SQL_DIR/init.sql"
-          echo "[📝] Generating init.sql at $INIT_FILE..."
+          echo "[📝] Creating $INIT_FILE"
           echo "CREATE TABLE IF NOT EXISTS transfers (
             id INT AUTO_INCREMENT PRIMARY KEY,
             type VARCHAR(30),
@@ -62,10 +63,10 @@ jobs:
               echo "INSERT INTO transfers(type, amount, currency, status) VALUES('$TYPE', $AMOUNT, 'KRW', '$STATUS');" >> "$INIT_FILE"
             done
           done
-          echo "[📄] Preview of init.sql:"
+          echo "[📄] Preview of $INIT_FILE:"
           head -n 20 "$INIT_FILE"
 
-      - name: 🔁 Process each TYPE
+      - name: 🔁 Process Each TYPE and Dump
         run: |
           for TYPE in $TYPES; do
             echo "[🔄] Processing: $TYPE"
@@ -75,7 +76,6 @@ jobs:
             CONTAINER="mysql_${TYPE}"
             PORT=$((3307 + RANDOM % 1000))
 
-            echo "[🐬] Starting container $CONTAINER..."
             docker run -d \
               --name $CONTAINER \
               -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
@@ -90,45 +90,42 @@ jobs:
               --health-retries=10 \
               mysql:8.0
 
-            echo "[⏳] Waiting for health..."
+            echo "[⏳] Waiting for container $CONTAINER..."
             HEALTH_LOG="$HEALTH_DIR/${TYPE}-health.log"
             for i in {1..10}; do
               STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER || echo "notfound")
-              echo "  - Health $i: $STATUS" | tee -a "$HEALTH_LOG"
+              echo "[🔁] Health $i: $STATUS" | tee -a "$HEALTH_LOG"
               docker inspect $CONTAINER >> "$HEALTH_LOG" 2>&1
               if [ "$STATUS" = "healthy" ]; then break; fi
               sleep 6
               if [ $i -eq 10 ]; then
-                echo "[❌] Health check failed. Logs:"
                 docker logs $CONTAINER >> "$HEALTH_LOG"
                 docker stop $CONTAINER && docker rm $CONTAINER
                 exit 1
               fi
             done
 
-            echo "[🔎] Verifying data..."
             TABLE_LOG="$LOG_DIR/tables_${TYPE}.log"
             mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -e "USE $DB_NAME; SHOW TABLES;" | tee "$TABLE_LOG"
             mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -e "USE $DB_NAME; DESC transfers;" | tee -a "$TABLE_LOG"
             mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -e "USE $DB_NAME; SELECT * FROM transfers LIMIT 5;" | tee -a "$TABLE_LOG"
 
             COUNT=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
-            echo "✅ $COUNT completed records for $TYPE"
+            echo "✅ $COUNT completed rows for $TYPE"
 
             if [ "$COUNT" != "0" ]; then
-              FILE="$BACKUP_DIR/${TYPE}_backup.sql"
-              echo "[💾] Dumping to $FILE"
-              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > "$FILE"
-              head -n 10 "$FILE" || echo "[⚠️] Could not preview dump"
+              SQL_FILE="$BACKUP_DIR/${TYPE}_backup.sql"
+              echo "[💾] Saving SQL to $SQL_FILE"
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > "$SQL_FILE"
 
               PROV_FILE="$PROVENANCE_DIR/.provenance_${TYPE}.json"
-              echo "[📜] Creating provenance file..."
+              echo "[📜] Writing provenance to $PROV_FILE"
               {
                 echo '{'
                 echo "  \"type\": \"$TYPE\","
                 echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
                 echo "  \"status\": \"completed\","
-                echo "  \"backup_file\": \"$FILE\","
+                echo "  \"backup_file\": \"$SQL_FILE\","
                 echo "  \"workflow\": \"${{ github.workflow }}\","
                 echo "  \"repository\": \"${{ github.repository }}\","
                 echo "  \"run_id\": \"${{ github.run_id }}\","
@@ -136,27 +133,23 @@ jobs:
                 echo '}'
               } > "$PROV_FILE"
               cat "$PROV_FILE"
-            else
-              echo "[⏭️] No completed data for $TYPE"
             fi
 
             docker stop $CONTAINER
             docker rm $CONTAINER
           done
 
-      - name: 🗜️ Compress All SQL Backups
+      - name: 🗜️ Compress SQLs under /opt/finance
         run: |
-          echo "[🗜️] Compressing all SQL backups..."
-          cd $BACKUP_DIR
-          ARCHIVE="finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
-          tar -czf "$ARCHIVE" *.sql || echo "[⚠️] No SQL files to compress"
-          echo "[📦] Archive: $ARCHIVE"
+          cd "$BACKUP_DIR"
+          ARCHIVE="$FINANCE_ROOT/finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
+          echo "[🗜️] Compressing SQLs to $ARCHIVE"
+          tar -czf "$ARCHIVE" *.sql || echo "[⚠️] Nothing to compress"
           ls -lh "$ARCHIVE"
 
-      - name: 🗃️ Compress Full Directory Structure
+      - name: 🗃️ Full /opt/finance directory backup
         run: |
-          echo "[🗃️] Backing up full /opt/finance directory..."
-          FULL_ARCHIVE="/opt/finance/finance-full-$(date +%Y%m%d%H%M%S).tar.gz"
-          tar -czf "$FULL_ARCHIVE" /opt/finance || echo "[⚠️] Failed full structure backup"
-          echo "[📦] Full backup archive:"
+          FULL_ARCHIVE="$FINANCE_ROOT/finance-full-$(date +%Y%m%d%H%M%S).tar.gz"
+          echo "[🗃️] Backing up $FINANCE_ROOT to $FULL_ARCHIVE"
+          tar -czf "$FULL_ARCHIVE" "$FINANCE_ROOT" || echo "[⚠️] Full backup failed"
           ls -lh "$FULL_ARCHIVE"
