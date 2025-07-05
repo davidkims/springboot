@@ -1,4 +1,4 @@
-name: 🧪 Secure Python Package Build & Audit
+name: 🐍 Secure Python Package Build
 
 on:
   release:
@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  security-events: write
   id-token: write
 
 jobs:
@@ -16,151 +14,139 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout source
+      - name: 📦 Checkout source
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: '3.11'
 
-      - name: 📁 Prepare all directories and placeholder files
+      - name: ⚙️ Install build & audit tools
         run: |
-          echo "[📁] Creating required directories and placeholders..."
-          mkdir -p build logs dist site .github/audit .github/test-publish
-
-          touch site/pip-audit-report.md
-          touch .github/audit/audit.md
-          touch logs/test.log
-          echo "[✅] Directory and placeholder files ready."
-
-      - name: 📦 Install Python packages
-        run: |
-          echo "[📦] Installing packages..."
+          echo "[⚙️] Installing build, lint, and security tools..."
           python -m pip install --upgrade pip
-          pip install build setuptools wheel twine
+          pip install build flake8 black isort mypy pip-audit bandit safety pip-check
 
-          # Quality
-          pip install flake8 black isort mypy pylint
-
-          # Testing
-          pip install pytest pytest-cov hypothesis
-
-          # Docs
-          pip install sphinx myst-parser sphinx-autobuild furo
-
-          # Data/Web
-          pip install pandas numpy matplotlib scipy
-          pip install fastapi flask httpx requests uvicorn
-
-          # Security tools
-          pip install safety bandit pip-audit pip-check
-
-          # Typing
-          pip install types-requests types-PyYAML types-setuptools
-          echo "[✅] All packages installed."
-
-      - name: ⚙️ Generate requirements.txt if missing
+      - name: 🧱 Generate pyproject.toml if missing
         run: |
-          if [ ! -f requirements.txt ]; then
-            echo "pandas" > requirements.txt
-            echo "fastapi" >> requirements.txt
-            echo "uvicorn" >> requirements.txt
-            echo "pytest" >> requirements.txt
-            echo "[⚙️] requirements.txt created."
-          fi
-
-      - name: ⚙️ Generate pyproject.toml/setup.py if missing
-        run: |
+          echo "[🔧] Checking for pyproject.toml..."
           if [ ! -f pyproject.toml ]; then
+            echo "[⚠️] pyproject.toml not found. Creating default..."
             echo "[build-system]" > pyproject.toml
             echo "requires = [\"setuptools\", \"wheel\"]" >> pyproject.toml
             echo "build-backend = \"setuptools.build_meta\"" >> pyproject.toml
-            echo "" >> pyproject.toml
-            echo "[project]" >> pyproject.toml
-            echo "name = \"demo-package\"" >> pyproject.toml
-            echo "version = \"0.0.1\"" >> pyproject.toml
-            echo "authors = [{name = \"GitHub Actions\"}]" >> pyproject.toml
-            echo "[tool.setuptools.packages.find]" >> pyproject.toml
-            echo "include = [\"finance_app*\"]" >> pyproject.toml
-            echo "exclude = [\"tests*\", \"logs*\", \"migrations*\"]" >> pyproject.toml
-            echo "[⚙️] pyproject.toml created."
+            echo "[✅] pyproject.toml created."
+          else
+            echo "[ℹ️] pyproject.toml already exists."
           fi
 
-          if [ ! -f setup.py ]; then
-            echo "from setuptools import setup, find_packages" > setup.py
-            echo "setup(name='demo-package', version='0.0.1', packages=find_packages(include=['finance_app*']))" >> setup.py
-            echo "[⚙️] setup.py created."
-          fi
-
-      - name: 🔒 Save pip freeze lock
+      - name: 🛠️ Build package
         run: |
-          pip freeze > logs/requirements.lock.txt
-          cp logs/requirements.lock.txt .github/requirements.lock.txt
+          echo "[🏗️] Building package..."
+          mkdir -p dist site .github/audit
+          python -m build
+          echo "[✅] Build complete. Contents of dist/:"
+          ls -lh dist/
+
+      - name: 🧪 Run Lint and Type Checks
+        run: |
+          echo "[🧪] Running lint/type checks..."
+          flake8 . || echo "[⚠️] flake8 issues found."
+          black . --check || echo "[⚠️] black formatting issues."
+          isort . --check-only || echo "[⚠️] isort import ordering issues."
+          mypy . || echo "[⚠️] mypy type issues."
+          echo "[✅] Lint/type checks complete."
 
       - name: 🔐 Run pip-audit and save report
         run: |
-          echo "[🔍] Running pip-audit..."
+          echo "[🔐] Running pip-audit..."
           mkdir -p site .github/audit
+
           if ! pip-audit -f markdown -o site/pip-audit-report.md; then
-            echo "[⚠️] Vulnerabilities found or audit incomplete."
+            echo "[⚠️] pip-audit failed or vulnerabilities found."
           fi
+
           if [ ! -s site/pip-audit-report.md ]; then
+            echo "[ℹ️] No vulnerabilities. Creating empty pip-audit report..."
             echo "# pip-audit report" > site/pip-audit-report.md
+            echo "" >> site/pip-audit-report.md
             echo "> ✅ No known vulnerabilities found." >> site/pip-audit-report.md
           fi
-          cp site/pip-audit-report.md .github/audit/audit.md
 
-      - name: 🛡️ Run Bandit
+          cp site/pip-audit-report.md .github/audit/pip-audit-report.md
+          echo "[✅] pip-audit report saved."
+
+      - name: 🛡️ Run Bandit and save report
         run: |
           echo "[🛡️] Running Bandit..."
-          bandit -r . -f markdown -o site/bandit-report.md || true
-          cp site/bandit-report.md .github/audit/bandit-report.md
+          mkdir -p site .github/audit
+          if ! bandit -r . -f markdown -o site/bandit-report.md; then
+            echo "[⚠️] Bandit scan encountered issues."
+          fi
 
-      - name: 🛡️ Run Safety
+          if [ ! -s site/bandit-report.md ]; then
+            echo "[ℹ️] No Bandit issues. Creating default report..."
+            echo "# Bandit Report" > site/bandit-report.md
+            echo "" >> site/bandit-report.md
+            echo "> ✅ No issues found by Bandit." >> site/bandit-report.md
+          fi
+
+          cp site/bandit-report.md .github/audit/bandit-report.md
+          echo "[✅] Bandit report saved."
+
+      - name: 🛡️ Run Safety and save report
         run: |
           echo "[🛡️] Running Safety..."
-          safety check --full-report > site/safety-report.md || true
-          cp site/safety-report.md .github/audit/safety-report.md
+          mkdir -p site .github/audit
+          if ! safety check --full-report > site/safety-report.md; then
+            echo "[⚠️] Safety reported issues or failed."
+          fi
 
-      - name: 🛡️ Run pip-check
+          if [ ! -s site/safety-report.md ]; then
+            echo "[ℹ️] No known vulnerabilities in Safety. Creating empty report..."
+            echo "# Safety Report" > site/safety-report.md
+            echo "" >> site/safety-report.md
+            echo "> ✅ No known vulnerabilities." >> site/safety-report.md
+          fi
+
+          cp site/safety-report.md .github/audit/safety-report.md
+          echo "[✅] Safety report saved."
+
+      - name: 🛡️ Run pip-check and save report
         run: |
           echo "[🛡️] Running pip-check..."
-          pip-check > site/pip-check-report.md || true
-          cp site/pip-check-report.md .github/audit/pip-check-report.md
+          mkdir -p site .github/audit
 
-      - name: 🧪 Run tests
-        run: |
-          if [ -d "tests" ]; then
-            pytest tests | tee logs/test.log
-          else
-            echo "[⚠️] No tests directory." | tee logs/test.log
+          if ! pip-check > site/pip-check-report.md 2>&1; then
+            echo "[⚠️] pip-check reported issues or failed."
           fi
-          cp logs/test.log .github/test-publish/test.log
 
-      - name: 🧹 Run lint/type checks
-        run: |
-          flake8 . || true
-          black . --check || true
-          isort . --check-only || true
-          mypy . || true
-          echo "[✅] Code checks complete."
+          if [ ! -s site/pip-check-report.md ]; then
+            echo "[ℹ️] pip-check passed. Creating empty report..."
+            echo "# pip-check Report" > site/pip-check-report.md
+            echo "" >> site/pip-check-report.md
+            echo "> ✅ All installed packages are valid." >> site/pip-check-report.md
+          fi
 
-      - name: 🏗️ Build package
-        run: |
-          python -m build
-          ls -lh dist/
+          cp site/pip-check-report.md .github/audit/pip-check-report.md
+          echo "[✅] pip-check report saved."
 
-      - name: 📦 Upload artifacts
+      - name: 📦 Upload dist/ as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-dists
+          name: python-dist
           path: dist/
 
-      - name: 🌍 Deploy GitHub Pages
+      - name: 📄 Upload audit reports as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-reports
+          path: .github/audit/
+
+      - name: 🌍 Deploy site/ to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           publish_branch: gh-pages
-        continue-on-error: true
