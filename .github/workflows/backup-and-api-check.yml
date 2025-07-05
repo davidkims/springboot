@@ -1,51 +1,125 @@
-name: ♻️ Watch & Retry Failed Workflows Until Success
+name: 🧩 Backup + API Speed Check with Gitignore Auto-Fix & Retry
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 매 5분
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
-  retry-failed:
+  backup-and-api-check:
     runs-on: ubuntu-latest
 
+    env:
+      MAX_LATENCY_MS: 1000
+
     steps:
-      - name: 📦 Checkout
+      - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔧 Setup GitHub CLI
-        uses: cli/cli-action@v2
-
-      - name: 🔐 Authenticate with PAT
-        run: gh auth login --with-token <<< "${{ secrets.GH_PAT }}"
-
-      - name: ♻️ Detect and Retry Failed Workflows
+      - name: 🧼 Generate and Clean .gitignore with Exceptions
         run: |
-          echo "[🔍] Fetching recent failed workflow runs..."
-
-          FAILED_WORKFLOWS=$(gh run list --limit 20 --json databaseId,name,status,conclusion,headBranch \
-            --jq '.[] | select(.status == "completed" and .conclusion == "failure") | .name' | sort | uniq)
-
-          echo "[📋] Failed workflows detected:"
-          echo "$FAILED_WORKFLOWS"
-
-          for wf in $FAILED_WORKFLOWS; do
-            echo "▶️ Retrying workflow: $wf"
-
-            # 실행 중인 동일 워크플로우가 있으면 skip
-            INPROGRESS=$(gh run list --workflow "$wf" --json status --jq '.[] | select(.status == "in_progress")')
-            if [ -n "$INPROGRESS" ]; then
-              echo "⏭️ Already running: $wf → skipping"
-              continue
-            fi
-
-            # 재시작
-            gh workflow run "$wf"
-            echo "🔁 Re-triggered workflow: $wf"
+          echo "[🧼] Ensuring .gitignore exists and includes required exceptions..."
+          touch .gitignore
+          ensure_gitignore_entry() {
+            entry="$1"
+            grep -qxF "$entry" .gitignore || echo "$entry" >> .gitignore
+          }
+          ensure_gitignore_entry '!.github/'
+          ensure_gitignore_entry '!.github/workflows/'
+          ensure_gitignore_entry '!.github/workflows/*.d/'
+          ensure_gitignore_entry '!.github/workflows/*.d/**'
+          sort .gitignore | uniq > .gitignore.tmp && mv .gitignore.tmp .gitignore
+          echo "[✅] Final .gitignore content:"
+          cat .gitignore
+      - name: 📁 Prepare Directories
+        run: |
+          echo "[📁] Creating backup and result directories..."
+          mkdir -p .github/backup/workflows
+          mkdir -p site/api_check
+      - name: 📝 Backup and Create Per-Workflow Directories
+        run: |
+          echo "[📝] Backing up workflows and creating per-file directories..."
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            name="${base%.*}"
+            backup_dir=".github/workflows/${name}.d"
+            echo "[📄] Processing $base → $backup_dir"
+            mkdir -p "$backup_dir"
+            cp "$f" "$backup_dir/$base" || echo "[⚠️] Copy to $backup_dir failed"
+            cp "$f" .github/backup/workflows/ || echo "[⚠️] Copy to backup failed"
           done
+          echo "[✅] Backup complete."
+      - name: 📅 Commit Backups If Changed (Safe Add)
+        run: |
+          echo "[📅] Staging changes..."
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add .github/backup/workflows || echo "[⚠️] .github/backup ignored"
+          git add .github/workflows/*.d/ || echo "[⚠️] .d/ dirs may be ignored"
+          git add .gitignore || true
+          git diff --cached --quiet && echo "[ℹ️] No changes to commit." || (
+            git commit -m "📦 Auto-backup of workflows with .gitignore patch"
+            echo "[✅] Commit complete."
+          )
+      - name: 🚦 Check Latency of All Extracted URLs
+        run: |
+          echo "[⚙️] Extracting URLs from workflows and checking latency..."
+          for wf in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$wf" ] || continue
+            echo "🔎 Checking: $wf"
+            FILE_ID=$(basename "$wf" | sed 's/\.[^.]*$//')
+            OUTPUT="site/api_check/${FILE_ID}.json"
+            echo "[" > "$OUTPUT"
+            urls=$(grep -Eo 'https?://[^ )\"]+' "$wf" | sort | uniq)
+            index=0
+            count=$(echo "$urls" | wc -l)
+            for url in $urls; do
+              if echo "$url" | grep -qE '\$\{|\$\(|localhost|127\.0\.0\.1|::1'; then
+                echo "⏭️ Skipping template or local URL: $url"
+                continue
+              fi
+              echo "🌐 Checking $url..."
+              start=$(date +%s%3N)
+              status=$(curl -o /dev/null -s -w "%{http_code}" "$url") || status="000"
+              end=$(date +%s%3N)
+              latency=$((end - start))
+              echo "    ↳ Status: $status, Latency: ${latency}ms"
+              if [ "$latency" -gt "$MAX_LATENCY_MS" ]; then
+                echo "⚠️ $url is slow: ${latency}ms > ${MAX_LATENCY_MS}ms"
+              fi
+              echo "  {" >> "$OUTPUT"
+              echo "    \"url\": \"$url\"," >> "$OUTPUT"
+              echo "    \"status\": \"$status\"," >> "$OUTPUT"
+              echo "    \"latency_ms\": $latency" >> "$OUTPUT"
+              index=$((index+1))
+              if [ $index -lt $count ]; then
+                echo "  }," >> "$OUTPUT"
+              else
+                echo "  }" >> "$OUTPUT"
+              fi
+            done
+            echo "]" >> "$OUTPUT"
+            echo "✅ Saved to $OUTPUT"
+          done
+      - name: 💾 Upload All API Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-api-speed-results
+          path: site/api_check/
+
+      - name: 📊 Print Result Summary
+        run: |
+          echo "[📊] Sample Result Preview:"
+          cat site/api_check/*.json | head -n 50 || echo "[ℹ️] No results to show."
+      - name: ♻️ Retry on Failure (max 1 retry)
+        if: failure() && github.run_attempt == 1
+        run: |
+          echo "[🔁] Workflow failed. Retrying once..."
+          gh workflow run "${{ github.workflow }}" -r "${{ github.ref_name }}"
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
