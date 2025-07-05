@@ -1,9 +1,13 @@
-name: 🧩 Backup + API Speed Check with Gitignore Auto-Fix
+name: 🧩 Backup + API Speed Check with Gitignore Auto-Fix & Retry
 
 on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   backup-and-api-check:
@@ -26,13 +30,11 @@ jobs:
             grep -qxF "$entry" .gitignore || echo "$entry" >> .gitignore
           }
 
-          # 필수 예외 추가
           ensure_gitignore_entry '!.github/'
           ensure_gitignore_entry '!.github/workflows/'
           ensure_gitignore_entry '!.github/workflows/*.d/'
           ensure_gitignore_entry '!.github/workflows/*.d/**'
 
-          # 정렬 및 중복 제거
           sort .gitignore | uniq > .gitignore.tmp && mv .gitignore.tmp .gitignore
 
           echo "[✅] Final .gitignore content:"
@@ -66,8 +68,8 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
 
-          git add .github/backup/workflows || echo "[⚠️] Backup workflows may be ignored"
-          git add .github/workflows/*.d/ || echo "[⚠️] Some .d/ dirs may be ignored"
+          git add .github/backup/workflows || echo "[⚠️] .github/backup ignored"
+          git add .github/workflows/*.d/ || echo "[⚠️] .d/ dirs may be ignored"
           git add .gitignore || true
 
           git diff --cached --quiet && echo "[ℹ️] No changes to commit." || (
@@ -90,9 +92,8 @@ jobs:
             count=$(echo "$urls" | wc -l)
 
             for url in $urls; do
-              # ⛔ Skip template or local URLs
               if echo "$url" | grep -qE '\$\{|\$\(|localhost|127\.0\.0\.1|::1'; then
-                echo "⏭️ Skipping unsafe or template URL: $url"
+                echo "⏭️ Skipping template or local URL: $url"
                 continue
               fi
 
@@ -131,5 +132,13 @@ jobs:
 
       - name: 📊 Print Result Summary
         run: |
-          echo "[📊] Sample Result Preview (up to 50 lines):"
+          echo "[📊] Sample Result Preview:"
           cat site/api_check/*.json | head -n 50 || echo "[ℹ️] No results to show."
+
+      - name: ♻️ Retry on Failure (max 1 retry)
+        if: failure() && github.run_attempt == 1
+        run: |
+          echo "[🔁] Workflow failed. Retrying once..."
+          gh workflow run "${{ github.workflow }}" -r "${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
