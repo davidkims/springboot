@@ -1,9 +1,9 @@
 name: ♾️ Transfer Log Backup - Cron (60건 Infinite)
 
 on:
-  # 매 5분마다 자동 실행
   schedule:
     - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   transfer_log_backup:
@@ -12,54 +12,134 @@ jobs:
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
+      PROVENANCE_DIR: provenance
+      PROVENANCE_STORE_DIR: provenance/store
 
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
+      - name: 🔄 Force full package upgrade
+        run: |
+          echo "[🔄] Updating and upgrading packages..."
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y --with-new-pkgs upgrade || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
+          sudo apt-get -y autoremove
+
       - name: 📁 Prepare directories
         run: |
-          sudo mkdir -p $TRANSFER_LOG_DIR
-          sudo mkdir -p $BACKUP_DIR
-          sudo chmod -R 777 $TRANSFER_LOG_DIR $BACKUP_DIR
+          echo "[📁] Creating required directories..."
+          sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
+          sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
 
-      - name: 💾 Generate 60 corporate transfer logs
+      - name: 📂 Generate 60 corporate transfer logs
         run: |
-          echo "🕒 Generating 60 corporate transfer logs..."
-          # 기존 로그 삭제 (필요시 주석 처리)
-          sudo rm -f $TRANSFER_LOG_DIR/*.txt
+          echo "[🕒] Generating 60 logs in $TRANSFER_LOG_DIR..."
+          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || echo "[ℹ️] No old logs to delete."
           for i in $(seq 1 60); do
-            TS_HUMAN=$(date +'%Y-%m-%d %H:%M:%S')
+            TS=$(date +'%Y-%m-%d %H:%M:%S')
             AMOUNT=$((RANDOM % 900000 + 100000))
-            LOG="[TRANSFER] $TS_HUMAN | 기업거래ID:$i | 송금금액:₩${AMOUNT} 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
-            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
+            LOG="[TRANSFER] $TS | 기업거래ID:$i | 송금금액:₩$AMOUNT 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
+            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" > /dev/null
           done
 
-      - name: 📦 Backup logs into timestamped folder
+      - name: 📆 Backup logs into timestamped folder
         id: backup
         run: |
+          echo "[📦] Backing up logs..."
           TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
           echo "ts_folder=$TS_FOLDER" >> $GITHUB_OUTPUT
           DEST="$BACKUP_DIR/$TS_FOLDER"
           sudo mkdir -p "$DEST"
-          sudo cp $TRANSFER_LOG_DIR/*.txt "$DEST/"
-          echo "✅ Backed up 60 logs at: $DEST"
+          sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy to $DEST"
 
-      - name: 📤 Upload generated logs as artifact
+      - name: 📤 Upload generated logs
         uses: actions/upload-artifact@v4
         with:
           name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
-          path: $TRANSFER_LOG_DIR/*.txt
+          path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
 
-      - name: 📤 Upload backup folder as artifact
+      - name: 📤 Upload backup folder
         uses: actions/upload-artifact@v4
         with:
           name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
-          path: $BACKUP_DIR/${{ steps.backup.outputs.ts_folder }}
+          path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
 
-      - name: 📂 Show recent backup state
+      - name: 📜 Generate provenance.json (echo 방식)
         run: |
-          echo "📂 Backup directory tree (최상위 2레벨):"
-          sudo apt-get update
-          sudo apt-get install -y tree
-          tree $BACKUP_DIR -L 2
+          echo "[📜] Creating provenance JSON via echo..."
+          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          FILE="transfer-backup-${{ steps.backup.outputs.ts_folder }}"
+          mkdir -p "${{ env.PROVENANCE_DIR }}"
+          PROV_FILE="${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
+          {
+            echo '{'
+            echo "  \"type\": \"transfer_log_backup\","
+            echo "  \"timestamp\": \"$TS\","
+            echo "  \"status\": \"completed\","
+            echo "  \"backup_file\": \"$FILE\","
+            echo "  \"workflow\": \"${{ github.workflow }}\","
+            echo "  \"repository\": \"${{ github.repository }}\","
+            echo "  \"run_id\": \"${{ github.run_id }}\","
+            echo "  \"run_number\": \"${{ github.run_number }}\""
+            echo '}'
+          } > "$PROV_FILE"
+          echo "[📁] Copying provenance to: $PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
+          mkdir -p "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}"
+          cp "$PROV_FILE" "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
+          echo "[📄] Contents of provenance file:"
+          cat "$PROV_FILE"
+
+      - name: 📤 Upload provenance.json
+        if: ${{ hashFiles('provenance/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
+          path: provenance/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json
+
+      - name: 📚 Generate .provenance_index.json
+        run: |
+          echo "[📚] Generating provenance index with echo..."
+          echo "[📁] Ensuring provenance directory exists..."
+          mkdir -p provenance
+          INDEX_FILE="provenance/.provenance_index.json"
+          echo "[📄] Target index file: $INDEX_FILE"
+
+          FILES=$(ls provenance/.provenance_transfer_*.json 2>/dev/null || true)
+          if [ -z "$FILES" ]; then
+            echo "[⚠️] No provenance transfer files found."
+            echo "[]" > "$INDEX_FILE"
+            echo "[🆕] Created empty index file at $INDEX_FILE"
+          else
+            echo "[" > "$INDEX_FILE"
+            FIRST=1
+            for file in $FILES; do
+              [ -e "$file" ] || continue
+              if [ $FIRST -eq 0 ]; then echo "," >> "$INDEX_FILE"; fi
+              echo "[📎] Appending $file to index..."
+              cat "$file" >> "$INDEX_FILE"
+              FIRST=0
+            done
+            echo "]" >> "$INDEX_FILE"
+            echo "[✅] Completed writing index."
+          fi
+          echo "[📄] Final contents of $INDEX_FILE:"
+          cat "$INDEX_FILE"
+          echo "[🗂️] Listing provenance directory:"
+          ls -lh provenance/
+
+      - name: 📤 Upload provenance index
+        if: ${{ hashFiles('provenance/.provenance_index.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-index
+          path: provenance/.provenance_index.json
+
+      - name: 📂 Show backup structure
+        run: |
+          echo "[📂] Showing backup and provenance structure..."
+          sudo apt-get install -y tree || echo "[⚠️] tree install failed"
+          tree ${{ env.BACKUP_DIR }} -L 2 || echo "[⚠️] tree command failed"
+          echo "[📁] Provenance store structure:"
+          tree ${{ env.PROVENANCE_STORE_DIR }} || echo "[ℹ️] No provenance store yet"
