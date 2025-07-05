@@ -16,22 +16,26 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧼 Generate and Clean .gitignore
+      - name: 🧼 Generate and Clean .gitignore with Exceptions
         run: |
-          echo "[🧼] Ensuring .gitignore is clean and sorted..."
-
+          echo "[🧼] Ensuring .gitignore exists and includes required exceptions..."
           touch .gitignore
 
-          # 필수 패턴 유지 목록
-          echo "[✏️] Filtering valid .gitignore patterns..."
-          grep -vE '^\s*$|^#' .gitignore > .gitignore.tmp || true
-          grep -q '!.github/workflows/*.d/' .gitignore.tmp || echo '!.github/workflows/*.d/' >> .gitignore.tmp
+          ensure_gitignore_entry() {
+            entry="$1"
+            grep -qxF "$entry" .gitignore || echo "$entry" >> .gitignore
+          }
+
+          # 필수 예외 추가
+          ensure_gitignore_entry '!.github/'
+          ensure_gitignore_entry '!.github/workflows/'
+          ensure_gitignore_entry '!.github/workflows/*.d/'
+          ensure_gitignore_entry '!.github/workflows/*.d/**'
 
           # 정렬 및 중복 제거
-          sort .gitignore.tmp | uniq > .gitignore
-          rm -f .gitignore.tmp
+          sort .gitignore | uniq > .gitignore.tmp && mv .gitignore.tmp .gitignore
 
-          echo "[✅] .gitignore rebuilt:"
+          echo "[✅] Final .gitignore content:"
           cat .gitignore
 
       - name: 📁 Prepare Directories
@@ -51,23 +55,23 @@ jobs:
             echo "[📄] Processing $base → $backup_dir"
 
             mkdir -p "$backup_dir"
-            cp "$f" "$backup_dir/$base" || echo "[⚠️] Failed to copy to $backup_dir"
-            cp "$f" .github/backup/workflows/ || echo "[⚠️] Failed to copy to backup"
+            cp "$f" "$backup_dir/$base" || echo "[⚠️] Copy to $backup_dir failed"
+            cp "$f" .github/backup/workflows/ || echo "[⚠️] Copy to backup failed"
           done
-          echo "[✅] Workflow backup and per-file directories complete."
+          echo "[✅] Backup complete."
 
-      - name: 📅 Commit Backups If Changed
+      - name: 📅 Commit Backups If Changed (Safe Add)
         run: |
-          echo "[📅] Committing changes if any..."
+          echo "[📅] Staging changes..."
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
 
-          git add .github/backup/workflows
-          git add .github/workflows/*.d/
-          git add .gitignore
+          git add .github/backup/workflows || echo "[⚠️] Backup workflows may be ignored"
+          git add .github/workflows/*.d/ || echo "[⚠️] Some .d/ dirs may be ignored"
+          git add .gitignore || true
 
           git diff --cached --quiet && echo "[ℹ️] No changes to commit." || (
-            git commit -m "📦 Auto-backup of workflows + .gitignore sync"
+            git commit -m "📦 Auto-backup of workflows with .gitignore patch"
             echo "[✅] Commit complete."
           )
 
@@ -86,7 +90,7 @@ jobs:
             count=$(echo "$urls" | wc -l)
 
             for url in $urls; do
-              # ⛔ Skip template or internal URLs
+              # ⛔ Skip template or local URLs
               if echo "$url" | grep -qE '\$\{|\$\(|localhost|127\.0\.0\.1|::1'; then
                 echo "⏭️ Skipping unsafe or template URL: $url"
                 continue
