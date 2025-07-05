@@ -32,36 +32,48 @@ jobs:
 
       - name: 📁 Prepare Directories & init.sql
         run: |
-          echo "[📁] Setting up directories..."
+          echo "[📁] Creating directories..."
           sudo mkdir -p $SQL_DIR $BACKUP_DIR $PROVENANCE_DIR
           sudo chmod -R 777 /opt/finance
-          echo "[📝] Creating init.sql..."
+
+          echo "[📂] Directories structure:"
+          tree /opt/finance || ls -R /opt/finance
+
+          echo "[📝] Generating init.sql at $SQL_DIR/init.sql..."
+          INIT_FILE="$SQL_DIR/init.sql"
           echo "CREATE TABLE IF NOT EXISTS transfers (
             id INT AUTO_INCREMENT PRIMARY KEY,
             type VARCHAR(30),
             amount DECIMAL(15,2),
             currency VARCHAR(5),
             status VARCHAR(20)
-          );" > $SQL_DIR/init.sql
+          );" > "$INIT_FILE"
+
           for TYPE in $TYPES; do
-            echo "-- Inserts for $TYPE" >> $SQL_DIR/init.sql
+            echo "  - Adding inserts for $TYPE..."
+            echo "-- Inserts for $TYPE" >> "$INIT_FILE"
             for i in $(seq 1 100); do
               AMOUNT=$(( (RANDOM % 1000000) + 1000 ))
               STATUS=$([ $((RANDOM % 2)) -eq 0 ] && echo "completed" || echo "pending")
-              echo "INSERT INTO transfers(type, amount, currency, status) VALUES('$TYPE', $AMOUNT, 'KRW', '$STATUS');" >> $SQL_DIR/init.sql
+              echo "INSERT INTO transfers(type, amount, currency, status) VALUES('$TYPE', $AMOUNT, 'KRW', '$STATUS');" >> "$INIT_FILE"
             done
           done
+
+          echo "[📄] init.sql content preview (first 20 lines):"
+          head -n 20 "$INIT_FILE"
           echo "[✔] init.sql ready"
 
-      - name: 🔁 Loop over types
+      - name: 🔁 Loop over types and process
         run: |
           for TYPE in $TYPES; do
+            echo "[🔄] Starting transaction processing for: $TYPE"
             DB_NAME="db_${TYPE}"
             DB_USER="user_${TYPE}"
             DB_PASS="pass_${TYPE}"
             CONTAINER="mysql_${TYPE}"
             PORT=$((3307 + RANDOM % 1000))
-            echo "🚀 Starting $CONTAINER..."
+
+            echo "[🐬] Starting MySQL container: $CONTAINER"
             docker run -d \
               --name $CONTAINER \
               -e MYSQL_ROOT_PASSWORD=$ROOT_PASS \
@@ -75,34 +87,38 @@ jobs:
               --health-timeout=3s \
               --health-retries=10 \
               mysql:8.0
-            echo "⏳ Waiting for $CONTAINER to be healthy..."
+
+            echo "[⏳] Waiting for MySQL container to be healthy..."
             for i in {1..10}; do
-              if ! docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER$"; then
-                echo "[❌] $CONTAINER crashed"
-                exit 1
-              fi
               STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CONTAINER || echo "notfound")
-              echo "  - Health $i: $STATUS"
+              echo "  - Health check $i: $STATUS"
               if [ "$STATUS" = "healthy" ]; then
-                echo "[✔] Healthy"
+                echo "[✅] Container $CONTAINER is healthy"
                 break
               fi
               sleep 6
               if [ $i -eq 10 ]; then
+                echo "[💥] Health check failed for $CONTAINER. Logs:"
                 docker logs $CONTAINER
                 docker stop $CONTAINER
                 exit 1
               fi
             done
-            echo "🔍 Checking completed rows for $TYPE..."
+
+            echo "[🔎] Counting completed records for $TYPE"
             COUNT=$(mysql -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS -N -e "USE $DB_NAME; SELECT COUNT(*) FROM transfers WHERE type='$TYPE' AND status='completed';")
-            echo "✅ Found $COUNT completed"
+            echo "✅ Found $COUNT completed rows"
+
             if [ "$COUNT" != "0" ]; then
               FILE="$BACKUP_DIR/${TYPE}_backup.sql"
-              echo "💾 Backing up to $FILE"
-              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > $FILE
+              echo "[💾] Dumping MySQL DB to $FILE"
+              mysqldump --no-tablespaces -h 127.0.0.1 -P $PORT -u$DB_USER -p$DB_PASS $DB_NAME > "$FILE"
+
+              echo "[🧾] Preview of $FILE (first 10 lines):"
+              head -n 10 "$FILE" || echo "[⚠️] Could not preview $FILE"
+
               PROV_FILE="$PROVENANCE_DIR/.provenance_${TYPE}.json"
-              echo "[📜] Creating provenance via echo to $PROV_FILE"
+              echo "[📜] Creating provenance JSON: $PROV_FILE"
               {
                 echo '{'
                 echo "  \"type\": \"$TYPE\","
@@ -115,17 +131,30 @@ jobs:
                 echo "  \"run_number\": \"${{ github.run_number }}\""
                 echo '}'
               } > "$PROV_FILE"
-              echo "[✔] Provenance file created: $PROV_FILE"
+
+              echo "[📑] Provenance file contents:"
+              cat "$PROV_FILE"
+
             else
-              echo "⏭️ No data for $TYPE"
+              echo "[⏭️] No completed data. Skipping backup for $TYPE"
             fi
+
+            echo "[🛑] Stopping and removing $CONTAINER"
             docker stop $CONTAINER
+            docker rm $CONTAINER
           done
 
       - name: 🗜️ Compress Backups
         run: |
-          echo "[🗜️] Compressing..."
+          echo "[🗜️] Compressing backup SQL files..."
           cd $BACKUP_DIR
           ARCHIVE="finance-backups-$(date +%Y%m%d%H%M%S).tar.gz"
-          tar -czf $ARCHIVE *.sql
-          echo "[✔] Archive: $ARCHIVE"
+
+          echo "[📂] Listing .sql files before compression:"
+          ls -lh *.sql || echo "[⚠️] No .sql files to compress"
+
+          tar -czf "$ARCHIVE" *.sql || echo "[⚠️] tar failed or no files found"
+
+          echo "[📦] Archive created: $ARCHIVE"
+          echo "[📂] Archive size:"
+          ls -lh "$ARCHIVE"
