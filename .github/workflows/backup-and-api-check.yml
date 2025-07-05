@@ -1,0 +1,102 @@
+name: 🛡️ Backup Workflows + API Speed Check (Every 5 Min)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # 매 5분마다 실행
+  workflow_dispatch:
+
+jobs:
+  backup-and-check:
+    runs-on: ubuntu-latest
+
+    env:
+      API_LIST: |
+        https://api.github.com
+        https://jsonplaceholder.typicode.com/posts
+        https://httpbin.org/get
+      MAX_LATENCY_MS: 1000  # 최대 허용 응답 시간 (ms)
+
+    steps:
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      # 🧱 디렉토리 준비
+      - name: 📂 Prepare output directories
+        run: |
+          echo "[📁] Creating backup and result directories..."
+          mkdir -p .github/backup/workflows
+          mkdir -p api_check site/api_check
+
+      # 📄 워크플로우 백업
+      - name: 📝 Backup workflow files
+        run: |
+          echo "[📝] Backing up .yml/.yaml workflow files..."
+          cp .github/workflows/*.yml .github/backup/workflows/ 2>/dev/null || echo "[ℹ️] No .yml files found."
+          cp .github/workflows/*.yaml .github/backup/workflows/ 2>/dev/null || echo "[ℹ️] No .yaml files found."
+
+      - name: 🔍 Echo backup preview
+        run: |
+          echo "[🔍] Previewing first 10 lines of each backed-up file..."
+          for f in .github/backup/workflows/*.yml .github/backup/workflows/*.yaml; do
+            [ -f "$f" ] || continue
+            echo "🗂️ File: $f"
+            head -n 10 "$f"
+            echo "------------------------------"
+          done
+
+      - name: 📅 Commit backup files
+        run: |
+          if [ -d .git ]; then
+            echo "[📅] Committing backup if changes are detected..."
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add .github/backup/workflows
+            git diff --cached --quiet && echo "[ℹ️] No changes to commit." || (
+              git commit -m "📃 Backup workflow files with echo outputs"
+              echo "[✅] Commit completed."
+            )
+          else
+            echo "[❌] Not a Git repository. Skipping commit."
+          fi
+
+      # 🌐 API 속도 측정
+      - name: 🧪 Run API latency checks
+        run: |
+          echo "[⚙️] Checking API latency..."
+          echo "[" > site/api_check/results.json
+          index=0
+          total=$(echo "$API_LIST" | wc -l)
+          for url in $API_LIST; do
+            start=$(date +%s%3N)
+            status=$(curl -o /dev/null -s -w "%{http_code}" "$url")
+            end=$(date +%s%3N)
+            latency=$((end - start))
+            echo "[🔎] $url"
+            echo "    ↳ Status: $status, Latency: ${latency}ms"
+            if [ "$latency" -gt "$MAX_LATENCY_MS" ]; then
+              echo "⚠️ $url 응답 지연: ${latency}ms > ${MAX_LATENCY_MS}ms"
+            fi
+            echo "  {" >> site/api_check/results.json
+            echo "    \"url\": \"$url\"," >> site/api_check/results.json
+            echo "    \"status\": \"$status\"," >> site/api_check/results.json
+            echo "    \"latency_ms\": $latency" >> site/api_check/results.json
+            index=$((index+1))
+            if [ $index -lt $total ]; then
+              echo "  }," >> site/api_check/results.json
+            else
+              echo "  }" >> site/api_check/results.json
+            fi
+          done
+          echo "]" >> site/api_check/results.json
+          echo "[✅] API check complete."
+
+      - name: 💾 Upload API result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-speed-result
+          path: site/api_check/results.json
+
+      - name: 📊 Display API check summary
+        run: |
+          echo "[📊] API 응답 속도 측정 결과:"
+          cat site/api_check/results.json
