@@ -8,10 +8,17 @@ on:
 permissions:
   contents: write
   actions: write
+  security-events: write    # required for CodeQL analyze/upload to work
 
 jobs:
   backup-and-api-check:
     runs-on: ubuntu-latest
+
+    services:
+      validation-collector:
+        image: myorg/validation-collector:latest
+        ports:
+          - 8080:80
 
     env:
       MAX_LATENCY_MS: 1000
@@ -31,7 +38,9 @@ jobs:
       - name: ⏹️ Cancel long-running 포트폴리오 생성 워크플로우
         run: |
           echo "[⏹️] 이전 포트폴리오 생성 워크플로우 중단 시도..."
-          for ID in $(gh run list --workflow="generate_full_readme.yml" --json databaseId,status -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId'); do
+          for ID in $(gh run list --workflow="generate_full_readme.yml" \
+            --json databaseId,status \
+            -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId'); do
             echo "[🛑] Cancelling run ID $ID"
             gh run cancel $ID || echo "[⚠️] Cancel failed for $ID"
           done
@@ -40,19 +49,16 @@ jobs:
       - name: 📁 Prepare Directories with Permissions
         run: |
           echo "[📁] Creating backup and result directories..."
-          mkdir -p .github/backup/workflows
-          mkdir -p site/api_check
+          mkdir -p .github/backup/workflows site/api_check
           chmod -R 755 .github/backup site/api_check
           echo "[✅] Directories created and permissions set."
 
       - name: 🧼 Ensure .gitignore Exists with Permissions
         run: |
           echo "[🧼] Ensuring .gitignore exists and includes required exceptions..."
-          touch .gitignore
-          chmod 644 .gitignore
+          touch .gitignore && chmod 644 .gitignore
           ensure_gitignore_entry() {
-            entry="$1"
-            grep -qxF "$entry" .gitignore || echo "$entry" >> .gitignore
+            grep -qxF "$1" .gitignore || echo "$1" >> .gitignore
           }
           ensure_gitignore_entry '!.github/'
           ensure_gitignore_entry '!.github/workflows/'
@@ -103,7 +109,7 @@ jobs:
             FILE_ID=$(basename "$wf" | sed 's/\.[^.]*$//')
             OUTPUT="site/api_check/${FILE_ID}.json"
             echo "[" > "$OUTPUT"
-            urls=$(grep -Eo 'https?://[^ )"]+' "$wf" | sort | uniq)
+            urls=$(grep -Eo 'https?://[^ )\"]+' "$wf" | sort | uniq)
             index=0
             count=$(echo "$urls" | wc -l)
             for url in $urls; do
@@ -117,9 +123,6 @@ jobs:
               end=$(date +%s%3N)
               latency=$((end - start))
               echo "    ↳ Status: $status, Latency: ${latency}ms"
-              if [ "$latency" -gt "$MAX_LATENCY_MS" ]; then
-                echo "⚠️ $url is slow: ${latency}ms > ${MAX_LATENCY_MS}ms"
-              fi
               echo "  {" >> "$OUTPUT"
               echo "    \"url\": \"$url\"," >> "$OUTPUT"
               echo "    \"status\": \"$status\"," >> "$OUTPUT"
@@ -169,8 +172,31 @@ jobs:
           chmod +x "$OUT_FILE"
           echo "[✅] echo.sh generated at $OUT_FILE"
 
-      - name: 🔁 Retry on Failure (Max 1 Retry)
+      # ─────────────────────────────────────────── #
+      # CodeQL code-scanning with validation & retry #
+      # ─────────────────────────────────────────── #
+      - name: 🔍 Initialize CodeQL                     # ← added
+        uses: github/codeql-action/init@v2           # ← added
+
+      - name: 🔍 Autobuild                             # ← added
+        uses: github/codeql-action/autobuild@v2       # ← added
+
+      - name: 🔍 Perform CodeQL Analysis               # ← added
+        id: codeql
+        uses: github/codeql-action/analyze@v2         # ← added
+
+      - name: 📤 Upload SARIF to Validation Collector  # ← added
+        run: |
+          echo "[📤] Uploading SARIF to validation collector..."
+          # adjust path if your SARIF lands elsewhere
+          SARIF=$(find . -name '*.sarif' | head -n1)
+          curl -X POST http://localhost:8080/upload \
+            -H "Content-Type: application/sarif+json" \
+            --data-binary @"$SARIF" \
+            || echo "[⚠️] SARIF upload failed"
+
+      - name: 🔁 Retry Code Scanning on Failure (Max 1)  # ← added
         if: failure() && github.run_attempt == 1
         run: |
-          echo "[🔁] Workflow failed. Retrying once..."
+          echo "[🔁] Code scanning failed. Retrying workflow…"
           gh workflow run "${{ github.workflow }}" -r "${{ github.ref_name }}"
