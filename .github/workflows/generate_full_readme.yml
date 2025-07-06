@@ -21,41 +21,64 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🔧 시스템 패키지, GitHub CLI, jq 설치
+      - name: 🔧 시스템 패키지, GitHub CLI, jq, parallel 설치
         run: |
-          echo "[🔧] 시스템 패키지, GitHub CLI, jq 최신화 중..."
-          sudo apt-get update -y && sudo apt-get upgrade -y
-          sudo apt-get install -y gh jq
+          echo "[🔧] 시스템 패키지, GitHub CLI, jq, parallel 최신화 중..."
+          sudo apt-get update -y
+          sudo apt-get dist-upgrade -y
+          sudo apt-get install -y gh jq parallel
           gh --version
           jq --version
+          parallel --version
+
+      - name: 🚀 Prometheus 통계 수집 서버 설치
+        run: |
+          echo "[🚀] Prometheus v2.53.5 설치 중..." 
+          wget https://github.com/prometheus/prometheus/releases/download/v2.53.5/prometheus-2.53.5.linux-amd64.tar.gz
+          tar xzf prometheus-2.53.5.linux-amd64.tar.gz
+          sudo mv prometheus-2.53.5.linux-amd64 /opt/prometheus
+          sudo useradd --no-create-home --shell /bin/false prometheus
+          sudo chown -R prometheus:prometheus /opt/prometheus
+          echo "[✅] Prometheus 서버가 /opt/prometheus 에 설치되었습니다."
 
       - name: 📋 Ensure .tmp Directory
         run: |
           echo "[📁] .tmp 디렉토리 생성 확인"
           mkdir -p .tmp
 
-      - name: 📊 워크플로우 통계 수집
+      - name: 📊 병렬 워크플로우 통계 수집
         run: |
-          echo "[📊] 워크플로우 통계 수집 중..."
+          echo "[📊] 워크플로우 통계 수집 (병렬) 중..."
           OUTPUT_FILE=".tmp/workflows.md"
-          echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계" > "$OUTPUT_FILE"
-          echo "" >> "$OUTPUT_FILE"
-          echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |" >> "$OUTPUT_FILE"
-          echo "|----------------|--------:|--------:|--------:|--------:|" >> "$OUTPUT_FILE"
-          for f in .github/workflows/*.yml; do
+          # 헤더
+          {
+            echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계"
+            echo ""
+            echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |"
+            echo "|----------------|--------:|--------:|--------:|--------:|"
+          } > "$OUTPUT_FILE"
+
+          # 통계 수집 함수
+          parallel_stats() {
+            f="$1"
             NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
             FILENAME=$(basename "$f")
-            RUNS=$(gh run list --workflow="$FILENAME" --limit 100 --json conclusion -q '.[] | .conclusion' || echo "")
+            RUNS=$(gh run list --workflow="$FILENAME" --limit 100 --json conclusion -q '.[] | .conclusion')
             TOTAL=$(echo "$RUNS" | wc -l)
-            SUCCESS=$(echo "$RUNS" | grep -c "success" || true)
+            SUCCESS=$(echo "$RUNS" | grep -c success || true)
             FAILURE=$((TOTAL - SUCCESS))
             if [ "$TOTAL" -gt 0 ]; then
               RATE=$(awk "BEGIN {printf \"%.1f\", ($SUCCESS/$TOTAL)*100}")
             else
               RATE="N/A"
             fi
-            echo "| $NAME | $TOTAL | $SUCCESS | $FAILURE | $RATE% |" >> "$OUTPUT_FILE"
-          done
+            echo "| $NAME | $TOTAL | $SUCCESS | $FAILURE | $RATE% |"
+          }
+
+          export -f parallel_stats
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
+            | parallel -j 4 parallel_stats {} >> "$OUTPUT_FILE"
+
           cat "$OUTPUT_FILE"
 
       - name: 📄 Generate README.md
@@ -108,9 +131,7 @@ jobs:
           echo "" >> SECURITY.md
           echo "## Reporting a Vulnerability" >> SECURITY.md
           echo "Use this section to tell people how to report a vulnerability." >> SECURITY.md
-          echo "Tell them where to go, how often they can expect to get an update on a" >> SECURITY.md
-          echo "reported vulnerability, what to expect if the vulnerability is accepted or" >> SECURITY.md
-          echo "declined, etc." >> SECURITY.md
+          echo "Tell them where to go, how often they can expect updates, and what to expect if it’s accepted or declined." >> SECURITY.md
 
       - name: 🔁 Commit / Push or PR
         run: |
