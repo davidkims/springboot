@@ -10,3 +10,425 @@
 ## Reporting a Vulnerability
 Use this section to tell people how to report a vulnerability.
 Tell them where to go, how often they can expect updates, and what to expect if it’s accepted or declined.
+
+## Workflow Validation Checklist
+- [ ] Pages Auto Indexing.yml: YAML syntax validation
+- [ ] Pages Auto Indexing.yml: Permissions review
+- [ ] Pages Auto Indexing.yml: Secret detection scan
+- [ ] Pages Auto Indexing.yml: Dependency scanning enabled
+- [ ] Pages Auto Indexing.yml: Container scanning enabled
+- [ ] Release.yml: YAML syntax validation
+- [ ] Release.yml: Permissions review
+- [ ] Release.yml: Secret detection scan
+- [ ] Release.yml: Dependency scanning enabled
+- [ ] Release.yml: Container scanning enabled
+- [ ] ScorecardAnalysis.yml: YAML syntax validation
+- [ ] ScorecardAnalysis.yml: Permissions review
+- [ ] ScorecardAnalysis.yml: Secret detection scan
+- [ ] ScorecardAnalysis.yml: Dependency scanning enabled
+- [ ] ScorecardAnalysis.yml: Container scanning enabled
+- [ ] TradingAgents.yml: YAML syntax validation
+- [ ] TradingAgents.yml: Permissions review
+- [ ] TradingAgents.yml: Secret detection scan
+- [ ] TradingAgents.yml: Dependency scanning enabled
+- [ ] TradingAgents.yml: Container scanning enabled
+- [ ] airflow-healthcheck.yml: YAML syntax validation
+- [ ] airflow-healthcheck.yml: Permissions review
+- [ ] airflow-healthcheck.yml: Secret detection scan
+- [ ] airflow-healthcheck.yml: Dependency scanning enabled
+- [ ] airflow-healthcheck.yml: Container scanning enabled
+- [ ] auto-backup.yml: YAML syntax validation
+- [ ] auto-backup.yml: Permissions review
+- [ ] auto-backup.yml: Secret detection scan
+- [ ] auto-backup.yml: Dependency scanning enabled
+- [ ] auto-backup.yml: Container scanning enabled
+- [ ] auto-backup2.yml: YAML syntax validation
+- [ ] auto-backup2.yml: Permissions review
+- [ ] auto-backup2.yml: Secret detection scan
+- [ ] auto-backup2.yml: Dependency scanning enabled
+- [ ] auto-backup2.yml: Container scanning enabled
+- [ ] auto-rerun-all.yml: YAML syntax validation
+- [ ] auto-rerun-all.yml: Permissions review
+- [ ] auto-rerun-all.yml: Secret detection scan
+- [ ] auto-rerun-all.yml: Dependency scanning enabled
+- [ ] auto-rerun-all.yml: Container scanning enabled
+- [ ] auto-transactions.yml: YAML syntax validation
+- [ ] auto-transactions.yml: Permissions review
+- [ ] auto-transactions.yml: Secret detection scan
+- [ ] auto-transactions.yml: Dependency scanning enabled
+- [ ] auto-transactions.yml: Container scanning enabled
+- [ ] auto_create_workflow.yml: YAML syntax validation
+- [ ] auto_create_workflow.yml: Permissions review
+- [ ] auto_create_workflow.yml: Secret detection scan
+- [ ] auto_create_workflow.yml: Dependency scanning enabled
+- [ ] auto_create_workflow.yml: Container scanning enabled
+- [ ] backup-and-api-check.yml: YAML syntax validation
+- [ ] backup-and-api-check.yml: Permissions review
+- [ ] backup-and-api-check.yml: Secret detection scan
+- [ ] backup-and-api-check.yml: Dependency scanning enabled
+- [ ] backup-and-api-check.yml: Container scanning enabled
+- [ ] backup.yml: YAML syntax validation
+- [ ] backup.yml: Permissions review
+- [ ] backup.yml: Secret detection scan
+- [ ] backup.yml: Dependency scanning enabled
+- [ ] backup.yml: Container scanning enabled
+- [ ] bankbackup.yml: YAML syntax validation
+- [ ] bankbackup.yml: Permissions review
+- [ ] bankbackup.yml: Secret detection scan
+- [ ] bankbackup.yml: Dependency scanning enabled
+- [ ] bankbackup.yml: Container scanning enabled
+- [ ] billing.yml: YAML syntax validation
+- [ ] billing.yml: Permissions review
+- [ ] billing.yml: Secret detection scan
+- [ ] billing.yml: Dependency scanning enabled
+- [ ] billing.yml: Container scanning enabled
+- [ ] black-duck-security-scan-ci.yml: YAML syntax validation
+- [ ] black-duck-security-scan-ci.yml: Permissions review
+- [ ] black-duck-security-scan-ci.yml: Secret detection scan
+- [ ] black-duck-security-scan-ci.yml: Dependency scanning enabled
+- [ ] black-duck-security-scan-ci.yml: Container scanning enabled
+- [ ] build_and_test.yml: YAML syntax validation
+- [ ] build_and_test.yml: Permissions review
+- [ ] build_and_test.yml: Secret detection scan
+- [ ] build_and_test.yml: Dependency scanning enabled
+- [ ] build_and_test.yml: Container scanning enabled
+- [ ] cash.yml: YAML syntax validation
+- [ ] cash.yml: Permissions review
+- [ ] cash.yml: Secret detection scan
+- [ ] cash.yml: Dependency scanning enabled
+- [ ] cash.yml: Container scanning enabled
+- [ ] check-expensive-workflows.yml: YAML syntax validation
+- [ ] check-expensive-workflows.yml: Permissions review
+- [ ] check-expensive-workflows.yml: Secret detection scan
+- [ ] check-expensive-workflows.yml: Dependency scanning enabled
+- [ ] check-expensive-workflows.yml: Container scanning enabled
+- [ ] codeql-disabled.yml: YAML syntax validation
+- [ ] codeql-disabled.yml: Permissions review
+- [ ] codeql-disabled.yml: Secret detection scan
+- [ ] codeql-disabled.yml: Dependency scanning enabled
+- [ ] codeql-disabled.yml: Container scanning enabled
+- [ ] codeql.yml: YAML syntax validation
+- [ ] codeql.yml: Permissions review
+- [ ] codeql.yml: Secret detection scan
+- [ ] codeql.yml: Dependency scanning enabled
+- [ ] codeql.yml: Container scanning enabled
+- [ ] codespace-security-check.yml: YAML syntax validation
+- [ ] codespace-security-check.yml: Permissions review
+- [ ] codespace-security-check.yml: Secret detection scan
+- [ ] codespace-security-check.yml: Dependency scanning enabled
+- [ ] codespace-security-check.yml: Container scanning enabled
+- [ ] corescorecard.yml: YAML syntax validation
+- [ ] corescorecard.yml: Permissions review
+- [ ] corescorecard.yml: Secret detection scan
+- [ ] corescorecard.yml: Dependency scanning enabled
+- [ ] corescorecard.yml: Container scanning enabled
+- [ ] customer-image-docker.yml: YAML syntax validation
+- [ ] customer-image-docker.yml: Permissions review
+- [ ] customer-image-docker.yml: Secret detection scan
+- [ ] customer-image-docker.yml: Dependency scanning enabled
+- [ ] customer-image-docker.yml: Container scanning enabled
+- [ ] db.yml: YAML syntax validation
+- [ ] db.yml: Permissions review
+- [ ] db.yml: Secret detection scan
+- [ ] db.yml: Dependency scanning enabled
+- [ ] db.yml: Container scanning enabled
+- [ ] delete-failed-workflow-runs.yml: YAML syntax validation
+- [ ] delete-failed-workflow-runs.yml: Permissions review
+- [ ] delete-failed-workflow-runs.yml: Secret detection scan
+- [ ] delete-failed-workflow-runs.yml: Dependency scanning enabled
+- [ ] delete-failed-workflow-runs.yml: Container scanning enabled
+- [ ] delete_workflows.yml: YAML syntax validation
+- [ ] delete_workflows.yml: Permissions review
+- [ ] delete_workflows.yml: Secret detection scan
+- [ ] delete_workflows.yml: Dependency scanning enabled
+- [ ] delete_workflows.yml: Container scanning enabled
+- [ ] dependabot-auto-merge.yml: YAML syntax validation
+- [ ] dependabot-auto-merge.yml: Permissions review
+- [ ] dependabot-auto-merge.yml: Secret detection scan
+- [ ] dependabot-auto-merge.yml: Dependency scanning enabled
+- [ ] dependabot-auto-merge.yml: Container scanning enabled
+- [ ] dependabot-rescue.yml: YAML syntax validation
+- [ ] dependabot-rescue.yml: Permissions review
+- [ ] dependabot-rescue.yml: Secret detection scan
+- [ ] dependabot-rescue.yml: Dependency scanning enabled
+- [ ] dependabot-rescue.yml: Container scanning enabled
+- [ ] devskim.yml: YAML syntax validation
+- [ ] devskim.yml: Permissions review
+- [ ] devskim.yml: Secret detection scan
+- [ ] devskim.yml: Dependency scanning enabled
+- [ ] devskim.yml: Container scanning enabled
+- [ ] docker-backup-workflow.yml: YAML syntax validation
+- [ ] docker-backup-workflow.yml: Permissions review
+- [ ] docker-backup-workflow.yml: Secret detection scan
+- [ ] docker-backup-workflow.yml: Dependency scanning enabled
+- [ ] docker-backup-workflow.yml: Container scanning enabled
+- [ ] docker-backup.yml: YAML syntax validation
+- [ ] docker-backup.yml: Permissions review
+- [ ] docker-backup.yml: Secret detection scan
+- [ ] docker-backup.yml: Dependency scanning enabled
+- [ ] docker-backup.yml: Container scanning enabled
+- [ ] docker-build-deploy.yml: YAML syntax validation
+- [ ] docker-build-deploy.yml: Permissions review
+- [ ] docker-build-deploy.yml: Secret detection scan
+- [ ] docker-build-deploy.yml: Dependency scanning enabled
+- [ ] docker-build-deploy.yml: Container scanning enabled
+- [ ] docker-ci-cd.yml: YAML syntax validation
+- [ ] docker-ci-cd.yml: Permissions review
+- [ ] docker-ci-cd.yml: Secret detection scan
+- [ ] docker-ci-cd.yml: Dependency scanning enabled
+- [ ] docker-ci-cd.yml: Container scanning enabled
+- [ ] docker-finance-build.yml: YAML syntax validation
+- [ ] docker-finance-build.yml: Permissions review
+- [ ] docker-finance-build.yml: Secret detection scan
+- [ ] docker-finance-build.yml: Dependency scanning enabled
+- [ ] docker-finance-build.yml: Container scanning enabled
+- [ ] docker-image.yml: YAML syntax validation
+- [ ] docker-image.yml: Permissions review
+- [ ] docker-image.yml: Secret detection scan
+- [ ] docker-image.yml: Dependency scanning enabled
+- [ ] docker-image.yml: Container scanning enabled
+- [ ] docker-setup.yml: YAML syntax validation
+- [ ] docker-setup.yml: Permissions review
+- [ ] docker-setup.yml: Secret detection scan
+- [ ] docker-setup.yml: Dependency scanning enabled
+- [ ] docker-setup.yml: Container scanning enabled
+- [ ] download-security-regulations.yml: YAML syntax validation
+- [ ] download-security-regulations.yml: Permissions review
+- [ ] download-security-regulations.yml: Secret detection scan
+- [ ] download-security-regulations.yml: Dependency scanning enabled
+- [ ] download-security-regulations.yml: Container scanning enabled
+- [ ] encrypt-decrypt-tag-label.yml: YAML syntax validation
+- [ ] encrypt-decrypt-tag-label.yml: Permissions review
+- [ ] encrypt-decrypt-tag-label.yml: Secret detection scan
+- [ ] encrypt-decrypt-tag-label.yml: Dependency scanning enabled
+- [ ] encrypt-decrypt-tag-label.yml: Container scanning enabled
+- [ ] finance-backup-multi.yml: YAML syntax validation
+- [ ] finance-backup-multi.yml: Permissions review
+- [ ] finance-backup-multi.yml: Secret detection scan
+- [ ] finance-backup-multi.yml: Dependency scanning enabled
+- [ ] finance-backup-multi.yml: Container scanning enabled
+- [ ] finance-docker.yml: YAML syntax validation
+- [ ] finance-docker.yml: Permissions review
+- [ ] finance-docker.yml: Secret detection scan
+- [ ] finance-docker.yml: Dependency scanning enabled
+- [ ] finance-docker.yml: Container scanning enabled
+- [ ] finance-smart-backup1.yml: YAML syntax validation
+- [ ] finance-smart-backup1.yml: Permissions review
+- [ ] finance-smart-backup1.yml: Secret detection scan
+- [ ] finance-smart-backup1.yml: Dependency scanning enabled
+- [ ] finance-smart-backup1.yml: Container scanning enabled
+- [ ] full-finance-provenance-pages.yml: YAML syntax validation
+- [ ] full-finance-provenance-pages.yml: Permissions review
+- [ ] full-finance-provenance-pages.yml: Secret detection scan
+- [ ] full-finance-provenance-pages.yml: Dependency scanning enabled
+- [ ] full-finance-provenance-pages.yml: Container scanning enabled
+- [ ] full-finance-scorecard1.yml: YAML syntax validation
+- [ ] full-finance-scorecard1.yml: Permissions review
+- [ ] full-finance-scorecard1.yml: Secret detection scan
+- [ ] full-finance-scorecard1.yml: Dependency scanning enabled
+- [ ] full-finance-scorecard1.yml: Container scanning enabled
+- [ ] generate-customers.yml: YAML syntax validation
+- [ ] generate-customers.yml: Permissions review
+- [ ] generate-customers.yml: Secret detection scan
+- [ ] generate-customers.yml: Dependency scanning enabled
+- [ ] generate-customers.yml: Container scanning enabled
+- [ ] generate-workflow-log06.yml: YAML syntax validation
+- [ ] generate-workflow-log06.yml: Permissions review
+- [ ] generate-workflow-log06.yml: Secret detection scan
+- [ ] generate-workflow-log06.yml: Dependency scanning enabled
+- [ ] generate-workflow-log06.yml: Container scanning enabled
+- [ ] generate_blog.yml: YAML syntax validation
+- [ ] generate_blog.yml: Permissions review
+- [ ] generate_blog.yml: Secret detection scan
+- [ ] generate_blog.yml: Dependency scanning enabled
+- [ ] generate_blog.yml: Container scanning enabled
+- [ ] generate_full_readme.yml: YAML syntax validation
+- [ ] generate_full_readme.yml: Permissions review
+- [ ] generate_full_readme.yml: Secret detection scan
+- [ ] generate_full_readme.yml: Dependency scanning enabled
+- [ ] generate_full_readme.yml: Container scanning enabled
+- [ ] gitlab-integration.yml: YAML syntax validation
+- [ ] gitlab-integration.yml: Permissions review
+- [ ] gitlab-integration.yml: Secret detection scan
+- [ ] gitlab-integration.yml: Dependency scanning enabled
+- [ ] gitlab-integration.yml: Container scanning enabled
+- [ ] init-directory-structure.yml: YAML syntax validation
+- [ ] init-directory-structure.yml: Permissions review
+- [ ] init-directory-structure.yml: Secret detection scan
+- [ ] init-directory-structure.yml: Dependency scanning enabled
+- [ ] init-directory-structure.yml: Container scanning enabled
+- [ ] install-java-maven.yml: YAML syntax validation
+- [ ] install-java-maven.yml: Permissions review
+- [ ] install-java-maven.yml: Secret detection scan
+- [ ] install-java-maven.yml: Dependency scanning enabled
+- [ ] install-java-maven.yml: Container scanning enabled
+- [ ] jekyll-gh-pages.yml: YAML syntax validation
+- [ ] jekyll-gh-pages.yml: Permissions review
+- [ ] jekyll-gh-pages.yml: Secret detection scan
+- [ ] jekyll-gh-pages.yml: Dependency scanning enabled
+- [ ] jekyll-gh-pages.yml: Container scanning enabled
+- [ ] label-comment.yml: YAML syntax validation
+- [ ] label-comment.yml: Permissions review
+- [ ] label-comment.yml: Secret detection scan
+- [ ] label-comment.yml: Dependency scanning enabled
+- [ ] label-comment.yml: Container scanning enabled
+- [ ] label.yml: YAML syntax validation
+- [ ] label.yml: Permissions review
+- [ ] label.yml: Secret detection scan
+- [ ] label.yml: Dependency scanning enabled
+- [ ] label.yml: Container scanning enabled
+- [ ] ledger-generator.yml: YAML syntax validation
+- [ ] ledger-generator.yml: Permissions review
+- [ ] ledger-generator.yml: Secret detection scan
+- [ ] ledger-generator.yml: Dependency scanning enabled
+- [ ] ledger-generator.yml: Container scanning enabled
+- [ ] log-backup-container.yml: YAML syntax validation
+- [ ] log-backup-container.yml: Permissions review
+- [ ] log-backup-container.yml: Secret detection scan
+- [ ] log-backup-container.yml: Dependency scanning enabled
+- [ ] log-backup-container.yml: Container scanning enabled
+- [ ] ml-setup.yml: YAML syntax validation
+- [ ] ml-setup.yml: Permissions review
+- [ ] ml-setup.yml: Secret detection scan
+- [ ] ml-setup.yml: Dependency scanning enabled
+- [ ] ml-setup.yml: Container scanning enabled
+- [ ] mysql-integrated.yml: YAML syntax validation
+- [ ] mysql-integrated.yml: Permissions review
+- [ ] mysql-integrated.yml: Secret detection scan
+- [ ] mysql-integrated.yml: Dependency scanning enabled
+- [ ] mysql-integrated.yml: Container scanning enabled
+- [ ] mysql-setup-and-query.yml: YAML syntax validation
+- [ ] mysql-setup-and-query.yml: Permissions review
+- [ ] mysql-setup-and-query.yml: Secret detection scan
+- [ ] mysql-setup-and-query.yml: Dependency scanning enabled
+- [ ] mysql-setup-and-query.yml: Container scanning enabled
+- [ ] mysql-setup.yml: YAML syntax validation
+- [ ] mysql-setup.yml: Permissions review
+- [ ] mysql-setup.yml: Secret detection scan
+- [ ] mysql-setup.yml: Dependency scanning enabled
+- [ ] mysql-setup.yml: Container scanning enabled
+- [ ] mysql-upgrade.yml: YAML syntax validation
+- [ ] mysql-upgrade.yml: Permissions review
+- [ ] mysql-upgrade.yml: Secret detection scan
+- [ ] mysql-upgrade.yml: Dependency scanning enabled
+- [ ] mysql-upgrade.yml: Container scanning enabled
+- [ ] osv-scan.yml: YAML syntax validation
+- [ ] osv-scan.yml: Permissions review
+- [ ] osv-scan.yml: Secret detection scan
+- [ ] osv-scan.yml: Dependency scanning enabled
+- [ ] osv-scan.yml: Container scanning enabled
+- [ ] puppet-lint.yml: YAML syntax validation
+- [ ] puppet-lint.yml: Permissions review
+- [ ] puppet-lint.yml: Secret detection scan
+- [ ] puppet-lint.yml: Dependency scanning enabled
+- [ ] puppet-lint.yml: Container scanning enabled
+- [ ] python-ci.yml: YAML syntax validation
+- [ ] python-ci.yml: Permissions review
+- [ ] python-ci.yml: Secret detection scan
+- [ ] python-ci.yml: Dependency scanning enabled
+- [ ] python-ci.yml: Container scanning enabled
+- [ ] python-publish.yml: YAML syntax validation
+- [ ] python-publish.yml: Permissions review
+- [ ] python-publish.yml: Secret detection scan
+- [ ] python-publish.yml: Dependency scanning enabled
+- [ ] python-publish.yml: Container scanning enabled
+- [ ] release.yml: YAML syntax validation
+- [ ] release.yml: Permissions review
+- [ ] release.yml: Secret detection scan
+- [ ] release.yml: Dependency scanning enabled
+- [ ] release.yml: Container scanning enabled
+- [ ] release1.yml: YAML syntax validation
+- [ ] release1.yml: Permissions review
+- [ ] release1.yml: Secret detection scan
+- [ ] release1.yml: Dependency scanning enabled
+- [ ] release1.yml: Container scanning enabled
+- [ ] retrigger-and-db-init.yml: YAML syntax validation
+- [ ] retrigger-and-db-init.yml: Permissions review
+- [ ] retrigger-and-db-init.yml: Secret detection scan
+- [ ] retrigger-and-db-init.yml: Dependency scanning enabled
+- [ ] retrigger-and-db-init.yml: Container scanning enabled
+- [ ] rust.yml: YAML syntax validation
+- [ ] rust.yml: Permissions review
+- [ ] rust.yml: Secret detection scan
+- [ ] rust.yml: Dependency scanning enabled
+- [ ] rust.yml: Container scanning enabled
+- [ ] scorecard-analysis.ymltes.yml: YAML syntax validation
+- [ ] scorecard-analysis.ymltes.yml: Permissions review
+- [ ] scorecard-analysis.ymltes.yml: Secret detection scan
+- [ ] scorecard-analysis.ymltes.yml: Dependency scanning enabled
+- [ ] scorecard-analysis.ymltes.yml: Container scanning enabled
+- [ ] setup-and-generate.yml: YAML syntax validation
+- [ ] setup-and-generate.yml: Permissions review
+- [ ] setup-and-generate.yml: Secret detection scan
+- [ ] setup-and-generate.yml: Dependency scanning enabled
+- [ ] setup-and-generate.yml: Container scanning enabled
+- [ ] setup-java-opa.yml: YAML syntax validation
+- [ ] setup-java-opa.yml: Permissions review
+- [ ] setup-java-opa.yml: Secret detection scan
+- [ ] setup-java-opa.yml: Dependency scanning enabled
+- [ ] setup-java-opa.yml: Container scanning enabled
+- [ ] setup-logistics-environment.yml: YAML syntax validation
+- [ ] setup-logistics-environment.yml: Permissions review
+- [ ] setup-logistics-environment.yml: Secret detection scan
+- [ ] setup-logistics-environment.yml: Dependency scanning enabled
+- [ ] setup-logistics-environment.yml: Container scanning enabled
+- [ ] sql-backup-and-migrate.yml: YAML syntax validation
+- [ ] sql-backup-and-migrate.yml: Permissions review
+- [ ] sql-backup-and-migrate.yml: Secret detection scan
+- [ ] sql-backup-and-migrate.yml: Dependency scanning enabled
+- [ ] sql-backup-and-migrate.yml: Container scanning enabled
+- [ ] swift-backup.yml: YAML syntax validation
+- [ ] swift-backup.yml: Permissions review
+- [ ] swift-backup.yml: Secret detection scan
+- [ ] swift-backup.yml: Dependency scanning enabled
+- [ ] swift-backup.yml: Container scanning enabled
+- [ ] test.yml: YAML syntax validation
+- [ ] test.yml: Permissions review
+- [ ] test.yml: Secret detection scan
+- [ ] test.yml: Dependency scanning enabled
+- [ ] test.yml: Container scanning enabled
+- [ ] tokencheck.yml: YAML syntax validation
+- [ ] tokencheck.yml: Permissions review
+- [ ] tokencheck.yml: Secret detection scan
+- [ ] tokencheck.yml: Dependency scanning enabled
+- [ ] tokencheck.yml: Container scanning enabled
+- [ ] transfer-log-backup.yml: YAML syntax validation
+- [ ] transfer-log-backup.yml: Permissions review
+- [ ] transfer-log-backup.yml: Secret detection scan
+- [ ] transfer-log-backup.yml: Dependency scanning enabled
+- [ ] transfer-log-backup.yml: Container scanning enabled
+- [ ] transfer-log-backup1.yml: YAML syntax validation
+- [ ] transfer-log-backup1.yml: Permissions review
+- [ ] transfer-log-backup1.yml: Secret detection scan
+- [ ] transfer-log-backup1.yml: Dependency scanning enabled
+- [ ] transfer-log-backup1.yml: Container scanning enabled
+- [ ] transfer-log-infinite-backup.yml: YAML syntax validation
+- [ ] transfer-log-infinite-backup.yml: Permissions review
+- [ ] transfer-log-infinite-backup.yml: Secret detection scan
+- [ ] transfer-log-infinite-backup.yml: Dependency scanning enabled
+- [ ] transfer-log-infinite-backup.yml: Container scanning enabled
+- [ ] update_readme.yml: YAML syntax validation
+- [ ] update_readme.yml: Permissions review
+- [ ] update_readme.yml: Secret detection scan
+- [ ] update_readme.yml: Dependency scanning enabled
+- [ ] update_readme.yml: Container scanning enabled
+- [ ] update_readme1.yml: YAML syntax validation
+- [ ] update_readme1.yml: Permissions review
+- [ ] update_readme1.yml: Secret detection scan
+- [ ] update_readme1.yml: Dependency scanning enabled
+- [ ] update_readme1.yml: Container scanning enabled
+- [ ] welcome.yml: YAML syntax validation
+- [ ] welcome.yml: Permissions review
+- [ ] welcome.yml: Secret detection scan
+- [ ] welcome.yml: Dependency scanning enabled
+- [ ] welcome.yml: Container scanning enabled
+- [ ] workflow-health-monitor.yml: YAML syntax validation
+- [ ] workflow-health-monitor.yml: Permissions review
+- [ ] workflow-health-monitor.yml: Secret detection scan
+- [ ] workflow-health-monitor.yml: Dependency scanning enabled
+- [ ] workflow-health-monitor.yml: Container scanning enabled
+- [ ] Provenance.yaml: YAML syntax validation
+- [ ] Provenance.yaml: Permissions review
+- [ ] Provenance.yaml: Secret detection scan
+- [ ] Provenance.yaml: Dependency scanning enabled
+- [ ] Provenance.yaml: Container scanning enabled
