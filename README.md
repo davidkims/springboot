@@ -95,7 +95,7 @@
 - 자기개발 메시지: https://www.youtube.com/watch?v=G8lvQRALa6s
 
 ## 📅 마지막 업데이트
-- 2025-07-06 21:50:44 KST
+- 2025-07-06 22:02:30 KST
 
 ## ✅ 현재 브랜치
 - main
@@ -109,35 +109,35 @@
 |----------------|--------:|--------:|--------:|--------:|
 | ✨ Tmax 전체 코드 생성기 및 배포자 | 16 | 10 | 6 | 62.5% |
 | 실패한 워크플로 자동 재시도 # 이 워크플로우의 이름입니다. | 21 | 0 | 21 | 0.0% |
-| 🛡️ OpenSSF Scorecard Analysis (Docker Only) | 23 | 0 | 23 | 0.0% |
 | Hourly Docker Setup1 | 100 | 97 | 3 | 97.0% |
+| 🛡️ OpenSSF Scorecard Analysis (Docker Only) | 23 | 0 | 23 | 0.0% |
 | Provenance Attestation + Pages Deploy | 100 | 99 | 1 | 99.0% |
+| 🐍 Secure Python Package Build | 11 | 3 | 8 | 27.3% |
 | Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List | 100 | 100 | 0 | 100.0% |
 | Generate Repository Blog | 3 | 0 | 3 | 0.0% |
-| 🐍 Secure Python Package Build | 11 | 3 | 8 | 27.3% |
 | Setup & Load Loans Ledger with Backup and Tags | 100 | 100 | 0 | 100.0% |
-| ♾️ Transfer Log Backup - Cron (60건 Infinite) | 100 | 37 | 63 | 37.0% |
-| ♾️ Transfer Log Backup - Cron (60건 Infinite) | 100 | 100 | 0 | 100.0% |
+| ♾️ Transfer Log Backup - Cron (60건 Infinite) | 100 | 36 | 64 | 36.0% |
 | Repo Analysis and README Update # 워크플로우의 이름 (기존 이름 유지) | 52 | 45 | 7 | 86.5% |
 | 📦 Create GitHub Release | 1 | 0 | 1 | 0.0% |
+| ♾️ Transfer Log Backup - Cron (60건 Infinite) | 100 | 100 | 0 | 100.0% |
 | ♾️ Infinite Transfer Log Backup (Resident) | 4 | 4 | 0 | 100.0% |
+| Build & Simulate Finance Transactions | 100 | 100 | 0 | 100.0% |
 | 🔐 금융 거래 자동 백업 | 100 | 100 | 0 | 100.0% |
 | 🐬 MySQL Backup with Dynamic Port & Persistent Containers | 12 | 8 | 4 | 66.7% |
-| Build & Simulate Finance Transactions | 100 | 100 | 0 | 100.0% |
+| 🔐 암호화/복호화 + Codex 요금 추적 | 100 | 100 | 0 | 100.0% |
 | 🧱 Maven Build (echo 버전) | 100 | 99 | 1 | 99.0% |
 | 📄 Provenance Index Generator | 100 | 37 | 63 | 37.0% |
-| 🔐 암호화/복호화 + Codex 요금 추적 | 100 | 100 | 0 | 100.0% |
-| 🐬 MySQL Setup & Migration | 5 | 2 | 3 | 40.0% |
 | 🧾 결제 자동화 - PDF 영수증 포함 | 100 | 100 | 0 | 100.0% |
+| 🐬 MySQL Setup & Migration | 5 | 2 | 3 | 40.0% |
 | 🌀 Resident Batch Log Backup | 5 | 4 | 1 | 80.0% |
 | OSV-Scanner | 100 | 0 | 100 | 0.0% |
-| 🧾 금융 거래 자동화 (PDF 영수증 포함) | 100 | 100 | 0 | 100.0% |
 | ♾️ Transfer Log Backup - Cron (60건 Infinite) | 100 | 100 | 0 | 100.0% |
 | PostgreSQL DB 백업 및 S3 업로드 | 11 | 0 | 11 | 0.0% |
+| 🧾 금융 거래 자동화 (PDF 영수증 포함) | 100 | 100 | 0 | 100.0% |
 | Create GitHub Release | 81 | 0 | 81 | 0.0% |
 | Codespace Security Configuration Check # 워크플로우의 이름 | 1 | 0 | 1 | 0.0% |
+| 🧾 Secure Finance Backup (w/ Stable TAR, .github Upload) | 100 | 100 | 0 | 100.0% |
 | 키 가가이드 - PDF 영수증 포함 | 100 | 100 | 0 | 100.0% |
-| 🧾 Secure Finance Backup (w/ Stable TAR, .github Upload) | 100 | 99 | 1 | 99.0% |
 | Install Java, Maven, NetBackup CLI & Ledger Generation with Customer List | 100 | 100 | 0 | 100.0% |
 | 📄 Provenance Index Generator | 17 | 0 | 17 | 0.0% |
 | 🚀 Full Finance + Provenance + Pages Deployment | 100 | 98 | 2 | 98.0% |
@@ -147,11 +147,11 @@
 | 📓 포트폴리오 + 워크플로 통계로 README & SECURITY 업데이트 | 100 | 56 | 44 | 56.0% |
 | 🤖 Auto-Approve & Merge Dependabot PRs | 11 | 9 | 2 | 81.8% |
 | 🔁 Auto Finance Backup (Manual + Cron) | 100 | 100 | 0 | 100.0% |
-| 🦾 거래 자동화 - PDF 영수증 포함 | 100 | 100 | 0 | 100.0% |
 | Welcome to the Microsoft Generative AI | 100 | 99 | 1 | 99.0% |
 | Setup & Load Loans Ledger with Backup and Tags | 100 | 100 | 0 | 100.0% |
-| 💰 Check Workflow Costs with Valid Completed Runs Only | 19 | 18 | 1 | 94.7% |
+| 🦾 거래 자동화 - PDF 영수증 포함 | 100 | 100 | 0 | 100.0% |
 | 🏷️ Label and Comment Automation | 100 | 100 | 0 | 100.0% |
+| 💰 Check Workflow Costs with Valid Completed Runs Only | 19 | 18 | 1 | 94.7% |
 | Update README | 34 | 16 | 18 | 47.1% |
 | 🧾 고객 명함 생성 + 암호화 + 복호화 + 비교 자동화 (echo 완전 적용) | 100 | 100 | 0 | 100.0% |
 | 🧠 TradingAgents CI (Echo + Conda) | 48 | 45 | 3 | 93.8% |
@@ -159,35 +159,35 @@
 | Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload | 100 | 100 | 0 | 100.0% |
 | DevSkim | 100 | 99 | 1 | 99.0% |
 | 🛠️ Dependabot Recovery & Sanity Check | 1 | 0 | 1 | 0.0% |
-| ♻️ Regenerate Workflow (Echo + Dependabot) | 52 | 10 | 42 | 19.2% |
 | 🚫 CodeQL Scan Disabled Workflow | 2 | 2 | 0 | 100.0% |
+| ♻️ Regenerate Workflow (Echo + Dependabot) | 52 | 10 | 42 | 19.2% |
 | 🐬 MySQL Root Setup and DB Init | 15 | 0 | 15 | 0.0% |
 | 💳 카드사별 거래 백업 + NetBackup + OCI 업로드 | 100 | 100 | 0 | 100.0% |
-| Delete Failed Workflow Runs | 15 | 15 | 0 | 100.0% |
 | 🐳 Docker Finance Backup with GHCR + Kafka-style Logging | 100 | 100 | 0 | 100.0% |
 | 🔄 Finance Smart Backup with PostgreSQL & Kafka | 5 | 5 | 0 | 100.0% |
-| 🐬 Full MySQL Workflow with Auto Recovery, GPG, CSV, ZIP | 100 | 99 | 1 | 99.0% |
-| Rust & CLI Setup | 10 | 1 | 9 | 10.0% |
+| Delete Failed Workflow Runs | 15 | 15 | 0 | 100.0% |
 | 🛡️ OPA 정책 자동화 및 Spring 연동 | 9 | 9 | 0 | 100.0% |
+| Rust & CLI Setup | 10 | 1 | 9 | 10.0% |
+| 🐬 Full MySQL Workflow with Auto Recovery, GPG, CSV, ZIP | 100 | 100 | 0 | 100.0% |
 | 🧾 Multi-Transaction Backup (Per-Type Containers) | 100 | 100 | 0 | 100.0% |
 | Download Security Regulations | 9 | 6 | 3 | 66.7% |
 | 🏗️ Full Loan Simulation & Document Generation | 6 | 5 | 1 | 83.3% |
 | 💸 Transfer Log Backup (Resident Batch) | 4 | 4 | 0 | 100.0% |
 | CI with OpenAI API Usage Logging via Echo | 100 | 100 | 0 | 100.0% |
-| 🔁 Auto Finance Backup (No Manual Trigger) | 100 | 100 | 0 | 100.0% |
 | 🐳 Docker Build & Run with Echo | 100 | 100 | 0 | 100.0% |
-| Repo Analysis and README Update # 워크플로우의 이름 | 68 | 43 | 25 | 63.2% |
+| 🔁 Auto Finance Backup (No Manual Trigger) | 100 | 100 | 0 | 100.0% |
 | Provenance with Pages Deploy | 100 | 100 | 0 | 100.0% |
+| Repo Analysis and README Update # 워크플로우의 이름 | 68 | 43 | 25 | 63.2% |
+| Install Java, Maven, NetBackup CLI & Ledger Generation | 100 | 100 | 0 | 100.0% |
 | Install Java, Maven, NetBackup CLI & Ledger Generation | 100 | 100 | 0 | 100.0% |
 | MySQL Latest Version Upgrade | 4 | 3 | 1 | 75.0% |
-| Install Java, Maven, NetBackup CLI & Ledger Generation | 100 | 100 | 0 | 100.0% |
-| 💰 Generate Bulk Finance Ledger (Manual + Cron) | 100 | 100 | 0 | 100.0% |
-| Create GitHub Release | 1 | 0 | 1 | 0.0% |
 | 🔁 Auto Finance Backup (Manual + Cron) | 100 | 100 | 0 | 100.0% |
-| 🏦 Generate Customer Data + Provenance + Logs + Backup | 3 | 1 | 2 | 33.3% |
-| 🧩 Gitignore Auto-Fix & Retry with Backup + API Speed Check | 100 | 86 | 14 | 86.0% |
 | Create GitHub Release | 1 | 0 | 1 | 0.0% |
+| 🏦 Generate Customer Data + Provenance + Logs + Backup | 3 | 1 | 2 | 33.3% |
+| Create GitHub Release | 1 | 0 | 1 | 0.0% |
+| 💰 Generate Bulk Finance Ledger (Manual + Cron) | 100 | 100 | 0 | 100.0% |
 | 📃 Backup GitHub Workflows with Echo and Commit | 100 | 100 | 0 | 100.0% |
+| 🧩 Gitignore Auto-Fix & Retry with Backup + API Speed Check | 100 | 86 | 14 | 86.0% |
 | Project Source Code Backup | 30 | 30 | 0 | 100.0% |
 | Full Finance and Scorecard Setup | 100 | 88 | 12 | 88.0% |
 | Auto Create Workflow File | 100 | 100 | 0 | 100.0% |
