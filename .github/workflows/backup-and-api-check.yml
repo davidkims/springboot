@@ -1,4 +1,4 @@
-name: 🧩 Backup + API Speed Check with Gitignore Auto-Fix & Retry
+name: 🧩 Gitignore Auto-Fix & Retry with Backup + API Speed Check
 
 on:
   schedule:
@@ -18,53 +18,179 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      # ────────────────────────────────────── #
-      # 1. 풀 히스토리 체크아웃                #
-      # ────────────────────────────────────── #
-      - name: 📦 Checkout (full history)
+      # ─────────────────────────────────────────────────── #
+      # 1. Checkout full history                            #
+      # ─────────────────────────────────────────────────── #
+      - name: 📦 Checkout repository (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: 🔄 Unshallow repo if needed
+      - name: 🔄 Unshallow repository if needed
         run: |
+          echo "[🔄] Checking if repo is shallow..."
           if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
             git fetch --prune --unshallow
-            echo "[✅] Repository unshallowed"
+            echo "[✅] Repository converted to full clone"
           else
-            echo "[ℹ️] Already full clone"
+            echo "[ℹ️] Repository already full clone"
           fi
 
-      # ────────────────────────────────────── #
-      # 2. 이전 CodeQL DB 삭제 (초기화)        #
-      # ────────────────────────────────────── #
+      # ─────────────────────────────────────────────────── #
+      # 2. Clean previous CodeQL databases                 #
+      # ─────────────────────────────────────────────────── #
       - name: 🧹 Clean previous CodeQL DB
         run: |
           echo "[🧹] Removing old CodeQL databases..."
-          rm -rf ${HOME}/codeql_databases || true
+          rm -rf "${HOME}/codeql_databases" || true
+          echo "[✅] Old CodeQL DB removed"
 
-      # ────────────────────────────────────── #
-      # 3. 기존 단계 (GitHub CLI, 백업 등)    #
-      #    … (생략 없이 그대로 유지)         #
-      # ────────────────────────────────────── #
+      # ─────────────────────────────────────────────────── #
+      # 3. Install GitHub CLI, do backups, API checks, etc #
+      # ─────────────────────────────────────────────────── #
       - name: 🧰 Install GitHub CLI (gh)
         run: |
           echo "[🧰] Installing GitHub CLI..."
-          sudo apt-get update && sudo apt-get install -y gh
-          gh --version
-          echo "[✅] GitHub CLI installed."
+          sudo apt-get update
+          sudo apt-get install -y gh
+          echo "[✅] gh version: $(gh --version | head -n1)"
 
-      # … 이하 기존 “Cancel run” / “디렉토리 준비” / “.gitignore 패치” /
-      # “워크플로우 백업” / “API 속도체크” / “echo.sh 생성” 단계 유지 …
+      - name: ⏹️ Cancel long-running portfolio workflow
+        run: |
+          echo "[⏹️] Cancelling in-progress portfolio runs..."
+          for id in $(gh run list --workflow="generate_full_readme.yml" \
+                        --json databaseId,status \
+                        -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId'); do
+            echo "[🛑] Cancelling run $id"
+            gh run cancel "$id" || echo "[⚠️] Failed to cancel $id"
+          done
+          echo "[✅] Done cancelling"
 
-      # ────────────────────────────────────── #
-      # 4. CodeQL 스캐닝 초기화 → 실행 → 업로드 #
-      # ────────────────────────────────────── #
+      - name: 📁 Prepare backup & results directories
+        run: |
+          echo "[📁] Creating directories..."
+          mkdir -p .github/backup/workflows site/api_check
+          chmod -R 755 .github/backup site/api_check
+          echo "[✅] Directories ready"
+
+      - name: 🧼 Ensure .gitignore entries
+        run: |
+          echo "[🧼] Patching .gitignore..."
+          touch .gitignore && chmod 644 .gitignore
+          add_if_missing() {
+            grep -qxF "$1" .gitignore || echo "$1" >> .gitignore
+          }
+          add_if_missing '!.github/'
+          add_if_missing '!.github/workflows/'
+          add_if_missing '!.github/workflows/*.d/'
+          add_if_missing '!.github/workflows/*.d/**'
+          sort .gitignore | uniq > .gitignore.tmp && mv .gitignore.tmp .gitignore
+          echo "[✅] .gitignore patched:"
+          cat .gitignore
+
+      - name: 📝 Backup workflows with .gitkeep
+        run: |
+          echo "[📝] Backing up each workflow..."
+          for f in .github/workflows/*.{yml,yaml}; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            name="${base%.*}"
+            dir=".github/workflows/${name}.d"
+            echo "[📄] $base → $dir"
+            mkdir -p "$dir"
+            echo "" > "$dir/.gitkeep"
+            chmod 755 "$dir"
+            cp "$f" "$dir/$base" && chmod 644 "$dir/$base"
+            cp "$f" .github/backup/workflows/ && chmod 644 ".github/backup/workflows/$base"
+          done
+          echo "[✅] Backup complete"
+
+      - name: 📅 Commit backups if changed
+        run: |
+          echo "[📅] Staging backup changes..."
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -f .github/backup/workflows
+          git add -f .github/workflows/*.d/** || echo "[⚠️] Some .d/ dirs were ignored"
+          git add .gitignore
+          if git diff --cached --quiet; then
+            echo "[ℹ️] No changes to commit"
+          else
+            git commit -m "📦 Auto-backup workflows"
+            echo "[✅] Commit done"
+          fi
+
+      - name: 🚦 Check latency for extracted URLs
+        run: |
+          echo "[🚦] Checking URL latencies..."
+          for wf in .github/workflows/*.{yml,yaml}; do
+            [ -f "$wf" ] || continue
+            id=$(basename "$wf" | sed 's/\.[^.]*$//')
+            out="site/api_check/${id}.json"
+            echo "[" > "$out"
+            urls=$(grep -Eo 'https?://[^ )"]+' "$wf" | sort -u)
+            count=$(echo "$urls" | wc -l)
+            i=0
+            for url in $urls; do
+              if echo "$url" | grep -qE '\$\{|\$\(|localhost|127\.0\.0\.1'; then
+                echo "⏭️ Skipping $url"
+                continue
+              fi
+              echo "🌐 Checking $url..."
+              start=$(date +%s%3N)
+              status=$(curl -o /dev/null -s -w "%{http_code}" "$url" || echo "000")
+              latency=$(( $(date +%s%3N) - start ))
+              echo "  {" >> "$out"
+              echo "    \"url\": \"$url\"," >> "$out"
+              echo "    \"status\": \"$status\"," >> "$out"
+              echo "    \"latency_ms\": $latency" >> "$out"
+              i=$((i+1))
+              if [ $i -lt $count ]; then echo "  }," >> "$out"; else echo "  }" >> "$out"; fi
+            done
+            echo "]" >> "$out"
+            echo "[✅] Saved $out"
+          done
+
+      - name: 💾 Upload API results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-api-speed-results
+          path: site/api_check/
+
+      - name: 📊 Print sample results
+        run: |
+          echo "[📊] Sample API results:"
+          head -n50 site/api_check/*.json || echo "[ℹ️] No results found"
+
+      - name: 🧾 Generate echo.sh from API results
+        run: |
+          echo "[🧾] Generating echo.sh script..."
+          out="site/api_check/echo.sh"
+          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "#!/bin/bash" > "$out"
+          echo "# Generated: $ts" >> "$out"
+          echo "echo \"[🌐] Replaying API logs...\"" >> "$out"
+          for f in site/api_check/*.json; do
+            [ -f "$f" ] || continue
+            echo "echo \"[📄] $(basename "$f")\"" >> "$out"
+            jq -c '.[]' "$f" | while read -r item; do
+              url=$(echo "$item" | jq -r '.url')
+              st=$(echo "$item" | jq -r '.status')
+              lt=$(echo "$item" | jq -r '.latency_ms')
+              echo "echo \"URL: $url | Status: $st | Latency: ${lt}ms\"" >> "$out"
+            done
+          done
+          chmod +x "$out"
+          echo "[✅] echo.sh generated at $out"
+
+      # ─────────────────────────────────────────────────── #
+      # 4. CodeQL scanning: init → autobuild → analyze → upload #
+      # ─────────────────────────────────────────────────── #
       - name: 🔍 Initialize CodeQL
         uses: github/codeql-action/init@v2
         with:
-          languages: ['python','rust']
+          languages: ['python', 'rust']
 
       - name: 🔍 Autobuild
         uses: github/codeql-action/autobuild@v2
@@ -72,19 +198,18 @@ jobs:
       - name: 🔍 Analyze with CodeQL
         id: codeql
         uses: github/codeql-action/analyze@v2
-        # 실패시에도 다음 단계로(업로드) 넘어가도록
         continue-on-error: true
 
-      - name: 📤 Upload SARIF results to GitHub
+      - name: 📤 Upload SARIF results
         uses: github/codeql-action/upload-sarif@v2
         with:
           sarif_file: ${{ steps.codeql.outputs.sarif_file }}
 
-      # ────────────────────────────────────── #
-      # 5. 전체 재시도 (Max 1회)             #
-      # ────────────────────────────────────── #
-      - name: 🔁 Retry on Failure (Max 1)
+      # ─────────────────────────────────────────────────── #
+      # 5. Retry entire workflow once on any failure      #
+      # ─────────────────────────────────────────────────── #
+      - name: 🔁 Retry on failure (max 1)
         if: failure() && github.run_attempt == 1
         run: |
-          echo "[🔁] Workflow failed. Retrying…"
+          echo "[🔁] Workflow failed; retrying..."
           gh workflow run "${{ github.workflow }}" -r "${{ github.ref_name }}"
