@@ -21,25 +21,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🔧 시스템 패키지, GitHub CLI, jq, parallel 설치
+      - name: 🔧 시스템 패키지, GitHub CLI, jq, parallel 설치 및 업그레이드
         run: |
-          echo "[🔧] 시스템 패키지, GitHub CLI, jq, parallel 최신화 중..."
+          echo "[🔧] 시스템 패키지, GitHub CLI, jq, parallel 최신화 및 업그레이드 중..."
           sudo apt-get update -y
           sudo apt-get dist-upgrade -y
           sudo apt-get install -y gh jq parallel
+          # parallel 최신 버전으로 업그레이드
+          sudo apt-get install --only-upgrade -y parallel
           gh --version
           jq --version
           parallel --version
 
-      - name: 🚀 Prometheus 통계 수집 서버 설치
+      - name: 🚀 Prometheus 통계 수집 서버 설치 및 데이터 디렉토리 생성
         run: |
-          echo "[🚀] Prometheus v2.53.5 설치 중..." 
+          echo "[🚀] Prometheus v2.53.5 설치 중..."
           wget https://github.com/prometheus/prometheus/releases/download/v2.53.5/prometheus-2.53.5.linux-amd64.tar.gz
           tar xzf prometheus-2.53.5.linux-amd64.tar.gz
           sudo mv prometheus-2.53.5.linux-amd64 /opt/prometheus
           sudo useradd --no-create-home --shell /bin/false prometheus
-          sudo chown -R prometheus:prometheus /opt/prometheus
-          echo "[✅] Prometheus 서버가 /opt/prometheus 에 설치되었습니다."
+          # 데이터 저장용 디렉토리 생성
+          sudo mkdir -p /opt/prometheus/data
+          sudo chown -R prometheus:prometheus /opt/prometheus/data
+          echo "[✅] Prometheus 서버와 데이터 디렉토리(/opt/prometheus/data) 생성 완료."
 
       - name: 📋 Ensure .tmp Directory
         run: |
@@ -50,7 +54,6 @@ jobs:
         run: |
           echo "[📊] 워크플로우 통계 수집 (병렬) 중..."
           OUTPUT_FILE=".tmp/workflows.md"
-          # 헤더
           {
             echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계"
             echo ""
@@ -58,7 +61,6 @@ jobs:
             echo "|----------------|--------:|--------:|--------:|--------:|"
           } > "$OUTPUT_FILE"
 
-          # 통계 수집 함수
           parallel_stats() {
             f="$1"
             NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
@@ -77,9 +79,17 @@ jobs:
 
           export -f parallel_stats
           find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
-            | parallel -j 4 parallel_stats {} >> "$OUTPUT_FILE"
+            | parallel -j $(nproc) parallel_stats {} >> "$OUTPUT_FILE"
 
           cat "$OUTPUT_FILE"
+
+      - name: 📂 Prometheus 데이터 디렉토리에 통계 저장
+        run: |
+          echo "[📂] 통계 파일을 Prometheus 데이터 디렉토리로 복사 중..."
+          sudo cp .tmp/workflows.md /opt/prometheus/data/workflows.md
+          mkdir -p prometheus_data
+          cp .tmp/workflows.md prometheus_data/workflows.md
+          echo "[✅] 통계가 prometheus_data/ 와 /opt/prometheus/data/ 에 저장되었습니다."
 
       - name: 📄 Generate README.md
         run: |
