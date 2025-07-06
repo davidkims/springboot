@@ -21,26 +21,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 🔧 시스템 및 GitHub CLI 업데이트
+      - name: 🔧 시스템 패키지, GitHub CLI, jq 설치
         run: |
-          echo "[🔧] 시스템 패키지 및 GitHub CLI 최신화 중..."
+          echo "[🔧] 시스템 패키지, GitHub CLI, jq 최신화 중..."
           sudo apt-get update -y && sudo apt-get upgrade -y
-          sudo apt-get install -y gh
+          sudo apt-get install -y gh jq
           gh --version
+          jq --version
 
-      - name: 🔄 실패한 워크플로우 정상 종료될 때까지 무한 재실행
+      - name: 🔄 실패한 워크플로우 정상 종료될 때까지 무한 재실행 (Rate-limit 대비)
         run: |
           echo "[🔄] 실패한 워크플로우 정상 종료될 때까지 무한 재실행 중..."
           for f in .github/workflows/*.yml; do
             FILENAME=$(basename "$f")
             echo "[🔍] 워크플로우: $FILENAME"
-            until gh run list --workflow="$FILENAME" --limit 1 --json conclusion -q '.[0].conclusion' | grep -q success; do
-              RUN_ID=$(gh run list --workflow="$FILENAME" --limit 1 --json databaseId -q '.[0].databaseId')
-              echo "[🔄] Run ID $RUN_ID 재실행 시도"
-              gh run rerun "$RUN_ID" || echo "[⚠️] Run ID $RUN_ID 재실행 실패"
-              sleep 30
+            while true; do
+              RES=$(gh run list --workflow="$FILENAME" --limit 1 --json databaseId,conclusion 2>&1)
+              if echo "$RES" | grep -q "API rate limit"; then
+                echo "[⚠️] API rate limit 발생. 60초 후 재시도..."
+                sleep 60
+                continue
+              fi
+              RUN_ID=$(echo "$RES" | jq -r '.[0].databaseId')
+              CONC=$(echo "$RES" | jq -r '.[0].conclusion')
+              if [ "$CONC" != "success" ]; then
+                echo "[🔄] Run ID $RUN_ID 재실행 시도"
+                RR=$(gh run rerun "$RUN_ID" 2>&1)
+                if echo "$RR" | grep -q "API rate limit"; then
+                  echo "[⚠️] rerun API rate limit 발생. 60초 후 재시도..."
+                  sleep 60
+                  continue
+                fi
+                echo "[ℹ️] 재실행 완료. 60초 대기 후 상태 재확인..."
+                sleep 60
+                continue
+              else
+                echo "[✅] 워크플로우 $FILENAME 마지막 실행 성공"
+                break
+              fi
             done
-            echo "[✅] 워크플로우 $FILENAME 마지막 실행 성공"
           done
 
       - name: 📋 Ensure .tmp Directory
