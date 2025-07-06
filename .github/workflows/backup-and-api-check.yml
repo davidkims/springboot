@@ -8,38 +8,49 @@ on:
 permissions:
   contents: write
   actions: write
-  security-events: write    # required for CodeQL analyze/upload to work
+  security-events: write
 
 jobs:
   backup-and-api-check:
     runs-on: ubuntu-latest
-
-    services:
-      validation-collector:
-        image: myorg/validation-collector:latest
-        ports:
-          - 8080:80
-
     env:
       MAX_LATENCY_MS: 1000
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
+      - name: 🔒 Docker Login (for private registry)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io                    # or your private registry host
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🚀 Start validation-collector container
+        run: |
+          echo "[🚀] Pulling validation-collector image..."
+          docker pull myorg/validation-collector:latest \
+            || echo "[⚠️] Could not pull validation-collector; skipping startup."
+          if docker images | grep -q 'myorg/validation-collector'; then
+            docker run -d --label c06bda -p 8080:80 myorg/validation-collector:latest
+            echo "[✅] validation-collector running on http://localhost:8080"
+          else
+            echo "[⚠️] validation-collector not available; SARIF upload will be skipped."
+          fi
+
       - name: 🧰 Install GitHub CLI (gh)
         run: |
           echo "[🧰] Installing GitHub CLI..."
-          sudo apt-get update
-          sudo apt-get install -y gh
-          which gh && gh --version
+          sudo apt-get update && sudo apt-get install -y gh
+          gh --version
           echo "[✅] GitHub CLI installed."
 
       - name: ⏹️ Cancel long-running 포트폴리오 생성 워크플로우
         run: |
           echo "[⏹️] 이전 포트폴리오 생성 워크플로우 중단 시도..."
-          for ID in $(gh run list --workflow="generate_full_readme.yml" \
-            --json databaseId,status \
+          for ID in $(gh run list --workflow="generate_full_readme.yml" --json databaseId,status \
             -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId'); do
             echo "[🛑] Cancelling run ID $ID"
             gh run cancel $ID || echo "[⚠️] Cancel failed for $ID"
@@ -57,86 +68,76 @@ jobs:
         run: |
           echo "[🧼] Ensuring .gitignore exists and includes required exceptions..."
           touch .gitignore && chmod 644 .gitignore
-          ensure_gitignore_entry() {
-            grep -qxF "$1" .gitignore || echo "$1" >> .gitignore
-          }
-          ensure_gitignore_entry '!.github/'
-          ensure_gitignore_entry '!.github/workflows/'
-          ensure_gitignore_entry '!.github/workflows/*.d/'
-          ensure_gitignore_entry '!.github/workflows/*.d/**'
+          ensure_entry(){ grep -qxF "$1" .gitignore || echo "$1" >> .gitignore; }
+          ensure_entry '!.github/'
+          ensure_entry '!.github/workflows/'
+          ensure_entry '!.github/workflows/*.d/'
+          ensure_entry '!.github/workflows/*.d/**'
           sort .gitignore | uniq > .gitignore.tmp && mv .gitignore.tmp .gitignore
-          echo "[✅] Final .gitignore content:"
+          echo "[✅] Final .gitignore:"
           cat .gitignore
 
-      - name: 📝 Backup and Create Per-Workflow Directories with .gitkeep
+      - name: 📝 Backup and Create Per-Workflow Directories
         run: |
-          echo "[📝] Backing up workflows and creating per-file directories..."
-          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+          echo "[📝] Backing up workflows..."
+          for f in .github/workflows/*.{yml,yaml}; do
             [ -f "$f" ] || continue
             base=$(basename "$f")
             name="${base%.*}"
-            backup_dir=".github/workflows/${name}.d"
-            echo "[📄] Processing $base → $backup_dir"
-            mkdir -p "$backup_dir"
-            echo "" > "$backup_dir/.gitkeep"
-            chmod 755 "$backup_dir"
-            cp "$f" "$backup_dir/$base" && chmod 644 "$backup_dir/$base"
-            cp "$f" .github/backup/workflows/ && chmod 644 ".github/backup/workflows/$base"
+            dir=".github/workflows/${name}.d"
+            echo "[📄] $base → $dir"
+            mkdir -p "$dir"
+            echo "" > "$dir/.gitkeep"
+            chmod 755 "$dir"
+            cp "$f" "$dir/$base"
+            chmod 644 "$dir/$base"
+            cp "$f" .github/backup/workflows/
+            chmod 644 .github/backup/workflows/"$base"
           done
-          echo "[✅] Backup complete with .gitkeep files set."
+          echo "[✅] Backup complete."
 
-      - name: 📅 Commit Backups If Changed (Force Add .d/)
+      - name: 📅 Commit Backups If Changed
         run: |
           echo "[📅] Staging changes..."
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -f .github/backup/workflows
           git add -f .github/workflows/*.d/** || echo "[⚠️] .d/ dirs may be ignored"
-          git add .gitignore || true
+          git add .gitignore
           if git diff --cached --quiet; then
             echo "[ℹ️] No changes to commit."
           else
-            git commit -m "📦 Auto-backup of workflows with .gitignore patch and .gitkeep"
-            echo "[✅] Commit complete."
+            git commit -m "📦 Auto-backup of workflows"
+            echo "[✅] Commit done."
           fi
 
       - name: 🚦 Check Latency of All Extracted URLs
         run: |
-          echo "[⚙️] Extracting URLs from workflows and checking latency..."
-          for wf in .github/workflows/*.yml .github/workflows/*.yaml; do
+          echo "[⚙️] Extracting URLs..."
+          for wf in .github/workflows/*.{yml,yaml}; do
             [ -f "$wf" ] || continue
-            echo "🔎 Checking: $wf"
-            FILE_ID=$(basename "$wf" | sed 's/\.[^.]*$//')
-            OUTPUT="site/api_check/${FILE_ID}.json"
-            echo "[" > "$OUTPUT"
-            urls=$(grep -Eo 'https?://[^ )\"]+' "$wf" | sort | uniq)
-            index=0
-            count=$(echo "$urls" | wc -l)
+            id=$(basename "$wf" | sed 's/\.[^.]*$//')
+            out="site/api_check/${id}.json"
+            echo "[" > "$out"
+            urls=$(grep -Eo 'https?://[^ )"]+' "$wf" | sort -u)
+            i=0; total=$(echo "$urls" | wc -l)
             for url in $urls; do
-              if echo "$url" | grep -qE '\$\{|\$\(|localhost|127\.0\.0\.1|::1'; then
-                echo "⏭️ Skipping template or local URL: $url"
+              if echo "$url" | grep -qE '\$\{|\$\(|localhost|127\.0\.0\.1'; then
+                echo "⏭️ Skipping $url"
                 continue
               fi
               echo "🌐 Checking $url..."
               start=$(date +%s%3N)
-              status=$(curl -o /dev/null -s -w "%{http_code}" "$url") || status="000"
-              end=$(date +%s%3N)
-              latency=$((end - start))
-              echo "    ↳ Status: $status, Latency: ${latency}ms"
-              echo "  {" >> "$OUTPUT"
-              echo "    \"url\": \"$url\"," >> "$OUTPUT"
-              echo "    \"status\": \"$status\"," >> "$OUTPUT"
-              echo "    \"latency_ms\": $latency" >> "$OUTPUT"
-              index=$((index+1))
-              if [ $index -lt $count ]; then
-                echo "  }," >> "$OUTPUT"
-              else
-                echo "  }" >> "$OUTPUT"
-              fi
+              status=$(curl -o /dev/null -s -w "%{http_code}" "$url" || echo "000")
+              latency=$(( $(date +%s%3N) - start ))
+              echo "  {" >> "$out"
+              echo "    \"url\": \"$url\"," >> "$out"
+              echo "    \"status\": \"$status\"," >> "$out"
+              echo "    \"latency_ms\": $latency" >> "$out"
+              if [ $((++i)) -lt $total ]; then echo "  }," >> "$out"; else echo "  }" >> "$out"; fi
             done
-            echo "]" >> "$OUTPUT"
-            echo "✅ Saved to $OUTPUT"
-            chmod 644 "$OUTPUT"
+            echo "]" >> "$out"
+            echo "✅ Saved $out"
           done
 
       - name: 💾 Upload All API Results
@@ -147,56 +148,51 @@ jobs:
 
       - name: 📊 Print Result Preview
         run: |
-          echo "[📊] Sample Result Preview:"
-          cat site/api_check/*.json | head -n 50 || echo "[ℹ️] No results to show."
+          echo "[📊] Sample:"
+          head -n50 site/api_check/*.json || echo "[ℹ️] No results."
 
-      - name: 🧾 Generate .echo.sh for All API Results (with Timestamp)
+      - name: 🧾 Generate .echo.sh for All API Results
         run: |
-          echo "[🧾] Generating echo.sh from API results..."
-          OUT_FILE="site/api_check/echo.sh"
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "#!/bin/bash" > "$OUT_FILE"
-          echo "# Generated: $TIMESTAMP" >> "$OUT_FILE"
-          echo "echo \"[🌐] Replaying API Result Logs with echo...\"" >> "$OUT_FILE"
+          echo "[🧾] Generating echo.sh..."
+          out="site/api_check/echo.sh"
+          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "#!/bin/bash" > "$out"
+          echo "# Generated: $ts" >> "$out"
+          echo "echo \"[🌐] Replaying logs...\"" >> "$out"
           for f in site/api_check/*.json; do
             [ -f "$f" ] || continue
-            filename=$(basename "$f")
-            echo "echo \"[📄] File: $filename\"" >> "$OUT_FILE"
+            echo "echo \"[📄] $(basename "$f")\"" >> "$out"
             jq -c '.[]' "$f" | while read -r item; do
               url=$(echo "$item" | jq -r '.url')
-              status=$(echo "$item" | jq -r '.status')
-              latency=$(echo "$item" | jq -r '.latency_ms')
-              echo "echo \"URL: $url | Status: $status | Latency: ${latency}ms\"" >> "$OUT_FILE"
+              st=$(echo "$item" | jq -r '.status')
+              lt=$(echo "$item" | jq -r '.latency_ms')
+              echo "echo \"URL: $url | Status: $st | Latency: ${lt}ms\"" >> "$out"
             done
           done
-          chmod +x "$OUT_FILE"
-          echo "[✅] echo.sh generated at $OUT_FILE"
+          chmod +x "$out"
+          echo "[✅] echo.sh at $out"
 
-      # ─────────────────────────────────────────── #
-      # CodeQL code-scanning with validation & retry #
-      # ─────────────────────────────────────────── #
-      - name: 🔍 Initialize CodeQL                     # ← added
-        uses: github/codeql-action/init@v2           # ← added
+      - name: 🔍 Initialize CodeQL
+        uses: github/codeql-action/init@v2
 
-      - name: 🔍 Autobuild                             # ← added
-        uses: github/codeql-action/autobuild@v2       # ← added
+      - name: 🔍 Autobuild
+        uses: github/codeql-action/autobuild@v2
 
-      - name: 🔍 Perform CodeQL Analysis               # ← added
+      - name: 🔍 CodeQL Analyze
         id: codeql
-        uses: github/codeql-action/analyze@v2         # ← added
+        uses: github/codeql-action/analyze@v2
 
-      - name: 📤 Upload SARIF to Validation Collector  # ← added
+      - name: 📤 Upload SARIF to Collector
         run: |
-          echo "[📤] Uploading SARIF to validation collector..."
-          # adjust path if your SARIF lands elsewhere
-          SARIF=$(find . -name '*.sarif' | head -n1)
+          echo "[📤] Uploading SARIF..."
+          sarif=$(find . -name '*.sarif' | head -n1)
           curl -X POST http://localhost:8080/upload \
             -H "Content-Type: application/sarif+json" \
-            --data-binary @"$SARIF" \
+            --data-binary @"$sarif" \
             || echo "[⚠️] SARIF upload failed"
 
-      - name: 🔁 Retry Code Scanning on Failure (Max 1)  # ← added
+      - name: 🔁 Retry on Failure (Max 1)
         if: failure() && github.run_attempt == 1
         run: |
-          echo "[🔁] Code scanning failed. Retrying workflow…"
+          echo "[🔁] Workflow failed. Retrying…"
           gh workflow run "${{ github.workflow }}" -r "${{ github.ref_name }}"
