@@ -44,22 +44,14 @@ jobs:
           ORACLE_ALLOW_REMOTE: "true"
         ports:
           - 1521:1521
-        # rely on container’s built-in HEALTHCHECK
 
-    # Pull secrets into job environment (not in services)
     env:
-      MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-      MYSQL_APP_PASSWORD: ${{ secrets.MYSQL_APP_PASSWORD }}
-      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-      ORACLE_SYS_PASSWORD: ${{ secrets.ORACLE_SYS_PASSWORD }}
-      ORACLE_APP_PASSWORD: ${{ secrets.ORACLE_APP_PASSWORD }}
       BACKUP_DIR: /opt/backup/transfer
       INIT_SCRIPTS_DIR: /opt/db/init
       DB_CONFIG_DIR: /opt/db/config
       POOLING_CONFIG: /opt/db/config/pooling.properties
       SSL_CERT_DIR: /opt/db/ssl
       MONITORING_DIR: /opt/monitor
-      LOG_DIR: /opt/logs
       K8S_DIR: /opt/k8s
       HELM_CHART_DIR: /opt/helm/backup-chart
 
@@ -67,9 +59,9 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📁 Prepare directories
+      - name: 📁 Prepare directories and permissions
         run: |
-          echo "[📁] Creating required directories..."
+          echo "[📁] Creating required directories with sudo..."
           for dir in \
             $INIT_SCRIPTS_DIR/mysql \
             $INIT_SCRIPTS_DIR/postgres \
@@ -82,32 +74,32 @@ jobs:
             $K8S_DIR/docker-compose \
             $K8S_DIR/manifests \
             $HELM_CHART_DIR; do
-            mkdir -p "$dir"
+            sudo mkdir -p "$dir"
+            sudo chmod 750 "$dir"
           done
-          echo "[🔒] Setting permissions..."
-          chmod -R 750 /opt/db /opt/backup /opt/monitor /opt/k8s /opt/helm
-          chown -R root:root /opt/db /opt/backup /opt/monitor /opt/k8s /opt/helm
+          echo "[🔒] Ensuring overall directory permissions..."
+          sudo find /opt/db /opt/backup /opt/monitor /opt/k8s /opt/helm -type d -exec chmod 750 {} +
 
       - name: 📝 Generate DB init scripts
         run: |
           echo "[📝] Writing MySQL init script..."
-          cat << 'EOF' > "$INIT_SCRIPTS_DIR/mysql/init.sql"
-          ALTER USER 'root'@'%' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}' PASSWORD EXPIRE INTERVAL 90 DAY;
-          CREATE USER 'app'@'%' IDENTIFIED BY '${MYSQL_APP_PASSWORD}';
+          cat << 'EOF' | sudo tee "$INIT_SCRIPTS_DIR/mysql/init.sql"
+          ALTER USER 'root'@'%' IDENTIFIED BY 'testpass' PASSWORD EXPIRE INTERVAL 90 DAY;
+          CREATE USER 'app'@'%' IDENTIFIED BY 'testpass';
           GRANT SELECT, INSERT, UPDATE ON testdb.* TO 'app'@'%';
           SOURCE /opt/db/init/mysql/schema.sql;
           EOF
 
           echo "[📝] Writing PostgreSQL init script..."
-          cat << 'EOF' > "$INIT_SCRIPTS_DIR/postgres/init.sql"
-          ALTER ROLE postgres PASSWORD '${POSTGRES_PASSWORD}';
-          CREATE ROLE app LOGIN PASSWORD '${POSTGRES_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
+          cat << 'EOF' | sudo tee "$INIT_SCRIPTS_DIR/postgres/init.sql"
+          ALTER ROLE postgres PASSWORD 'postgres';
+          CREATE ROLE app LOGIN PASSWORD 'postgres' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
           GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO app;
           EOF
 
           echo "[📝] Writing Oracle init script..."
-          cat << 'EOF' > "$INIT_SCRIPTS_DIR/oracle/init.sql"
-          CREATE USER app IDENTIFIED BY "${ORACLE_APP_PASSWORD}";
+          cat << 'EOF' | sudo tee "$INIT_SCRIPTS_DIR/oracle/init.sql"
+          CREATE USER app IDENTIFIED BY "testpass";
           GRANT CONNECT TO app;
           GRANT CREATE SESSION TO app;
           EXIT;
@@ -116,10 +108,11 @@ jobs:
       - name: ⚙️ Generate pooling config
         run: |
           echo "[⚙️] Writing JDBC connection pooling properties..."
-          cat << 'EOF' > "$POOLING_CONFIG"
+          sudo mkdir -p "$(dirname $POOLING_CONFIG)"
+          cat << 'EOF' | sudo tee "$POOLING_CONFIG"
           dataSourceClassName=com.mysql.cj.jdbc.MysqlDataSource
           dataSource.user=app
-          dataSource.password=${MYSQL_APP_PASSWORD}
+          dataSource.password=testpass
           dataSource.databaseName=testdb
           maximumPoolSize=20
           minimumIdle=5
@@ -130,15 +123,17 @@ jobs:
       - name: 🔐 Generate self-signed SSL certificates
         run: |
           echo "[🔐] Generating SSL/TLS certificates..."
+          sudo mkdir -p "$SSL_CERT_DIR"
           openssl req -newkey rsa:2048 -nodes -keyout "$SSL_CERT_DIR/db.key" \
             -x509 -days 365 -out "$SSL_CERT_DIR/db.crt" \
             -subj "/CN=database.local"
-          chmod 600 "$SSL_CERT_DIR/db.key" "$SSL_CERT_DIR/db.crt"
+          sudo chmod 600 "$SSL_CERT_DIR/db.key" "$SSL_CERT_DIR/db.crt"
 
       - name: 🐳 Generate Docker Compose
         run: |
           echo "[🐳] Writing docker-compose.yml..."
-          cat << 'EOF' > "$K8S_DIR/docker-compose/docker-compose.yml"
+          sudo mkdir -p "$K8S_DIR/docker-compose"
+          cat << 'EOF' | sudo tee "$K8S_DIR/docker-compose/docker-compose.yml"
           version: '3.8'
           services:
             backup:
@@ -156,7 +151,8 @@ jobs:
       - name: ☸️ Generate Kubernetes manifests
         run: |
           echo "[☸️] Writing backup job manifest..."
-          cat << 'EOF' > "$K8S_DIR/manifests/backup-job.yaml"
+          sudo mkdir -p "$K8S_DIR/manifests"
+          cat << 'EOF' | sudo tee "$K8S_DIR/manifests/backup-job.yaml"
           apiVersion: batch/v1
           kind: Job
           metadata:
@@ -176,15 +172,15 @@ jobs:
 
       - name: 🎯 Generate Helm chart scaffold
         run: |
-          echo "[🎯] Writing Helm Chart.yaml..."
-          cat << 'EOF' > "$HELM_CHART_DIR/Chart.yaml"
+          echo "[🎯] Writing Helm Chart and values..."
+          sudo mkdir -p "$HELM_CHART_DIR"
+          cat << 'EOF' | sudo tee "$HELM_CHART_DIR/Chart.yaml"
           apiVersion: v2
           name: backup-system
           version: 0.1.0
           description: Backup & restore system
           EOF
-          echo "[🎯] Writing Helm values.yaml..."
-          cat << 'EOF' > "$HELM_CHART_DIR/values.yaml"
+          cat << 'EOF' | sudo tee "$HELM_CHART_DIR/values.yaml"
           image:
             repository: backup-service
             tag: latest
@@ -198,7 +194,8 @@ jobs:
       - name: 📊 Generate monitoring config
         run: |
           echo "[📊] Writing Prometheus scrape config..."
-          cat << 'EOF' > "$MONITORING_DIR/metrics/prometheus.yml"
+          sudo mkdir -p "$MONITORING_DIR/metrics"
+          cat << 'EOF' | sudo tee "$MONITORING_DIR/metrics/prometheus.yml"
           scrape_configs:
             - job_name: 'backup'
               metrics_path: /metrics
@@ -209,7 +206,8 @@ jobs:
       - name: 🛑 Generate logging config
         run: |
           echo "[🛑] Writing logback.xml for structured JSON logs..."
-          cat << 'EOF' > "$MONITORING_DIR/logs/logback.xml"
+          sudo mkdir -p "$MONITORING_DIR/logs"
+          cat << 'EOF' | sudo tee "$MONITORING_DIR/logs/logback.xml"
           <configuration>
             <appender name="FILE" class="ch.qos.logback.core.FileAppender">
               <file>/opt/logs/app.log</file>
@@ -226,41 +224,44 @@ jobs:
           echo "[🔧] Installing AWS CLI & Google Cloud SDK..."
           sudo apt-get update
           sudo apt-get install -y python3-pip
-          pip3 install awscli google-cloud-storage
+          pip3 install --user awscli google-cloud-storage
 
       - name: 🔄 Generate backup policy
         run: |
           echo "[🔄] Writing backup policy script..."
-          cat << 'EOF' > "$BACKUP_DIR/backup-run.sh"
+          sudo mkdir -p "$BACKUP_DIR/incremental"
+          cat << 'EOF' | sudo tee "$BACKUP_DIR/backup-run.sh"
           #!/bin/bash
           set -euo pipefail
           tar czf $BACKUP_DIR/incremental/backup-$(date +%F-%T).tgz /opt/data
-          aws s3 cp $BACKUP_DIR/incremental/*.tgz s3://my-bucket/backups/ --storage-class STANDARD_IA --encrypt
+          aws s3 cp $BACKUP_DIR/incremental/*.tgz s3://my-bucket/backups/ \
+            --storage-class STANDARD_IA --encrypt
           gsutil cp $BACKUP_DIR/incremental/*.tgz gs://my-bucket/backups/
-          echo "{\"status\":\"success\",\"time\":\"$(date -u +%FT%TZ)\"}" >> $MONITORING_DIR/logs/backup.json
+          echo "{\"status\":\"success\",\"time\":\"$(date -u +%FT%TZ)\"}" \
+            >> $MONITORING_DIR/logs/backup.json
           EOF
-          chmod +x "$BACKUP_DIR/backup-run.sh"
+          sudo chmod +x "$BACKUP_DIR/backup-run.sh"
 
       - name: 🛠️ Generate restore-test script
         run: |
           echo "[🛠️] Writing restore test script..."
-          cat << 'EOF' > "$BACKUP_DIR/restore-test.sh"
+          cat << 'EOF' | sudo tee "$BACKUP_DIR/restore-test.sh"
           #!/bin/bash
           LATEST=$(ls -1t $BACKUP_DIR/incremental/*.tgz | head -n1)
           tar xzf $LATEST -C /tmp/restore
           echo "restored" > /tmp/restore/ok.txt
           EOF
-          chmod +x "$BACKUP_DIR/restore-test.sh"
+          sudo chmod +x "$BACKUP_DIR/restore-test.sh"
 
       - name: ▶️ Run backup
         run: |
           echo "[▶️] Running backup script..."
-          "$BACKUP_DIR/backup-run.sh"
+          sudo "$BACKUP_DIR/backup-run.sh"
 
       - name: ▶️ Run restore test
         run: |
           echo "[▶️] Running restore-test script..."
-          "$BACKUP_DIR/restore-test.sh"
+          sudo "$BACKUP_DIR/restore-test.sh"
 
       - name: 📊 Upload metrics & logs
         run: |
@@ -270,17 +271,17 @@ jobs:
       - name: 🔄 Remake BS logic
         run: |
           echo "[🔄] Starting Remake BS logic..."
-          mkdir -p "$BACKUP_DIR/bs"
+          sudo mkdir -p "$BACKUP_DIR/bs"
           echo "{ \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"type\": \"BS\" }" \
-            > "$BACKUP_DIR/bs/bs-$(date +%s).json"
-          chmod 644 "$BACKUP_DIR/bs/"*.json
+            | sudo tee "$BACKUP_DIR/bs/bs-$(date +%s).json"
+          sudo chmod 644 "$BACKUP_DIR/bs/"*.json
           echo "[✅] Remake BS logic completed"
 
       - name: 🔄 Remake MIS logic
         run: |
           echo "[🔄] Starting Remake MIS logic..."
-          mkdir -p "$BACKUP_DIR/mis"
+          sudo mkdir -p "$BACKUP_DIR/mis"
           echo "MIS Report generated at $(date -u +'%Y-%m-%d %H:%M:%SZ')" \
-            > "$BACKUP_DIR/mis/mis-$(date +%s).txt"
-          chmod 644 "$BACKUP_DIR/mis/"*.txt
+            | sudo tee "$BACKUP_DIR/mis/mis-$(date +%s).txt"
+          sudo chmod 644 "$BACKUP_DIR/mis/"*.txt
           echo "[✅] Remake MIS logic completed"
