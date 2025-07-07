@@ -8,8 +8,7 @@
 | < 4.0   | :x:                |
 
 ## Reporting a Vulnerability
-Use this section to tell people how to report a vulnerability.
-Tell them where to go, how often they can expect updates, and what to expect if it’s accepted or declined.
+Use this section to tell people how to report vulnerabilities.
 
 ## Workflow Validation Checklist
 - [ ] Pages Auto Indexing.yml: YAML syntax validation
