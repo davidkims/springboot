@@ -44,7 +44,6 @@ jobs:
           ORACLE_ALLOW_REMOTE: "true"
         ports:
           - 1521:1521
-        # This image has its own built-in HEALTHCHECK.
 
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
@@ -56,31 +55,69 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
+      - name: 📥 Install Oracle Instant Client
+        run: |
+          echo "[📥] Installing Oracle client prerequisites..."
+          sudo apt-get update
+          sudo apt-get install -y libaio1 unzip
+          echo "[📁] Creating Instant Client directory..."
+          mkdir -p /opt/oracle
+          echo "[⬇️] Downloading Oracle Instant Client ZIP..."
+          curl -L -o /tmp/instantclient.zip \
+            https://download.oracle.com/otn_software/linux/instantclient/217000/instantclient-basic-linux.x64-21.7.0.0.0.zip
+          echo "[🗜️] Unzipping Instant Client..."
+          unzip /tmp/instantclient.zip -d /opt/oracle
+          echo "[🔗] Configuring library path..."
+          echo "/opt/oracle/instantclient_21_7" | sudo tee /etc/ld.so.conf.d/oracle-instantclient.conf
+          sudo ldconfig
+          echo "[✅] Oracle Instant Client installed"
+
       - name: ⏳ Wait for databases to be ready
         run: |
           echo "[⏳] Waiting for MySQL…"
-          until mysqladmin ping -h127.0.0.1 -uroot -ptestpass --silent; do
-            sleep 5
-          done
+          until mysqladmin ping -h127.0.0.1 -uroot -ptestpass --silent; do sleep 5; done
           echo "[✅] MySQL is up"
 
           echo "[⏳] Waiting for PostgreSQL…"
-          until pg_isready -h127.0.0.1 -U testuser; do
-            sleep 5
-          done
+          until pg_isready -h127.0.0.1 -U testuser; do sleep 5; done
           echo "[✅] PostgreSQL is up"
 
-          echo "[⏳] Waiting for Oracle XE… (may take ~60s)"
-          n=0
-          until echo "SELECT 1 FROM dual;" | sqlplus -s system/testpass@//127.0.0.1:1521/XE | grep -q "1"; do
-            n=$((n+1))
-            if [ $n -gt 12 ]; then
-              echo "[⚠️] Oracle still not ready after $((n*5))s, proceeding anyway"
-              break
-            fi
-            sleep 5
-          done
-          echo "[✅] Oracle check done (or timed out)"
+          echo "[⏳] Waiting for Oracle listener on 1521…"
+          until bash -c "exec 3<>/dev/tcp/127.0.0.1/1521"; do sleep 5; done
+          echo "[✅] Oracle listener is accepting connections"
+
+      - name: 🔧 Configure DB users & permissions
+        run: |
+          echo "[🔧] Creating MySQL user 'testuser' and granting privileges..."
+          mysql -h127.0.0.1 -uroot -ptestpass -e "
+            CREATE USER IF NOT EXISTS 'testuser'@'%' IDENTIFIED BY 'testpass';
+            GRANT ALL PRIVILEGES ON testdb.* TO 'testuser'@'%';
+            FLUSH PRIVILEGES;
+          "
+          echo "[🔧] Creating Oracle user 'testuser' and granting privileges..."
+          cat << 'EOF' > /tmp/init_oracle.sql
+          CREATE USER testuser IDENTIFIED BY testpass;
+          GRANT CONNECT, RESOURCE TO testuser;
+          GRANT UNLIMITED TABLESPACE TO testuser;
+          EXIT;
+          EOF
+          sqlplus -s system/testpass@//127.0.0.1:1521/XE @/tmp/init_oracle.sql
+
+          echo "[📁] Creating JDBC credential directory and files..."
+          mkdir -p /opt/jdbc/credentials
+          cat << 'EOF' > /opt/jdbc/credentials/.my.cnf
+          [client]
+          user=testuser
+          password=testpass
+          host=127.0.0.1
+          EOF
+          chmod 600 /opt/jdbc/credentials/.my.cnf
+
+          echo "[🔒] Setting permissions on /opt/jdbc and /opt/oracle..."
+          chmod -R 755 /opt/jdbc
+          chmod -R 755 /opt/oracle
+
+          echo "[✅] DB users, credentials, and permissions configured"
 
       - name: 🧪 Install Java & JDBC Drivers and Test Connections
         run: |
