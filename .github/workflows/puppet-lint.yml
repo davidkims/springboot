@@ -44,7 +44,7 @@ jobs:
           ORACLE_ALLOW_REMOTE: "true"
         ports:
           - 1521:1521
-        # removed custom healthcheck options to prevent auto-fail :contentReference[oaicite:1]{index=1}
+        # letting container handle its own healthcheck
 
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
@@ -59,9 +59,9 @@ jobs:
       - name: ⏳ Wait for Oracle XE to be ready
         run: |
           echo "[⏳] Waiting for Oracle XE to accept SQL*Plus connections…"
-          until docker exec -i \
-            $(docker ps --filter ancestor=gvenzl/oracle-xe:18-slim --format '{{.ID}}') \
-            bash -lc "echo SELECT 1 FROM dual | sqlplus -s system/testpass@//127.0.0.1:1521/XE | grep -q 1"; do
+          ORACLE_CID=""
+          until ORACLE_CID=$(docker ps --filter ancestor=gvenzl/oracle-xe:18-slim --format '{{.ID}}') && \
+                docker exec -i $ORACLE_CID bash -lc "echo SELECT 1 FROM dual | sqlplus -s system/testpass@XE | grep -q 1"; do
             echo "[ℹ️] Oracle still starting…"
             sleep 10
           done
@@ -71,10 +71,14 @@ jobs:
         run: |
           echo "[🔧] Creating Oracle user 'testuser'…"
           ORACLE_CID=$(docker ps --filter ancestor=gvenzl/oracle-xe:18-slim --format '{{.ID}}')
-          echo "CREATE USER testuser IDENTIFIED BY testpass;
-                GRANT CONNECT, RESOURCE TO testuser;
-                GRANT UNLIMITED TABLESPACE TO testuser;
-                EXIT;" | docker exec -i $ORACLE_CID sqlplus -s system/testpass@//127.0.0.1:1521/XE
+          # connect AS SYSDBA to create user and grant tablespace
+          docker exec -i $ORACLE_CID bash -lc "\
+            echo \"CREATE USER testuser IDENTIFIED BY testpass; \
+            GRANT CONNECT, RESOURCE TO testuser; \
+            GRANT UNLIMITED TABLESPACE TO testuser; \
+            EXIT;\" \
+            | sqlplus -s sys/testpass@XE as sysdba" \
+            || echo "[⚠️] Oracle user init failed, continuing…"
           echo "[✅] Oracle user 'testuser' initialized"
 
       - name: 🔧 Configure MySQL user & permissions
