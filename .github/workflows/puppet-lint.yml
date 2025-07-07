@@ -9,15 +9,19 @@ jobs:
   transfer_log_backup:
     runs-on: ubuntu-latest
 
-    # ─── 인프라 및 아키텍처 개선: 서비스 업그레이드 ─────────────────────────────
     services:
       mysql:
-        image: mysql:8.4-lts
+        image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
           MYSQL_DATABASE: testdb
         ports:
           - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
       postgres:
         image: postgres:17
@@ -27,6 +31,11 @@ jobs:
           POSTGRES_DB: testdb
         ports:
           - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U ${{ secrets.POSTGRES_USER }}"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
       oracle:
         image: gvenzl/oracle-xe:21-faststart
@@ -35,6 +44,7 @@ jobs:
           ORACLE_ALLOW_REMOTE: "true"
         ports:
           - 1521:1521
+        # Oracle 자체 헬스체크 사용
 
     env:
       BACKUP_DIR: /opt/backup/transfer
@@ -51,10 +61,9 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      # ─── 디렉토리 생성 및 권한 설정 ───────────────────────────────────────
       - name: 📁 Prepare directories
         run: |
-          echo "[📁] Creating directories..."
+          echo "[📁] Creating init, config, backup, monitoring, k8s, helm dirs..."
           for dir in \
             $INIT_SCRIPTS_DIR/mysql \
             $INIT_SCRIPTS_DIR/postgres \
@@ -73,12 +82,10 @@ jobs:
           chmod -R 750 /opt/db /opt/backup /opt/monitor /opt/k8s /opt/helm
           chown -R root:root /opt/db /opt/backup /opt/monitor /opt/k8s /opt/helm
 
-      # ─── 데이터베이스 초기화 스크립트 분리 ─────────────────────────────────
       - name: 📝 Generate DB init scripts
         run: |
           echo "[📝] Writing MySQL init script..."
           cat << 'EOF' > $INIT_SCRIPTS_DIR/mysql/init.sql
-          -- enforce password policy
           ALTER USER 'root'@'%' IDENTIFIED BY '${{ secrets.MYSQL_ROOT_PASSWORD }}' PASSWORD EXPIRE INTERVAL 90 DAY;
           CREATE USER 'app'@'%' IDENTIFIED BY '${{ secrets.MYSQL_APP_PASSWORD }}';
           GRANT SELECT, INSERT, UPDATE ON testdb.* TO 'app'@'%';
@@ -87,7 +94,6 @@ jobs:
 
           echo "[📝] Writing PostgreSQL init script..."
           cat << 'EOF' > $INIT_SCRIPTS_DIR/postgres/init.sql
-          -- enforce password policy
           ALTER ROLE postgres PASSWORD '${{ secrets.POSTGRES_PASSWORD }}';
           CREATE ROLE app LOGIN PASSWORD '${{ secrets.POSTGRES_PASSWORD }}' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
           GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO app;
@@ -95,19 +101,16 @@ jobs:
 
           echo "[📝] Writing Oracle init script..."
           cat << 'EOF' > $INIT_SCRIPTS_DIR/oracle/init.sql
-          -- minimal privileges, service account
           CREATE USER app IDENTIFIED BY "${{ secrets.ORACLE_APP_PASSWORD }}";
           GRANT CONNECT TO app;
           GRANT CREATE SESSION TO app;
           EXIT;
           EOF
 
-      # ─── 커넥션 풀링 설정 추가 ────────────────────────────────────────────
       - name: ⚙️ Generate pooling config
         run: |
           echo "[⚙️] Writing JDBC connection pooling properties..."
           cat << 'EOF' > $POOLING_CONFIG
-          # HikariCP configuration
           dataSourceClassName=com.mysql.cj.jdbc.MysqlDataSource
           dataSource.user=app
           dataSource.password=${{ secrets.MYSQL_APP_PASSWORD }}
@@ -118,7 +121,6 @@ jobs:
           idleTimeout=600000
           EOF
 
-      # ─── SSL/TLS 인증서 및 키 생성 ────────────────────────────────────────
       - name: 🔐 Generate self-signed SSL certificates
         run: |
           echo "[🔐] Generating SSL/TLS certificates..."
@@ -127,7 +129,6 @@ jobs:
             -subj "/CN=database.local"
           chmod 600 $SSL_CERT_DIR/db.key $SSL_CERT_DIR/db.crt
 
-      # ─── 컨테이너화 및 오케스트레이션 파일 생성 ─────────────────────────────
       - name: 🐳 Generate Docker Compose
         run: |
           echo "[🐳] Writing docker-compose.yml..."
@@ -169,7 +170,7 @@ jobs:
 
       - name: 🎯 Generate Helm chart scaffold
         run: |
-          echo "[🎯] Writing Helm Chart Chart.yaml..."
+          echo "[🎯] Writing Helm Chart.yaml..."
           cat << 'EOF' > $HELM_CHART_DIR/Chart.yaml
           apiVersion: v2
           name: backup-system
@@ -188,7 +189,6 @@ jobs:
             encryptionKey: {{ .Values.encryptionKey }}
           EOF
 
-      # ─── 모니터링 및 로깅 설정 ───────────────────────────────────────────
       - name: 📊 Generate monitoring config
         run: |
           echo "[📊] Writing Prometheus scrape config..."
@@ -215,7 +215,6 @@ jobs:
           </configuration>
           EOF
 
-      # ─── 백업 전략 및 도구 설치 ───────────────────────────────────────────
       - name: 🔧 Install backup tools (AWS CLI & gsutil)
         run: |
           echo "[🔧] Installing AWS CLI & Google Cloud SDK..."
@@ -229,7 +228,6 @@ jobs:
           cat << 'EOF' > $BACKUP_DIR/backup-run.sh
           #!/bin/bash
           set -euo pipefail
-          # incremental backup
           tar czf $BACKUP_DIR/incremental/backup-$(date +%F-%T).tgz /opt/data
           aws s3 cp $BACKUP_DIR/incremental/*.tgz s3://my-bucket/backups/ --storage-class STANDARD_IA --encrypt
           gsutil cp $BACKUP_DIR/incremental/*.tgz gs://my-bucket/backups/
@@ -237,20 +235,17 @@ jobs:
           EOF
           chmod +x $BACKUP_DIR/backup-run.sh
 
-      # ─── 백업 테스트 및 복구 ────────────────────────────────────────────
       - name: 🛠️ Generate restore-test script
         run: |
           echo "[🛠️] Writing restore test script..."
           cat << 'EOF' > $BACKUP_DIR/restore-test.sh
           #!/bin/bash
-          # automatically restore latest backup and validate checksum
           LATEST=$(ls -1t $BACKUP_DIR/incremental/*.tgz | head -n1)
           tar xzf $LATEST -C /tmp/restore
           echo "restored" > /tmp/restore/ok.txt
           EOF
           chmod +x $BACKUP_DIR/restore-test.sh
 
-      # ─── 이루어질 주요 실행 단계 ─────────────────────────────────────────
       - name: ▶️ Run backup
         run: |
           echo "[▶️] Running backup script..."
@@ -266,7 +261,6 @@ jobs:
           echo "[📊] Collecting and displaying backup metrics..."
           cat $MONITORING_DIR/logs/backup.json
 
-      # ─── Remake BS/MIS 로직 유지 ─────────────────────────────────────────
       - name: 🔄 Remake BS logic
         run: |
           echo "[🔄] Starting Remake BS logic..."
