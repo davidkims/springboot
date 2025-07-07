@@ -9,6 +9,48 @@ jobs:
   transfer_log_backup:
     runs-on: ubuntu-latest
 
+    # 1) Bring up database services
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: testdb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U testuser"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      oracle:
+        image: wnameless/oracle-xe-11g
+        env:
+          ORACLE_PASSWORD: testpass
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd="echo 'SELECT 1 FROM dual;' | \
+            docker-entrypoint.sh sqlplus system/testpass@//localhost:1521/XE"
+          --health-interval=30s
+          --health-timeout=5s
+          --health-retries=5
+
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
@@ -18,6 +60,32 @@ jobs:
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
+
+      - name: ⏳ Wait for databases to be ready
+        run: |
+          echo "[⏳] Waiting for MySQL…"
+          until mysqladmin ping -h127.0.0.1 -uroot -ptestpass --silent; do
+            sleep 5
+          done
+          echo "[✅] MySQL is up"
+
+          echo "[⏳] Waiting for PostgreSQL…"
+          until pg_isready -h127.0.0.1 -U testuser; do
+            sleep 5
+          done
+          echo "[✅] PostgreSQL is up"
+
+          echo "[⏳] Waiting for Oracle XE… (may take ~60s)"
+          n=0
+          until echo "SELECT 1 FROM dual;" | sqlplus -s system/testpass@//127.0.0.1:1521/XE | grep -q "1"; do
+            n=$((n+1))
+            if [ $n -gt 12 ]; then
+              echo "[⚠️] Oracle still not ready after $((n*5))s, proceeding anyway"
+              break
+            fi
+            sleep 5
+          done
+          echo "[✅] Oracle check done (or timed out)"
 
       - name: 🧪 Install Java & JDBC Drivers and Test Connections
         run: |
@@ -32,20 +100,17 @@ jobs:
 
           echo "[⬇️] Downloading MySQL Connector/J..."
           curl -L -o /opt/jdbc/mysql-connector-j.jar \
-            https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar \
-            || echo "[⚠️] MySQL JDBC download failed – check URL"  :contentReference[oaicite:0]{index=0}
+            https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar
 
           echo "[⬇️] Downloading PostgreSQL JDBC Driver..."
           curl -L -o /opt/jdbc/postgresql-jdbc.jar \
-            https://jdbc.postgresql.org/download/postgresql-42.7.3.jar \
-            || echo "[⚠️] PostgreSQL JDBC download failed – check URL"
+            https://jdbc.postgresql.org/download/postgresql-42.7.3.jar
 
-          echo "[⬇️] Downloading Oracle JDBC Driver..."
+          echo "[⬇️] Downloading Oracle JDBC (ojdbc8)…"
           curl -L -o /opt/jdbc/ojdbc8.jar \
-            https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc8/19.3.0.0/ojdbc8-19.3.0.0.jar \
-            || echo "[⚠️] Oracle JDBC download failed – check URL"  :contentReference[oaicite:1]{index=1}
+            https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc8/19.3.0.0/ojdbc8-19.3.0.0.jar
 
-          echo "[📄] Generating JDBC Test Java File (with echo)..."
+          echo "[📄] Generating JDBCTest.java (with echo)…"
           {
             echo 'import java.sql.Connection;'
             echo 'import java.sql.DriverManager;'
@@ -59,13 +124,13 @@ jobs:
             echo ''
             echo '        switch (type) {'
             echo '            case "mysql":'
-            echo '                url = "jdbc:mysql://localhost:3306/testdb";'
+            echo '                url = "jdbc:mysql://127.0.0.1:3306/testdb";'
             echo '                break;'
             echo '            case "postgres":'
-            echo '                url = "jdbc:postgresql://localhost:5432/testdb";'
+            echo '                url = "jdbc:postgresql://127.0.0.1:5432/testdb";'
             echo '                break;'
             echo '            case "oracle":'
-            echo '                url = "jdbc:oracle:thin:@localhost:1521:xe";'
+            echo '                url = "jdbc:oracle:thin:@127.0.0.1:1521:XE";'
             echo '                break;'
             echo '            default:'
             echo '                System.err.println("Unsupported type: " + type);'
@@ -81,19 +146,16 @@ jobs:
             echo '}'
           } | tee /opt/jdbc/test/JDBCTest.java
 
-          echo "[📜] JDBCTest.java contents:"
-          cat /opt/jdbc/test/JDBCTest.java
-
-          echo "[🚰] Compiling JDBC Test Code..."
+          echo "[🚰] Compiling JDBC Test Code…"
           javac -cp "/opt/jdbc/*" /opt/jdbc/test/JDBCTest.java
 
-          echo "[🧲] Testing MySQL JDBC connection..."
+          echo "[🧲] Testing MySQL JDBC connection…"
           java -cp "/opt/jdbc/*:/opt/jdbc/test" JDBCTest mysql || true
 
-          echo "[🧲] Testing PostgreSQL JDBC connection..."
+          echo "[🧲] Testing PostgreSQL JDBC connection…"
           java -cp "/opt/jdbc/*:/opt/jdbc/test" JDBCTest postgres || true
 
-          echo "[🧲] Testing Oracle JDBC connection..."
+          echo "[🧲] Testing Oracle JDBC connection…"
           java -cp "/opt/jdbc/*:/opt/jdbc/test" JDBCTest oracle || true
 
           echo "[📂] Listing JDBC contents:"
