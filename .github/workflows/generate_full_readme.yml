@@ -146,7 +146,7 @@ jobs:
 
       - name: 📊 병렬 워크플로우 통계 수집
         run: |
-          echo "[📊] 워크플로우 통계 수집 중..."
+          echo "[📊] 워크플로우 통계 수집 시작..."
           OUTPUT_FILE=".tmp/workflows.md"
           echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계" > "$OUTPUT_FILE"
           echo "" >> "$OUTPUT_FILE"
@@ -158,7 +158,7 @@ jobs:
             NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
             FILENAME=$(basename "$f")
             echo "[🔎] $FILENAME 통계 조회 중..."
-            RUNS=$(gh run list --workflow="$FILENAME" --limit 100 --json conclusion -q '.[] | .conclusion')
+            RUNS=$(gh run list --workflow="$FILENAME" --limit 500 --json conclusion -q '.[] | .conclusion')
             TOTAL=$(echo "$RUNS" | wc -l)
             SUCCESS=$(echo "$RUNS" | grep -c success || true)
             FAILURE=$((TOTAL - SUCCESS))
@@ -171,16 +171,10 @@ jobs:
           }
 
           export -f parallel_stats
-          if command -v parallel >/dev/null; then
-            echo "[⚡] GNU Parallel 사용 (병렬 제한 1)"
-            find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
-              | parallel -j 1 parallel_stats {} >> "$OUTPUT_FILE"
-          else
-            echo "[ℹ️] parallel 미설치, 직렬 처리"
-            for f in .github/workflows/*.{yml,yaml}; do
-              parallel_stats "$f" >> "$OUTPUT_FILE"
-            done
-          fi
+          CORES=$(nproc)
+          echo "[⚡] GNU Parallel 사용 (병렬 제한: $CORES)"
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
+            | parallel --no-notice -j $CORES parallel_stats {} >> "$OUTPUT_FILE"
 
           cat "$OUTPUT_FILE"
           echo "[✅] 워크플로우 통계 수집 완료"
@@ -272,16 +266,32 @@ jobs:
           echo "[🔁] 변경사항 확인 및 Git 설정"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --exit-code --quiet README.md SECURITY.md .tmp; then
+
+          # 변경사항 체크
+          changed=false
+          if ! git diff --exit-code --quiet README.md SECURITY.md; then
+            changed=true
+          fi
+          if [ -d .tmp ] && ! git diff --exit-code --quiet .tmp; then
+            changed=true
+          fi
+          if [ "$changed" = false ]; then
             echo "[⏭️] 변경사항 없음"
             exit 0
           fi
+
           echo "[✅] 변경사항 감지됨"
           git stash --include-untracked
           git pull --rebase origin main || echo "[⚠️] rebase 실패"
           git stash pop || echo "[⚠️] stash pop 실패"
-          git add README.md SECURITY.md .tmp
-          git commit -m "문서: README & SECURITY 업데이트 [skip ci]"
+
+          git add README.md SECURITY.md
+          if [ -d .tmp ]; then
+            git add .tmp
+          fi
+
+          git commit -m "문서: README & SECURITY 업데이트 [skip ci]" || echo "[ℹ️] 커밋할 변경사항이 없습니다"
+
           if git push origin HEAD:main; then
             echo "[🚀] 정상 Push 완료"
           else
