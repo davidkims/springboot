@@ -55,38 +55,34 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 📥 Install Oracle Instant Client
+      - name: 📥 Install Oracle Instant Client & libaio support
         run: |
           echo "[📥] Updating apt and installing prerequisites..."
           sudo apt-get update
-          sudo apt-get install -y software-properties-common unzip
+          sudo apt-get install -y unzip
 
-          echo "[🔧] Enabling universe repository for libaio1..."
-          sudo add-apt-repository universe -y
-          sudo apt-get update
+          echo "[📦] Installing libaio1t64 (replaces libaio1)…"
+          sudo apt-get install -y libaio1t64  # Ubuntu 24.04 renamed package :contentReference[oaicite:0]{index=0}
 
-          echo "[📦] Installing libaio1 (or fallback libaio-dev)..."
-          if apt-cache show libaio1 > /dev/null 2>&1; then
-            sudo apt-get install -y libaio1
-          else
-            sudo apt-get install -y libaio-dev
-          fi
+          echo "[🔗] Creating symlink for libaio.so.1…"
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libaio.so.1t64 \
+                     /usr/lib/x86_64-linux-gnu/libaio.so.1
 
           echo "[📁] Creating Instant Client directory..."
-          mkdir -p /opt/oracle
+          sudo mkdir -p /opt/oracle
 
           echo "[⬇️] Downloading Oracle Instant Client ZIP..."
           curl -L -o /tmp/instantclient.zip \
             https://download.oracle.com/otn_software/linux/instantclient/217000/instantclient-basic-linux.x64-21.7.0.0.0.zip
 
           echo "[🗜️] Unzipping Instant Client..."
-          unzip /tmp/instantclient.zip -d /opt/oracle
+          sudo unzip /tmp/instantclient.zip -d /opt/oracle
 
           echo "[🔗] Configuring library path..."
           echo "/opt/oracle/instantclient_21_7" | sudo tee /etc/ld.so.conf.d/oracle-instantclient.conf
           sudo ldconfig
 
-          echo "[✅] Oracle Instant Client installed"
+          echo "[✅] Oracle Instant Client and AIO support installed"
 
       - name: ⏳ Wait for databases to be ready
         run: |
@@ -111,14 +107,15 @@ jobs:
             FLUSH PRIVILEGES;
           "
 
-          echo "[🔧] Creating Oracle user 'testuser' and granting privileges..."
+          echo "[🔧] Initializing Oracle user 'testuser'..."
           cat << 'EOF' > /tmp/init_oracle.sql
           CREATE USER testuser IDENTIFIED BY testpass;
           GRANT CONNECT, RESOURCE TO testuser;
           GRANT UNLIMITED TABLESPACE TO testuser;
           EXIT;
           EOF
-          sqlplus -s system/testpass@//127.0.0.1:1521/XE @/tmp/init_oracle.sql || echo "[⚠️] Oracle user init failed, continuing..."
+          sqlplus -s system/testpass@//127.0.0.1:1521/XE @/tmp/init_oracle.sql \
+            || echo "[⚠️] Oracle user init failed, continuing..."
 
           echo "[📁] Creating JDBC credential directory and files..."
           mkdir -p /opt/jdbc/credentials
@@ -131,8 +128,7 @@ jobs:
           chmod 600 /opt/jdbc/credentials/.my.cnf
 
           echo "[🔒] Setting permissions on /opt/jdbc and /opt/oracle..."
-          chmod -R 755 /opt/jdbc
-          chmod -R 755 /opt/oracle
+          chmod -R 755 /opt/jdbc /opt/oracle
 
           echo "[✅] DB users, credentials, and permissions configured"
 
@@ -209,3 +205,21 @@ jobs:
 
           echo "[📂] Listing JDBC contents:"
           tree /opt/jdbc || ls -lh /opt/jdbc/
+
+      - name: 🔄 Remake BS logic
+        run: |
+          echo "[🔄] Starting Remake BS logic..."
+          mkdir -p $BACKUP_DIR/bs
+          echo "{ \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"type\": \"BS\" }" \
+            > $BACKUP_DIR/bs/bs-$(date +%s).json
+          chmod 644 $BACKUP_DIR/bs/*.json
+          echo "[✅] Remake BS logic completed"
+
+      - name: 🔄 Remake MIS logic
+        run: |
+          echo "[🔄] Starting Remake MIS logic..."
+          mkdir -p $BACKUP_DIR/mis
+          echo "MIS Report generated at $(date -u +"%Y-%m-%d %H:%M:%SZ")" \
+            > $BACKUP_DIR/mis/mis-$(date +%s).txt
+          chmod 644 $BACKUP_DIR/mis/*.txt
+          echo "[✅] Remake MIS logic completed"
