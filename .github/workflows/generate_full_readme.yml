@@ -1,8 +1,11 @@
 name: 📓 포트폴리오 + 워크플로 통계로 README & SECURITY 업데이트
 
 on:
+  push:
+    paths:
+      - '.github/workflows/**'
   schedule:
-    - cron: '*/1 * * * *'  # 매분 실행
+    - cron: '*/5 * * * *'  # 5분마다 실행
   workflow_dispatch:
 
 permissions:
@@ -17,85 +20,116 @@ jobs:
       MAX_LATENCY_MS: 1000
 
     steps:
+      - name: Cache apt packages
+        uses: actions/cache@v3
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-packages
+
+      - name: Cache Prometheus binary
+        uses: actions/cache@v3
+        with:
+          path: prometheus-2.53.5.linux-amd64.tar.gz
+          key: prometheus-v2.53.5
+
       - name: 📅 Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 🔧 시스템 패키지, GitHub CLI, jq, parallel 설치 및 업그레이드
+      - name: 🔧 Install System Packages & Tools
         run: |
-          echo "[🔧] 시스템 패키지, GitHub CLI, jq, parallel 최신화 및 업그레이드 중..."
+          echo "[🔧] apt-get update 중..."
           sudo apt-get update -y
+          echo "[🔧] apt-get dist-upgrade 중..."
           sudo apt-get dist-upgrade -y
+          echo "[🔧] gh, jq, parallel 설치 중..."
           sudo apt-get install -y gh jq parallel
+          echo "[🔧] parallel만 업그레이드 중..."
           sudo apt-get install --only-upgrade -y parallel
+          echo "[🔧] gh 버전 확인 중..."
           gh --version
+          echo "[🔧] jq 버전 확인 중..."
           jq --version
+          echo "[🔧] parallel 버전 확인 중..."
           parallel --version
-      - name: 🚀 Prometheus 통계 수집 서버 설치 및 데이터 디렉토리 생성
+
+      - name: Docker Pull Prometheus
         run: |
-          echo "[🚀] Prometheus v2.53.5 설치 중..."
-          wget https://github.com/prometheus/prometheus/releases/download/v2.53.5/prometheus-2.53.5.linux-amd64.tar.gz
-          tar xzf prometheus-2.53.5.linux-amd64.tar.gz
-          sudo mv prometheus-2.53.5.linux-amd64 /opt/prometheus
-          sudo useradd --no-create-home --shell /bin/false prometheus
-          echo "[📂] Prometheus 데이터 저장 디렉토리 생성 중..."
-          sudo mkdir -p /opt/prometheus/data
-          sudo chown -R prometheus:prometheus /opt/prometheus/data
-          echo "[✅] Prometheus 서버 및 데이터 디렉토리 생성 완료."
-      - name: 📋 Ensure .tmp Directory
+          echo "[🚀] Docker에서 Prometheus v2.53.5 이미지 pull 중..."
+          docker pull prom/prometheus:v2.53.5
+          echo "[✅] Prometheus Docker 이미지 준비 완료"
+          echo "[📂] prometheus_data 디렉토리 생성 중..."
+          mkdir -p prometheus_data
+          echo "[✅] prometheus_data 디렉토리 생성 완료"
+
+      - name: Ensure .tmp Directory
         run: |
           echo "[📁] .tmp 디렉토리 생성 확인"
           mkdir -p .tmp
-      - name: 📊 병렬 워크플로우 통계 수집
+
+      - name: 📈 GraphQL 기반 워크플로우 통계 수집
         run: |
-          echo "[📊] 워크플로우 통계 수집 (병렬) 중..."
-          OUTPUT_FILE=".tmp/workflows.md"
+          echo "[📈] GraphQL 쿼리 파일 생성 중..."
+          cat << 'EOF' > query.graphql
+          {
+            repository(owner: "${{ github.repository_owner }}", name: "${{ github.event.repository.name }}") {
+              workflows(first: 50) {
+                nodes {
+                  name
+                  runs(last: 30) {
+                    totalCount
+                    nodes {
+                      conclusion
+                    }
+                  }
+                }
+              }
+            }
+          }
+          EOF
+          echo "[📡] gh api graphql 호출 중..."
+          gh api graphql -f query="$(cat query.graphql)" > .tmp/graphql_stats.json
+          echo "[📊] 결과 파싱 및 .tmp/workflows.md 생성 중..."
+          jq -r '
+            .data.repository.workflows.nodes[] |
+            "| " + .name +
+            " | " + (.runs.totalCount|tostring) +
+            " | " + ([.runs.nodes[].conclusion] | map(select(. == "success")) | length | tostring) +
+            " | " + ((.runs.totalCount - ([.runs.nodes[].conclusion] | map(select(. == "success")) | length))|tostring) +
+            " | " + (if .runs.totalCount>0 then ( ([.runs.nodes[].conclusion] | map(select(. == "success")) | length) / .runs.totalCount * 100 | tostring) + "%" else "N/A" end) + " |"
+          ' .tmp/graphql_stats.json > .tmp/workflows.md.body
           {
             echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계"
             echo ""
             echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |"
             echo "|----------------|--------:|--------:|--------:|--------:|"
-          } > "$OUTPUT_FILE"
-          parallel_stats() {
-            f="$1"
-            NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
-            FILENAME=$(basename "$f")
-            RUNS=$(gh run list --workflow="$FILENAME" --limit 100 --json conclusion -q '.[] | .conclusion')
-            TOTAL=$(echo "$RUNS" | wc -l)
-            SUCCESS=$(echo "$RUNS" | grep -c success || true)
-            FAILURE=$((TOTAL - SUCCESS))
-            if [ "$TOTAL" -gt 0 ]; then
-              RATE=$(awk "BEGIN {printf \"%.1f\", ($SUCCESS/$TOTAL)*100}")
-            else
-              RATE="N/A"
-            fi
-            echo "| $NAME | $TOTAL | $SUCCESS | $FAILURE | $RATE% |"
-          }
-          export -f parallel_stats
-          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
-            | parallel -j $(nproc) parallel_stats {} >> "$OUTPUT_FILE"
-          cat "$OUTPUT_FILE"
-      - name: 📂 Prometheus 데이터 디렉토리에 통계 저장
+            cat .tmp/workflows.md.body
+          } > .tmp/workflows.md
+          echo "[✅] .tmp/workflows.md 생성 완료"
+          cat .tmp/workflows.md
+
+      - name: Copy statistics to prometheus_data
         run: |
-          echo "[📂] 통계 파일을 Prometheus 데이터 디렉토리로 복사 중..."
-          sudo cp .tmp/workflows.md /opt/prometheus/data/workflows.md
-          mkdir -p prometheus_data
+          echo "[📂] .tmp/workflows.md를 prometheus_data/로 복사 중..."
           cp .tmp/workflows.md prometheus_data/workflows.md
-          echo "[✅] 통계가 prometheus_data/ 와 /opt/prometheus/data/ 에 저장되었습니다."
+          echo "[✅] prometheus_data에 통계 저장 완료"
+
       - name: 📦 Upload Prometheus metrics artifact
         uses: actions/upload-artifact@v4
         with:
           name: prometheus-metrics-data
-          path: |
-            prometheus_data/
-            /opt/prometheus/data/workflows.md
+          path: prometheus_data/
+
       - name: 📄 Generate README.md
         run: |
-          echo "[📄] README.md 생성 중..."
+          echo "[📄] README.md 생성 시작"
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S KST')
+          echo "[⏰] 타임스탬프: $TIMESTAMP"
           REPO="${{ github.repository }}"
+          echo "[🔗] Repository: $REPO"
           BRANCH="${{ github.ref_name }}"
+          echo "[🌿] Branch: $BRANCH"
           {
             echo "# 👨‍💻 김병권 포토포리오"
             echo ""
@@ -104,7 +138,7 @@ jobs:
               echo "[![${BADGE_NAME}](https://github.com/${REPO}/actions/workflows/${BADGE_NAME}/badge.svg)](https://github.com/${REPO}/actions/workflows/${BADGE_NAME})"
             done
             echo ""
-            echo "자동으로 관리되는 프로젝트입니다. 매분 간격으로 업데이트됩니다."
+            echo "자동으로 관리되는 프로젝트입니다. 매 5분마다 업데이트됩니다."
             echo ""
             echo "## 🤖 디바이저 소개"
             echo "- 이름: 김병권"
@@ -125,12 +159,13 @@ jobs:
             echo ""
             cat .tmp/workflows.md
           } > README.md
+          echo "[✅] README.md 생성 완료"
+
       - name: 🛡️ Generate SECURITY.md
         run: |
-          echo "[🛡️] SECURITY.md 생성 및 워크플로우 검증 체크리스트 추가 중..."
-          # 기본 헤더
-          echo "# Security Policy" > SECURITY.md
-          echo "## Supported Versions" >> SECURITY.md
+          echo "[🛡️] SECURITY.md 생성 시작"
+          echo "[🔧] 기본 헤더 작성" > SECURITY.md
+          echo "[🔧] Supported Versions 표 작성" >> SECURITY.md
           echo "| Version | Supported          |" >> SECURITY.md
           echo "| ------- | ------------------ |" >> SECURITY.md
           echo "| 5.1.x   | :white_check_mark: |" >> SECURITY.md
@@ -138,11 +173,12 @@ jobs:
           echo "| 4.0.x   | :white_check_mark: |" >> SECURITY.md
           echo "| < 4.0   | :x:                |" >> SECURITY.md
           echo "" >> SECURITY.md
+          echo "[🔧] Reporting a Vulnerability 섹션 추가" >> SECURITY.md
           echo "## Reporting a Vulnerability" >> SECURITY.md
           echo "Use this section to tell people how to report a vulnerability." >> SECURITY.md
           echo "Tell them where to go, how often they can expect updates, and what to expect if it’s accepted or declined." >> SECURITY.md
           echo "" >> SECURITY.md
-          # 워크플로우 검증 체크리스트
+          echo "[🔧] Workflow Validation Checklist 추가" >> SECURITY.md
           echo "## Workflow Validation Checklist" >> SECURITY.md
           for f in .github/workflows/*.yml .github/workflows/*.yaml; do
             base=$(basename "$f")
@@ -154,21 +190,26 @@ jobs:
             echo "- [ ] $base: Container scanning enabled"      >> SECURITY.md
           done
           echo "[✅] SECURITY.md 업데이트 완료"
+
       - name: 🔁 Commit / Push or PR
         run: |
           echo "[🔁] 변경사항 확인 및 Git 설정"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "[🔍] README.md 및 SECURITY.md diff 확인"
           if git diff --exit-code --quiet README.md SECURITY.md; then
             echo "[⏭️] 변경사항 없음"
             exit 0
           fi
           echo "[✅] 변경사항 감지됨"
+          echo "[📦] Stash 및 Pull 준비"
           git stash --include-untracked
           git pull --rebase origin main || echo "[⚠️] rebase 실패"
           git stash pop || echo "[⚠️] stash pop 실패"
+          echo "[📝] 파일 추가 및 커밋"
           git add README.md SECURITY.md
           git commit -m "문서: README & SECURITY 업데이트 [skip ci]"
+          echo "[🚀] Push 또는 PR 생성"
           if git push origin HEAD:main; then
             echo "[🚀] 정상 Push 완료"
           else
