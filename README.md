@@ -5907,5 +5907,5 @@ bpbackup -f /path/to/output/corporate_banking_backup.zip -S <master_server> -L /
 - **특이사항:** 스크립트 파일입니다. 실행 권한 및 보안에 유의해야 합니다.
 
 ## 📅 보고서 생성 날짜
-2025년 07월 08일 13시 16분 29초 KST
+2025년 07월 08일 13시 16분 38초 KST
 
