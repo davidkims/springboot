@@ -20,73 +20,57 @@ jobs:
       MAX_LATENCY_MS: 1000
 
     steps:
-      - name: Cache apt packages
-        uses: actions/cache@v3
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-packages
-
-      - name: Cache Prometheus binary
-        uses: actions/cache@v3
-        with:
-          path: prometheus-2.53.5.linux-amd64.tar.gz
-          key: prometheus-v2.53.5
-
       - name: 📅 Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: 📁 Ensure Required Directories
+        run: |
+          echo "[📁] 필요한 디렉토리 생성 중..."
+          mkdir -p .tmp prometheus_data backups logs metrics
+          echo "[✅] 디렉토리 생성 완료: .tmp, prometheus_data, backups, logs, metrics"
+
       - name: 🔧 Install System Packages & Tools
         run: |
-          echo "[🔧] apt-get update 중..."
+          echo "[🔧] apt-get update 시작..."
           sudo apt-get update -y
-          echo "[🔧] apt-get dist-upgrade 중..."
+          echo "[🔧] apt-get dist-upgrade 시작..."
           sudo apt-get dist-upgrade -y
-          echo "[🔧] gh, jq, parallel 설치 중..."
+          echo "[🔧] gh, jq, parallel 설치 시작..."
           sudo apt-get install -y gh jq parallel
-          echo "[🔧] parallel만 업그레이드 중..."
+          echo "[🔧] parallel 업그레이드 시작..."
           sudo apt-get install --only-upgrade -y parallel
-          echo "[🔧] gh 버전 확인 중..."
+          echo "[🔧] 설치 완료 확인: gh, jq, parallel"
           gh --version
-          echo "[🔧] jq 버전 확인 중..."
           jq --version
-          echo "[🔧] parallel 버전 확인 중..."
           parallel --version
 
-      - name: Docker Pull Prometheus
+      - name: 🚀 Docker Pull Prometheus
         run: |
-          echo "[🚀] Docker에서 Prometheus v2.53.5 이미지 pull 중..."
+          echo "[🚀] Prometheus Docker 이미지 pull 중..."
           docker pull prom/prometheus:v2.53.5
-          echo "[✅] Prometheus Docker 이미지 준비 완료"
-          echo "[📂] prometheus_data 디렉토리 생성 중..."
-          mkdir -p prometheus_data
-          echo "[✅] prometheus_data 디렉토리 생성 완료"
-
-      - name: Ensure .tmp Directory
-        run: |
-          echo "[📁] .tmp 디렉토리 생성 확인"
-          mkdir -p .tmp
+          echo "[✅] Prometheus 이미지 준비 완료"
 
       - name: 📈 REST 기반 워크플로우 통계 수집
         run: |
-          echo "[📈] repo workflows 목록 REST 호출 중..."
+          echo "[📈] repo workflows 목록 조회 시작..."
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
-          # workflows 목록 가져오기
+          echo "[📈] 워크플로우 리스트 가져오는 중..."
           gh api repos/${OWNER}/${REPO}/actions/workflows --jq '.workflows[] | "\(.id)||\(.name)"' > .tmp/workflow_list.txt
-
-          # 결과 헤더
+          
+          echo "[📊] 통계 헤더 작성 중..."
           {
             echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계"
             echo ""
             echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |"
             echo "|----------------|--------:|--------:|--------:|--------:|"
           } > .tmp/workflows.md.body
-
-          # 각 workflow 통계 계산
+          
+          echo "[📈] 각 워크플로우 실행 통계 계산 중..."
           while IFS="||" read -r ID NAME; do
-            echo "[📈] '$NAME' 워크플로우 runs 조회 중..."
+            echo "[📈] '$NAME' runs 조회..."
             RUNS_JSON=$(gh api repos/${OWNER}/${REPO}/actions/workflows/${ID}/runs?per_page=30)
             TOTAL=$(echo "${RUNS_JSON}" | jq '.workflow_runs | length')
             SUCCESS=$(echo "${RUNS_JSON}" | jq '[.workflow_runs[] | select(.conclusion=="success")] | length')
@@ -99,14 +83,15 @@ jobs:
             echo "| ${NAME} | ${TOTAL} | ${SUCCESS} | ${FAILURE} | ${RATE}% |"
           done >> .tmp/workflows.md.body
 
-          # 완성본 이동
+          echo "[📂] 최종 .tmp/workflows.md 생성..."
           mv .tmp/workflows.md.body .tmp/workflows.md
           echo "[✅] .tmp/workflows.md 생성 완료"
           cat .tmp/workflows.md
 
-      - name: Copy statistics to prometheus_data
+      - name: 📂 Copy statistics to prometheus_data
         run: |
-          echo "[📂] .tmp/workflows.md를 prometheus_data/로 복사 중..."
+          echo "[📂] 통계 파일 복사 중..."
+          mkdir -p prometheus_data
           cp .tmp/workflows.md prometheus_data/workflows.md
           echo "[✅] prometheus_data에 통계 저장 완료"
 
@@ -121,14 +106,16 @@ jobs:
           echo "[📄] README.md 생성 시작"
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S KST')
           echo "[⏰] 타임스탬프: $TIMESTAMP"
-          echo "[🔗] Repository: ${{ github.repository }}"
-          echo "[🌿] Branch: ${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          echo "[🔗] Repository: $REPO"
+          BRANCH="${{ github.ref_name }}"
+          echo "[🌿] Branch: $BRANCH"
           {
             echo "# 👨‍💻 김병권 포토포리오"
             echo ""
             for f in .github/workflows/*.yml; do
-              BADGE_NAME=$(basename "$f")
-              echo "[![${BADGE_NAME}](https://github.com/${{ github.repository }}/actions/workflows/${BADGE_NAME}/badge.svg)](https://github.com/${{ github.repository }}/actions/workflows/${BADGE_NAME})"
+              BADGE=$(basename "$f")
+              echo "[![${BADGE}](https://github.com/${REPO}/actions/workflows/${BADGE}/badge.svg)](https://github.com/${REPO}/actions/workflows/${BADGE})"
             done
             echo ""
             echo "자동으로 관리되는 프로젝트입니다. 매 5분마다 업데이트됩니다."
@@ -145,10 +132,10 @@ jobs:
             echo "- $TIMESTAMP"
             echo ""
             echo "## ✅ 현재 브랜치"
-            echo "- ${{ github.ref_name }}"
+            echo "- $BRANCH"
             echo ""
             echo "## 🔧 빌드 방식 배지"
-            echo "![Build](https://github.com/${{ github.repository }}/actions/workflows/generate_full_readme.yml/badge.svg)"
+            echo "![Build](https://github.com/${REPO}/actions/workflows/generate_full_readme.yml/badge.svg)"
             echo ""
             cat .tmp/workflows.md
           } > README.md
