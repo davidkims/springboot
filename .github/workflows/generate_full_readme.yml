@@ -15,18 +15,24 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [16, 18, 20]
-      max-parallel: 1
+      max-parallel: 3  # 병렬 3개까지 허용
     runs-on: ${{ matrix.os }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MAX_LATENCY_MS: 1000
+      TMP_DIR: .tmp/${{ matrix.os }}-${{ matrix.node-version }}
 
     steps:
+      - name: 🖥️ 환경 정보
+        run: |
+          echo "[🖥️] 실행 환경 정보 확인"
+          echo "OS: ${{ runner.os }}"
+          echo "Node.js 버전: ${{ matrix.node-version }}"
+
       - name: 📅 Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: 📅 Checkout 완료
         run: echo "[📅] 레포지토리 체크아웃 완료"
 
@@ -57,7 +63,6 @@ jobs:
           echo "[🔧] apt 업데이트 완료"
           sudo apt-get install -y gh jq parallel
           echo "[✅] Linux 패키지 설치 완료"
-
       - name: 🔧 패키지 설치 (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -66,20 +71,19 @@ jobs:
           echo "[🔧] brew 업데이트 완료"
           brew install gh jq parallel
           echo "[✅] macOS 패키지 설치 완료"
-
       - name: 🔧 패키지 설치 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Write-Host "[🔧] Windows: choco로 시스템 패키지 설치 중..."
-          choco install git.install jq -y
-          choco install parallel -y
-          Write-Host "[✅] Windows 패키지 설치 완료"
-
+          Write-Host "[🔧] Windows: Chocolatey로 시스템 패키지 설치 중..."
+          choco install git.install jq -y || Write-Host "[⚠️] git 또는 jq 설치 실패"
+          Write-Host "[ℹ️] parallel 패키지가 Chocolatey에 없어 설치를 생략합니다."
+          # Windows PowerShell에서는 ForEach-Object -Parallel 또는 PSWorkflow 모듈 사용을 권장합니다.
+          Write-Host "[✅] Windows 패키지 설치 완료 (parallel 생략)"
       - name: 🔍 패키지 버전 확인
         run: |
-          echo "[🔍] gh 버전:" && gh --version  || echo "[ℹ️] gh CLI not available"
-          echo "[🔍] jq 버전:" && jq --version  || echo "[ℹ️] jq not available"
+          echo "[🔍] gh 버전:" && gh --version || echo "[ℹ️] gh CLI not available"
+          echo "[🔍] jq 버전:" && jq --version || echo "[ℹ️] jq not available"
           echo "[🔍] parallel 버전:" && parallel --version || echo "[ℹ️] parallel not available"
 
       - name: 🔄 Prometheus 설치 (Linux, 재시도 3회)
@@ -101,7 +105,6 @@ jobs:
           sudo mkdir -p /opt/prometheus
           sudo mv prometheus-2.53.5.linux-amd64 /opt/prometheus
           echo "[✅] Prometheus 설치 완료"
-
       - name: 📂 Prometheus 데이터 디렉토리 생성 (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -130,29 +133,28 @@ jobs:
           for f in .github/workflows/*.{yml,yaml}; do
             base=$(basename "$f")
             echo "[🗒️] Adding checks for $base"
-            echo "- [ ] $base: YAML syntax validation"         >> SECURITY.md
-            echo "- [ ] $base: Permissions review"             >> SECURITY.md
-            echo "- [ ] $base: Secret detection scan"           >> SECURITY.md
-            echo "- [ ] $base: Dependency scanning enabled"     >> SECURITY.md
-            echo "- [ ] $base: Container scanning enabled"      >> SECURITY.md
+            echo "- [ ] $base: YAML syntax validation"      >> SECURITY.md
+            echo "- [ ] $base: Permissions review"          >> SECURITY.md
+            echo "- [ ] $base: Secret detection scan"        >> SECURITY.md
+            echo "- [ ] $base: Dependency scanning enabled"  >> SECURITY.md
+            echo "- [ ] $base: Container scanning enabled"   >> SECURITY.md
           done
           echo "[✅] SECURITY.md 업데이트 완료"
 
-      - name: 📋 Ensure .tmp Directory
+      - name: 📋 Ensure TMP_DIR
         run: |
-          echo "[📋] .tmp 디렉토리 생성 확인"
-          mkdir -p .tmp
-          echo "[✅] .tmp 디렉토리 준비 완료"
+          echo "[📋] TMP_DIR 생성 확인: $TMP_DIR"
+          mkdir -p "$TMP_DIR"
+          echo "[✅] $TMP_DIR 준비 완료"
 
       - name: 📊 병렬 워크플로우 통계 수집
         run: |
           echo "[📊] 워크플로우 통계 수집 시작..."
-          OUTPUT_FILE=".tmp/workflows.md"
+          OUTPUT_FILE="$TMP_DIR/workflows.md"
           echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계" > "$OUTPUT_FILE"
           echo "" >> "$OUTPUT_FILE"
           echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |" >> "$OUTPUT_FILE"
           echo "|----------------|--------:|--------:|--------:|--------:|" >> "$OUTPUT_FILE"
-
           parallel_stats() {
             f="$1"
             NAME=$(grep '^name:' "$f" | head -n1 | cut -d ':' -f2- | xargs)
@@ -169,23 +171,31 @@ jobs:
             fi
             echo "| $NAME | $TOTAL | $SUCCESS | $FAILURE | $RATE% |"
           }
-
           export -f parallel_stats
           CORES=$(nproc)
           echo "[⚡] GNU Parallel 사용 (병렬 제한: $CORES)"
           find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
             | parallel --no-notice -j $CORES parallel_stats {} >> "$OUTPUT_FILE"
-
           cat "$OUTPUT_FILE"
           echo "[✅] 워크플로우 통계 수집 완료"
+
+      - name: 📝 Generate README.md
+        run: |
+          echo "[📝] README.md 생성 중..."
+          echo "# 프로젝트 포트폴리오" > README.md
+          echo "" >> README.md
+          echo "## 워크플로우 통계" >> README.md
+          cat "$TMP_DIR/workflows.md" >> README.md
+          echo "[✅] README.md 생성 완료"
 
       - name: 📂 Prometheus 데이터 디렉토리에 통계 저장
         if: runner.os == 'Linux'
         run: |
           echo "[📂] 통계 파일 복사 중..."
-          sudo cp .tmp/workflows.md /opt/prometheus/data/workflows.md
-          mkdir -p prometheus_data
-          cp .tmp/workflows.md prometheus_data/workflows.md
+          sudo mkdir -p /opt/prometheus/data/$TMP_DIR
+          sudo cp "$TMP_DIR/workflows.md" /opt/prometheus/data/$TMP_DIR/workflows.md
+          mkdir -p prometheus_data/$TMP_DIR
+          cp "$TMP_DIR/workflows.md" prometheus_data/$TMP_DIR/workflows.md
           echo "[✅] Prometheus 메트릭 데이터 보관 완료"
 
       - name: 📦 Upload Prometheus metrics artifact
@@ -193,8 +203,8 @@ jobs:
         with:
           name: prometheus-metrics-data
           path: |
-            prometheus_data/
-            /opt/prometheus/data/workflows.md
+            prometheus_data/**
+            /opt/prometheus/data/$TMP_DIR/workflows.md
       - name: 📦 아티팩트 업로드 완료
         run: echo "[📦] Prometheus 메트릭 아티팩트 업로드 완료"
 
@@ -216,7 +226,6 @@ jobs:
           echo "[🛠️] 이전 커밋 SHA 계산 중..."
           echo "prev_sha=$(git rev-parse HEAD~1)" >> $GITHUB_OUTPUT
           echo "[✅] 이전 커밋 SHA 계산 완료: ${{ steps.prev.outputs.prev_sha }}"
-
       - name: 🔐 시크릿 스캔
         uses: trufflesecurity/trufflehog@main
         with:
@@ -236,28 +245,27 @@ jobs:
         run: |
           echo "[🏷️] 자동 릴리즈 태그 생성 중..."
           if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            TAG="v$(date +%Y.%m.%d.%H%M)"
-            git tag "$TAG"
-            git push origin "$TAG"
-            echo "[✅] 태그 $TAG 생성 및 푸시 완료"
+            TAG="v$(date +%Y.%m.%d.%H%M)";
+            git tag "$TAG";
+            git push origin "$TAG";
+            echo "[✅] 태그 $TAG 생성 및 푸시 완료";
           else
-            echo "[ℹ️] main 브랜치가 아니므로 태그 생성 스킵"
+            echo "[ℹ️] main 브랜치가 아니므로 태그 생성 스킵";
           fi
 
       - name: 🧹 임시 파일 정리 (Linux/macOS)
         if: runner.os == 'Linux' || runner.os == 'macOS'
         run: |
           echo "[🧹] 임시 파일 정리 중..."
-          rm -rf .tmp/ || echo "[ℹ️] .tmp 없음"
+          rm -rf "$TMP_DIR" || echo "[ℹ️] $TMP_DIR 없음"
           rm -f prometheus-*.tar.gz || echo "[ℹ️] 프로메테우스 패키지 없음"
           echo "[✅] 임시 파일 정리 완료"
-
       - name: 🧹 임시 파일 정리 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Write-Host "[🧹] Windows 임시 파일 정리 중..."
-          Remove-Item -Recurse -Force .tmp\ -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$TMP_DIR\" -ErrorAction SilentlyContinue
           Remove-Item -Force prometheus-*.tar.gz -ErrorAction SilentlyContinue
           Write-Host "[✅] Windows 임시 파일 정리 완료"
 
@@ -266,44 +274,32 @@ jobs:
           echo "[🔁] 변경사항 확인 및 Git 설정"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 변경사항 체크
           changed=false
-          if ! git diff --exit-code --quiet README.md SECURITY.md; then
-            changed=true
-          fi
-          if [ -d .tmp ] && ! git diff --exit-code --quiet .tmp; then
-            changed=true
-          fi
+          if ! git diff --exit-code --quiet README.md SECURITY.md; then changed=true; fi
+          if [ -d "$TMP_DIR" ] && ! git diff --exit-code --quiet "$TMP_DIR"; then changed=true; fi
           if [ "$changed" = false ]; then
-            echo "[⏭️] 변경사항 없음"
-            exit 0
+            echo "[⏭️] 변경사항 없음";
+            exit 0;
           fi
-
           echo "[✅] 변경사항 감지됨"
-          git stash --include-untracked
+          git stash --include-untracked || echo "[⚠️] stash 실패"
           git pull --rebase origin main || echo "[⚠️] rebase 실패"
           git stash pop || echo "[⚠️] stash pop 실패"
-
           git add README.md SECURITY.md
-          if [ -d .tmp ]; then
-            git add .tmp
-          fi
-
+          if [ -d "$TMP_DIR" ]; then git add "$TMP_DIR"; fi
           git commit -m "문서: README & SECURITY 업데이트 [skip ci]" || echo "[ℹ️] 커밋할 변경사항이 없습니다"
-
           if git push origin HEAD:main; then
-            echo "[🚀] 정상 Push 완료"
+            echo "[🚀] 정상 Push 완료";
           else
-            echo "[⚠️] PR 생성 모드로 전환"
-            BRANCH="update-docs-$(date +%s)"
-            git checkout -b "$BRANCH"
-            git push origin "$BRANCH"
+            echo "[⚠️] PR 생성 모드로 전환";
+            BRANCH="update-docs-$(date +%s)";
+            git checkout -b "$BRANCH";
+            git push origin "$BRANCH";
             gh pr create \
               --title "문서: README & SECURITY 업데이트" \
               --body "자동 생성된 PR입니다." \
               --base main \
-              --label documentation,auto-generated \
-              || echo "[⚠️] PR 생성 실패"
-            echo "[📦] PR 생성 완료"
+              --label documentation,auto-generated || echo "[⚠️] PR 생성 실패";
+            echo "[📦] PR 생성 완료";
           fi
+```
