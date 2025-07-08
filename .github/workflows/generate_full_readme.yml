@@ -38,13 +38,14 @@ jobs:
           echo "[🔧] apt-get dist-upgrade 시작..."
           sudo apt-get dist-upgrade -y
           echo "[🔧] gh, jq, parallel 설치 시작..."
-          sudo apt-get install -y gh jq parallel
+          sudo apt-get install -y gh jq parallel python3-pip
           echo "[🔧] parallel 업그레이드 시작..."
           sudo apt-get install --only-upgrade -y parallel
-          echo "[🔧] 설치 완료 확인: gh, jq, parallel"
+          echo "[🔧] 설치 완료 확인: gh, jq, parallel, pip"
           gh --version
           jq --version
           parallel --version
+          pip3 --version
 
       - name: 🚀 Docker Pull Prometheus
         run: |
@@ -52,13 +53,40 @@ jobs:
           docker pull prom/prometheus:v2.53.5
           echo "[✅] Prometheus 이미지 준비 완료"
 
+      - name: 🔌 Install & Launch REST Server for Workflows
+        run: |
+          echo "[🔌] Flask 설치 환경 준비..."
+          echo "[🔌] Flask 설치 중..."
+          pip3 install flask
+          echo "[🔌] REST 서버 스크립트 작성 준비..."
+          echo "[🔌] rest_server.py 파일 생성 시작..."
+          cat << 'EOF' > rest_server.py
+          from flask import Flask, jsonify, send_from_directory
+          import os
+          app = Flask(__name__)
+          WORKFLOW_DIR = '.github/workflows'
+          @app.route('/files')
+          def list_files():
+              files = [f for f in os.listdir(WORKFLOW_DIR) if f.endswith(('.yml','.yaml'))]
+              return jsonify(files)
+          @app.route('/file/<path:fname>')
+          def get_file(fname):
+              return send_from_directory(WORKFLOW_DIR, fname)
+          if __name__=='__main__':
+              app.run(host='0.0.0.0', port=5000)
+          EOF
+          echo "[🔌] rest_server.py 파일 생성 완료"
+          echo "[🔌] REST 서버 시작 중 (백그라운드 실행)..."
+          nohup python3 rest_server.py > logs/rest_server.log 2>&1 &
+          echo "[🔌] REST 서버가 포트 5000에서 실행 중"
+
       - name: 📈 REST 기반 워크플로우 통계 수집
         run: |
-          echo "[📈] repo workflows 목록 조회 시작..."
+          echo "[📈] REST로 워크플로우 파일 목록 조회 중..."
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
-          echo "[📈] 워크플로우 리스트 가져오는 중..."
-          gh api repos/${OWNER}/${REPO}/actions/workflows --jq '.workflows[] | "\(.id)||\(.name)"' > .tmp/workflow_list.txt
+          FILES=$(curl -s http://localhost:5000/files | jq -r '.[]')
+          echo "[📈] 발견된 워크플로우 파일: $FILES"
           
           echo "[📊] 통계 헤더 작성 중..."
           {
@@ -68,10 +96,11 @@ jobs:
             echo "|----------------|--------:|--------:|--------:|--------:|"
           } > .tmp/workflows.md.body
           
-          echo "[📈] 각 워크플로우 실행 통계 계산 중..."
-          while IFS="||" read -r ID NAME; do
-            echo "[📈] '$NAME' runs 조회..."
-            RUNS_JSON=$(gh api repos/${OWNER}/${REPO}/actions/workflows/${ID}/runs?per_page=30)
+          for fname in $FILES; do
+            echo "[📈] '$fname' 워크플로우 ID 조회 중..."
+            WID=$(gh api repos/${OWNER}/${REPO}/actions/workflows/${fname} --jq '.workflow.id')
+            echo "[📈] ID=$WID; runs 조회 중..."
+            RUNS_JSON=$(gh api repos/${OWNER}/${REPO}/actions/workflows/${WID}/runs?per_page=30)
             TOTAL=$(echo "${RUNS_JSON}" | jq '.workflow_runs | length')
             SUCCESS=$(echo "${RUNS_JSON}" | jq '[.workflow_runs[] | select(.conclusion=="success")] | length')
             FAILURE=$((TOTAL - SUCCESS))
@@ -80,10 +109,10 @@ jobs:
             else
               RATE="N/A"
             fi
-            echo "| ${NAME} | ${TOTAL} | ${SUCCESS} | ${FAILURE} | ${RATE}% |"
+            echo "| ${fname} | ${TOTAL} | ${SUCCESS} | ${FAILURE} | ${RATE}% |"
           done >> .tmp/workflows.md.body
 
-          echo "[📂] 최종 .tmp/workflows.md 생성..."
+          echo "[📂] .tmp/workflows.md 생성 중..."
           mv .tmp/workflows.md.body .tmp/workflows.md
           echo "[✅] .tmp/workflows.md 생성 완료"
           cat .tmp/workflows.md
@@ -114,8 +143,8 @@ jobs:
             echo "# 👨‍💻 김병권 포토포리오"
             echo ""
             for f in .github/workflows/*.yml; do
-              BADGE=$(basename "$f")
-              echo "[![${BADGE}](https://github.com/${REPO}/actions/workflows/${BADGE}/badge.svg)](https://github.com/${REPO}/actions/workflows/${BADGE})"
+              BADGE_NAME=$(basename "$f")
+              echo "[![${BADGE_NAME}](https://github.com/${REPO}/actions/workflows/${BADGE_NAME}/badge.svg)](https://github.com/${REPO}/actions/workflows/${BADGE_NAME})"
             done
             echo ""
             echo "자동으로 관리되는 프로젝트입니다. 매 5분마다 업데이트됩니다."
