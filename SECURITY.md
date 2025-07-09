@@ -214,6 +214,11 @@ Tell them where to go, how often they can expect updates, and what to expect if 
 - [ ] encrypt-decrypt-tag-label.yml: Secret detection scan
 - [ ] encrypt-decrypt-tag-label.yml: Dependency scanning enabled
 - [ ] encrypt-decrypt-tag-label.yml: Container scanning enabled
+- [ ] event-monitoring.yml: YAML syntax validation
+- [ ] event-monitoring.yml: Permissions review
+- [ ] event-monitoring.yml: Secret detection scan
+- [ ] event-monitoring.yml: Dependency scanning enabled
+- [ ] event-monitoring.yml: Container scanning enabled
 - [ ] finance-backup-multi.yml: YAML syntax validation
 - [ ] finance-backup-multi.yml: Permissions review
 - [ ] finance-backup-multi.yml: Secret detection scan
@@ -324,11 +329,6 @@ Tell them where to go, how often they can expect updates, and what to expect if 
 - [ ] mysql-upgrade.yml: Secret detection scan
 - [ ] mysql-upgrade.yml: Dependency scanning enabled
 - [ ] mysql-upgrade.yml: Container scanning enabled
-- [ ] osv-scan.yml: YAML syntax validation
-- [ ] osv-scan.yml: Permissions review
-- [ ] osv-scan.yml: Secret detection scan
-- [ ] osv-scan.yml: Dependency scanning enabled
-- [ ] osv-scan.yml: Container scanning enabled
 - [ ] puppet-lint.yml: YAML syntax validation
 - [ ] puppet-lint.yml: Permissions review
 - [ ] puppet-lint.yml: Secret detection scan

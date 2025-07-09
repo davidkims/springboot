@@ -40,6 +40,7 @@
 [![docker-setup.yml](https://github.com/davidkims/springboot/actions/workflows/docker-setup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/docker-setup.yml)
 [![download-security-regulations.yml](https://github.com/davidkims/springboot/actions/workflows/download-security-regulations.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/download-security-regulations.yml)
 [![encrypt-decrypt-tag-label.yml](https://github.com/davidkims/springboot/actions/workflows/encrypt-decrypt-tag-label.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/encrypt-decrypt-tag-label.yml)
+[![event-monitoring.yml](https://github.com/davidkims/springboot/actions/workflows/event-monitoring.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/event-monitoring.yml)
 [![finance-backup-multi.yml](https://github.com/davidkims/springboot/actions/workflows/finance-backup-multi.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/finance-backup-multi.yml)
 [![finance-docker.yml](https://github.com/davidkims/springboot/actions/workflows/finance-docker.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/finance-docker.yml)
 [![finance-smart-backup1.yml](https://github.com/davidkims/springboot/actions/workflows/finance-smart-backup1.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/finance-smart-backup1.yml)
@@ -62,7 +63,6 @@
 [![mysql-setup-and-query.yml](https://github.com/davidkims/springboot/actions/workflows/mysql-setup-and-query.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-setup-and-query.yml)
 [![mysql-setup.yml](https://github.com/davidkims/springboot/actions/workflows/mysql-setup.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-setup.yml)
 [![mysql-upgrade.yml](https://github.com/davidkims/springboot/actions/workflows/mysql-upgrade.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/mysql-upgrade.yml)
-[![osv-scan.yml](https://github.com/davidkims/springboot/actions/workflows/osv-scan.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/osv-scan.yml)
 [![puppet-lint.yml](https://github.com/davidkims/springboot/actions/workflows/puppet-lint.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/puppet-lint.yml)
 [![python-ci.yml](https://github.com/davidkims/springboot/actions/workflows/python-ci.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/python-ci.yml)
 [![python-publish.yml](https://github.com/davidkims/springboot/actions/workflows/python-publish.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/python-publish.yml)
@@ -97,11 +97,7 @@
 - 자기개발 메시지: https://www.youtube.com/watch?v=G8lvQRALa6s
 
 ## 📅 마지막 업데이트
-<<<<<<< Updated upstream
-- 2025-07-09 14:14:33 KST
-=======
-- 2025-07-09 14:16:07 KST
->>>>>>> Stashed changes
+- 2025-07-09 14:21:12 KST
 
 ## ✅ 현재 브랜치
 - main
