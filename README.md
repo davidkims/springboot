@@ -1,5 +1,6 @@
 # 👨‍💻 김병권 포토포리오
 
+[![MetricsServer.yml](https://github.com/davidkims/springboot/actions/workflows/MetricsServer.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/MetricsServer.yml)
 [![Pages Auto Indexing.yml](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml)
 [![Release.yml](https://github.com/davidkims/springboot/actions/workflows/Release.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Release.yml)
 [![ScorecardAnalysis.yml](https://github.com/davidkims/springboot/actions/workflows/ScorecardAnalysis.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/ScorecardAnalysis.yml)
@@ -95,7 +96,7 @@
 - 자기개발 메시지: https://www.youtube.com/watch?v=G8lvQRALa6s
 
 ## 📅 마지막 업데이트
-- 2025-07-09 12:36:03 KST
+- 2025-07-09 12:42:35 KST
 
 ## ✅ 현재 브랜치
 - main

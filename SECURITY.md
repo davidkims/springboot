@@ -14,6 +14,11 @@ Tell them where to go, how often they can expect updates, and what to expect if 
 
 [🔧] Workflow Validation Checklist 추가
 ## Workflow Validation Checklist
+- [ ] MetricsServer.yml: YAML syntax validation
+- [ ] MetricsServer.yml: Permissions review
+- [ ] MetricsServer.yml: Secret detection scan
+- [ ] MetricsServer.yml: Dependency scanning enabled
+- [ ] MetricsServer.yml: Container scanning enabled
 - [ ] Pages Auto Indexing.yml: YAML syntax validation
 - [ ] Pages Auto Indexing.yml: Permissions review
 - [ ] Pages Auto Indexing.yml: Secret detection scan
