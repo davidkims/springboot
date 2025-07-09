@@ -97,9 +97,13 @@
 
 ## 📅 마지막 업데이트
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 - 2025-07-09 13:29:22 KST
 =======
 - 2025-07-09 13:33:48 KST
+>>>>>>> Stashed changes
+=======
+- 2025-07-09 13:34:31 KST
 >>>>>>> Stashed changes
 
 ## ✅ 현재 브랜치
