@@ -14,6 +14,11 @@ Tell them where to go, how often they can expect updates, and what to expect if 
 
 [🔧] Workflow Validation Checklist 추가
 ## Workflow Validation Checklist
+- [ ] AttachAdditionalDisk.yml: YAML syntax validation
+- [ ] AttachAdditionalDisk.yml: Permissions review
+- [ ] AttachAdditionalDisk.yml: Secret detection scan
+- [ ] AttachAdditionalDisk.yml: Dependency scanning enabled
+- [ ] AttachAdditionalDisk.yml: Container scanning enabled
 - [ ] MetricsServer.yml: YAML syntax validation
 - [ ] MetricsServer.yml: Permissions review
 - [ ] MetricsServer.yml: Secret detection scan

@@ -1,5 +1,6 @@
 # 👨‍💻 김병권 포토포리오
 
+[![AttachAdditionalDisk.yml](https://github.com/davidkims/springboot/actions/workflows/AttachAdditionalDisk.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/AttachAdditionalDisk.yml)
 [![MetricsServer.yml](https://github.com/davidkims/springboot/actions/workflows/MetricsServer.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/MetricsServer.yml)
 [![Pages Auto Indexing.yml](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml)
 [![Release.yml](https://github.com/davidkims/springboot/actions/workflows/Release.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Release.yml)
@@ -96,15 +97,7 @@
 - 자기개발 메시지: https://www.youtube.com/watch?v=G8lvQRALa6s
 
 ## 📅 마지막 업데이트
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-- 2025-07-09 13:46:49 KST
-=======
-- 2025-07-09 13:48:31 KST
->>>>>>> Stashed changes
-=======
-- 2025-07-09 13:50:24 KST
->>>>>>> Stashed changes
+- 2025-07-09 13:54:37 KST
 
 ## ✅ 현재 브랜치
 - main
