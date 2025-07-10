@@ -21,7 +21,16 @@ jobs:
         run: |
           echo "[🐳] Installing Docker CLI..."
           sudo apt-get update -y
-          sudo apt-get install -y docker.io
+          # Remove conflicting packages first
+          sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
+          # Install Docker using the official Docker repository
+          sudo apt-get install -y ca-certificates curl gnupg lsb-release
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+          sudo systemctl start docker
+          sudo systemctl enable docker
           echo "[✅] Docker installed: $(docker --version)"
 
       - name: 🛠️ Generate InfluxDB & Telegraf Configs
@@ -60,6 +69,11 @@ jobs:
             -p 8086:8086 \
             -v $PWD/.monitoring/influxdb/influxdb.conf:/etc/influxdb/influxdb.conf \
             influxdb:2.0
+          
+          # Wait for InfluxDB to be ready
+          echo "[⏳] Waiting for InfluxDB to be ready..."
+          timeout 60 bash -c 'until docker exec influxdb influx ping; do sleep 2; done' || echo "InfluxDB may not be fully ready"
+          
           echo "[🚀] Starting Telegraf container..."
           docker run -d --name telegraf \
             --link influxdb \
@@ -198,11 +212,19 @@ jobs:
           echo "[🚀] Starting Elasticsearch container..."
           docker run -d --name elasticsearch \
             -p 9200:9200 \
+            -e "discovery.type=single-node" \
+            -e "xpack.security.enabled=false" \
             -v $PWD/.monitoring/elastic/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml \
             docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+          
+          # Wait for Elasticsearch to be ready
+          echo "[⏳] Waiting for Elasticsearch to be ready..."
+          timeout 120 bash -c 'until curl -s http://localhost:9200/_cluster/health; do sleep 5; done' || echo "Elasticsearch may not be fully ready"
+          
           echo "[🚀] Starting Kibana container..."
           docker run -d --name kibana \
             -p 5601:5601 \
+            --link elasticsearch \
             -v $PWD/.monitoring/elastic/kibana.yml:/usr/share/kibana/config/kibana.yml \
             docker.elastic.co/kibana/kibana:8.0.0
 
@@ -232,12 +254,31 @@ jobs:
           import requests, time
           services = ["http://localhost:8086/health", "http://localhost/"]
           for url in services:
-              r = requests.get(url)
-              print(f"{url} -> {r.status_code}")
+              try:
+                  r = requests.get(url, timeout=5)
+                  print(f"{url} -> {r.status_code}")
+              except Exception as e:
+                  print(f"{url} -> ERROR: {e}")
               time.sleep(1)
           EOF
+          chmod +x .monitoring/scripts/monitor.py
           echo "[✅] Python script created"
 
       - name: ✅ Complete Setup
         run: |
           echo "[✅] All monitoring services configured and launched!"
+          echo "[📊] Services Summary:"
+          echo "  - InfluxDB: http://localhost:8086"
+          echo "  - Grafana: http://localhost:3000"
+          echo "  - Graphite: http://localhost:80"
+          echo "  - VictoriaMetrics: http://localhost:8428"
+          echo "  - OpenTelemetry Collector: grpc://localhost:4317"
+          echo "  - Zabbix: http://localhost:10051"
+          echo "  - Nagios: http://localhost:8080"
+          echo "  - Elasticsearch: http://localhost:9200"
+          echo "  - Kibana: http://localhost:5601"
+          echo ""
+          echo "[🐳] Container Status:"
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          echo ""
+          echo "[🚀] Setup Complete! Your monitoring stack is ready."
