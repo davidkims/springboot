@@ -1,4 +1,4 @@
-# 👨‍💻 김병권 포토포리오
+# 👨‍💻 김병권 포트폴리오
 
 [![MetricsServer.yml](https://github.com/davidkims/springboot/actions/workflows/MetricsServer.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/MetricsServer.yml)
 [![Pages Auto Indexing.yml](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml/badge.svg)](https://github.com/davidkims/springboot/actions/workflows/Pages Auto Indexing.yml)
@@ -94,14 +94,9 @@
 - 이메일2: kwonny1302@gmail.com
 - 전문 범위: 백업, GitHub Actions 자동화, DevOps
 - 스택: Python, Java, Spring Boot, Docker, PostgreSQL, MySQL
-- 자기개발 메시지: https://www.youtube.com/watch?v=G8lvQRALa6s
 
 ## 📅 마지막 업데이트
-<<<<<<< Updated upstream
-- 2025-07-10 13:05:06 KST
-=======
-- 2025-07-10 13:06:45 KST
->>>>>>> Stashed changes
+- 2025-07-10 13:22:03 KST
 
 ## ✅ 현재 브랜치
 - main
