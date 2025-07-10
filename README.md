@@ -96,11 +96,7 @@
 - 스택: Python, Java, Spring Boot, Docker, PostgreSQL, MySQL
 
 ## 📅 마지막 업데이트
-<<<<<<< Updated upstream
-- 2025-07-10 13:22:03 KST
-=======
-- 2025-07-10 13:24:24 KST
->>>>>>> Stashed changes
+- 2025-07-10 13:29:36 KST
 
 ## ✅ 현재 브랜치
 - main
