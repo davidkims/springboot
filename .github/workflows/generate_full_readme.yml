@@ -1,261 +1,243 @@
-name: 📓 포트폴리오 + 워크플로 통계로 README & SECURITY 업데이트
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+name: 📊 Full Monitoring Stack Setup
 
 on:
-  push:
-    paths:
-      - '.github/workflows/**'
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-  actions: write
-
 jobs:
-  update_docs:
+  setup_monitoring:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MAX_LATENCY_MS: 1000
 
     steps:
-      - name: 📅 Checkout Repository
+      - name: 📥 Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: 📁 Ensure Required Directories
+      - name: 📁 Create Monitoring Directories
         run: |
-          echo "[📁] 필요한 디렉토리 생성 중..."
-          mkdir -p .tmp prometheus_data backups logs metrics
-          echo "[✅] 디렉토리 생성 완료: .tmp, prometheus_data, backups, logs, metrics"
+          echo "[📁] Creating base monitoring directories..."
+          mkdir -p .monitoring/{influxdb,telegraf,graphite,victoriametrics,otel,statsd,zabbix,nagios,datadog,elastic,sql,scripts,python}
+          echo "[✅] Directories created under .monitoring/"
 
-      - name: 🔧 Install System Packages & Tools
+      - name: 🐳 Install Docker CLI
         run: |
-          echo "[🔧] apt-get update 시작..."
+          echo "[🐳] Installing Docker CLI..."
           sudo apt-get update -y
-          echo "[🔧] apt-get dist-upgrade 시작..."
-          sudo apt-get dist-upgrade -y
-          echo "[🔧] gh, jq, parallel 설치 시작..."
-          sudo apt-get install -y gh jq parallel python3-pip
-          echo "[🔧] parallel 업그레이드 시작..."
-          sudo apt-get install --only-upgrade -y parallel
-          echo "[🔧] 설치 완료 확인: gh, jq, parallel, pip"
-          gh --version
-          jq --version
-          parallel --version
-          pip3 --version
+          sudo apt-get install -y docker.io
+          echo "[✅] Docker installed: $(docker --version)"
 
-      - name: 🚀 Docker Pull Prometheus
+      - name: 🛠️ Generate InfluxDB & Telegraf Configs
         run: |
-          echo "[🚀] Prometheus Docker 이미지 pull 중..."
-          docker pull prom/prometheus:v2.53.5
-          echo "[✅] Prometheus 이미지 준비 완료"
+          echo "[🛠️] Generating InfluxDB & Telegraf Configs..."
+          echo "[🛠️] Generating InfluxDB config..."
+          cat << 'EOF' > .monitoring/influxdb/influxdb.conf
+[meta]
+  dir = "/var/lib/influxdb/meta"
+[data]
+  dir = "/var/lib/influxdb/data"
+  engine = "tsm1"
+[http]
+  bind-address = ":8086"
+EOF
+          echo "[🛠️] Generating Telegraf config..."
+          cat << 'EOF' > .monitoring/telegraf/telegraf.conf
+[[outputs.influxdb_v2]]
+  urls = ["http://influxdb:8086"]
+  token = "YOUR_TOKEN"
+  organization = "org"
+  bucket = "metrics"
 
-      - name: 🔌 Install & Launch REST Server for Workflows
+[[inputs.cpu]]
+  percpu = true
+  totalcpu = true
+[[inputs.mem]]
+EOF
+          echo "[✅] InfluxDB and Telegraf configs created"
+
+      - name: 🚀 Launch InfluxDB & Telegraf
         run: |
-          echo "[🔌] REST 서버 스크립트 완료"
-          echo "[🔌] Inline Python REST 서버 시작 준비"
-          nohup python3 - <<'PYCODE' > logs/rest_server.log 2>&1 &
-          echo "[🔌] import Flask modules"
-          from flask import Flask, jsonify, send_from_directory
-          echo "[🔌] import os module"
-          import os
+          echo "[🚀] Launching InfluxDB & Telegraf..."
+          echo "[🚀] Starting InfluxDB container..."
+          docker run -d --name influxdb \
+            -p 8086:8086 \
+            -v $PWD/.monitoring/influxdb/influxdb.conf:/etc/influxdb/influxdb.conf \
+            influxdb:2.0
+          echo "[🚀] Starting Telegraf container..."
+          docker run -d --name telegraf \
+            --link influxdb \
+            -v $PWD/.monitoring/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf \
+            telegraf:1.20
 
-          echo "[🔌] Create Flask app instance"
-          app = Flask(__name__)
-          echo "[🔌] Set WORKFLOW_DIR variable"
-          WORKFLOW_DIR = '.github/workflows'
-
-          echo "[🔌] Define /files endpoint"
-          @app.route('/files')
-          echo "[🔌] Define list_files() function"
-          def list_files():
-            echo "[🔌] Listing YAML workflow files"
-            files = [f for f in os.listdir(WORKFLOW_DIR) if f.endswith(('.yml','.yaml'))]
-            echo "[🔌] Returning JSON response"
-            return jsonify(files)
-
-          echo "[🔌] Define /file/<fname> endpoint"
-          @app.route('/file/<path:fname>')
-          echo "[🔌] Define get_file() function"
-          def get_file(fname):
-            echo "[🔌] Sending requested file"
-            return send_from_directory(WORKFLOW_DIR, fname)
-
-          echo "[🔌] If main, run Flask app"
-          if __name__=='__main__':
-            echo "[🔌] Running app on 0.0.0.0:5000"
-            app.run(host='0.0.0.0', port=5000)
-          echo "[🔌] REST 서버 inline 스크립트 블록 종료"
-          PYCODE
-
-      - name: 📈 REST 기반 워크플로우 통계 수집
+      - name: 🛠️ Generate Graphite & StatsD Configs
         run: |
-          echo "[📈] REST로 워크플로우 파일 목록 조회 중..."
-          OWNER="${{ github.repository_owner }}"
-          REPO="${{ github.event.repository.name }}"
-          FILES=$(curl -s http://localhost:5000/files | jq -r '.[]')
-          echo "[📈] 발견된 워크플로우 파일: $FILES"
+          echo "[🛠️] Generating Graphite & StatsD Configs..."
+          echo "[🛠️] Generating Graphite config..."
+          cat << 'EOF' > .monitoring/graphite/storage-schemas.conf
+[default]
+pattern = .*
+retentions = 60s:30d
+EOF
+          echo "[🛠️] Generating StatsD example script..."
+          cat << 'EOF' > .monitoring/statsd/example_statsd.py
+#!/usr/bin/env python3
+import statsd
+c = statsd.StatsClient('localhost', 8125)
+c.gauge('example.metric', 42)
+EOF
+          echo "[✅] Graphite and StatsD configs created"
 
-          echo "[📊] 통계 헤더 작성 중..."
-          {
-            echo "## ⚙️ GitHub Actions 워크플로우 목록 및 통계"
-            echo ""
-            echo "| 워크플로우 이름 | 실행 수 | 성공 수 | 실패 수 | 성공률 |"
-            echo "|----------------|--------:|--------:|--------:|--------:|"
-          } > .tmp/workflows.md.body
-
-          for fname in $FILES; do
-            echo "[📈] '$fname' 워크플로우 ID 조회 중..."
-            WID=$(gh api repos/${OWNER}/${REPO}/actions/workflows/${fname} --jq '.workflow.id')
-            echo "[📈] ID=$WID; runs 조회 중..."
-            RUNS_JSON=$(gh api repos/${OWNER}/${REPO}/actions/workflows/${WID}/runs?per_page=30)
-            TOTAL=$(echo "${RUNS_JSON}" | jq '.workflow_runs | length')
-            SUCCESS=$(echo "${RUNS_JSON}" | jq '[.workflow_runs[] | select(.conclusion=="success")] | length')
-            FAILURE=$((TOTAL - SUCCESS))
-            if [ "$TOTAL" -gt 0 ]; then
-              RATE=$(awk "BEGIN {printf \"%.1f\", (${SUCCESS}/${TOTAL})*100}")
-            else
-              RATE="N/A"
-            fi
-            echo "| ${fname} | ${TOTAL} | ${SUCCESS} | ${FAILURE} | ${RATE}% |"
-          done >> .tmp/workflows.md.body
-
-          echo "[📂] .tmp/workflows.md 생성 중..."
-          mv .tmp/workflows.md.body .tmp/workflows.md
-          echo "[✅] .tmp/workflows.md 생성 완료"
-          cat .tmp/workflows.md
-
-      - name: 💬 Show Collected Statistics
+      - name: 🚀 Launch Graphite & StatsD
         run: |
-          echo "[💬] 수집된 워크플로우 통계:"
-          cat .tmp/workflows.md
+          echo "[🚀] Launching Graphite & StatsD..."
+          echo "[🚀] Starting Graphite+StatsD container..."
+          docker run -d --name graphite-statsd \
+            -p 80:80 -p 2003-2004:2003-2004/udp \
+            -v $PWD/.monitoring/graphite/storage-schemas.conf:/opt/graphite/conf/storage-schemas.conf \
+            graphiteapp/graphite-statsd
 
-      - name: 📂 Copy statistics to prometheus_data
+      - name: 🛠️ Generate VictoriaMetrics Config
         run: |
-          echo "[📂] 통계 파일 복사 중..."
-          mkdir -p prometheus_data
-          cp .tmp/workflows.md prometheus_data/workflows.md
-          echo "[✅] prometheus_data에 통계 저장 완료"
+          echo "[🛠️] Generating VictoriaMetrics Config..."
+          echo "[🛠️] No config needed for single-node VictoriaMetrics"
 
-      - name: 📦 Upload Prometheus metrics artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: prometheus-metrics-data
-          path: prometheus_data/
-
-      - name: 📄 Generate README.md
+      - name: 🚀 Launch VictoriaMetrics
         run: |
-          echo "[📄] README.md 생성 시작"
-          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S KST')
-          echo "[⏰] 타임스탬프: $TIMESTAMP"
-          REPO="${{ github.repository }}"
-          echo "[🔗] Repository: $REPO"
-          BRANCH="${{ github.ref_name }}"
-          echo "[🌿] Branch: $BRANCH"
+          echo "[🚀] Launching VictoriaMetrics..."
+          echo "[🚀] Starting VictoriaMetrics container..."
+          docker run -d --name victoriametrics \
+            -p 8428:8428 \
+            victoriametrics/victoria-metrics:latest
 
-          {
-            echo "# 👨‍💻 김병권 포트폴리오"
-            echo ""
-            for f in .github/workflows/*.yml; do
-              BADGE_NAME=$(basename "$f")
-              echo "[![${BADGE_NAME}](https://github.com/${REPO}/actions/workflows/${BADGE_NAME}/badge.svg)](https://github.com/${REPO}/actions/workflows/${BADGE_NAME})"
-            done
-            echo ""
-            echo "자동으로 관리되는 프로젝트입니다. 매 5분마다 업데이트됩니다."
-            echo ""
-            echo "## 🤖 디바이저 소개"
-            echo "- 이름: 김병권"
-            echo "- 이메일1: byungkwonkim95@gmail.com"
-            echo "- 이메일2: kwonny1302@gmail.com"
-            echo "- 전문 범위: 백업, GitHub Actions 자동화, DevOps"
-            echo "- 스택: Python, Java, Spring Boot, Docker, PostgreSQL, MySQL"
-            echo ""
-            echo "## 📅 마지막 업데이트"
-            echo "- $TIMESTAMP"
-            echo ""
-            echo "## ✅ 현재 브랜치"
-            echo "- $BRANCH"
-            echo ""
-            echo "## 🔧 빌드 방식 배지"
-            echo "![Build](https://github.com/${REPO}/actions/workflows/generate_full_readme.yml/badge.svg)"
-            echo ""
-            cat .tmp/workflows.md
-          } > README.md
-          echo "[✅] README.md 생성 완료"
-
-      - name: 🛡️ Generate SECURITY.md
+      - name: 🛠️ Generate OpenTelemetry Collector Config
         run: |
-          echo "[🛡️] SECURITY.md 생성 시작"
-          echo "[🔧] 기본 헤더 작성" > SECURITY.md
-          echo "[🔧] Supported Versions 표 작성" >> SECURITY.md
-          echo "| Version | Supported          |" >> SECURITY.md
-          echo "| ------- | ------------------ |" >> SECURITY.md
-          echo "| 5.1.x   | :white_check_mark: |" >> SECURITY.md
-          echo "| 5.0.x   | :x:                |" >> SECURITY.md
-          echo "| 4.0.x   | :white_check_mark: |" >> SECURITY.md
-          echo "| < 4.0   | :x:                |" >> SECURITY.md
-          echo "" >> SECURITY.md
-          echo "[🔧] Reporting a Vulnerability 섹션 추가" >> SECURITY.md
-          echo "## Reporting a Vulnerability" >> SECURITY.md
-          echo "Use this section to tell people how to report a vulnerability." >> SECURITY.md
-          echo "Tell them where to go, how often they can expect updates, and what to expect if it’s accepted or declined." >> SECURITY.md
-          echo "" >> SECURITY.md
-          echo "[🔧] Workflow Validation Checklist 추가" >> SECURITY.md
-          echo "## Workflow Validation Checklist" >> SECURITY.md
-          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
-            base=$(basename "$f")
-            echo "[🗒️] Adding checks for $base"
-            echo "- [ ] $base: YAML syntax validation"         >> SECURITY.md
-            echo "- [ ] $base: Permissions review"             >> SECURITY.md
-            echo "- [ ] $base: Secret detection scan"           >> SECURITY.md
-            echo "- [ ] $base: Dependency scanning enabled"     >> SECURITY.md
-            echo "- [ ] $base: Container scanning enabled"      >> SECURITY.md
-          done
-          echo "[✅] SECURITY.md 업데이트 완료"
+          echo "[🛠️] Generating OpenTelemetry Collector Config..."
+          echo "[🛠️] Generating Otel Collector config..."
+          cat << 'EOF' > .monitoring/otel/collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+exporters:
+  logging:
+    logLevel: debug
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [logging]
+EOF
+          echo "[✅] Otel Collector config created"
 
-      - name: 🔁 Commit / Push or PR
-        shell: bash
+      - name: 🚀 Launch OpenTelemetry Collector
         run: |
-          echo "[🔁] 변경사항 확인 및 Git 설정"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          echo "[🔍] README.md 및 SECURITY.md diff 확인"
-          if git diff --exit-code --quiet README.md SECURITY.md; then
-            echo "[⏭️] 변경사항 없음"
-            exit 0
-          fi
-          echo "[✅] 변경사항 감지됨"
-          echo "[📦] Stash 및 Pull 준비"
-          git stash --include-untracked
-          git pull --rebase origin main || echo "[⚠️] rebase 실패"
-          git stash pop || echo "[⚠️] stash pop 실패"
-          echo "[📝] 파일 추가 및 커밋"
-          git add README.md SECURITY.md
-          git commit -m "문서: README & SECURITY 업데이트 [skip ci]"
+          echo "[🚀] Launching OpenTelemetry Collector..."
+          echo "[🚀] Starting Otel Collector container..."
+          docker run -d --name otel-collector \
+            -p 4317:4317 -p 55681:55681 \
+            -v $PWD/.monitoring/otel/collector-config.yaml:/etc/otel/config.yaml \
+            otel/opentelemetry-collector:latest \
+            --config /etc/otel/config.yaml
 
-          echo "[🚀] Push 또는 PR 생성"
-          if git push origin HEAD:main; then
-            echo "[🚀] 정상 Push 완료"
-          else
-            echo "[⚠️] 직접 Push 권한 없음 — PR 생성 시도"
-            BRANCH="update-docs-$(date +%s)"
-            git checkout -b "$BRANCH"
-            git push origin "$BRANCH"
-            gh pr create \
-              --title "문서: README & SECURITY 업데이트" \
-              --body "자동 생성된 PR입니다." \
-              --base main \
-              --label documentation,auto-generated \
-              || echo "[⚠️] 라벨 생성 실패"
-            echo "[📦] PR 생성 완료"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MAX_LATENCY_MS: ${{ env.MAX_LATENCY_MS }}
+      - name: 🛠️ Generate Zabbix & Nagios Configs
+        run: |
+          echo "[🛠️] Generating Zabbix & Nagios Configs..."
+          echo "[🛠️] Generating Zabbix minimal config..."
+          cat << 'EOF' > .monitoring/zabbix/zabbix_server.conf
+LogFile=/var/log/zabbix/zabbix_server.log
+DBHost=postgres
+DBName=zabbix
+DBUser=zabbix
+DBPassword=zabbix
+EOF
+          echo "[🛠️] Generating Nagios sample host config..."
+          cat << 'EOF' > .monitoring/nagios/hosts.cfg
+define host {
+  host_name localhost
+  address 127.0.0.1
+  use generic-host
+}
+EOF
+          echo "[✅] Zabbix and Nagios configs created"
+
+      - name: 🚀 Launch Zabbix & Nagios
+        run: |
+          echo "[🚀] Launching Zabbix & Nagios..."
+          echo "[🚀] Starting Zabbix server container..."
+          docker run -d --name zabbix-server \
+            -p 10051:10051 \
+            zabbix/zabbix-server-pgsql:latest
+          echo "[🚀] Starting Nagios container..."
+          docker run -d --name nagios \
+            -p 8080:80 \
+            jasonrivers/nagios:latest
+
+      - name: 🛠️ Install Datadog Agent
+        run: |
+          echo "[🛠️] Installing Datadog Agent..."
+          DD_API_KEY=YOUR_DATADOG_API_KEY bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
+          echo "[✅] Datadog Agent installed"
+
+      - name: 🛠️ Generate Elastic Stack Configs
+        run: |
+          echo "[🛠️] Generating Elastic Stack Configs..."
+          echo "[🛠️] Generating Elasticsearch yml..."
+          cat << 'EOF' > .monitoring/elastic/elasticsearch.yml
+cluster.name: "monitoring"
+network.host: 0.0.0.0
+http.port: 9200
+EOF
+          echo "[🛠️] Generating Kibana yml..."
+          cat << 'EOF' > .monitoring/elastic/kibana.yml
+server.host: "0.0.0.0"
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+EOF
+          echo "[✅] Elastic configs created"
+
+      - name: 🚀 Launch Elastic Stack
+        run: |
+          echo "[🚀] Launching Elastic Stack..."
+          echo "[🚀] Starting Elasticsearch container..."
+          docker run -d --name elasticsearch \
+            -p 9200:9200 \
+            -v $PWD/.monitoring/elastic/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml \
+            docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+          echo "[🚀] Starting Kibana container..."
+          docker run -d --name kibana \
+            -p 5601:5601 \
+            -v $PWD/.monitoring/elastic/kibana.yml:/usr/share/kibana/config/kibana.yml \
+            docker.elastic.co/kibana/kibana:8.0.0
+
+      - name: 🗄️ Generate SQL Init Script
+        run: |
+          echo "[🗄️] Generating SQL Init Script..."
+          echo "[🗄️] Generating SQL init script..."
+          cat << 'EOF' > .monitoring/sql/init_metrics.sql
+CREATE DATABASE monitoring;
+\c monitoring
+CREATE TABLE metrics (
+  id SERIAL PRIMARY KEY,
+  service VARCHAR(50),
+  metric VARCHAR(50),
+  value DOUBLE PRECISION,
+  ts TIMESTAMP DEFAULT now()
+);
+EOF
+          echo "[✅] SQL init script created"
+
+      - name: 🐍 Generate Python Monitoring Script
+        run: |
+          echo "[🐍] Generating Python Monitoring Script..."
+          echo "[🐍] Generating Python monitoring script..."
+          cat << 'EOF' > .monitoring/scripts/monitor.py
+#!/usr/bin/env python3
+import requests, time
+services = ["http://localhost:8086/health", "http://localhost/"]
+for url in services:
+    r = requests.get(url)
+    print(f"{url} -> {r.status_code}")
+    time.sleep(1)
+EOF
+          echo "[✅] Python script created"
+
+      - name: ✅ Complete Setup
+        run: |
+          echo "[✅] All monitoring services configured and launched!"
