@@ -97,11 +97,7 @@
 - 자기개발 메시지: https://www.youtube.com/watch?v=G8lvQRALa6s
 
 ## 📅 마지막 업데이트
-<<<<<<< Updated upstream
-- 2025-07-10 12:48:32 KST
-=======
-- 2025-07-10 12:50:18 KST
->>>>>>> Stashed changes
+- 2025-07-10 12:53:23 KST
 
 ## ✅ 현재 브랜치
 - main
