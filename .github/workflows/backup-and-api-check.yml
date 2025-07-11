@@ -1,126 +1,82 @@
-name: 🛡️ Ultimate CodeQL & Scorecard Auto-Upgrade
+name: 🛡️ CodeQL Ultimate Multi-Language Scan (Auto-Detect & Upgrade)
 
 on:
-  schedule:
-    - cron: '0 4 * * *'  # 매일 오전 4시
   workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *'
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
   security-events: write
 
 jobs:
-  secure-scan:
+  codeql-multi:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
-      # 1. Checkout repository (full history)
-      - name: 📦 Checkout repository (full)
+      - name: 📦 Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
-      # 2. CodeQL CLI 최신 설치(강제 업데이트, 최대 업그레이드)
-      - name: 🛠️ Install/Upgrade CodeQL CLI (latest)
+      - name: 🛠️ Install CodeQL CLI
         run: |
-          echo "echo '[🛠️] Installing/Upgrading CodeQL CLI...'"
-          echo '[🛠️] Installing/Upgrading CodeQL CLI...'
+          echo "echo '[🛠️] Installing CodeQL CLI...'"
+          echo '[🛠️] Installing CodeQL CLI...'
           wget -qO- https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-linux64.zip > codeql.zip
           unzip -qo codeql.zip -d $HOME/codeql
           chmod +x $HOME/codeql/codeql/codeql
           echo 'export PATH="$HOME/codeql/codeql:$PATH"' >> $GITHUB_ENV
-          echo "echo '[✅] CodeQL CLI version:'"
           $HOME/codeql/codeql/codeql --version
 
-      # 3. CodeQL 최대 업그레이드 분석 (언어 자동 탐지/최대 옵션/trace)
       - name: 🔍 CodeQL Ultimate Multi-Language Scan
         run: |
-          echo "echo '[🔍] Detecting supported languages...'"
-          echo '[🔍] Detecting supported languages...'
-          langs=$(github/codeql-action/init@v3 --languages | grep -Eo '\b[A-Za-z]+\b' | tr '\n' ',' | sed 's/,$//')
-          if [ -z "$langs" ]; then
-            echo "echo '[⚠️] No supported languages found, defaulting to python,java,javascript.'"
-            langs="python,java,javascript"
+          echo "echo '[🔍] Detecting supported languages in project...'"
+          echo '[🔍] Detecting supported languages in project...'
+
+          detect_langs() {
+            langs=""
+            [ -d src ] && grep -r -q "def " src/ 2>/dev/null && langs="$langs,python"
+            [ -d src ] && grep -r -q "class " src/ 2>/dev/null && langs="$langs,java"
+            [ -d src ] && grep -r -q "function " src/ 2>/dev/null && langs="$langs,javascript"
+            [ -d src ] && grep -r -q "#include" src/ 2>/dev/null && langs="$langs,cpp"
+            [ -f setup.py ] && langs="$langs,python"
+            [ -f pom.xml ] && langs="$langs,java"
+            [ -f package.json ] && langs="$langs,javascript"
+            [ -f main.go ] && langs="$langs,go"
+            [ -f Cargo.toml ] && langs="$langs,cpp"
+            [ -f Gemfile ] && langs="$langs,ruby"
+            langs=$(echo $langs | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+            [ -z "$langs" ] && langs="python,java,javascript"
+            echo $langs
+          }
+
+          langs=$(detect_langs)
+          echo "echo '[🔍] Detected languages: $langs'"
+          echo "[🔍] Detected languages: $langs"
+
+          if [[ "$langs" == *,* ]]; then
+            echo "echo '[⚡] Creating DB for multiple languages ($langs) with --db-cluster ...'"
+            echo "[⚡] Creating DB for multiple languages ($langs) with --db-cluster ..."
+            $HOME/codeql/codeql/codeql database create db-ql --language=$langs --db-cluster --source-root=.
+          else
+            echo "echo '[⚡] Creating DB for $langs...'"
+            echo "[⚡] Creating DB for $langs..."
+            $HOME/codeql/codeql/codeql database create db-ql --language=$langs --source-root=.
           fi
-          echo "echo '[🔍] CodeQL init for: $langs'"
-          echo "[🔍] CodeQL init for: $langs"
-          $HOME/codeql/codeql/codeql database create db-ql --language=$langs --source-root=.
+
           echo "echo '[⚡] CodeQL database created: db-ql'"
           echo '[⚡] CodeQL database created: db-ql'
-          $HOME/codeql/codeql/codeql database analyze db-ql --format=sarifv2.1.0 --output=codeql-report.sarif --threads=2 --ram=4096 --rerun --trace-process --trace-process-level=3 || echo "echo '[⚠️] CodeQL analyze failed!'"
+
+          $HOME/codeql/codeql/codeql database analyze db-ql \
+            --format=sarifv2.1.0 \
+            --output=codeql-report.sarif \
+            --threads=2 --ram=4096 --rerun --trace-process --trace-process-level=3 \
+            || echo "echo '[⚠️] CodeQL analyze failed!'"
+
           echo "echo '[✅] CodeQL SARIF: codeql-report.sarif'"
           echo '[✅] CodeQL SARIF: codeql-report.sarif'
           ls -lh codeql-report.sarif || echo "echo '[⚠️] SARIF file not found'"
 
-      # 4. Upload CodeQL SARIF 결과
       - name: ⬆️ Upload CodeQL SARIF Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: codeql-sarif-ultimate
+          name: codeql-report-sarif
           path: codeql-report.sarif
-
-      # 5. Scorecard CLI 최신 설치 (최대 업그레이드)
-      - name: 🏅 Install/Upgrade OpenSSF Scorecard CLI
-        run: |
-          echo "echo '[🏅] Installing latest OpenSSF Scorecard CLI...'"
-          echo '[🏅] Installing latest OpenSSF Scorecard CLI...'
-          curl -sSfL https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64 -o /usr/local/bin/scorecard
-          chmod +x /usr/local/bin/scorecard
-          echo "echo '[✅] Scorecard version:'"
-          scorecard version || echo "echo '[⚠️] Scorecard version check failed!'"
-
-      # 6. Scorecard 최대 분석 실행 (codeql 동일한 공격적 분석, 모든 옵션)
-      - name: 🕵️ Run Ultimate Scorecard Analysis (All checks, Pipelined)
-        run: |
-          echo "echo '[🕵️] Running Scorecard for repo: ${{ github.repository }} ...'"
-          echo '[🕵️] Running Scorecard for repo: ${{ github.repository }} ...'
-          scorecard --repo="github.com/${{ github.repository }}" --checks=all --format=json --show-details --confidence-level=high --output=scorecard-report.json || echo "echo '[⚠️] Scorecard analysis failed!'"
-          echo "echo '[✅] Scorecard JSON: scorecard-report.json'"
-          echo '[✅] Scorecard JSON: scorecard-report.json'
-          head -n 20 scorecard-report.json || echo "echo '[⚠️] No Scorecard report found'"
-
-      # 7. Upload Scorecard JSON 결과
-      - name: ⬆️ Upload Scorecard JSON Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openssf-scorecard-json
-          path: scorecard-report.json
-
-      # 8. Scorecard/CodeQL 요약 표 생성 및 echo.sh 스크립트 저장
-      - name: 📊 Generate echo.sh (Security Summary)
-        run: |
-          echo "echo '[📊] Generating echo.sh summary...'"
-          echo '[📊] Generating echo.sh summary...'
-          OUT="site/security/echo.sh"
-          mkdir -p site/security
-          echo "#!/bin/bash" > $OUT
-          echo "echo '🔒 CodeQL & Scorecard Ultimate Summary'" >> $OUT
-          echo "echo '---'" >> $OUT
-          if [ -f codeql-report.sarif ]; then
-            findings=$(jq '.runs[].results | length' codeql-report.sarif | awk '{s+=$1}END{print s}')
-            echo "echo 'CodeQL Findings: $findings'" >> $OUT
-          fi
-          if [ -f scorecard-report.json ]; then
-            score=$(jq '.scorecard.score' scorecard-report.json 2>/dev/null || echo "N/A")
-            echo "echo 'Scorecard Score: $score'" >> $OUT
-            jq -r '.checks[] | select(.score < 10) | "echo \"> \(.name): \(.score) - \(.reason)\""' scorecard-report.json >> $OUT
-          fi
-          chmod +x $OUT
-          echo "echo '[✅] echo.sh generated at $OUT'"
-          echo "[✅] echo.sh generated at $OUT"
-
-      - name: ⬆️ Upload echo.sh (summary script)
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-echo-script
-          path: site/security/echo.sh
-
-      # 9. (선택) Scorecard/CodeQL Health 및 슬랙/이메일 연동 추가 확장 가능 (echo 만 남김)
-      - name: 🟢 Finished
-        run: |
-          echo "echo '[🟢] All CodeQL & Scorecard steps complete. 99999$ level security automated.'"
-          echo '[🟢] All CodeQL & Scorecard steps complete. 99999$ level security automated.'
