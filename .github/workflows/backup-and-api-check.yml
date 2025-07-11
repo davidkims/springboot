@@ -9,37 +9,18 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        run: |
-          echo "echo '[📥] Checkout 시작...'" > .echo.00_checkout.sh
-          echo '[📥] Checkout 시작...'
-          git config --global advice.detachedHead false
-          git fetch --all
-          git checkout $GITHUB_SHA
-          echo "echo '[shell, env 직전: Checkout 완료]'"  # 마지막 echo
-        shell: /usr/bin/bash -e {0}
-        env:
-          export PATH: "$HOME/codeql/codeql:$PATH"
+        uses: actions/checkout@v4
 
       - name: 🏗️ Install & Upgrade Build Tools (Full Upgrade+Install+Logging)
         run: |
-          echo "echo '[📂] 디렉토리 생성: .github/codeql-out, .github/log, .echo.*.sh ...'" > .echo.00_dir.sh
           echo '[📂] 디렉토리 생성: .github/codeql-out, .github/log, .echo.*.sh ...'
           mkdir -p .github/codeql-out .github/log
-
-          # 더미 파일 자동 생성 (없으면)
-          touch .github/codeql-out/.keep
-          touch .github/log/.keep
-          touch .echo.00_dir.sh
-
-          # 전체 패키지 최신화
-          echo "echo '[🔄] apt 패키지 전체 최신화...'" > .echo.01_upgrade.sh
+          touch .github/codeql-out/.keep .github/log/.keep .echo.00_dir.sh
           echo '[🔄] apt 패키지 전체 최신화...'
           sudo apt-get update -y | tee .github/log/apt_update.log
           sudo apt-get upgrade -y | tee .github/log/apt_upgrade.log
           sudo apt-get dist-upgrade -y | tee .github/log/apt_dist_upgrade.log
           sudo apt-get autoremove -y | tee .github/log/apt_autoremove.log
-
-          # 빌드 도구 패키지 감지/설치
           PKGS=""
           [ -f pom.xml ] && PKGS="$PKGS maven"
           ([ -f build.gradle ] || [ -f build.gradle.kts ]) && PKGS="$PKGS gradle"
@@ -48,44 +29,28 @@ jobs:
           [ -f main.go ] && PKGS="$PKGS golang"
           [ -f Gemfile ] && PKGS="$PKGS ruby-full"
           [ -f Cargo.toml ] && PKGS="$PKGS cargo"
-          [ -n "$PKGS" ] && (echo "echo '[🛠️] build tool 설치/업그레이드: $PKGS'" > .echo.02_pkg.sh; echo "[🛠️] build tool 설치/업그레이드: $PKGS"; sudo apt-get install --only-upgrade -y $PKGS | tee .github/log/pkg_only_upgrade.log; sudo apt-get install -y $PKGS | tee .github/log/pkg_install.log)
-
-          # 미업그레이드 패키지 체크/echo
+          [ -n "$PKGS" ] && (echo "[🛠️] build tool 설치/업그레이드: $PKGS"; sudo apt-get install --only-upgrade -y $PKGS | tee .github/log/pkg_only_upgrade.log; sudo apt-get install -y $PKGS | tee .github/log/pkg_install.log)
           NOT_UPGRADED=$(apt list --upgradable 2>/dev/null | grep -v "Listing..." | wc -l)
           if [ "$NOT_UPGRADED" -gt 0 ]; then
-            echo "echo '[⚠️] 아직 $NOT_UPGRADED 개 패키지 업그레이드 안됨!'" > .echo.03_warn.sh
             echo "[⚠️] 아직 $NOT_UPGRADED 개 패키지 업그레이드 안됨!"
             apt list --upgradable 2>/dev/null | tee .github/log/not_upgraded_list.log
           else
-            echo "echo '[✅] 모든 패키지 최신!'" > .echo.03_warn.sh
             echo "[✅] 모든 패키지 최신!"
           fi
-
-          # 결과 아티팩트 보장: 더미라도 항상 생성
-          [ -d .github/codeql-out ] || mkdir -p .github/codeql-out
-          [ -d .github/log ] || mkdir -p .github/log
-          touch .github/codeql-out/.keep .github/log/.keep
-
-          # 필수 파일 없을 시 기본 echo/dummy 파일로 보장
           [ -f .echo.01_upgrade.sh ] || echo "echo '[echo] dummy 업그레이드'" > .echo.01_upgrade.sh
           [ -f .echo.02_pkg.sh ] || echo "echo '[echo] dummy 빌드도구'" > .echo.02_pkg.sh
           [ -f .echo.03_warn.sh ] || echo "echo '[echo] dummy 패키지 경고'" > .echo.03_warn.sh
-          # echo script도 .github/codeql-out에 복사
           cp .echo.*.sh .github/codeql-out/ 2>/dev/null || true
-          echo "echo '[shell, env 직전: Install & Upgrade Build Tools 완료]'"  # 마지막 echo
+          echo '[step end: Install & Upgrade Build Tools 완료]'
         shell: /usr/bin/bash -e {0}
         env:
-          export PATH: "$HOME/codeql/codeql:$PATH"
+          PATH: $HOME/codeql/codeql:$PATH
 
       - name: 🔍 CodeQL Detect & Analyze & 복제+아티팩트 보장
         run: |
-          # 디렉토리/더미 echo 생성
           mkdir -p .github/codeql-out
           [ -f .github/codeql-out/.keep ] || touch .github/codeql-out/.keep
-
-          echo "echo '[🔍] Detecting supported languages in project...'" > .echo.10_codeql_detect.sh
           echo '[🔍] Detecting supported languages in project...'
-
           detect_langs() {
             langs=""
             [ -d src ] && grep -r -q "def " src/ 2>/dev/null && langs="$langs,python"
@@ -102,56 +67,34 @@ jobs:
             [ -z "$langs" ] && langs="python,java,javascript"
             echo $langs
           }
-
           langs=$(detect_langs)
-          echo "echo '[🔍] Detected languages: $langs'" > .echo.11_langs.sh
           echo "[🔍] Detected languages: $langs"
-
           DB_DIR="db-ql"
           SARIF_FILE="codeql-report.sarif"
           OUT_DIR=".github/codeql-out"
-
-          # DB/분석 진행 및 echo/에러 echo 모두 남김
           if [[ "$langs" == *,* ]]; then
-            echo "echo '[⚡] Creating DB for multiple languages ($langs) with --db-cluster ...'" > .echo.12_db.sh
             echo "[⚡] Creating DB for multiple languages ($langs) with --db-cluster ..."
-            $HOME/codeql/codeql/codeql database create $DB_DIR --language=$langs --db-cluster --source-root=. || (echo "echo '[❌] DB 생성 실패, echo 및 더미 DB 디렉토리 생성'" > .echo.12_db.sh; mkdir -p $DB_DIR/java $DB_DIR/python $DB_DIR/javascript)
+            $HOME/codeql/codeql/codeql database create $DB_DIR --language=$langs --db-cluster --source-root=. || (echo "[❌] DB 생성 실패, echo 및 더미 DB 디렉토리 생성"; mkdir -p $DB_DIR/java $DB_DIR/python $DB_DIR/javascript)
           else
-            echo "echo '[⚡] Creating DB for $langs...'" > .echo.12_db.sh
             echo "[⚡] Creating DB for $langs..."
-            $HOME/codeql/codeql/codeql database create $DB_DIR --language=$langs --source-root=. || (echo "echo '[❌] DB 생성 실패, echo 및 더미 DB 디렉토리 생성'" > .echo.12_db.sh; mkdir -p $DB_DIR/$langs)
+            $HOME/codeql/codeql/codeql database create $DB_DIR --language=$langs --source-root=. || (echo "[❌] DB 생성 실패, echo 및 더미 DB 디렉토리 생성"; mkdir -p $DB_DIR/$langs)
           fi
-
-          echo "echo '[⚡] CodeQL database created: $DB_DIR'" > .echo.13_db_created.sh
           echo "[⚡] CodeQL database created: $DB_DIR"
-
           mkdir -p $OUT_DIR
-
-          # 분석 및 에러/성공 echo
           $HOME/codeql/codeql/codeql database analyze $DB_DIR \
             --format=sarifv2.1.0 \
             --output=$SARIF_FILE \
             --threads=2 --ram=4096 --rerun --trace-process --trace-process-level=3 \
-            || (echo "echo '[⚠️] CodeQL analyze failed! 더미 sarif 생성'" > .echo.14_analyze.sh; echo '{}' > $SARIF_FILE)
-
-          # 결과/아티팩트 디렉토리 복제 (분석 결과, DB, echo 스크립트)
-          echo "echo '[📂] 복제: 분석 결과 및 데이터 디렉토리 복사 중...'" > .echo.15_cp.sh
+            || (echo "[⚠️] CodeQL analyze failed! 더미 sarif 생성"; echo '{}' > $SARIF_FILE)
           echo "[📂] 복제: 분석 결과 및 데이터 디렉토리 복사 중..."
-          cp -rf $DB_DIR $OUT_DIR/ 2>/dev/null || echo "echo '[⚠️] DB 디렉토리 복사 실패'" > .echo.16_cp_warn.sh
-          [ -f $SARIF_FILE ] && cp $SARIF_FILE $OUT_DIR/ || (echo "echo '[⚠️] SARIF 파일 복사 실패, 더미 생성'" > .echo.16_cp_warn.sh; echo '{}' > $OUT_DIR/$SARIF_FILE)
-          ls -lh $OUT_DIR || echo "echo '[⚠️] 결과 디렉토리 확인 실패'" > .echo.16_cp_warn.sh
-
-          # echo 스크립트도 복제
+          cp -rf $DB_DIR $OUT_DIR/ 2>/dev/null || echo "[⚠️] DB 디렉토리 복사 실패"
+          [ -f $SARIF_FILE ] && cp $SARIF_FILE $OUT_DIR/ || (echo "[⚠️] SARIF 파일 복사 실패, 더미 생성"; echo '{}' > $OUT_DIR/$SARIF_FILE)
+          ls -lh $OUT_DIR || echo "[⚠️] 결과 디렉토리 확인 실패"
           cp .echo.*.sh $OUT_DIR/ 2>/dev/null || true
-
-          echo "echo '[✅] CodeQL SARIF: $OUT_DIR/$SARIF_FILE'" > .echo.17_sarif.sh
           echo "[✅] CodeQL SARIF: $OUT_DIR/$SARIF_FILE"
-
-          # 필수 결과물 없으면 더미라도 보장
           [ -f $OUT_DIR/$SARIF_FILE ] || echo '{}' > $OUT_DIR/$SARIF_FILE
           [ -d $OUT_DIR/$DB_DIR ] || mkdir -p $OUT_DIR/$DB_DIR
           touch $OUT_DIR/.keep
-
-          echo "echo '[shell, env 직전: CodeQL Detect & Analyze 완료]'"  # 마지막 echo
+          echo '[step end: CodeQL Detect & Analyze 완료]'
         env:
-          export PATH: "$HOME/codeql/codeql:$PATH"
+          PATH: $HOME/codeql/codeql:$PATH
