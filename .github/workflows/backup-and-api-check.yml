@@ -1,15 +1,24 @@
-name: 🛡️ No Shell Error Workflow (Safe Bash + 모든 echo, log, 아티팩트 보장)
+name: 🏗️ CodeQL Multi-Lang Build & Analyze (Full Logging)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
 
 jobs:
-  main:
+  codeql-multilang:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📥 Checkout repository
-        uses: actions/checkout@v4
+        run: |
+          echo '[📥] Checkout 시작...'
+          git config --global advice.detachedHead false
+          git fetch --all
+          git checkout $GITHUB_SHA || git checkout HEAD
+          echo '[📥] Checkout 완료!'
+        shell: bash
 
       - name: 🏗️ Install & Upgrade Build Tools (Full Upgrade+Install+Logging)
         run: |
@@ -83,6 +92,7 @@ jobs:
           SARIF_FILE="codeql-report.sarif"
           OUT_DIR=".github/codeql-out"
 
+          # DB/분석 진행 및 echo/에러 echo 모두 남김
           if [[ "$langs" == *,* ]]; then
             echo "echo '[⚡] Creating DB for multiple languages ($langs) with --db-cluster ...'" > .echo.12_db.sh
             echo "[⚡] Creating DB for multiple languages ($langs) with --db-cluster ..."
@@ -98,26 +108,37 @@ jobs:
 
           mkdir -p $OUT_DIR
 
+          # 분석 및 에러/성공 echo
           $HOME/codeql/codeql/codeql database analyze $DB_DIR \
             --format=sarifv2.1.0 \
             --output=$SARIF_FILE \
             --threads=2 --ram=4096 --rerun --trace-process --trace-process-level=3 \
             || (echo "echo '[⚠️] CodeQL analyze failed! 더미 sarif 생성'" > .echo.14_analyze.sh; echo '{}' > $SARIF_FILE)
 
+          # 결과/아티팩트 디렉토리 복제 (분석 결과, DB, echo 스크립트)
           echo "echo '[📂] 복제: 분석 결과 및 데이터 디렉토리 복사 중...'" > .echo.15_cp.sh
           echo "[📂] 복제: 분석 결과 및 데이터 디렉토리 복사 중..."
           cp -rf $DB_DIR $OUT_DIR/ 2>/dev/null || echo "echo '[⚠️] DB 디렉토리 복사 실패'" > .echo.16_cp_warn.sh
           [ -f $SARIF_FILE ] && cp $SARIF_FILE $OUT_DIR/ || (echo "echo '[⚠️] SARIF 파일 복사 실패, 더미 생성'" > .echo.16_cp_warn.sh; echo '{}' > $OUT_DIR/$SARIF_FILE)
           ls -lh $OUT_DIR || echo "echo '[⚠️] 결과 디렉토리 확인 실패'" > .echo.16_cp_warn.sh
 
+          # echo 스크립트도 복제
           cp .echo.*.sh $OUT_DIR/ 2>/dev/null || true
 
           echo "echo '[✅] CodeQL SARIF: $OUT_DIR/$SARIF_FILE'" > .echo.17_sarif.sh
           echo "[✅] CodeQL SARIF: $OUT_DIR/$SARIF_FILE"
 
+          # 필수 결과물 없으면 더미라도 보장
           [ -f $OUT_DIR/$SARIF_FILE ] || echo '{}' > $OUT_DIR/$SARIF_FILE
           [ -d $OUT_DIR/$DB_DIR ] || mkdir -p $OUT_DIR/$DB_DIR
           touch $OUT_DIR/.keep
         shell: bash
         env:
           PATH: $HOME/codeql/codeql:$PATH
+
+      - name: 📦 Upload CodeQL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-multilang-out
+          path: |
+            .github/codeql-out/
