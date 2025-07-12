@@ -1,4 +1,4 @@
-name: DB CLI Install & Echo Robust Retry Automation (최대 10회 재시도, 데이터 누수 방지)
+name: DB CLI Install & Echo Infinite Install Retry Automation (무한루프 재시도)
 
 on:
   workflow_dispatch:
@@ -46,38 +46,29 @@ jobs:
           done
           echo "[✅] 모든 시스템 및 패키지 업그레이드 및 경고 디렉토리 정리 완료 (90000%)"
 
-      - name: 📂 Robust Directory & Sample File Creation (최대 10회 재시도, 데이터 누수 방지)
+      - name: 📂 Robust Directory & Sample File Creation (무한루프)
         run: |
           robust_mkdir() {
             TARGET="$1"
-            local n=1
-            while [ $n -le 10 ]; do
-              echo "[🔁][$n/10] $TARGET 디렉토리 생성 시도"
-              mkdir -p "$TARGET" && chmod 700 "$TARGET" && echo "[✅] $TARGET 생성 성공" && return 0
-              echo "[⚠️] $TARGET 생성 실패 (시도 $n)"
-              n=$((n+1))
+            while true; do
+              echo "[🔁][∞] $TARGET 디렉토리 생성 시도"
+              mkdir -p "$TARGET" && chmod 700 "$TARGET" && echo "[✅] $TARGET 생성 성공" && break
+              echo "[⚠️] $TARGET 생성 실패 (재시도)"
               sleep 1
             done
-            echo "[❌] $TARGET 10회 생성 모두 실패"
-            return 1
           }
 
           robust_echo() {
             CONTENT="$1"
             TARGET="$2"
-            local n=1
-            while [ $n -le 10 ]; do
-              echo "[🔁][$n/10] $TARGET 파일 echo 생성 시도"
-              echo "$CONTENT" > "$TARGET" && chmod 600 "$TARGET" && echo "[✅] $TARGET 파일 생성 성공" && return 0
-              echo "[⚠️] $TARGET 파일 생성 실패 (시도 $n)"
-              n=$((n+1))
+            while true; do
+              echo "[🔁][∞] $TARGET 파일 echo 생성 시도"
+              echo "$CONTENT" > "$TARGET" && chmod 600 "$TARGET" && echo "[✅] $TARGET 파일 생성 성공" && break
+              echo "[⚠️] $TARGET 파일 생성 실패 (재시도)"
               sleep 1
             done
-            echo "[❌] $TARGET 파일 10회 생성 모두 실패"
-            return 1
           }
 
-          # Robust 디렉토리 생성
           robust_mkdir "$DBCLI_DIR/mysql"
           robust_mkdir "$DBCLI_DIR/postgresql"
           robust_mkdir "$DBCLI_DIR/sqlite"
@@ -87,14 +78,12 @@ jobs:
           robust_mkdir "$VA_DIR"
           robust_mkdir "$TMP_SAFE_DIR"
 
-          # 샘플 SQL/커맨드 파일 robust 생성
           [ -f $DBCLI_DIR/mysql/demo.sql ]      || robust_echo "SELECT VERSION();"        $DBCLI_DIR/mysql/demo.sql
           [ -f $DBCLI_DIR/postgresql/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/postgresql/demo.sql
           [ -f $DBCLI_DIR/sqlite/demo.sql ]     || robust_echo "SELECT sqlite_version();" $DBCLI_DIR/sqlite/demo.sql
           [ -f $DBCLI_DIR/redis/demo.redis ]    || { robust_echo "PING" $DBCLI_DIR/redis/demo.redis; echo "INFO" >> $DBCLI_DIR/redis/demo.redis; chmod 600 $DBCLI_DIR/redis/demo.redis; }
           [ -f $DBCLI_DIR/clickhouse/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/clickhouse/demo.sql
 
-          # 가상계좌 echo 파일 robust 생성(5분마다 1개, 기존은 삭제)
           echo "[🧹] 기존 가상계좌 파일 전체 삭제"
           rm -f $VA_DIR/virtual_accounts_*.txt
           TS=$(date '+%Y%m%d_%H%M%S')
@@ -112,52 +101,56 @@ jobs:
           echo "[✅] $VA_FILE → $VA_DIR 이동 및 권한 최소화"
           ls -lh $VA_DIR/virtual_accounts_*.txt
 
-          # 임시파일·디렉토리 정리
           rm -rf $TMP_SAFE_DIR
 
-      - name: 🏃 Install & Run DB CLI Samples (최대 10회 재시도, 안전)
+      - name: 🏃 Install & Run DB CLI Samples (무한루프+systemctl reload, 안전)
         run: |
-          retry_install() {
+          is_service_pkg() {
+            case "$1" in
+              mysql-client|mysql-server|postgresql-client|postgresql|redis-tools|redis-server|clickhouse-client|clickhouse-server) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          retry_install_infinite() {
             PKG="$1"
             CMD="$2"
             DESC="$3"
-            local n=1
-            while [ $n -le 10 ]; do
-              echo "[🔁][$n/10] $PKG 설치 시도"
+            while true; do
+              echo "[🔁][∞] $PKG 설치 시도"
               sudo apt-get update -y
-              sudo apt-get install -y "$PKG" && command -v "$CMD" && echo "[✅] $PKG ($DESC) 설치 성공" && return 0
-              echo "[⚠️] $PKG ($DESC) 설치 실패 (시도 $n)"
-              n=$((n+1))
+              sudo apt-get install -y "$PKG" && command -v "$CMD" && echo "[✅] $PKG ($DESC) 설치 성공"
+              if command -v "$CMD" > /dev/null; then
+                if is_service_pkg "$PKG"; then
+                  echo "[🔄] $PKG 설치 후 systemctl daemon-reload 실행"
+                  sudo systemctl daemon-reload && echo "[✅] systemctl daemon-reload 성공" || echo "[❗] systemctl daemon-reload 실패"
+                fi
+                break
+              fi
+              echo "[⚠️] $PKG ($DESC) 설치 실패 (재시도)"
               sleep 1
             done
-            echo "[❌] $PKG ($DESC) 10회 설치 모두 실패, 스킵"
-            return 1
           }
 
-          run_or_generate_and_retry() {
+          run_or_generate_and_retry_infinite() {
             PKG="$1"
             CMD="$2"
             DESC="$3"
             FILE="$4"
             GEN="$5"
             OUT="$6"
-            local n=1
 
-            # robust 파일 생성 (최대 10회)
-            if [ ! -f "$FILE" ]; then
-              while [ $n -le 10 ]; do
-                echo "[🔁][$n/10] $DESC 샘플 파일 없음. 안전 임시파일 생성"
-                eval "$GEN > \$FILE" && chmod 600 "$FILE" && echo "[✅] $FILE 생성 성공" && break
-                echo "[⚠️] $FILE 생성 실패 (시도 $n)"
-                n=$((n+1))
-                sleep 1
-              done
-              [ -f "$FILE" ] || { echo "[❌] $FILE 10회 생성 모두 실패"; return 1; }
-            fi
+            # robust 파일 생성 (무한)
+            while [ ! -f "$FILE" ]; do
+              echo "[🔁][∞] $DESC 샘플 파일 없음. 안전 임시파일 생성"
+              eval "$GEN > \$FILE" && chmod 600 "$FILE" && echo "[✅] $FILE 생성 성공" && break
+              echo "[⚠️] $FILE 생성 실패 (재시도)"
+              sleep 1
+            done
 
             if ! command -v "$CMD" > /dev/null; then
-              echo "[AUTO] $CMD 미설치. 재시도 설치"
-              retry_install "$PKG" "$CMD" "$DESC"
+              echo "[AUTO] $CMD 미설치. 무한 재시도 설치"
+              retry_install_infinite "$PKG" "$CMD" "$DESC"
             fi
 
             if command -v "$CMD" > /dev/null && [ -f "$FILE" ]; then
@@ -186,19 +179,19 @@ jobs:
           }
 
           # MySQL
-          run_or_generate_and_retry "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();'" "$OUTPUT_DIR/mysql_demo.out"
+          run_or_generate_and_retry_infinite "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();'" "$OUTPUT_DIR/mysql_demo.out"
 
           # PostgreSQL
-          run_or_generate_and_retry "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/psql_demo.out"
+          run_or_generate_and_retry_infinite "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/psql_demo.out"
 
           # SQLite
-          run_or_generate_and_retry "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();'" "$OUTPUT_DIR/sqlite_demo.out"
+          run_or_generate_and_retry_infinite "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();'" "$OUTPUT_DIR/sqlite_demo.out"
 
           # Redis
-          run_or_generate_and_retry "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO'" "$OUTPUT_DIR/redis_demo.out"
+          run_or_generate_and_retry_infinite "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO'" "$OUTPUT_DIR/redis_demo.out"
 
           # ClickHouse
-          run_or_generate_and_retry "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/clickhouse_demo.out"
+          run_or_generate_and_retry_infinite "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/clickhouse_demo.out"
 
           # 임시/백업/로그/세션 파일 및 디렉토리 데이터 누수 방지
           find /tmp -maxdepth 1 -type d -name "dbcli_safe_tmp*" -exec rm -rf {} +
