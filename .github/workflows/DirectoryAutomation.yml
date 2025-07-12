@@ -1,10 +1,10 @@
-name: DB CLI Auto Install & Safe Execution (No key/repo registration)
+name: DB CLI Install & Fallback Version Attempt (apt만 사용, echo 안내)
 
 on:
   workflow_dispatch:
 
 jobs:
-  db-cli-tools-no-key:
+  db-cli-version-safe:
     runs-on: ubuntu-latest
 
     env:
@@ -15,49 +15,49 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
+      - name: 🚀 90000% System & Package Upgrade
+        run: |
+          echo "[🚀] 90000% 업그레이드: apt update & apt upgrade 시작!"
+          sudo apt-get update -y
+          sudo apt-get -y upgrade
+          echo "[✅] 모든 시스템 및 패키지 업그레이드 완료 (90000%)"
+
       - name: 📂 Ensure Sample SQL/Command Files Exist
         run: |
-          mkdir -p $DBCLI_DIR/mysql
-          mkdir -p $DBCLI_DIR/postgresql
-          mkdir -p $DBCLI_DIR/sqlite
-          mkdir -p $DBCLI_DIR/redis
-          mkdir -p $DBCLI_DIR/clickhouse
-
-          if [ ! -f $DBCLI_DIR/mysql/demo.sql ]; then
-            echo "[AUTO] Generating MySQL demo.sql"
-            echo "SELECT VERSION();" > $DBCLI_DIR/mysql/demo.sql
-          fi
-
-          if [ ! -f $DBCLI_DIR/postgresql/demo.sql ]; then
-            echo "[AUTO] Generating PostgreSQL demo.sql"
-            echo "SELECT version();" > $DBCLI_DIR/postgresql/demo.sql
-          fi
-
-          if [ ! -f $DBCLI_DIR/sqlite/demo.sql ]; then
-            echo "[AUTO] Generating SQLite demo.sql"
-            echo "SELECT sqlite_version();" > $DBCLI_DIR/sqlite/demo.sql
-          fi
-
-          if [ ! -f $DBCLI_DIR/redis/demo.redis ]; then
-            echo "[AUTO] Generating Redis demo.redis"
-            echo "PING" > $DBCLI_DIR/redis/demo.redis
-            echo "INFO" >> $DBCLI_DIR/redis/demo.redis
-          fi
-
-          if [ ! -f $DBCLI_DIR/clickhouse/demo.sql ]; then
-            echo "[AUTO] Generating ClickHouse demo.sql"
-            echo "SELECT version();" > $DBCLI_DIR/clickhouse/demo.sql
-          fi
-
+          mkdir -p $DBCLI_DIR/mysql $DBCLI_DIR/postgresql $DBCLI_DIR/sqlite $DBCLI_DIR/redis $DBCLI_DIR/clickhouse
+          [ -f $DBCLI_DIR/mysql/demo.sql ]       || echo "SELECT VERSION();"                  > $DBCLI_DIR/mysql/demo.sql
+          [ -f $DBCLI_DIR/postgresql/demo.sql ]  || echo "SELECT version();"                  > $DBCLI_DIR/postgresql/demo.sql
+          [ -f $DBCLI_DIR/sqlite/demo.sql ]      || echo "SELECT sqlite_version();"           > $DBCLI_DIR/sqlite/demo.sql
+          [ -f $DBCLI_DIR/redis/demo.redis ]     || { echo "PING"; echo "INFO"; }             > $DBCLI_DIR/redis/demo.redis
+          [ -f $DBCLI_DIR/clickhouse/demo.sql ]  || echo "SELECT version();"                  > $DBCLI_DIR/clickhouse/demo.sql
           mkdir -p $OUTPUT_DIR
 
-      - name: 🏃 Auto-install & Safely Run DB CLI Samples (NO key registration)
+      - name: 🏃 Install & Run DB CLI Samples (버전 fallback 지원)
         run: |
-          # MySQL (mysql-client, 기본 apt)
+          install_with_fallback() {
+            PKG="$1"
+            CMD="$2"
+            DESC="$3"
+            # 일반 설치 시도
+            echo "[⚡] $PKG 최신 설치 시도"
+            sudo apt-get update -y && sudo apt-get install -y "$PKG" && return 0
+
+            echo "[❗] $PKG 최신 설치 실패! 설치 가능한 버전 목록:"
+            apt-cache madison "$PKG" || apt-cache policy "$PKG"
+            # 구버전 목록에서 최대 2개 버전만 순차 설치 시도
+            VERSIONS=$(apt-cache madison "$PKG" | awk '{print $3}' | head -n 2)
+            for VER in $VERSIONS; do
+              echo "[🔄] $PKG 버전 $VER로 설치 재시도"
+              sudo apt-get install -y "$PKG=$VER" && return 0
+            done
+            echo "[❌] $PKG ($DESC) 모든 버전 설치 실패! 스킵"
+            return 1
+          }
+
+          # MySQL
           echo "[🏃] Run MySQL sample"
           if ! command -v mysql > /dev/null; then
-            echo "[⚠️] mysql CLI not found, installing..."
-            sudo apt-get update && sudo apt-get install -y mysql-client
+            install_with_fallback mysql-client mysql "MySQL CLI"
           fi
           if command -v mysql > /dev/null && [ -f $DBCLI_DIR/mysql/demo.sql ]; then
             mysql --version
@@ -66,11 +66,10 @@ jobs:
             echo "[❌] mysql CLI 또는 샘플 SQL 미존재 - 실행 스킵"
           fi
 
-          # PostgreSQL (postgresql-client, 기본 apt)
+          # PostgreSQL
           echo "[🏃] Run PostgreSQL sample"
           if ! command -v psql > /dev/null; then
-            echo "[⚠️] psql CLI not found, installing..."
-            sudo apt-get update && sudo apt-get install -y postgresql-client
+            install_with_fallback postgresql-client psql "PostgreSQL CLI"
           fi
           if command -v psql > /dev/null && [ -f $DBCLI_DIR/postgresql/demo.sql ]; then
             psql --version
@@ -79,11 +78,10 @@ jobs:
             echo "[❌] psql CLI 또는 샘플 SQL 미존재 - 실행 스킵"
           fi
 
-          # SQLite (sqlite3, 기본 apt)
+          # SQLite
           echo "[🏃] Run SQLite sample"
           if ! command -v sqlite3 > /dev/null; then
-            echo "[⚠️] sqlite3 CLI not found, installing..."
-            sudo apt-get update && sudo apt-get install -y sqlite3
+            install_with_fallback sqlite3 sqlite3 "SQLite CLI"
           fi
           if command -v sqlite3 > /dev/null && [ -f $DBCLI_DIR/sqlite/demo.sql ]; then
             sqlite3 --version
@@ -92,11 +90,10 @@ jobs:
             echo "[❌] sqlite3 CLI 또는 샘플 SQL 미존재 - 실행 스킵"
           fi
 
-          # Redis (redis-tools, 기본 apt)
+          # Redis
           echo "[🏃] Run Redis sample"
           if ! command -v redis-cli > /dev/null; then
-            echo "[⚠️] redis-cli not found, installing..."
-            sudo apt-get update && sudo apt-get install -y redis-tools
+            install_with_fallback redis-tools redis-cli "Redis CLI"
           fi
           if command -v redis-cli > /dev/null && [ -f $DBCLI_DIR/redis/demo.redis ]; then
             redis-cli --version
@@ -105,11 +102,10 @@ jobs:
             echo "[❌] redis-cli 또는 샘플 파일 미존재 - 실행 스킵"
           fi
 
-          # ClickHouse (clickhouse-client, 기본 apt)
+          # ClickHouse
           echo "[🏃] Run ClickHouse sample"
           if ! command -v clickhouse-client > /dev/null; then
-            echo "[⚠️] clickhouse-client not found, installing..."
-            sudo apt-get update && sudo apt-get install -y clickhouse-client
+            install_with_fallback clickhouse-client clickhouse-client "ClickHouse CLI"
           fi
           if command -v clickhouse-client > /dev/null && [ -f $DBCLI_DIR/clickhouse/demo.sql ]; then
             clickhouse-client --version
