@@ -30,10 +30,9 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y tree jq curl wget lsb-release mariadb-client percona-toolkit || true
 
-      - name: ♻️ 리메이크 robust 생성/삭제/echo/df/정수 robust
+      - name: ♻️ robust 생성/삭제/echo/df/정수 robust + CodeQL 워크플로우 자동 생성
         run: |
           set -e
-
           robust_mkdir() {
             DIR="$1"
             if [ -e "$DIR" ] && [ ! -d "$DIR" ]; then
@@ -43,38 +42,6 @@ jobs:
             mkdir -p "$DIR"
             chmod 700 "$DIR"
           }
-
-          MIN_FREE_MB=${MIN_FREE_MB:-500}
-          check_free() {
-            DIR="$1"
-            robust_mkdir "$DIR"
-            MB=$(df -Pm "$DIR" 2>/dev/null | awk 'NR==2 {print $4}')
-            if ! [[ "$MB" =~ ^[0-9]+$ ]]; then
-              echo "[❗][robust] $DIR df 결과 비정상 (MB='$MB'), MB=0으로 처리"
-              MB=0
-            fi
-            if [ "$MB" -lt "$MIN_FREE_MB" ]; then
-              echo "[❗][용량] $DIR 디스크 여유 $MB MB → $MIN_FREE_MB MB 이상 필요, 10초 후 재시도"
-              df -h "$DIR" || true
-              sleep 10
-              return 1
-            else
-              echo "[✅][용량] $DIR 여유 $MB MB"
-              return 0
-            fi
-          }
-
-          robust_rm() {
-            TARGET="$1"
-            if [ -f "$TARGET" ]; then
-              rm -f "$TARGET"
-              echo "[🧹][robust] $TARGET 파일 삭제"
-            elif [ -d "$TARGET" ]; then
-              rm -rf "$TARGET"
-              echo "[🧹][robust] $TARGET 디렉토리(및 하위 전체) 삭제"
-            fi
-          }
-
           robust_echo() {
             CONTENT="$1"
             TARGET="$2"
@@ -83,7 +50,7 @@ jobs:
             if [ -e "$TARGET" ]; then
               if [ -d "$TARGET" ]; then
                 echo "[⚠️][에러] $TARGET (echo 대상이 디렉토리, robust_rm로 삭제 후 파일 생성)"
-                robust_rm "$TARGET"
+                rm -rf "$TARGET"
               else
                 rm -f "$TARGET"
               fi
@@ -92,40 +59,8 @@ jobs:
             chmod 600 "$TARGET"
             echo "[✅][robust] $TARGET robust echo 파일 생성 성공"
           }
-          robust_append() {
-            TARGET="$1"
-            LINE="$2"
-            DIR=$(dirname "$TARGET")
-            robust_mkdir "$DIR"
-            if [ -e "$TARGET" ] && [ -d "$TARGET" ]; then
-              echo "[⚠️][에러] $TARGET (append 대상이 디렉토리, robust_rm로 삭제 후 빈파일 생성)"
-              robust_rm "$TARGET"
-              touch "$TARGET"
-              chmod 600 "$TARGET"
-            elif [ ! -e "$TARGET" ]; then
-              touch "$TARGET"
-              chmod 600 "$TARGET"
-            fi
-            echo "$LINE" >> "$TARGET"
-          }
-          robust_touch() {
-            FILE="$1"
-            DIR=$(dirname "$FILE")
-            robust_mkdir "$DIR"
-            if [ -e "$FILE" ] && [ -d "$FILE" ]; then
-              echo "[⚠️][에러] $FILE (touch 대상이 디렉토리, robust_rm로 삭제 후 빈파일 생성)"
-              robust_rm "$FILE"
-            fi
-            touch "$FILE"
-            chmod 600 "$FILE"
-            echo "[✅][robust] $FILE robust 빈파일 생성 성공"
-          }
 
-          robust_rmdir() {
-            DIR="$1"
-            [ -d "$DIR" ] && rm -rf "$DIR"
-          }
-
+          # DB/CLI/샘플 robust
           for DB in mysql mariadb percona postgresql sqlite redis clickhouse firebird db2; do
             robust_mkdir "$DBCLI_DIR/$DB"
           done
@@ -134,32 +69,18 @@ jobs:
           robust_mkdir "$TMP_SAFE_DIR"
           robust_mkdir "$ORDER_DIR"
           robust_mkdir "$USER_DIR"
-
           robust_echo "SELECT VERSION();"        $DBCLI_DIR/mysql/demo.sql
           robust_echo "SELECT VERSION();"        $DBCLI_DIR/mariadb/demo.sql
           robust_echo "SELECT VERSION();"        $DBCLI_DIR/percona/demo.sql
           robust_echo "SELECT version();"        $DBCLI_DIR/postgresql/demo.sql
           robust_echo "SELECT sqlite_version();" $DBCLI_DIR/sqlite/demo.sql
           robust_echo "PING"                     $DBCLI_DIR/redis/demo.redis
-          robust_append "$DBCLI_DIR/redis/demo.redis" "INFO"
           robust_echo "SELECT version();"        $DBCLI_DIR/clickhouse/demo.sql
           robust_echo "SELECT * FROM RDB\$DATABASE;" $DBCLI_DIR/firebird/demo.sql
           robust_echo "SELECT service_level, fixpack_num FROM sysibmadm.env_inst_info;" $DBCLI_DIR/db2/demo.sql
 
-          for DB in mysql mariadb percona postgresql sqlite clickhouse firebird db2; do
-            robust_echo "-- dummy database for $DB" "$DBCLI_DIR/$DB/dummy_db.sql"
-            robust_touch "$DBCLI_DIR/$DB/dummy.db"
-          done
-
-          for DB in mysql mariadb percona postgresql sqlite redis clickhouse firebird db2; do
-            robust_echo "[dummy output]" "$OUTPUT_DIR/${DB}_dummy.out"
-          done
-
+          # 가상계좌 더미 robust
           robust_echo "user_id,user_name,permission,enabled" "$USER_DIR/users.csv"
-          robust_append "$USER_DIR/users.csv" "U001,홍길동,ADMIN,1"
-          robust_append "$USER_DIR/users.csv" "U002,김철수,USER,1"
-          robust_append "$USER_DIR/users.csv" "U003,이영희,USER,0"
-
           echo "[🧹][∞][리메이크] 기존 가상계좌 파일 전체 삭제"
           rm -f $VA_DIR/virtual_accounts_*.txt
           TS=$(date '+%Y%m%d_%H%M%S')
@@ -170,13 +91,53 @@ jobs:
             CUST="User$(printf '%05d' $i)"
             BANK="B$(printf '%04d' $((1000 + ($i % 9000))))"
             DATE="$(date '+%Y-%m-%d')"
-            robust_append "$VA_FILE" "VA${i},${ACC_NUM},${CUST},${BANK},${DATE}"
+            echo "VA${i},${ACC_NUM},${CUST},${BANK},${DATE}" >> "$VA_FILE"
           done
           chmod 600 "$VA_FILE"
           mv "$VA_FILE" "$VA_DIR/"
           echo "[✅][∞][리메이크] $VA_FILE → $VA_DIR 이동 및 권한 최소화"
           ls -lh $VA_DIR/virtual_accounts_*.txt
           rm -rf $TMP_SAFE_DIR
+
+          # ★ .github/workflows/codeql-db-echo-daemon.yml robust 생성 (cat EOF 이용)
+          robust_mkdir ".github/workflows"
+          CQLECHO_YML=".github/workflows/codeql-db-echo-daemon.yml"
+          cat <<'EOF' > "$CQLECHO_YML"
+name: ♾️ CodeQL DB Echo Daemon
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  codeql-db-echo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+      - name: 📁 Ensure Directory
+        run: |
+          mkdir -p .github/codeql-out/db-ql-dummy
+          chmod 700 .github/codeql-out/db-ql-dummy
+      - name: 📝 Generate codeql-db-echo.txt
+        run: |
+          ECHO_FILE=.github/codeql-out/db-ql-dummy/codeql-db-echo.txt
+          echo "==== CodeQL DB Echo Batch ====" > $ECHO_FILE
+          echo "timestamp: $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $ECHO_FILE
+          echo "repository: $GITHUB_REPOSITORY" | tee -a $ECHO_FILE
+          echo "commit_sha: $GITHUB_SHA" | tee -a $ECHO_FILE
+          echo "run_id: $GITHUB_RUN_ID" | tee -a $ECHO_FILE
+          echo "run_number: $GITHUB_RUN_NUMBER" | tee -a $ECHO_FILE
+          echo "workflow: $GITHUB_WORKFLOW" | tee -a $ECHO_FILE
+          echo "generated_by: codeql-db-echo-daemon" | tee -a $ECHO_FILE
+          echo "----" | tee -a $ECHO_FILE
+          chmod 600 $ECHO_FILE
+      - name: 📂 List Results
+        run: ls -lR .github/codeql-out/
+EOF
+          chmod 600 "$CQLECHO_YML"
+          echo "[✅][robust] codeql-db-echo-daemon.yml robust 생성 완료"
 
       - name: 최신 DB CLI 추가 설치 (옵션, 에러 무시)
         run: |
