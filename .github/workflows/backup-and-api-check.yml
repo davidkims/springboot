@@ -1,46 +1,48 @@
-name: "Safe CodeQL + Utility Guarantee"
+name: "CodeQL CLI Auto Setup + 분석 Safe Workflow"
 
 on:
   workflow_dispatch:
 
 jobs:
-  main:
+  codeql-custom:
     runs-on: ubuntu-latest
-
     steps:
-      - name: "[0] 필수 유틸리티 설치"
+      - name: "[0] 필수 유틸리티 설치 (coreutils 등)"
         run: |
-          set +e
-          echo "[🛠️] 기본 유틸리티 설치(coreutils, findutils, grep, sed, ...)"
-          sudo apt-get update -y || true
-          sudo apt-get install -y coreutils findutils grep sed gawk tree bash dash util-linux || true
-          echo "[🛠️] which 확인:"
-          which bash || true
-          which mkdir || true
-          which cp || true
-          which grep || true
-          which sort || true
-          which sed || true
-          which tr || true
-          which ls || true
-          which touch || true
+          sudo apt-get update -y
+          sudo apt-get install -y coreutils findutils grep sed gawk tree bash dash util-linux curl tar
 
       - name: "[1] Checkout"
         uses: actions/checkout@v4
 
-      - name: "[2] 디렉토리 및 빌드/패키지 설치"
+      - name: "[2] CodeQL CLI 최신버전 다운로드 및 설치"
+        id: setup_codeql
+        run: |
+          set -e
+          # 최신 릴리즈 버전 확인 및 다운로드
+          CODEQL_VERSION=$(curl -s https://api.github.com/repos/github/codeql-cli-binaries/releases/latest | grep tag_name | cut -d '"' -f4)
+          CODEQL_URL="https://github.com/github/codeql-cli-binaries/releases/download/$CODEQL_VERSION/codeql-linux64.zip"
+          echo "[🛠️] CodeQL CLI 다운로드: $CODEQL_URL"
+          mkdir -p $HOME/codeql
+          cd $HOME/codeql
+          curl -LO $CODEQL_URL
+          unzip -o codeql-linux64.zip
+          echo "$HOME/codeql/codeql" >> $GITHUB_PATH
+          export PATH="$HOME/codeql/codeql:$PATH"
+          cd -
+        shell: bash
+
+      - name: "[3] Build Tool 및 빌드 환경 준비"
         run: |
           set +e
+          export PATH="$HOME/codeql/codeql:/usr/bin:/bin:/usr/local/bin:$PATH"
           echo '[📂] 디렉토리 생성: .github/codeql-out, .github/log, .echo.*.sh ...'
           mkdir -p .github/codeql-out .github/log
           touch .github/codeql-out/.keep .github/log/.keep .echo.00_dir.sh
-
-          echo '[🔄] apt 패키지 전체 최신화...'
           sudo apt-get update -y || true
           sudo apt-get upgrade -y || true
           sudo apt-get dist-upgrade -y || true
           sudo apt-get autoremove -y || true
-
           PKGS=""
           [ -f pom.xml ] && PKGS="$PKGS maven"
           ([ -f build.gradle ] || [ -f build.gradle.kts ]) && PKGS="$PKGS gradle"
@@ -50,7 +52,6 @@ jobs:
           [ -f Gemfile ] && PKGS="$PKGS ruby-full"
           [ -f Cargo.toml ] && PKGS="$PKGS cargo"
           [ -n "$PKGS" ] && (echo "[🛠️] build tool 설치/업그레이드: $PKGS"; sudo apt-get install --only-upgrade -y $PKGS || true; sudo apt-get install -y $PKGS || true)
-
           NOT_UPGRADED=$(apt list --upgradable 2>/dev/null | grep -v "Listing..." | wc -l)
           if [ "$NOT_UPGRADED" -gt 0 ]; then
             echo "[⚠️] 아직 $NOT_UPGRADED 개 패키지 업그레이드 안됨!"
@@ -58,22 +59,17 @@ jobs:
           else
             echo "[✅] 모든 패키지 최신!"
           fi
-
-          [ -f .echo.01_upgrade.sh ] || echo "echo '[echo] dummy 업그레이드'" > .echo.01_upgrade.sh
-          [ -f .echo.02_pkg.sh ] || echo "echo '[echo] dummy 빌드도구'" > .echo.02_pkg.sh
-          [ -f .echo.03_warn.sh ] || echo "echo '[echo] dummy 패키지 경고'" > .echo.03_warn.sh
           cp .echo.*.sh .github/codeql-out/ 2>/dev/null || true
-          echo '[step end: Install & Upgrade Build Tools 완료]'
+        shell: bash
 
-      - name: "[3] CodeQL Detect & Analyze & 복제"
+      - name: "[4] CodeQL Detect & Analyze & 복제"
         run: |
           set +e
-          export PATH="/usr/bin:/bin:/usr/local/bin:$PATH"
+          export PATH="$HOME/codeql/codeql:/usr/bin:/bin:/usr/local/bin:$PATH"
           mkdir -p .github/codeql-out
           [ -f .github/codeql-out/.keep ] || touch .github/codeql-out/.keep
 
           echo '[🔍] Detecting supported languages in project...'
-
           detect_langs() {
             langs=""
             [ -d src ] && grep -r -q "def " src/ 2>/dev/null && langs="$langs,python"
@@ -97,15 +93,12 @@ jobs:
           DB_DIR="db-ql"
           SARIF_FILE="codeql-report.sarif"
           OUT_DIR=".github/codeql-out"
-
-          # CodeQL 바이너리 실제 경로 확인
           CODEQL_BIN=""
           if [ -x "$HOME/codeql/codeql/codeql" ]; then
             CODEQL_BIN="$HOME/codeql/codeql/codeql"
           elif command -v codeql >/dev/null 2>&1; then
             CODEQL_BIN=$(command -v codeql)
           fi
-
           if [ -z "$CODEQL_BIN" ]; then
             echo "[❌] CodeQL 바이너리 없음! Dummy 결과만 생성"
             echo '{}' > $SARIF_FILE
@@ -124,7 +117,6 @@ jobs:
           fi
 
           echo "[⚡] CodeQL database created: $DB_DIR"
-
           mkdir -p $OUT_DIR
 
           $CODEQL_BIN database analyze $DB_DIR \
@@ -137,13 +129,11 @@ jobs:
           cp -rf $DB_DIR $OUT_DIR/ 2>/dev/null || echo '[⚠️] DB 디렉토리 복사 실패'
           [ -f $SARIF_FILE ] && cp $SARIF_FILE $OUT_DIR/ || (echo '[⚠️] SARIF 파일 복사 실패, 더미 생성'; echo '{}' > $OUT_DIR/$SARIF_FILE)
           ls -lh $OUT_DIR || echo '[⚠️] 결과 디렉토리 확인 실패'
-
           cp .echo.*.sh $OUT_DIR/ 2>/dev/null || true
-
           echo "[✅] CodeQL SARIF: $OUT_DIR/$SARIF_FILE"
-
           [ -f $OUT_DIR/$SARIF_FILE ] || echo '{}' > $OUT_DIR/$SARIF_FILE
           [ -d $OUT_DIR/$DB_DIR ] || mkdir -p $OUT_DIR/$DB_DIR
           touch $OUT_DIR/.keep
+        shell: bash
         env:
-          PATH: /usr/bin:/bin:/usr/local/bin:$HOME/codeql/codeql:$PATH
+          PATH: $HOME/codeql/codeql:/usr/bin:/bin:/usr/local/bin:$PATH
