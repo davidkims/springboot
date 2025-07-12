@@ -1,4 +1,4 @@
-name: DB CLI & Virtual Account Infinite Robust Automation (디렉토리 완전 삭제·재생성 포함)
+name: DB CLI & Virtual Account Infinite Robust Custom (특정DB·사용자 시나리오·90분제한)
 
 on:
   workflow_dispatch:
@@ -8,12 +8,14 @@ on:
 jobs:
   db-cli-virtual-accounts:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     env:
       DBCLI_DIR: .github/dbcli
       OUTPUT_DIR: .github/dbcli/output
       VA_DIR: .github/dbcli/virtual_accounts
       ORDER_DIR: .github/dbcli/orders
+      USER_DIR: .github/dbcli/users
       TMP_SAFE_DIR: /tmp/dbcli_safe_tmp
 
     steps:
@@ -29,7 +31,6 @@ jobs:
             sleep 1
           done
 
-          # 중요 시스템 디렉토리 robust 삭제→재생성
           for d in /etc/firefox /etc/apport/native-origins.d /etc/apport/blacklist.d; do
             if [ -d "$d" ]; then
               if [ -z "$(ls -A "$d")" ]; then
@@ -39,7 +40,6 @@ jobs:
                   echo "[⚠️][∞] $d 삭제 실패 (재시도)"
                   sleep 1
                 done
-                # robust 재생성
                 while true; do
                   sudo mkdir -p "$d" && sudo chmod 755 "$d" && echo "[✅][∞] $d 재생성" && break
                   echo "[⚠️][∞] $d 재생성 실패 (재시도)"
@@ -75,7 +75,7 @@ jobs:
             fi
           done
 
-      - name: 📂 Robust Directory & Sample File Infinite Creation
+      - name: 📂 Robust Directory & Sample/User File Infinite Creation
         run: |
           robust_mkdir() {
             TARGET="$1"
@@ -86,7 +86,6 @@ jobs:
               sleep 1
             done
           }
-
           robust_echo() {
             CONTENT="$1"
             TARGET="$2"
@@ -97,22 +96,34 @@ jobs:
               sleep 1
             done
           }
-
           robust_mkdir "$DBCLI_DIR/mysql"
           robust_mkdir "$DBCLI_DIR/postgresql"
           robust_mkdir "$DBCLI_DIR/sqlite"
           robust_mkdir "$DBCLI_DIR/redis"
           robust_mkdir "$DBCLI_DIR/clickhouse"
+          robust_mkdir "$DBCLI_DIR/mariadb"
+          robust_mkdir "$DBCLI_DIR/firebird"
+          robust_mkdir "$DBCLI_DIR/db2"
           robust_mkdir "$OUTPUT_DIR"
           robust_mkdir "$VA_DIR"
           robust_mkdir "$TMP_SAFE_DIR"
           robust_mkdir "$ORDER_DIR"
+          robust_mkdir "$USER_DIR"
 
           [ -f $DBCLI_DIR/mysql/demo.sql ]      || robust_echo "SELECT VERSION();"        $DBCLI_DIR/mysql/demo.sql
+          [ -f $DBCLI_DIR/mariadb/demo.sql ]    || robust_echo "SELECT VERSION();"        $DBCLI_DIR/mariadb/demo.sql
           [ -f $DBCLI_DIR/postgresql/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/postgresql/demo.sql
           [ -f $DBCLI_DIR/sqlite/demo.sql ]     || robust_echo "SELECT sqlite_version();" $DBCLI_DIR/sqlite/demo.sql
           [ -f $DBCLI_DIR/redis/demo.redis ]    || { robust_echo "PING" $DBCLI_DIR/redis/demo.redis; echo "INFO" >> $DBCLI_DIR/redis/demo.redis; chmod 600 $DBCLI_DIR/redis/demo.redis; }
           [ -f $DBCLI_DIR/clickhouse/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/clickhouse/demo.sql
+          [ -f $DBCLI_DIR/firebird/demo.sql ]   || robust_echo "SELECT * FROM RDB$DATABASE;" $DBCLI_DIR/firebird/demo.sql
+          [ -f $DBCLI_DIR/db2/demo.sql ]        || robust_echo "SELECT service_level, fixpack_num FROM sysibmadm.env_inst_info;" $DBCLI_DIR/db2/demo.sql
+
+          # 사용자 시나리오용 user 정보 echo (id, 이름, 권한, 사용여부)
+          robust_echo "user_id,user_name,permission,enabled" "$USER_DIR/users.csv"
+          robust_echo "U001,홍길동,ADMIN,1" "$USER_DIR/users.csv"
+          robust_echo "U002,김철수,USER,1" "$USER_DIR/users.csv"
+          robust_echo "U003,이영희,USER,0" "$USER_DIR/users.csv"   # enabled=0(비활성)
 
           echo "[🧹][∞] 기존 가상계좌 파일 전체 삭제"
           rm -f $VA_DIR/virtual_accounts_*.txt
@@ -130,18 +141,16 @@ jobs:
           mv "$VA_FILE" "$VA_DIR/"
           echo "[✅][∞] $VA_FILE → $VA_DIR 이동 및 권한 최소화"
           ls -lh $VA_DIR/virtual_accounts_*.txt
-
           rm -rf $TMP_SAFE_DIR
 
-      - name: 🏃 DB CLI Install & Run Infinite Retry (systemctl reload 포함)
+      - name: 🏃 DB CLI Install & Run Infinite Retry (특정DB 포함)
         run: |
           is_service_pkg() {
             case "$1" in
-              mysql-client|mysql-server|postgresql-client|postgresql|redis-tools|redis-server|clickhouse-client|clickhouse-server) return 0 ;;
+              mysql-client|mariadb-client|postgresql-client|redis-tools|clickhouse-client|firebird-utils|db2-client) return 0 ;;
               *) return 1 ;;
             esac
           }
-
           retry_install_infinite() {
             PKG="$1"
             CMD="$2"
@@ -161,7 +170,6 @@ jobs:
               sleep 1
             done
           }
-
           run_or_generate_and_retry_infinite() {
             PKG="$1"
             CMD="$2"
@@ -169,24 +177,21 @@ jobs:
             FILE="$4"
             GEN="$5"
             OUT="$6"
-
             while [ ! -f "$FILE" ]; do
               echo "[🔁][∞] $DESC 샘플 파일 없음. 안전 임시파일 생성"
               eval "$GEN > \$FILE" && chmod 600 "$FILE" && echo "[✅][∞] $FILE 생성 성공" && break
               echo "[⚠️][∞] $FILE 생성 실패 (재시도)"
               sleep 1
             done
-
             if ! command -v "$CMD" > /dev/null; then
               echo "[AUTO][∞] $CMD 미설치. 무한 재시도 설치"
               retry_install_infinite "$PKG" "$CMD" "$DESC"
             fi
-
             if command -v "$CMD" > /dev/null && [ -f "$FILE" ]; then
               $CMD --version || true
               case "$CMD" in
-                mysql)
-                  sudo mysql -u root < "$FILE" > "$OUT" 2>&1 || echo "[⚠️][∞] MySQL 실행 실패"
+                mysql|mariadb)
+                  sudo $CMD -u root < "$FILE" > "$OUT" 2>&1 || echo "[⚠️][∞] $DESC 실행 실패"
                   ;;
                 psql)
                   sudo -u postgres psql -f "$FILE" > "$OUT" 2>&1 || echo "[⚠️][∞] PostgreSQL 실행 실패"
@@ -200,25 +205,32 @@ jobs:
                 clickhouse-client)
                   clickhouse-client --multiquery < "$FILE" > "$OUT" 2>&1 || echo "[⚠️][∞] ClickHouse 실행 실패"
                   ;;
+                isql-fb)
+                  echo "[⚠️][∞] Firebird CLI 샘플 실행: isql-fb 직접 DB 연결 필요 (테스트 생략)"
+                  ;;
+                db2)
+                  echo "[⚠️][∞] DB2 CLI 샘플 실행: db2 직접 연결 필요 (테스트 생략)"
+                  ;;
               esac
               chmod 600 "$OUT"
             else
               echo "[❌][∞] $DESC 실행불가(설치/샘플파일 모두 없음)"
             fi
           }
-
           run_or_generate_and_retry_infinite "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();'" "$OUTPUT_DIR/mysql_demo.out"
+          run_or_generate_and_retry_infinite "mariadb-client" "mariadb" "MariaDB" "$DBCLI_DIR/mariadb/demo.sql" "echo 'SELECT VERSION();'" "$OUTPUT_DIR/mariadb_demo.out"
           run_or_generate_and_retry_infinite "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/psql_demo.out"
           run_or_generate_and_retry_infinite "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();'" "$OUTPUT_DIR/sqlite_demo.out"
           run_or_generate_and_retry_infinite "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO'" "$OUTPUT_DIR/redis_demo.out"
           run_or_generate_and_retry_infinite "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/clickhouse_demo.out"
-
+          run_or_generate_and_retry_infinite "firebird-utils" "isql-fb" "Firebird" "$DBCLI_DIR/firebird/demo.sql" "echo 'SELECT * FROM RDB\$DATABASE;'" "$OUTPUT_DIR/firebird_demo.out"
+          run_or_generate_and_retry_infinite "db2-client" "db2" "DB2" "$DBCLI_DIR/db2/demo.sql" "echo 'SELECT service_level, fixpack_num FROM sysibmadm.env_inst_info;'" "$OUTPUT_DIR/db2_demo.out"
           find /tmp -maxdepth 1 -type d -name "dbcli_safe_tmp*" -exec rm -rf {} +
           find $HOME -type f -name "*.tmp" -delete
           find . -type f -name "*~" -delete
           echo "[✅][∞] 임시파일/디렉토리/백업 삭제, 데이터 누수 방지 완료"
 
-      - name: 💳 Virtual Account Payment Infinite Robust Automation
+      - name: 💳 Virtual Account Payment Infinite Robust Automation (사용자/조건 시나리오)
         run: |
           robust_mkdir() {
             TARGET="$1"
@@ -227,7 +239,6 @@ jobs:
               sleep 1
             done
           }
-
           robust_echo() {
             CONTENT="$1"
             TARGET="$2"
@@ -236,9 +247,15 @@ jobs:
               sleep 1
             done
           }
-
           robust_mkdir "$ORDER_DIR"
-
+          USER_FILE=".github/dbcli/users/users.csv"
+          # 사용자 id=U001만 결제·입금·완료, enabled=1 아닌 경우 스킵(테스트)
+          USER_ID="U001"
+          USER_ENABLED=$(awk -F',' -v id="$USER_ID" '$1==id{print $4}' $USER_FILE)
+          if [ "$USER_ENABLED" != "1" ]; then
+            echo "[❌][∞] 사용자 $USER_ID 비활성. 결제 시나리오 스킵"
+            exit 0
+          fi
           while true; do
             ORDER_ID="ORD$(date +%H%M%S)$$"
             VA_FILE=$(ls -1t $VA_DIR/virtual_accounts_*.txt | head -n 1)
@@ -249,21 +266,18 @@ jobs:
             robust_echo "order_id,account_number,customer_name,amount,status,created_at" "$ORDER_DIR/order_${ORDER_ID}.csv"
             robust_echo "$ORDER_ID,$VA,$CUST,$AMOUNT,REQUEST,$(date '+%Y-%m-%d %H:%M:%S')" "$ORDER_DIR/order_${ORDER_ID}.csv"
             echo "[💳][∞] 주문생성: $ORDER_ID ($VA, $AMOUNT원)"
-
             sleep 5
             robust_echo "$ORDER_ID,$VA,$CUST,$AMOUNT,DEPOSITED,$(date '+%Y-%m-%d %H:%M:%S')" "$ORDER_DIR/order_${ORDER_ID}_paid.csv"
             echo "[🏦][∞] 입금완료: $ORDER_ID ($VA, $AMOUNT원)"
-
             sleep 5
             robust_echo "$ORDER_ID,$VA,$CUST,$AMOUNT,PAID,$(date '+%Y-%m-%d %H:%M:%S')" "$ORDER_DIR/order_${ORDER_ID}_completed.csv"
             echo "[✅][∞] 결제완료: $ORDER_ID ($VA, $AMOUNT원)"
-
             rm -f "$ORDER_DIR/order_${ORDER_ID}.csv" "$ORDER_DIR/order_${ORDER_ID}_paid.csv"
             ls -lh $ORDER_DIR
             break
           done
 
-      - name: 📝 Show Output Directory Structure & Virtual Account/Order File
+      - name: 📝 Show Output Directory Structure & Virtual Account/Order/User File
         run: |
           echo "[📝][∞] $OUTPUT_DIR 디렉토리와 파일 리스트"
           tree $OUTPUT_DIR || ls -R $OUTPUT_DIR
@@ -273,3 +287,5 @@ jobs:
           echo "[📝][∞] 결제 완료된 주문 파일:"
           ls -lh $ORDER_DIR || true
           head -5 $ORDER_DIR/order_*_completed.csv || true
+          echo "[📝][∞] 사용자 목록 파일:"
+          cat .github/dbcli/users/users.csv ||
