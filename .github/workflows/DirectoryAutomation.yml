@@ -1,4 +1,4 @@
-name: DB CLI Remake Automation (Is a directory 경고 완벽 방지, robust)
+name: DB CLI Remake Automation (robust mkdir/echo/touch/CLI install, No such file or directory/Not a directory/append robust)
 
 on:
   workflow_dispatch:
@@ -25,21 +25,39 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🛠️ 필수 도구 사전 설치 (확장적)
+      - name: 🛠️ 필수 도구 및 DB CLI 사전 설치(확장)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y tree jq curl wget lsb-release || true
+          sudo apt-get install -y tree jq curl wget lsb-release mariadb-client percona-toolkit || true
 
-      - name: ♻️ [리메이크] 디렉토리/파일 robust 재생성, Is-a-directory 경고 방지
+      - name: ♻️ [리메이크] 디렉토리/파일 robust 재생성, echo/append/cli robust
         run: |
           set -e
+
+          # 1. robust mkdir (mkdir -p로 항상 사전 생성)
+          robust_mkdir() {
+            DIR="$1"
+            if [ -e "$DIR" ] && [ ! -d "$DIR" ]; then
+              echo "[⚠️][robust] $DIR: 파일이 디렉토리 이름과 충돌, 파일 삭제"
+              rm -f "$DIR"
+            fi
+            mkdir -p "$DIR"
+            chmod 700 "$DIR"
+          }
+
+          # 2. check_free (존재하지 않으면 robust_mkdir)
           MIN_FREE_MB=${MIN_FREE_MB:-500}
           check_free() {
             DIR="$1"
+            [ -d "$DIR" ] || robust_mkdir "$DIR"
             MB=$(df -Pm "$DIR" | awk 'NR==2 {print $4}')
+            if [ -z "$MB" ]; then
+              echo "[❗][robust] $DIR df 결과 비정상 (No such file or directory)"
+              MB=0
+            fi
             if [ "$MB" -lt "$MIN_FREE_MB" ]; then
               echo "[❗][용량] $DIR 디스크 여유 $MB MB → $MIN_FREE_MB MB 이상 필요, 10초 후 재시도"
-              df -h "$DIR"
+              df -h "$DIR" || true
               sleep 10
               return 1
             else
@@ -47,34 +65,20 @@ jobs:
               return 0
             fi
           }
-          # robust rm -rf but directory/file 구분해서 로그
+
+          # 3. robust_rm (파일/디렉토리 구분)
           robust_rm() {
             TARGET="$1"
             if [ -f "$TARGET" ]; then
-              echo "[🧹] $TARGET 파일 삭제"
               rm -f "$TARGET"
+              echo "[🧹][robust] $TARGET 파일 삭제"
             elif [ -d "$TARGET" ]; then
-              echo "[🧹][경고] $TARGET 디렉토리 대상, 하위 전체 삭제"
               rm -rf "$TARGET"
-            elif [ -e "$TARGET" ]; then
-              echo "[❓] $TARGET: 파일/디렉토리도 아닌데 존재"
-              rm -rf "$TARGET"
+              echo "[🧹][robust] $TARGET 디렉토리(및 하위 전체) 삭제"
             fi
           }
-          robust_rmdir() {
-            DIR="$1"
-            robust_rm "$DIR"
-          }
-          robust_mkdir() {
-            TARGET="$1"
-            robust_rmdir "$TARGET"
-            while true; do
-              check_free "$TARGET" || continue
-              mkdir -p "$TARGET" && chmod 700 "$TARGET" && echo "[✅][∞][리메이크] $TARGET 생성 성공" && break
-              echo "[⚠️][∞][리메이크] $TARGET 생성 실패 (재시도)"
-              sleep 1
-            done
-          }
+
+          # 4. robust_echo (같은 이름의 디렉토리 존재시 삭제 후 파일 생성, append도 안전)
           robust_echo() {
             CONTENT="$1"
             TARGET="$2"
@@ -82,41 +86,51 @@ jobs:
             robust_mkdir "$DIR"
             if [ -e "$TARGET" ]; then
               if [ -d "$TARGET" ]; then
-                echo "[⚠️][에러] $TARGET (echo 대상이 디렉토리, 삭제 후 파일 생성)"
+                echo "[⚠️][에러] $TARGET (echo 대상이 디렉토리, robust_rm로 삭제 후 파일 생성)"
                 robust_rm "$TARGET"
               else
-                robust_rm "$TARGET"
+                rm -f "$TARGET"
               fi
             fi
-            while true; do
-              check_free "$DIR" || continue
-              echo "$CONTENT" > "$TARGET" && chmod 600 "$TARGET" && echo "[✅][∞][리메이크] $TARGET 파일 생성 성공" && break
-              echo "[⚠️][∞][리메이크] $TARGET 파일 생성 실패 (재시도)"
-              sleep 1
-            done
+            echo "$CONTENT" > "$TARGET"
+            chmod 600 "$TARGET"
+            echo "[✅][robust] $TARGET robust echo 파일 생성 성공"
+          }
+          robust_append() {
+            TARGET="$1"
+            LINE="$2"
+            if [ -e "$TARGET" ] && [ -d "$TARGET" ]; then
+              echo "[⚠️][에러] $TARGET (append 대상이 디렉토리, robust_rm로 삭제 후 빈파일 생성)"
+              robust_rm "$TARGET"
+              touch "$TARGET"
+              chmod 600 "$TARGET"
+            elif [ ! -e "$TARGET" ]; then
+              touch "$TARGET"
+              chmod 600 "$TARGET"
+            fi
+            echo "$LINE" >> "$TARGET"
           }
           robust_touch() {
             FILE="$1"
             DIR=$(dirname "$FILE")
             robust_mkdir "$DIR"
-            if [ -e "$FILE" ]; then
-              if [ -d "$FILE" ]; then
-                echo "[⚠️][에러] $FILE (touch 대상이 디렉토리, 삭제 후 빈파일 생성)"
-                robust_rm "$FILE"
-              else
-                robust_rm "$FILE"
-              fi
+            if [ -e "$FILE" ] && [ -d "$FILE" ]; then
+              echo "[⚠️][에러] $FILE (touch 대상이 디렉토리, robust_rm로 삭제 후 빈파일 생성)"
+              robust_rm "$FILE"
             fi
-            while true; do
-              check_free "$DIR" || continue
-              touch "$FILE" && chmod 600 "$FILE" && echo "[✅][∞][리메이크] $FILE 빈파일 생성 성공" && break
-              echo "[⚠️][∞][리메이크] $FILE 빈파일 생성 실패 (재시도)"
-              sleep 1
-            done
+            touch "$FILE"
+            chmod 600 "$FILE"
+            echo "[✅][robust] $FILE robust 빈파일 생성 성공"
           }
 
-          # === 리메이크: 완전 새로 robust 생성 (Is a directory 경고 완벽 방지) ===
-          for DB in mysql mariadb postgresql sqlite redis clickhouse firebird db2; do
+          # 5. robust_rmdir (디렉토리 삭제만)
+          robust_rmdir() {
+            DIR="$1"
+            [ -d "$DIR" ] && rm -rf "$DIR"
+          }
+
+          # === robust 생성(디렉토리, 파일, echo, append, touch, output) ===
+          for DB in mysql mariadb percona postgresql sqlite redis clickhouse firebird db2; do
             robust_mkdir "$DBCLI_DIR/$DB"
           done
           robust_mkdir "$OUTPUT_DIR"
@@ -125,30 +139,30 @@ jobs:
           robust_mkdir "$ORDER_DIR"
           robust_mkdir "$USER_DIR"
 
-          # 샘플 SQL, 더미 robust echo/touch
           robust_echo "SELECT VERSION();"        $DBCLI_DIR/mysql/demo.sql
           robust_echo "SELECT VERSION();"        $DBCLI_DIR/mariadb/demo.sql
+          robust_echo "SELECT VERSION();"        $DBCLI_DIR/percona/demo.sql
           robust_echo "SELECT version();"        $DBCLI_DIR/postgresql/demo.sql
           robust_echo "SELECT sqlite_version();" $DBCLI_DIR/sqlite/demo.sql
           robust_echo "PING"                     $DBCLI_DIR/redis/demo.redis
-          echo "INFO" >> $DBCLI_DIR/redis/demo.redis; chmod 600 $DBCLI_DIR/redis/demo.redis
+          robust_append "$DBCLI_DIR/redis/demo.redis" "INFO"
           robust_echo "SELECT version();"        $DBCLI_DIR/clickhouse/demo.sql
           robust_echo "SELECT * FROM RDB\$DATABASE;" $DBCLI_DIR/firebird/demo.sql
           robust_echo "SELECT service_level, fixpack_num FROM sysibmadm.env_inst_info;" $DBCLI_DIR/db2/demo.sql
 
-          for DB in mysql mariadb postgresql sqlite clickhouse firebird db2; do
+          for DB in mysql mariadb percona postgresql sqlite clickhouse firebird db2; do
             robust_echo "-- dummy database for $DB" "$DBCLI_DIR/$DB/dummy_db.sql"
             robust_touch "$DBCLI_DIR/$DB/dummy.db"
           done
 
-          for DB in mysql mariadb postgresql sqlite redis clickhouse firebird db2; do
+          for DB in mysql mariadb percona postgresql sqlite redis clickhouse firebird db2; do
             robust_echo "[dummy output]" "$OUTPUT_DIR/${DB}_dummy.out"
           done
 
           robust_echo "user_id,user_name,permission,enabled" "$USER_DIR/users.csv"
-          robust_echo "U001,홍길동,ADMIN,1" "$USER_DIR/users.csv"
-          robust_echo "U002,김철수,USER,1" "$USER_DIR/users.csv"
-          robust_echo "U003,이영희,USER,0" "$USER_DIR/users.csv"
+          robust_append "$USER_DIR/users.csv" "U001,홍길동,ADMIN,1"
+          robust_append "$USER_DIR/users.csv" "U002,김철수,USER,1"
+          robust_append "$USER_DIR/users.csv" "U003,이영희,USER,0"
 
           echo "[🧹][∞][리메이크] 기존 가상계좌 파일 전체 삭제"
           rm -f $VA_DIR/virtual_accounts_*.txt
@@ -160,10 +174,17 @@ jobs:
             CUST="User$(printf '%05d' $i)"
             BANK="B$(printf '%04d' $((1000 + ($i % 9000))))"
             DATE="$(date '+%Y-%m-%d')"
-            echo "VA${i},${ACC_NUM},${CUST},${BANK},${DATE}" >> "$VA_FILE"
+            robust_append "$VA_FILE" "VA${i},${ACC_NUM},${CUST},${BANK},${DATE}"
           done
           chmod 600 "$VA_FILE"
           mv "$VA_FILE" "$VA_DIR/"
           echo "[✅][∞][리메이크] $VA_FILE → $VA_DIR 이동 및 권한 최소화"
           ls -lh $VA_DIR/virtual_accounts_*.txt
           rm -rf $TMP_SAFE_DIR
+
+      - name: [확장] 최신 DB CLI 추가 설치(옵션, 에러 무시)
+        run: |
+          sudo apt-get install -y mysql-client-8.0 mysql-client-core-8.0 mariadb-client-10.6 || true
+          sudo apt-get install -y postgresql-client-16 postgresql-client-common || true
+          sudo apt-get install -y clickhouse-client || true
+          sudo apt-get install -y firebird-utils || true
