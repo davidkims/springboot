@@ -1,4 +1,4 @@
-name: DB CLI Install & Virtual Account Echo (디렉토리 정리 경고 대응)
+name: DB CLI Install & Echo Robust Retry Automation (최대 10회 재시도, 데이터 누수 방지)
 
 on:
   workflow_dispatch:
@@ -13,6 +13,7 @@ jobs:
       DBCLI_DIR: .github/dbcli
       OUTPUT_DIR: .github/dbcli/output
       VA_DIR: .github/dbcli/virtual_accounts
+      TMP_SAFE_DIR: /tmp/dbcli_safe_tmp
 
     steps:
       - name: 📦 Checkout
@@ -24,7 +25,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get -y upgrade
 
-          # dpkg 경고 경로 목록
+          # dpkg 경고 경로 목록 - 비어있을 때만 삭제
           for d in /etc/firefox /etc/apport/native-origins.d /etc/apport/blacklist.d; do
             if [ -d "$d" ]; then
               if [ -z "$(ls -A "$d")" ]; then
@@ -45,24 +46,60 @@ jobs:
           done
           echo "[✅] 모든 시스템 및 패키지 업그레이드 및 경고 디렉토리 정리 완료 (90000%)"
 
-      - name: 📂 Ensure Sample SQL/Command Files & Virtual Account File
+      - name: 📂 Robust Directory & Sample File Creation (최대 10회 재시도, 데이터 누수 방지)
         run: |
-          mkdir -p $DBCLI_DIR/mysql $DBCLI_DIR/postgresql $DBCLI_DIR/sqlite $DBCLI_DIR/redis $DBCLI_DIR/clickhouse $OUTPUT_DIR $VA_DIR
+          robust_mkdir() {
+            TARGET="$1"
+            local n=1
+            while [ $n -le 10 ]; do
+              echo "[🔁][$n/10] $TARGET 디렉토리 생성 시도"
+              mkdir -p "$TARGET" && chmod 700 "$TARGET" && echo "[✅] $TARGET 생성 성공" && return 0
+              echo "[⚠️] $TARGET 생성 실패 (시도 $n)"
+              n=$((n+1))
+              sleep 1
+            done
+            echo "[❌] $TARGET 10회 생성 모두 실패"
+            return 1
+          }
 
-          # 샘플 SQL/커맨드 파일 생성
-          [ -f $DBCLI_DIR/mysql/demo.sql ]      || echo "SELECT VERSION();"        > $DBCLI_DIR/mysql/demo.sql
-          [ -f $DBCLI_DIR/postgresql/demo.sql ] || echo "SELECT version();"        > $DBCLI_DIR/postgresql/demo.sql
-          [ -f $DBCLI_DIR/sqlite/demo.sql ]     || echo "SELECT sqlite_version();" > $DBCLI_DIR/sqlite/demo.sql
-          [ -f $DBCLI_DIR/redis/demo.redis ]    || { echo "PING"; echo "INFO"; }   > $DBCLI_DIR/redis/demo.redis
-          [ -f $DBCLI_DIR/clickhouse/demo.sql ] || echo "SELECT version();"        > $DBCLI_DIR/clickhouse/demo.sql
+          robust_echo() {
+            CONTENT="$1"
+            TARGET="$2"
+            local n=1
+            while [ $n -le 10 ]; do
+              echo "[🔁][$n/10] $TARGET 파일 echo 생성 시도"
+              echo "$CONTENT" > "$TARGET" && chmod 600 "$TARGET" && echo "[✅] $TARGET 파일 생성 성공" && return 0
+              echo "[⚠️] $TARGET 파일 생성 실패 (시도 $n)"
+              n=$((n+1))
+              sleep 1
+            done
+            echo "[❌] $TARGET 파일 10회 생성 모두 실패"
+            return 1
+          }
 
-          # 가상계좌 echo 파일(5분마다 1개, 없으면 자동 생성, 기존 삭제)
+          # Robust 디렉토리 생성
+          robust_mkdir "$DBCLI_DIR/mysql"
+          robust_mkdir "$DBCLI_DIR/postgresql"
+          robust_mkdir "$DBCLI_DIR/sqlite"
+          robust_mkdir "$DBCLI_DIR/redis"
+          robust_mkdir "$DBCLI_DIR/clickhouse"
+          robust_mkdir "$OUTPUT_DIR"
+          robust_mkdir "$VA_DIR"
+          robust_mkdir "$TMP_SAFE_DIR"
+
+          # 샘플 SQL/커맨드 파일 robust 생성
+          [ -f $DBCLI_DIR/mysql/demo.sql ]      || robust_echo "SELECT VERSION();"        $DBCLI_DIR/mysql/demo.sql
+          [ -f $DBCLI_DIR/postgresql/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/postgresql/demo.sql
+          [ -f $DBCLI_DIR/sqlite/demo.sql ]     || robust_echo "SELECT sqlite_version();" $DBCLI_DIR/sqlite/demo.sql
+          [ -f $DBCLI_DIR/redis/demo.redis ]    || { robust_echo "PING" $DBCLI_DIR/redis/demo.redis; echo "INFO" >> $DBCLI_DIR/redis/demo.redis; chmod 600 $DBCLI_DIR/redis/demo.redis; }
+          [ -f $DBCLI_DIR/clickhouse/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/clickhouse/demo.sql
+
+          # 가상계좌 echo 파일 robust 생성(5분마다 1개, 기존은 삭제)
           echo "[🧹] 기존 가상계좌 파일 전체 삭제"
           rm -f $VA_DIR/virtual_accounts_*.txt
           TS=$(date '+%Y%m%d_%H%M%S')
-          VA_FILE="$VA_DIR/virtual_accounts_${TS}.txt"
-          echo "[💳] ${TS} 기준 가상계좌 10000건 echo 파일 생성: $VA_FILE"
-          echo "account_id,account_number,customer_name,bank_code,open_date" > "$VA_FILE"
+          VA_FILE="$TMP_SAFE_DIR/virtual_accounts_${TS}_$$.txt"
+          robust_echo "account_id,account_number,customer_name,bank_code,open_date" "$VA_FILE"
           for i in $(seq 1 10000); do
             ACC_NUM="7000$(printf '%07d' $i)"
             CUST="User$(printf '%05d' $i)"
@@ -70,25 +107,30 @@ jobs:
             DATE="$(date '+%Y-%m-%d')"
             echo "VA${i},${ACC_NUM},${CUST},${BANK},${DATE}" >> "$VA_FILE"
           done
-          echo "[✅] $VA_FILE 생성 완료"
-          ls -lh $VA_FILE
+          chmod 600 "$VA_FILE"
+          mv "$VA_FILE" "$VA_DIR/"
+          echo "[✅] $VA_FILE → $VA_DIR 이동 및 권한 최소화"
+          ls -lh $VA_DIR/virtual_accounts_*.txt
 
-      - name: 🏃 Install & Run DB CLI Samples (재시도, 파일/CLI 자동 생성)
+          # 임시파일·디렉토리 정리
+          rm -rf $TMP_SAFE_DIR
+
+      - name: 🏃 Install & Run DB CLI Samples (최대 10회 재시도, 안전)
         run: |
           retry_install() {
             PKG="$1"
             CMD="$2"
             DESC="$3"
             local n=1
-            while [ $n -le 3 ]; do
-              echo "[🔁][$n/3] $PKG 설치 시도"
+            while [ $n -le 10 ]; do
+              echo "[🔁][$n/10] $PKG 설치 시도"
               sudo apt-get update -y
               sudo apt-get install -y "$PKG" && command -v "$CMD" && echo "[✅] $PKG ($DESC) 설치 성공" && return 0
               echo "[⚠️] $PKG ($DESC) 설치 실패 (시도 $n)"
               n=$((n+1))
               sleep 1
             done
-            echo "[❌] $PKG ($DESC) 3회 설치 모두 실패, 스킵"
+            echo "[❌] $PKG ($DESC) 10회 설치 모두 실패, 스킵"
             return 1
           }
 
@@ -99,10 +141,18 @@ jobs:
             FILE="$4"
             GEN="$5"
             OUT="$6"
+            local n=1
 
+            # robust 파일 생성 (최대 10회)
             if [ ! -f "$FILE" ]; then
-              echo "[AUTO] $DESC 샘플 파일 없음. 자동 생성"
-              eval "$GEN"
+              while [ $n -le 10 ]; do
+                echo "[🔁][$n/10] $DESC 샘플 파일 없음. 안전 임시파일 생성"
+                eval "$GEN > \$FILE" && chmod 600 "$FILE" && echo "[✅] $FILE 생성 성공" && break
+                echo "[⚠️] $FILE 생성 실패 (시도 $n)"
+                n=$((n+1))
+                sleep 1
+              done
+              [ -f "$FILE" ] || { echo "[❌] $FILE 10회 생성 모두 실패"; return 1; }
             fi
 
             if ! command -v "$CMD" > /dev/null; then
@@ -129,25 +179,32 @@ jobs:
                   clickhouse-client --multiquery < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] ClickHouse 실행 실패"
                   ;;
               esac
+              chmod 600 "$OUT"
             else
               echo "[❌] $DESC 실행불가(설치/샘플파일 모두 없음)"
             fi
           }
 
           # MySQL
-          run_or_generate_and_retry "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();' > $DBCLI_DIR/mysql/demo.sql" "$OUTPUT_DIR/mysql_demo.out"
+          run_or_generate_and_retry "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();'" "$OUTPUT_DIR/mysql_demo.out"
 
           # PostgreSQL
-          run_or_generate_and_retry "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();' > $DBCLI_DIR/postgresql/demo.sql" "$OUTPUT_DIR/psql_demo.out"
+          run_or_generate_and_retry "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/psql_demo.out"
 
           # SQLite
-          run_or_generate_and_retry "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();' > $DBCLI_DIR/sqlite/demo.sql" "$OUTPUT_DIR/sqlite_demo.out"
+          run_or_generate_and_retry "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();'" "$OUTPUT_DIR/sqlite_demo.out"
 
           # Redis
-          run_or_generate_and_retry "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO' > $DBCLI_DIR/redis/demo.redis" "$OUTPUT_DIR/redis_demo.out"
+          run_or_generate_and_retry "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO'" "$OUTPUT_DIR/redis_demo.out"
 
           # ClickHouse
-          run_or_generate_and_retry "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();' > $DBCLI_DIR/clickhouse/demo.sql" "$OUTPUT_DIR/clickhouse_demo.out"
+          run_or_generate_and_retry "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/clickhouse_demo.out"
+
+          # 임시/백업/로그/세션 파일 및 디렉토리 데이터 누수 방지
+          find /tmp -maxdepth 1 -type d -name "dbcli_safe_tmp*" -exec rm -rf {} +
+          find $HOME -type f -name "*.tmp" -delete
+          find . -type f -name "*~" -delete
+          echo "[✅] 임시파일/디렉토리/백업 삭제, 데이터 누수 방지 완료"
 
       - name: 📝 Show Output Directory Structure & Virtual Account File
         run: |
