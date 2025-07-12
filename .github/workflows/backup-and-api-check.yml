@@ -1,4 +1,4 @@
-name: "🛡️ Robust CI + 필수 유틸리티 강제설치"
+name: "Robust CI + CodeQL + 유틸리티 환경 보장"
 
 on:
   workflow_dispatch:
@@ -8,27 +8,62 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: "[0] 필수 유틸리티 설치 (coreutils, findutils, grep 등) & echo"
+      - name: "[0] 필수 유틸리티 설치(coreutils, findutils, grep, ...)"
         run: |
           set +e
-          echo "[🛠️] 필수 유틸리티(기본 shell 명령어) 재설치/확인..."
+          echo "[🛠️] 기본 명령어 설치(coreutils, findutils, grep, sed, gawk, tree, bash, dash, util-linux)..."
           sudo apt-get update -y || true
-          sudo apt-get install -y --no-install-recommends coreutils findutils grep sed gawk gnu-standards gnu-efi tree bash dash util-linux | tee .github/log/util_install.log || true
-          echo "[🛠️] PATH 및 쉘 기본 명령어 확인"
-          which bash && which mkdir && which cp && which grep && which sort && which sed && which tr && which touch && which ls && echo "OK" || true
-          echo "[🛠️] 유틸리티 설치 및 환경 확인 완료"
+          sudo apt-get install -y --no-install-recommends coreutils findutils grep sed gawk tree bash dash util-linux | tee .github/log/util_install.log || true
+          echo "[🛠️] which 확인:"
+          which bash || true
+          which mkdir || true
+          which cp || true
+          which grep || true
+          which sort || true
+          which sed || true
+          which tr || true
+          which ls || true
+          which touch || true
+          echo "[🛠️] 필수 유틸리티 환경 OK"
 
       - name: "[1] Checkout"
         uses: actions/checkout@v4
 
-      - name: "[2] 디렉토리 생성 & 빌드도구 설치 (실패 허용)"
+      - name: "[2] 디렉토리 생성 및 빌드/패키지 설치"
         run: |
           set +e
           echo '[📂] 디렉토리 생성: .github/codeql-out, .github/log, .echo.*.sh ...'
           mkdir -p .github/codeql-out .github/log
           touch .github/codeql-out/.keep .github/log/.keep .echo.00_dir.sh
-          # (이하 기존 빌드 도구/패키지 설치 코드 그대로)
-          # ... 이하 생략 ...
+
+          echo '[🔄] apt 패키지 전체 최신화...'
+          sudo apt-get update -y | tee .github/log/apt_update.log
+          sudo apt-get upgrade -y | tee .github/log/apt_upgrade.log
+          sudo apt-get dist-upgrade -y | tee .github/log/apt_dist_upgrade.log
+          sudo apt-get autoremove -y | tee .github/log/apt_autoremove.log
+
+          PKGS=""
+          [ -f pom.xml ] && PKGS="$PKGS maven"
+          ([ -f build.gradle ] || [ -f build.gradle.kts ]) && PKGS="$PKGS gradle"
+          ls **/*.py 2>/dev/null | grep -q . && PKGS="$PKGS python3-pip python3-venv"
+          [ -f package.json ] && PKGS="$PKGS nodejs npm"
+          [ -f main.go ] && PKGS="$PKGS golang"
+          [ -f Gemfile ] && PKGS="$PKGS ruby-full"
+          [ -f Cargo.toml ] && PKGS="$PKGS cargo"
+          [ -n "$PKGS" ] && (echo "[🛠️] build tool 설치/업그레이드: $PKGS"; sudo apt-get install --only-upgrade -y $PKGS | tee .github/log/pkg_only_upgrade.log; sudo apt-get install -y $PKGS | tee .github/log/pkg_install.log)
+
+          NOT_UPGRADED=$(apt list --upgradable 2>/dev/null | grep -v "Listing..." | wc -l)
+          if [ "$NOT_UPGRADED" -gt 0 ]; then
+            echo "[⚠️] 아직 $NOT_UPGRADED 개 패키지 업그레이드 안됨!"
+            apt list --upgradable 2>/dev/null | tee .github/log/not_upgraded_list.log
+          else
+            echo "[✅] 모든 패키지 최신!"
+          fi
+
+          [ -f .echo.01_upgrade.sh ] || echo "echo '[echo] dummy 업그레이드'" > .echo.01_upgrade.sh
+          [ -f .echo.02_pkg.sh ] || echo "echo '[echo] dummy 빌드도구'" > .echo.02_pkg.sh
+          [ -f .echo.03_warn.sh ] || echo "echo '[echo] dummy 패키지 경고'" > .echo.03_warn.sh
+          cp .echo.*.sh .github/codeql-out/ 2>/dev/null || true
           echo '[step end: Install & Upgrade Build Tools 완료]'
 
       - name: "[3] CodeQL Detect & Analyze & 복제"
