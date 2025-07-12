@@ -1,4 +1,4 @@
-name: DB CLI Install & Echo Infinite Install Retry Automation (무한루프 재시도)
+name: DB CLI & Virtual Account Payment Simulation (결제 시나리오 자동화)
 
 on:
   workflow_dispatch:
@@ -13,38 +13,12 @@ jobs:
       DBCLI_DIR: .github/dbcli
       OUTPUT_DIR: .github/dbcli/output
       VA_DIR: .github/dbcli/virtual_accounts
+      ORDER_DIR: .github/dbcli/orders
       TMP_SAFE_DIR: /tmp/dbcli_safe_tmp
 
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
-
-      - name: 🚀 90000% System & Package Upgrade (+경고 디렉토리 정리)
-        run: |
-          echo "[🚀] 90000% 업그레이드: apt update & apt upgrade 시작!"
-          sudo apt-get update -y
-          sudo apt-get -y upgrade
-
-          # dpkg 경고 경로 목록 - 비어있을 때만 삭제
-          for d in /etc/firefox /etc/apport/native-origins.d /etc/apport/blacklist.d; do
-            if [ -d "$d" ]; then
-              if [ -z "$(ls -A "$d")" ]; then
-                echo "[🧹] $d 비어 있음 → rmdir로 삭제"
-                sudo rmdir "$d"
-                if [ ! -d "$d" ]; then
-                  echo "[✅] $d 삭제 완료"
-                else
-                  echo "[❗] $d 삭제 실패(권한/잠금 등)"
-                fi
-              else
-                echo "[❗] $d 디렉토리 비어있지 않아 삭제하지 않음"
-                ls -l "$d"
-              fi
-            else
-              echo "[ℹ️] $d 디렉토리 없음"
-            fi
-          done
-          echo "[✅] 모든 시스템 및 패키지 업그레이드 및 경고 디렉토리 정리 완료 (90000%)"
 
       - name: 📂 Robust Directory & Sample File Creation (무한루프)
         run: |
@@ -77,6 +51,7 @@ jobs:
           robust_mkdir "$OUTPUT_DIR"
           robust_mkdir "$VA_DIR"
           robust_mkdir "$TMP_SAFE_DIR"
+          robust_mkdir "$ORDER_DIR"
 
           [ -f $DBCLI_DIR/mysql/demo.sql ]      || robust_echo "SELECT VERSION();"        $DBCLI_DIR/mysql/demo.sql
           [ -f $DBCLI_DIR/postgresql/demo.sql ] || robust_echo "SELECT version();"        $DBCLI_DIR/postgresql/demo.sql
@@ -103,106 +78,59 @@ jobs:
 
           rm -rf $TMP_SAFE_DIR
 
-      - name: 🏃 Install & Run DB CLI Samples (무한루프+systemctl reload, 안전)
+      - name: 💳 Virtual Account Payment 시나리오 자동화 (주문-입금-완료)
         run: |
-          is_service_pkg() {
-            case "$1" in
-              mysql-client|mysql-server|postgresql-client|postgresql|redis-tools|redis-server|clickhouse-client|clickhouse-server) return 0 ;;
-              *) return 1 ;;
-            esac
-          }
-
-          retry_install_infinite() {
-            PKG="$1"
-            CMD="$2"
-            DESC="$3"
+          robust_mkdir() {
+            TARGET="$1"
             while true; do
-              echo "[🔁][∞] $PKG 설치 시도"
-              sudo apt-get update -y
-              sudo apt-get install -y "$PKG" && command -v "$CMD" && echo "[✅] $PKG ($DESC) 설치 성공"
-              if command -v "$CMD" > /dev/null; then
-                if is_service_pkg "$PKG"; then
-                  echo "[🔄] $PKG 설치 후 systemctl daemon-reload 실행"
-                  sudo systemctl daemon-reload && echo "[✅] systemctl daemon-reload 성공" || echo "[❗] systemctl daemon-reload 실패"
-                fi
-                break
-              fi
-              echo "[⚠️] $PKG ($DESC) 설치 실패 (재시도)"
+              mkdir -p "$TARGET" && chmod 700 "$TARGET" && break
               sleep 1
             done
           }
 
-          run_or_generate_and_retry_infinite() {
-            PKG="$1"
-            CMD="$2"
-            DESC="$3"
-            FILE="$4"
-            GEN="$5"
-            OUT="$6"
-
-            # robust 파일 생성 (무한)
-            while [ ! -f "$FILE" ]; do
-              echo "[🔁][∞] $DESC 샘플 파일 없음. 안전 임시파일 생성"
-              eval "$GEN > \$FILE" && chmod 600 "$FILE" && echo "[✅] $FILE 생성 성공" && break
-              echo "[⚠️] $FILE 생성 실패 (재시도)"
+          robust_echo() {
+            CONTENT="$1"
+            TARGET="$2"
+            while true; do
+              echo "$CONTENT" > "$TARGET" && chmod 600 "$TARGET" && break
               sleep 1
             done
-
-            if ! command -v "$CMD" > /dev/null; then
-              echo "[AUTO] $CMD 미설치. 무한 재시도 설치"
-              retry_install_infinite "$PKG" "$CMD" "$DESC"
-            fi
-
-            if command -v "$CMD" > /dev/null && [ -f "$FILE" ]; then
-              $CMD --version || true
-              case "$CMD" in
-                mysql)
-                  sudo mysql -u root < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] MySQL 실행 실패"
-                  ;;
-                psql)
-                  sudo -u postgres psql -f "$FILE" > "$OUT" 2>&1 || echo "[⚠️] PostgreSQL 실행 실패"
-                  ;;
-                sqlite3)
-                  sqlite3 :memory: < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] SQLite 실행 실패"
-                  ;;
-                redis-cli)
-                  while read line; do redis-cli $line; done < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] Redis 실행 실패"
-                  ;;
-                clickhouse-client)
-                  clickhouse-client --multiquery < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] ClickHouse 실행 실패"
-                  ;;
-              esac
-              chmod 600 "$OUT"
-            else
-              echo "[❌] $DESC 실행불가(설치/샘플파일 모두 없음)"
-            fi
           }
 
-          # MySQL
-          run_or_generate_and_retry_infinite "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();'" "$OUTPUT_DIR/mysql_demo.out"
+          robust_mkdir "$ORDER_DIR"
 
-          # PostgreSQL
-          run_or_generate_and_retry_infinite "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/psql_demo.out"
+          # 주문 생성: 랜덤 가상계좌, 랜덤 금액/주문번호
+          ORDER_ID="ORD$(date +%H%M%S)$$"
+          VA_FILE=$(ls -1t $VA_DIR/virtual_accounts_*.txt | head -n 1)
+          [ -f "$VA_FILE" ] || { echo "[❌] 가상계좌 파일 없음!"; exit 1; }
+          VA=$(awk 'NR==RANDOM%10000+2{print $2}' RANDOM=$(date +%S) $VA_FILE)
+          AMOUNT=$((RANDOM%99000 + 1000))
+          CUST=$(awk -F',' -v acc="$VA" '$2==acc{print $3}' $VA_FILE | head -n1)
+          robust_echo "order_id,account_number,customer_name,amount,status,created_at" "$ORDER_DIR/order_${ORDER_ID}.csv"
+          robust_echo "$ORDER_ID,$VA,$CUST,$AMOUNT,REQUEST,$(date '+%Y-%m-%d %H:%M:%S')" "$ORDER_DIR/order_${ORDER_ID}.csv"
+          echo "[💳] 주문생성: $ORDER_ID ($VA, $AMOUNT원)"
 
-          # SQLite
-          run_or_generate_and_retry_infinite "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();'" "$OUTPUT_DIR/sqlite_demo.out"
+          # 입금 처리 시뮬레이션(5초 후)
+          sleep 5
+          robust_echo "$ORDER_ID,$VA,$CUST,$AMOUNT,DEPOSITED,$(date '+%Y-%m-%d %H:%M:%S')" "$ORDER_DIR/order_${ORDER_ID}_paid.csv"
+          echo "[🏦] 입금완료: $ORDER_ID ($VA, $AMOUNT원)"
 
-          # Redis
-          run_or_generate_and_retry_infinite "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO'" "$OUTPUT_DIR/redis_demo.out"
+          # 결제 완료 처리(5초 후)
+          sleep 5
+          robust_echo "$ORDER_ID,$VA,$CUST,$AMOUNT,PAID,$(date '+%Y-%m-%d %H:%M:%S')" "$ORDER_DIR/order_${ORDER_ID}_completed.csv"
+          echo "[✅] 결제완료: $ORDER_ID ($VA, $AMOUNT원)"
 
-          # ClickHouse
-          run_or_generate_and_retry_infinite "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();'" "$OUTPUT_DIR/clickhouse_demo.out"
+          # 정리: 진행 중(REQUEST) 파일 삭제, 최종 완료만 남김
+          rm -f "$ORDER_DIR/order_${ORDER_ID}.csv" "$ORDER_DIR/order_${ORDER_ID}_paid.csv"
+          ls -lh $ORDER_DIR
 
-          # 임시/백업/로그/세션 파일 및 디렉토리 데이터 누수 방지
-          find /tmp -maxdepth 1 -type d -name "dbcli_safe_tmp*" -exec rm -rf {} +
-          find $HOME -type f -name "*.tmp" -delete
-          find . -type f -name "*~" -delete
-          echo "[✅] 임시파일/디렉토리/백업 삭제, 데이터 누수 방지 완료"
-
-      - name: 📝 Show Output Directory Structure & Virtual Account File
+      - name: 📝 Show Output Directory Structure & Virtual Account/Order File
         run: |
           echo "[📝] $OUTPUT_DIR 디렉토리와 파일 리스트"
           tree $OUTPUT_DIR || ls -R $OUTPUT_DIR
           echo "[📝] 가상계좌 생성 결과:"
           ls -lh $VA_DIR || true
           head -5 $VA_DIR/virtual_accounts_*.txt || true
+          echo "[📝] 결제 완료된 주문 파일:"
+          ls -lh $ORDER_DIR || true
+          head -5 $ORDER_DIR/order_*_completed.csv || true
