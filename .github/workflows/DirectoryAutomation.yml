@@ -1,4 +1,4 @@
-name: DB CLI Install & Virtual Account Bulk Echo Automation
+name: DB CLI Install & Robust Virtual Account Echo Automation
 
 on:
   workflow_dispatch:
@@ -25,30 +25,24 @@ jobs:
           sudo apt-get -y upgrade
           echo "[✅] 모든 시스템 및 패키지 업그레이드 완료 (90000%)"
 
-      - name: 📂 Ensure Sample SQL/Command Files Exist
+      - name: 📂 Ensure Sample SQL/Command Files & Virtual Account File
         run: |
-          mkdir -p $DBCLI_DIR/mysql $DBCLI_DIR/postgresql $DBCLI_DIR/sqlite $DBCLI_DIR/redis $DBCLI_DIR/clickhouse
-          [ -f $DBCLI_DIR/mysql/demo.sql ]       || echo "SELECT VERSION();"                  > $DBCLI_DIR/mysql/demo.sql
-          [ -f $DBCLI_DIR/postgresql/demo.sql ]  || echo "SELECT version();"                  > $DBCLI_DIR/postgresql/demo.sql
-          [ -f $DBCLI_DIR/sqlite/demo.sql ]      || echo "SELECT sqlite_version();"           > $DBCLI_DIR/sqlite/demo.sql
-          [ -f $DBCLI_DIR/redis/demo.redis ]     || { echo "PING"; echo "INFO"; }             > $DBCLI_DIR/redis/demo.redis
-          [ -f $DBCLI_DIR/clickhouse/demo.sql ]  || echo "SELECT version();"                  > $DBCLI_DIR/clickhouse/demo.sql
-          mkdir -p $OUTPUT_DIR
+          mkdir -p $DBCLI_DIR/mysql $DBCLI_DIR/postgresql $DBCLI_DIR/sqlite $DBCLI_DIR/redis $DBCLI_DIR/clickhouse $OUTPUT_DIR $VA_DIR
 
-      - name: 🏦 Generate Virtual Account Bulk Echo File (Delete Old, Make New)
-        run: |
-          mkdir -p $VA_DIR
-          # Delete all old files
+          # 샘플 SQL/커맨드 파일 생성
+          [ -f $DBCLI_DIR/mysql/demo.sql ]      || echo "SELECT VERSION();"        > $DBCLI_DIR/mysql/demo.sql
+          [ -f $DBCLI_DIR/postgresql/demo.sql ] || echo "SELECT version();"        > $DBCLI_DIR/postgresql/demo.sql
+          [ -f $DBCLI_DIR/sqlite/demo.sql ]     || echo "SELECT sqlite_version();" > $DBCLI_DIR/sqlite/demo.sql
+          [ -f $DBCLI_DIR/redis/demo.redis ]    || { echo "PING"; echo "INFO"; }   > $DBCLI_DIR/redis/demo.redis
+          [ -f $DBCLI_DIR/clickhouse/demo.sql ] || echo "SELECT version();"        > $DBCLI_DIR/clickhouse/demo.sql
+
+          # 가상계좌 echo 파일(5분마다 1개, 없으면 자동 생성, 기존 삭제)
           echo "[🧹] 기존 가상계좌 파일 전체 삭제"
           rm -f $VA_DIR/virtual_accounts_*.txt
-
-          # Create new file with timestamp
           TS=$(date '+%Y%m%d_%H%M%S')
           VA_FILE="$VA_DIR/virtual_accounts_${TS}.txt"
           echo "[💳] ${TS} 기준 가상계좌 10000건 echo 파일 생성: $VA_FILE"
-          # 헤더
           echo "account_id,account_number,customer_name,bank_code,open_date" > "$VA_FILE"
-          # 1만건 예시 데이터 생성 (가상)
           for i in $(seq 1 10000); do
             ACC_NUM="7000$(printf '%07d' $i)"
             CUST="User$(printf '%05d' $i)"
@@ -56,88 +50,84 @@ jobs:
             DATE="$(date '+%Y-%m-%d')"
             echo "VA${i},${ACC_NUM},${CUST},${BANK},${DATE}" >> "$VA_FILE"
           done
-
           echo "[✅] $VA_FILE 생성 완료"
           ls -lh $VA_FILE
 
-      - name: 🏃 Install & Run DB CLI Samples (버전 fallback 지원)
+      - name: 🏃 Install & Run DB CLI Samples (재시도, 파일/CLI 자동 생성)
         run: |
-          install_with_fallback() {
+          retry_install() {
             PKG="$1"
             CMD="$2"
             DESC="$3"
-            echo "[⚡] $PKG 최신 설치 시도"
-            sudo apt-get update -y && sudo apt-get install -y "$PKG" && return 0
-            echo "[❗] $PKG 최신 설치 실패! 설치 가능한 버전 목록:"
-            apt-cache madison "$PKG" || apt-cache policy "$PKG"
-            VERSIONS=$(apt-cache madison "$PKG" | awk '{print $3}' | head -n 2)
-            for VER in $VERSIONS; do
-              echo "[🔄] $PKG 버전 $VER로 설치 재시도"
-              sudo apt-get install -y "$PKG=$VER" && return 0
+            local n=1
+            while [ $n -le 3 ]; do
+              echo "[🔁][$n/3] $PKG 설치 시도"
+              sudo apt-get update -y
+              sudo apt-get install -y "$PKG" && command -v "$CMD" && echo "[✅] $PKG ($DESC) 설치 성공" && return 0
+              echo "[⚠️] $PKG ($DESC) 설치 실패 (시도 $n)"
+              n=$((n+1))
+              sleep 1
             done
-            echo "[❌] $PKG ($DESC) 모든 버전 설치 실패! 스킵"
+            echo "[❌] $PKG ($DESC) 3회 설치 모두 실패, 스킵"
             return 1
           }
 
+          run_or_generate_and_retry() {
+            PKG="$1"
+            CMD="$2"
+            DESC="$3"
+            FILE="$4"
+            GEN="$5"
+            OUT="$6"
+
+            if [ ! -f "$FILE" ]; then
+              echo "[AUTO] $DESC 샘플 파일 없음. 자동 생성"
+              eval "$GEN"
+            fi
+
+            if ! command -v "$CMD" > /dev/null; then
+              echo "[AUTO] $CMD 미설치. 재시도 설치"
+              retry_install "$PKG" "$CMD" "$DESC"
+            fi
+
+            if command -v "$CMD" > /dev/null && [ -f "$FILE" ]; then
+              $CMD --version || true
+              case "$CMD" in
+                mysql)
+                  sudo mysql -u root < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] MySQL 실행 실패"
+                  ;;
+                psql)
+                  sudo -u postgres psql -f "$FILE" > "$OUT" 2>&1 || echo "[⚠️] PostgreSQL 실행 실패"
+                  ;;
+                sqlite3)
+                  sqlite3 :memory: < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] SQLite 실행 실패"
+                  ;;
+                redis-cli)
+                  while read line; do redis-cli $line; done < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] Redis 실행 실패"
+                  ;;
+                clickhouse-client)
+                  clickhouse-client --multiquery < "$FILE" > "$OUT" 2>&1 || echo "[⚠️] ClickHouse 실행 실패"
+                  ;;
+              esac
+            else
+              echo "[❌] $DESC 실행불가(설치/샘플파일 모두 없음)"
+            fi
+          }
+
           # MySQL
-          echo "[🏃] Run MySQL sample"
-          if ! command -v mysql > /dev/null; then
-            install_with_fallback mysql-client mysql "MySQL CLI"
-          fi
-          if command -v mysql > /dev/null && [ -f $DBCLI_DIR/mysql/demo.sql ]; then
-            mysql --version
-            sudo mysql -u root < $DBCLI_DIR/mysql/demo.sql > $OUTPUT_DIR/mysql_demo.out 2>&1 || echo "[⚠️] MySQL 실행 실패"
-          else
-            echo "[❌] mysql CLI 또는 샘플 SQL 미존재 - 실행 스킵"
-          fi
+          run_or_generate_and_retry "mysql-client" "mysql" "MySQL" "$DBCLI_DIR/mysql/demo.sql" "echo 'SELECT VERSION();' > $DBCLI_DIR/mysql/demo.sql" "$OUTPUT_DIR/mysql_demo.out"
 
           # PostgreSQL
-          echo "[🏃] Run PostgreSQL sample"
-          if ! command -v psql > /dev/null; then
-            install_with_fallback postgresql-client psql "PostgreSQL CLI"
-          fi
-          if command -v psql > /dev/null && [ -f $DBCLI_DIR/postgresql/demo.sql ]; then
-            psql --version
-            sudo -u postgres psql -f $DBCLI_DIR/postgresql/demo.sql > $OUTPUT_DIR/psql_demo.out 2>&1 || echo "[⚠️] PostgreSQL 실행 실패"
-          else
-            echo "[❌] psql CLI 또는 샘플 SQL 미존재 - 실행 스킵"
-          fi
+          run_or_generate_and_retry "postgresql-client" "psql" "PostgreSQL" "$DBCLI_DIR/postgresql/demo.sql" "echo 'SELECT version();' > $DBCLI_DIR/postgresql/demo.sql" "$OUTPUT_DIR/psql_demo.out"
 
           # SQLite
-          echo "[🏃] Run SQLite sample"
-          if ! command -v sqlite3 > /dev/null; then
-            install_with_fallback sqlite3 sqlite3 "SQLite CLI"
-          fi
-          if command -v sqlite3 > /dev/null && [ -f $DBCLI_DIR/sqlite/demo.sql ]; then
-            sqlite3 --version
-            sqlite3 :memory: < $DBCLI_DIR/sqlite/demo.sql > $OUTPUT_DIR/sqlite_demo.out 2>&1 || echo "[⚠️] SQLite 실행 실패"
-          else
-            echo "[❌] sqlite3 CLI 또는 샘플 SQL 미존재 - 실행 스킵"
-          fi
+          run_or_generate_and_retry "sqlite3" "sqlite3" "SQLite" "$DBCLI_DIR/sqlite/demo.sql" "echo 'SELECT sqlite_version();' > $DBCLI_DIR/sqlite/demo.sql" "$OUTPUT_DIR/sqlite_demo.out"
 
           # Redis
-          echo "[🏃] Run Redis sample"
-          if ! command -v redis-cli > /dev/null; then
-            install_with_fallback redis-tools redis-cli "Redis CLI"
-          fi
-          if command -v redis-cli > /dev/null && [ -f $DBCLI_DIR/redis/demo.redis ]; then
-            redis-cli --version
-            while read line; do redis-cli $line; done < $DBCLI_DIR/redis/demo.redis > $OUTPUT_DIR/redis_demo.out 2>&1 || echo "[⚠️] Redis 실행 실패"
-          else
-            echo "[❌] redis-cli 또는 샘플 파일 미존재 - 실행 스킵"
-          fi
+          run_or_generate_and_retry "redis-tools" "redis-cli" "Redis" "$DBCLI_DIR/redis/demo.redis" "echo -e 'PING\nINFO' > $DBCLI_DIR/redis/demo.redis" "$OUTPUT_DIR/redis_demo.out"
 
           # ClickHouse
-          echo "[🏃] Run ClickHouse sample"
-          if ! command -v clickhouse-client > /dev/null; then
-            install_with_fallback clickhouse-client clickhouse-client "ClickHouse CLI"
-          fi
-          if command -v clickhouse-client > /dev/null && [ -f $DBCLI_DIR/clickhouse/demo.sql ]; then
-            clickhouse-client --version
-            clickhouse-client --multiquery < $DBCLI_DIR/clickhouse/demo.sql > $OUTPUT_DIR/clickhouse_demo.out 2>&1 || echo "[⚠️] ClickHouse 실행 실패"
-          else
-            echo "[❌] clickhouse-client 또는 샘플 SQL 미존재 - 실행 스킵"
-          fi
+          run_or_generate_and_retry "clickhouse-client" "clickhouse-client" "ClickHouse" "$DBCLI_DIR/clickhouse/demo.sql" "echo 'SELECT version();' > $DBCLI_DIR/clickhouse/demo.sql" "$OUTPUT_DIR/clickhouse_demo.out"
 
       - name: 📝 Show Output Directory Structure & Virtual Account File
         run: |
