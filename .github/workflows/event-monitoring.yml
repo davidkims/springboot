@@ -1,4 +1,4 @@
-name: 📡 워크플로 전체 상황 모니터링 (최대 1000건, jq null/ratelimit 완전 방어)
+name: 📡 워크플로 전체 상황 모니터링 (최대 1000건, jq null/rate-limit 완전 방어)
 
 on:
   repository_dispatch:
@@ -12,11 +12,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: ▶️ 최신 1000건 워크플로우 실행 목록 수집 (페이지네이션, null-safe)
+      - name: ▶️ 최신 1000건 워크플로우 실행 목록 수집 (페이지네이션, null-safe, rate-limit-safe)
+        id: collect_runs
         run: |
           echo "echo '[🔍] 최신 1000건 워크플로우 실행 목록 수집...'"
           echo '[🔍] 최신 1000건 워크플로우 실행 목록 수집...'
           > all-runs-arrays.json
+          RATE_LIMITED=0
           for page in $(seq 1 10); do
             echo "echo '[🔎] 페이지: $page'"
             echo "[🔎] 페이지: $page"
@@ -24,21 +26,36 @@ jobs:
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page")
-            # ratelimit/오류 감지
             msg=$(echo "$resp" | jq -r '.message // empty')
-            if [[ "$msg" == *"rate limit"* ]]; then
+            if [[ "$msg" == *"rate limit"* ]] || [[ "$msg" == *"API rate limit exceeded"* ]]; then
               echo "echo '[🚨] API Rate Limit 초과 - 수집 중단'"
               echo '[🚨] API Rate Limit 초과 - 수집 중단'
+              RATE_LIMITED=1
               break
             fi
-            # workflow_runs가 비었거나 null이면 빈 배열로 대체
-            echo "$resp" | jq '.workflow_runs // []' >> all-runs-arrays.json
+            # null일 경우 빈 배열로 대체
+            runs=$(echo "$resp" | jq '.workflow_runs // []')
+            echo "$runs" >> all-runs-arrays.json
           done
-          # 모든 배열 합치기
-          jq -s 'add' all-runs-arrays.json > all-runs-flat.json
-          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json
+          # rate limit에 걸렸으면 빈 배열로 만들기
+          if [ "$RATE_LIMITED" -eq 1 ]; then
+            echo "[]" > all-runs-flat.json
+            echo "[]" > all-runs-summary.json
+            echo "RATE_LIMITED=1" >> $GITHUB_ENV
+            exit 0
+          fi
+          # 파일 합치기 및 null-safe
+          cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
+          if [ ! -s all-runs-flat.json ]; then
+            echo "[]" > all-runs-flat.json
+          fi
+          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
+          if [ ! -s all-runs-summary.json ]; then
+            echo "[]" > all-runs-summary.json
+          fi
 
       - name: 📝 최신 워크플로우 20건 요약 로그
+        if: env.RATE_LIMITED != '1'
         run: |
           echo "echo '[📝] 최신 워크플로우 20건 요약...'"
           echo '[📝] 최신 워크플로우 20건 요약...'
@@ -57,6 +74,7 @@ jobs:
           path: all-runs-summary.json
 
       - name: 🔄 각 워크플로우 실행 상세 감지 및 저장 (최대 1000건, null-safe)
+        if: env.RATE_LIMITED != '1'
         run: |
           echo "echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 1000건)...'"
           echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 1000건)...'
@@ -98,6 +116,7 @@ jobs:
             steps-details/
 
       - name: 📋 모든 워크플로우 최신 상태 집계
+        if: env.RATE_LIMITED != '1'
         run: |
           echo "echo '[📋] 최신 40건 워크플로우 상태 집계...'"
           echo '[📋] 최신 40건 워크플로우 상태 집계...'
