@@ -1,4 +1,4 @@
-name: 📡 워크플로 전체 상황 모니터링 (최대 1000건, jq null/rate-limit 완전 방어)
+name: 📡 워크플로 전체 상황 모니터링 (최대 1000건, 완전 방어/더미파일 생성)
 
 on:
   repository_dispatch:
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: ▶️ 최신 1000건 워크플로우 실행 목록 수집 (페이지네이션, null-safe, rate-limit-safe)
+      - name: ▶️ 최신 1000건 워크플로우 실행 목록 수집 (null-safe, rate-limit-safe)
         id: collect_runs
         run: |
           echo "echo '[🔍] 최신 1000건 워크플로우 실행 목록 수집...'"
@@ -33,29 +33,25 @@ jobs:
               RATE_LIMITED=1
               break
             fi
-            # null일 경우 빈 배열로 대체
             runs=$(echo "$resp" | jq '.workflow_runs // []')
             echo "$runs" >> all-runs-arrays.json
           done
-          # rate limit에 걸렸으면 빈 배열로 만들기
           if [ "$RATE_LIMITED" -eq 1 ]; then
             echo "[]" > all-runs-flat.json
             echo "[]" > all-runs-summary.json
             echo "RATE_LIMITED=1" >> $GITHUB_ENV
-            exit 0
-          fi
-          # 파일 합치기 및 null-safe
-          cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
-          if [ ! -s all-runs-flat.json ]; then
-            echo "[]" > all-runs-flat.json
-          fi
-          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
-          if [ ! -s all-runs-summary.json ]; then
-            echo "[]" > all-runs-summary.json
+          else
+            cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
+            if [ ! -s all-runs-flat.json ]; then
+              echo "[]" > all-runs-flat.json
+            fi
+            jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
+            if [ ! -s all-runs-summary.json ]; then
+              echo "[]" > all-runs-summary.json
+            fi
           fi
 
       - name: 📝 최신 워크플로우 20건 요약 로그
-        if: env.RATE_LIMITED != '1'
         run: |
           echo "echo '[📝] 최신 워크플로우 20건 요약...'"
           echo '[📝] 최신 워크플로우 20건 요약...'
@@ -66,20 +62,29 @@ jobs:
             echo '[⚠️] 워크플로우 데이터 없음'
           fi
 
-      - name: 📂 전체 워크플로우 실행 요약 아티팩트 업로드
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: all-workflow-runs-summary
-          path: all-runs-summary.json
+      - name: 📁 더미/실제 세부 디렉토리 생성 및 안내 파일 생성
+        run: |
+          echo "echo '[📁] runs-details/jobs-details/steps-details 디렉토리 및 안내 파일 생성...'"
+          echo '[📁] runs-details/jobs-details/steps-details 디렉토리 및 안내 파일 생성...'
+          mkdir -p runs-details jobs-details steps-details
+          if [ ! -f runs-details/README.txt ]; then
+            echo "echo '[ℹ️] runs-details 디렉토리는 워크플로 실행 상세를 저장합니다.'" > runs-details/README.txt
+            echo '[ℹ️] runs-details 디렉토리는 워크플로 실행 상세를 저장합니다.' >> runs-details/README.txt
+          fi
+          if [ ! -f jobs-details/README.txt ]; then
+            echo "echo '[ℹ️] jobs-details 디렉토리는 job 상태를 저장합니다.'" > jobs-details/README.txt
+            echo '[ℹ️] jobs-details 디렉토리는 job 상태를 저장합니다.' >> jobs-details/README.txt
+          fi
+          if [ ! -f steps-details/README.txt ]; then
+            echo "echo '[ℹ️] steps-details 디렉토리는 step 상태를 저장합니다.'" > steps-details/README.txt
+            echo '[ℹ️] steps-details 디렉토리는 step 상태를 저장합니다.' >> steps-details/README.txt
+          fi
 
       - name: 🔄 각 워크플로우 실행 상세 감지 및 저장 (최대 1000건, null-safe)
-        if: env.RATE_LIMITED != '1'
         run: |
           echo "echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 1000건)...'"
           echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 1000건)...'
-          mkdir -p runs-details jobs-details steps-details
-          ids=$(cat all-runs-summary.json | jq -r '.[].id' | head -1000)
+          ids=$(cat all-runs-summary.json 2>/dev/null | jq -r '.[].id' | head -1000 || true)
           i=0
           for rid in $ids; do
             echo "echo '[🟢] 워크플로우 실행 상세정보: $rid'"
@@ -88,7 +93,11 @@ jobs:
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid")
-            echo "$run_resp" > runs-details/run-$rid.json
+            if [ -n "$run_resp" ] && [ "$(echo "$run_resp" | jq -r '.id // empty')" != "" ]; then
+              echo "$run_resp" > runs-details/run-$rid.json
+            else
+              echo '{ "error": "수집 실패 또는 RateLimit" }' > runs-details/run-$rid.json
+            fi
 
             echo "echo '[🔹] jobs 목록: $rid'"
             echo "[🔹] jobs 목록: $rid"
@@ -96,17 +105,19 @@ jobs:
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid/jobs")
-            echo "$jobs_resp" > jobs-details/jobs-$rid.json
-
-            # step 추출 (jobs가 null이어도 에러 없이 처리)
-            cat jobs-details/jobs-$rid.json | jq '[.jobs // [] | .[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps // [] | .[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json
+            if [ -n "$jobs_resp" ] && [ "$(echo "$jobs_resp" | jq -r '.jobs // empty')" != "" ]; then
+              echo "$jobs_resp" > jobs-details/jobs-$rid.json
+              cat jobs-details/jobs-$rid.json | jq '[.jobs // [] | .[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps // [] | .[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json
+            else
+              echo '{ "error": "수집 실패 또는 RateLimit" }' > jobs-details/jobs-$rid.json
+              echo '[]' > steps-details/steps-$rid.json
+            fi
 
             i=$((i+1))
             if [ $i -ge 1000 ]; then break; fi
           done
 
       - name: 📦 모든 워크플로우 실행/잡/스텝 아티팩트 업로드
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: all-workflow-details
@@ -116,7 +127,6 @@ jobs:
             steps-details/
 
       - name: 📋 모든 워크플로우 최신 상태 집계
-        if: env.RATE_LIMITED != '1'
         run: |
           echo "echo '[📋] 최신 40건 워크플로우 상태 집계...'"
           echo '[📋] 최신 40건 워크플로우 상태 집계...'
