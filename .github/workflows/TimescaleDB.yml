@@ -1,31 +1,31 @@
-name: 📦 ELK & TimescaleDB 전문가 자동화 집계 워크플로우 (스냅샷, PATH, 서비스, not found 방지)
+name: 📦 전문가 분산 저장/설치/스냅샷 자동화 워크플로우 (충돌방지 완전판)
 
 on:
   workflow_dispatch:
 
 jobs:
-  elk-timescale-setup:
+  distributed-setup:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📂 디렉토리 생성 및 echo 안내 + snapshot
+      - name: 📂 역할별 분산 디렉토리/echo/snapshot 생성
         run: |
-          mkdir -p collector-tmp encrypted-data elk-config images snapshot
-          echo '[디렉토리 생성] collector-tmp' > collector-tmp/echo_dir.txt
-          echo '[디렉토리 생성] encrypted-data' > encrypted-data/echo_dir.txt
-          echo '[디렉토리 생성] elk-config' > elk-config/echo_dir.txt
-          echo '[디렉토리 생성] images' > images/echo_dir.txt
-          echo '[스냅샷] 초기 디렉토리 트리 저장'
+          mkdir -p collector-data elk-data docker-data encrypted-data snapshot
+          echo '[분산 디렉토리 생성] collector-data' > collector-data/echo_dir.txt
+          echo '[분산 디렉토리 생성] elk-data' > elk-data/echo_dir.txt
+          echo '[분산 디렉토리 생성] docker-data' > docker-data/echo_dir.txt
+          echo '[분산 디렉토리 생성] encrypted-data' > encrypted-data/echo_dir.txt
+          echo '[분산 디렉토리 생성] snapshot' > snapshot/echo_dir.txt
           tree -a > snapshot/dirs_tree_init.txt || ls -lR > snapshot/dirs_tree_init.txt
 
-      - name: 🐘 PostgreSQL 15 및 TimescaleDB 15 설치 및 업그레이드 + snapshot
+      - name: 🐘 TimescaleDB 분산 설치 및 snapshot
         run: |
           set -e
           sudo apt-get update
           sudo apt-get upgrade -y || true
-          sudo apt-get install -y postgresql-15 postgresql-server-dev-15 wget gnupg ca-certificates lsb-release || true
+          sudo apt-get install -y wget gnupg ca-certificates lsb-release
           echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor | sudo tee /usr/share/keyrings/postgres.gpg > /dev/null
           sudo apt-get update
           sudo apt-get install -y postgresql-15 postgresql-server-dev-15 || true
           wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor | sudo tee /usr/share/keyrings/timescale-archive-keyring.gpg > /dev/null
@@ -33,27 +33,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y timescaledb-2-postgresql-15 timescaledb-2-loader-postgresql-15 timescaledb-tools timescaledb-toolkit-postgresql-15 || (sudo apt-get -f install -y && sudo apt-get install -y timescaledb-2-postgresql-15 timescaledb-2-loader-postgresql-15 timescaledb-tools timescaledb-toolkit-postgresql-15)
           sudo apt-get upgrade -y || true
-          echo '[설치/업그레이드 완료] TimescaleDB(PostgreSQL 15)' > collector-tmp/echo_timescaledb.txt
-          echo '[스냅샷] PostgreSQL, TimescaleDB 설치 여부 확인'
-          dpkg -l | grep postgresql > snapshot/dpkg_postgres.txt || true
-          dpkg -l | grep timescaledb > snapshot/dpkg_timescaledb.txt || true
-          psql --version > snapshot/psql_version.txt || true
-          timescaledb_toolkit_version=$(psql -U postgres -c "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb_toolkit';" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || echo "none")
-          echo "TimescaleDB Toolkit version: $timescaledb_toolkit_version" > snapshot/timescaledb_toolkit_version.txt
+          echo '[설치/업그레이드 완료] TimescaleDB/PostgreSQL' > collector-data/echo_timescaledb.txt
+          dpkg -l | grep postgresql > collector-data/dpkg_postgres.txt || true
+          dpkg -l | grep timescaledb > collector-data/dpkg_timescaledb.txt || true
+          psql --version > collector-data/psql_version.txt || true
+          # 데이터, 로그, 설정 등도 collector-data에 저장 예시
+          echo '샘플 TimescaleDB 데이터' > collector-data/sample-tsdb.txt
+          sha256sum collector-data/sample-tsdb.txt > collector-data/sample-tsdb-sha256.txt
 
-      - name: 🔎 ELK Stack(Elasticsearch+Logstash+Kibana) 설치 및 업그레이드 + snapshot + not found 방지
+      - name: 🔎 ELK Stack 분산 설치 및 snapshot
         run: |
           sudo apt-get update
           sudo apt-get upgrade -y || true
           sudo apt-get install -y openjdk-11-jre wget apt-transport-https
-          wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | sudo apt-key add -
-          echo 'deb https://artifacts.elastic.co/packages/7.x/apt stable main' | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
+          wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor | sudo tee /usr/share/keyrings/elasticsearch.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/elasticsearch.gpg] https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
           sudo apt-get update
           sudo apt-get install -y elasticsearch logstash kibana
           sudo apt-get upgrade -y || true
-
-          # 서비스 등록 및 시작
-          echo '[서비스 활성화 및 기동] elasticsearch, kibana, logstash'
           sudo systemctl daemon-reload
           sudo systemctl enable elasticsearch.service || true
           sudo systemctl enable kibana.service || true
@@ -61,85 +58,70 @@ jobs:
           sudo systemctl start elasticsearch.service || true
           sudo systemctl start kibana.service || true
           sudo systemctl start logstash.service || true
+          (elasticsearch --version > elk-data/elasticsearch_version.txt 2>&1 || /usr/share/elasticsearch/bin/elasticsearch --version >> elk-data/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> elk-data/elasticsearch_version.txt)
+          (kibana --version > elk-data/kibana_version.txt 2>&1 || /usr/share/kibana/bin/kibana --version >> elk-data/kibana_version.txt 2>&1 || echo "kibana not found" >> elk-data/kibana_version.txt)
+          (logstash --version > elk-data/logstash_version.txt 2>&1 || /usr/share/logstash/bin/logstash --version >> elk-data/logstash_version.txt 2>&1 || echo "logstash not found" >> elk-data/logstash_version.txt)
+          dpkg -l | grep elasticsearch > elk-data/dpkg_elasticsearch.txt || true
+          dpkg -l | grep kibana > elk-data/dpkg_kibana.txt || true
+          dpkg -l | grep logstash > elk-data/dpkg_logstash.txt || true
+          sudo systemctl status elasticsearch.service > elk-data/elasticsearch_systemctl.txt || true
+          sudo systemctl status kibana.service > elk-data/kibana_systemctl.txt || true
+          sudo systemctl status logstash.service > elk-data/logstash_systemctl.txt || true
+          echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
+          sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
 
-          # PATH에 없으면 전체 경로로 체크/실행
-          echo '[스냅샷] ELK 바이너리 위치 체크'
-          which elasticsearch || find /usr/ -name elasticsearch || echo "elasticsearch not found" > snapshot/elasticsearch_path.txt
-          which kibana || find /usr/ -name kibana || echo "kibana not found" > snapshot/kibana_path.txt
-          which logstash || find /usr/ -name logstash || echo "logstash not found" > snapshot/logstash_path.txt
-
-          # 버전 정보 (PATH, 전체경로, 둘 다 시도)
-          (elasticsearch --version > snapshot/elasticsearch_version.txt 2>&1 || /usr/share/elasticsearch/bin/elasticsearch --version >> snapshot/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> snapshot/elasticsearch_version.txt)
-          (kibana --version > snapshot/kibana_version.txt 2>&1 || /usr/share/kibana/bin/kibana --version >> snapshot/kibana_version.txt 2>&1 || echo "kibana not found" >> snapshot/kibana_version.txt)
-          (logstash --version > snapshot/logstash_version.txt 2>&1 || /usr/share/logstash/bin/logstash --version >> snapshot/logstash_version.txt 2>&1 || echo "logstash not found" >> snapshot/logstash_version.txt)
-
-          echo '[설치/업그레이드 완료] ELK Stack' > elk-config/echo_elk.txt
-          echo '[스냅샷] ELK 설치/버전 확인'
-          dpkg -l | grep elasticsearch > snapshot/dpkg_elasticsearch.txt || true
-          dpkg -l | grep kibana > snapshot/dpkg_kibana.txt || true
-          dpkg -l | grep logstash > snapshot/dpkg_logstash.txt || true
-          sudo systemctl status elasticsearch.service > snapshot/elasticsearch_systemctl.txt || true
-          sudo systemctl status kibana.service > snapshot/kibana_systemctl.txt || true
-          sudo systemctl status logstash.service > snapshot/logstash_systemctl.txt || true
-
-      - name: 📝 예제 집계 데이터 파일 생성 및 snapshot
+      - name: 📝 집계 샘플 데이터 분산 저장
         run: |
-          echo '샘플 집계 데이터' > collector-tmp/sample-data.txt
-          echo '[파일 생성] collector-tmp/sample-data.txt' > collector-tmp/echo_sample.txt
-          echo '[스냅샷] 샘플 데이터 해시 저장'
-          sha256sum collector-tmp/sample-data.txt > snapshot/sample-data-sha256.txt
+          echo '샘플 집계 데이터' > collector-data/sample-data.txt
+          echo '[파일 생성] collector-data/sample-data.txt' > collector-data/echo_sample.txt
+          sha256sum collector-data/sample-data.txt > collector-data/sample-data-sha256.txt
 
-      - name: 📁 파일 이동 및 snapshot
+      - name: 📁 암호화 데이터 분산 처리
         run: |
-          mv collector-tmp/sample-data.txt encrypted-data/
-          echo '[파일 이동] sample-data.txt -> encrypted-data/' > encrypted-data/echo_move.txt
-          echo '[스냅샷] 이동 후 encrypted-data 내 파일 목록'
-          ls -lh encrypted-data/ > snapshot/ls-encrypted-data.txt
-
-      - name: 🔐 데이터 암호화(openssl) 및 snapshot
-        run: |
+          cp collector-data/sample-data.txt encrypted-data/sample-data.txt
           openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/sample-data.txt -out encrypted-data/sample-data.txt.enc -k testpassword
           echo '[암호화] encrypted-data/sample-data.txt.enc' > encrypted-data/echo_encrypt.txt
           rm -f encrypted-data/sample-data.txt
-          echo '[스냅샷] 암호화 파일 해시 저장'
-          sha256sum encrypted-data/sample-data.txt.enc > snapshot/sample-data-enc-sha256.txt
+          sha256sum encrypted-data/sample-data.txt.enc > encrypted-data/sample-data-enc-sha256.txt
+
+      - name: 🐳 Docker 분산 설치, 이미지 및 snapshot
+        run: |
+          sudo apt-get remove -y docker docker-engine docker.io containerd runc containerd.io || true
+          sudo apt-get purge -y docker docker-engine docker.io containerd runc containerd.io || true
+          sudo apt-get autoremove -y || true
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
+          sudo systemctl enable docker
+          sudo systemctl start docker
+          sudo docker --version > docker-data/docker_version.txt
+          sudo docker images > docker-data/docker_images.txt
+          echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
+          echo '[이미지 Dockerfile 생성] docker-data/Dockerfile' > docker-data/echo_dockerfile.txt
+          sudo docker build -t elk-timescale-test:latest docker-data
+          echo '[도커 이미지 빌드 완료] elk-timescale-test:latest' > docker-data/echo_build.txt
 
       - name: 🧹 메모리 누수 방지(GC/캐시 해제) 및 snapshot
         run: |
           sync; sudo sysctl -w vm.drop_caches=3
-          echo '[메모리 캐시 정리, GC 완료]' > collector-tmp/echo_gc.txt
-          echo '[스냅샷] 메모리 상태'
+          echo '[메모리 캐시 정리, GC 완료]' > snapshot/echo_gc.txt
           free -h > snapshot/memory_after_gc.txt
           vmstat 1 3 > snapshot/vmstat_after_gc.txt
 
-      - name: 🐳 Docker 이미지 CLI 설치/업그레이드 및 이미지 생성 snapshot
-        run: |
-          sudo apt-get update
-          sudo apt-get upgrade -y || true
-          sudo apt-get install -y docker.io
-          sudo apt-get upgrade -y || true
-          echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > images/Dockerfile
-          echo '[이미지 Dockerfile 생성] images/Dockerfile' > images/echo_dockerfile.txt
-          docker build -t elk-timescale-test:latest images
-          echo '[도커 이미지 빌드 완료] elk-timescale-test:latest' > images/echo_build.txt
-          echo '[스냅샷] 도커 이미지 리스트'
-          docker images > snapshot/docker_images.txt
-
-      - name: 📦 전체 파일/echo/snapshot 아티팩트 업로드
+      - name: 📦 전체 분산 데이터/echo/snapshot 아티팩트 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: all-artifacts-with-echo-and-snapshots
+          name: all-distributed-artifacts-with-echo-and-snapshots
           path: |
-            collector-tmp/
+            collector-data/
+            elk-data/
+            docker-data/
             encrypted-data/
-            elk-config/
-            images/
             snapshot/
 
       - name: 최신 상태 요약(데이터 없을 때 오류 방지)
         run: |
-          if [ -s all-runs-summary.json ]; then
-            jq -r '.[] | "워크플로: \(.display_title // .name) (#\(.run_number))\n상태: \(.status)/\(.conclusion)\nURL: \(.html_url)\n-----"' all-runs-summary.json | head -40
+          if [ -s collector-data/sample-data.txt ]; then
+            head -20 collector-data/sample-data.txt
           else
-            echo '[⚠️] 워크플로우 데이터 없음'
+            echo '[⚠️] collector-data/sample-data.txt 없음'
           fi
