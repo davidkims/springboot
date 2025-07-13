@@ -1,4 +1,4 @@
-name: 📡 워크플로 전체 상황 모니터링 (900건 이상)
+name: 📡 워크플로 전체 상황 모니터링 (최대 1000건, jq null/ratelimit 완전 방어)
 
 on:
   repository_dispatch:
@@ -12,68 +12,83 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: ▶️ 최신 900건 워크플로우 실행 목록 수집 (페이지네이션)
+      - name: ▶️ 최신 1000건 워크플로우 실행 목록 수집 (페이지네이션, null-safe)
         run: |
-          echo "echo '[🔍] 최신 900건 워크플로우 실행 목록 수집...'"
-          echo '[🔍] 최신 900건 워크플로우 실행 목록 수집...'
-          > all-runs.json
-          # 1~10페이지 반복 (per_page=100 × 10 = 1000건)
+          echo "echo '[🔍] 최신 1000건 워크플로우 실행 목록 수집...'"
+          echo '[🔍] 최신 1000건 워크플로우 실행 목록 수집...'
+          > all-runs-arrays.json
           for page in $(seq 1 10); do
             echo "echo '[🔎] 페이지: $page'"
             echo "[🔎] 페이지: $page"
-            curl -s \
+            resp=$(curl -s \
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page" \
-              | jq '.workflow_runs' >> all-runs.json
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page")
+            # ratelimit/오류 감지
+            msg=$(echo "$resp" | jq -r '.message // empty')
+            if [[ "$msg" == *"rate limit"* ]]; then
+              echo "echo '[🚨] API Rate Limit 초과 - 수집 중단'"
+              echo '[🚨] API Rate Limit 초과 - 수집 중단'
+              break
+            fi
+            # workflow_runs가 비었거나 null이면 빈 배열로 대체
+            echo "$resp" | jq '.workflow_runs // []' >> all-runs-arrays.json
           done
-          # 여러 배열 합치기(단일 배열로)
-          cat all-runs.json | jq -s 'flatten' > all-runs-flat.json
-          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: .actor.login}]' all-runs-flat.json > all-runs-summary.json
+          # 모든 배열 합치기
+          jq -s 'add' all-runs-arrays.json > all-runs-flat.json
+          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json
 
       - name: 📝 최신 워크플로우 20건 요약 로그
         run: |
           echo "echo '[📝] 최신 워크플로우 20건 요약...'"
           echo '[📝] 최신 워크플로우 20건 요약...'
-          cat all-runs-summary.json | jq -r '.[:20][] | "[\(.id)] \(.display_title // .name) #\(.run_number) | 상태: \(.status)/\(.conclusion) | 실행: \(.actor) | URL: \(.html_url)"'
+          if [ -s all-runs-summary.json ]; then
+            cat all-runs-summary.json | jq -r '.[:20][] | "[\(.id)] \(.display_title // .name) #\(.run_number) | 상태: \(.status)/\(.conclusion) | 실행: \(.actor) | URL: \(.html_url)"'
+          else
+            echo "echo '[⚠️] 워크플로우 데이터 없음'"
+            echo '[⚠️] 워크플로우 데이터 없음'
+          fi
 
       - name: 📂 전체 워크플로우 실행 요약 아티팩트 업로드
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: all-workflow-runs-summary
           path: all-runs-summary.json
 
-      - name: 🔄 각 워크플로우 실행 상세 감지 및 저장 (최대 900건)
+      - name: 🔄 각 워크플로우 실행 상세 감지 및 저장 (최대 1000건, null-safe)
         run: |
-          echo "echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 900건)...'"
-          echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 900건)...'
+          echo "echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 1000건)...'"
+          echo '[🔄] 각 워크플로우 실행 상세 감지 및 저장(최대 1000건)...'
           mkdir -p runs-details jobs-details steps-details
-          # 최대 900건만(실제 1000까지도 가능)
-          ids=$(cat all-runs-summary.json | jq -r '.[].id' | head -900)
+          ids=$(cat all-runs-summary.json | jq -r '.[].id' | head -1000)
           i=0
           for rid in $ids; do
             echo "echo '[🟢] 워크플로우 실행 상세정보: $rid'"
             echo "[🟢] 워크플로우 실행 상세정보: $rid"
-            curl -s \
+            run_resp=$(curl -s \
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid" > runs-details/run-$rid.json
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid")
+            echo "$run_resp" > runs-details/run-$rid.json
 
             echo "echo '[🔹] jobs 목록: $rid'"
             echo "[🔹] jobs 목록: $rid"
-            curl -s \
+            jobs_resp=$(curl -s \
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid/jobs" > jobs-details/jobs-$rid.json
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid/jobs")
+            echo "$jobs_resp" > jobs-details/jobs-$rid.json
 
-            # 모든 job별 step 상태 추출
-            cat jobs-details/jobs-$rid.json | jq '[.jobs[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json
+            # step 추출 (jobs가 null이어도 에러 없이 처리)
+            cat jobs-details/jobs-$rid.json | jq '[.jobs // [] | .[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps // [] | .[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json
 
             i=$((i+1))
-            if [ $i -ge 900 ]; then break; fi
+            if [ $i -ge 1000 ]; then break; fi
           done
 
       - name: 📦 모든 워크플로우 실행/잡/스텝 아티팩트 업로드
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: all-workflow-details
@@ -86,4 +101,9 @@ jobs:
         run: |
           echo "echo '[📋] 최신 40건 워크플로우 상태 집계...'"
           echo '[📋] 최신 40건 워크플로우 상태 집계...'
-          jq -r '.[] | "워크플로: \(.display_title // .name) (#\(.run_number))\n상태: \(.status)/\(.conclusion)\nURL: \(.html_url)\n-----"' all-runs-summary.json | head -40
+          if [ -s all-runs-summary.json ]; then
+            jq -r '.[] | "워크플로: \(.display_title // .name) (#\(.run_number))\n상태: \(.status)/\(.conclusion)\nURL: \(.html_url)\n-----"' all-runs-summary.json | head -40
+          else
+            echo "echo '[⚠️] 워크플로우 데이터 없음'"
+            echo '[⚠️] 워크플로우 데이터 없음'
+          fi
