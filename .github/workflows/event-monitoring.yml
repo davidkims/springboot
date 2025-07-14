@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/확장형)
+name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/격리+암호화 완벽 대응)
 
 on:
   workflow_dispatch:
@@ -12,35 +12,48 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🚀 [패키지 자동 최신화/확장] APT/PIP with 외부 입력 지원
+      - name: 🚀 [패키지 자동 최신화/venv 격리+설치내역 암호화] APT + venv PIP (충돌방지)
         run: |
           set -e
-          echo "[APT 최신화] 기존 패키지 upgrade + 신규 install + 동적 리스트 지원"
+          echo "[APT 최신화 및 설치내역 암호화] 시작"
           sudo apt-get update -y
           sudo apt-get upgrade -y || true
 
-          # (1) APT 패키지 동적 리스트: 파일 우선, 없으면 인라인
+          mkdir -p encrypted-data/installed-packages
+
+          # (1) APT 패키지 동적 리스트
           APT_LIST_FILE=".github/pkglist-apt.txt"
           if [ -f "$APT_LIST_FILE" ]; then
             PKGS=$(grep -v '^#' "$APT_LIST_FILE" | tr -s ' ' '\n' | grep -v '^\s*$' | sort -u | tr '\n' ' ')
             echo "[INFO] 외부 파일에서 APT 패키지 목록 로드: $PKGS"
           else
-            PKGS="wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip curl tree jq"
+            PKGS="wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq"
             echo "[INFO] 기본 인라인 APT 패키지 사용: $PKGS"
           fi
 
-          # (2) apt 패키지별 설치/최신화
+          > installed-apt-echo.txt
+
           for p in $PKGS; do
             if dpkg -s $p &>/dev/null; then
               echo "[$p] 업그레이드 시도"
               sudo apt-get install --only-upgrade -y $p
+              ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
+              echo "[APT] $p $ver UPGRADED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
             else
               echo "[$p] 신규 설치"
               sudo apt-get install -y $p
+              ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
+              echo "[APT] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
             fi
           done
 
-          # (3) PIP 패키지 동적 리스트: 파일 우선, 없으면 인라인
+          # (2) venv로 pip 충돌 완전 방지 (ubuntu-latest=24.04 문제 완벽 대응)
+          echo "[VENV 격리 환경 생성/활성화]"
+          VENV_DIR="collector-tmp/pip-venv"
+          python3 -m venv "$VENV_DIR"
+          . "$VENV_DIR/bin/activate"
+
+          # (3) PIP 패키지 동적 리스트
           PIP_LIST_FILE=".github/pkglist-pip.txt"
           if [ -f "$PIP_LIST_FILE" ]; then
             PKGSPY=$(grep -v '^#' "$PIP_LIST_FILE" | tr -s ' ' '\n' | grep -v '^\s*$' | sort -u | tr '\n' ' ')
@@ -50,19 +63,31 @@ jobs:
             echo "[INFO] 기본 인라인 PIP 패키지 사용: $PKGSPY"
           fi
 
-          # (4) pip 최신화 및 패키지별 install/upgrade
-          sudo python3 -m pip install --upgrade pip
+          > installed-pip-echo.txt
+
+          python -m pip install --upgrade pip
+
           for p in $PKGSPY; do
-            python3 -m pip show $p &>/dev/null && python3 -m pip install --upgrade $p || python3 -m pip install $p
+            if python -m pip show $p &>/dev/null; then
+              python -m pip install --upgrade $p
+              ver=$(python -m pip show $p | grep ^Version: | awk '{print $2}')
+              echo "[PIP] $p $ver UPGRADED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-pip-echo.txt
+            else
+              python -m pip install $p
+              ver=$(python -m pip show $p | grep ^Version: | awk '{print $2}')
+              echo "[PIP] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-pip-echo.txt
+            fi
           done
 
-          # 클린업
-          rm -rf collector-data elk-data docker-data encrypted-data snapshot
-          rm -rf runs-details jobs-details steps-details collector-tmp remake-batch
-          rm -f all-runs-*.json
-          echo '[초기화 및 패키지 최신화] 완료' > clean.log
+          deactivate
 
-      # 이하 단계 동일 (생략 가능, 위의 워크플로 최적화 내용과 100% 호환)
+          # 설치/최신화 내역을 암호화 후 이동
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-apt-echo.txt -out encrypted-data/installed-packages/apt-installed-echo.txt.enc -k "package-password"
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-pip-echo.txt -out encrypted-data/installed-packages/pip-installed-echo.txt.enc -k "package-password"
+          rm -f installed-apt-echo.txt installed-pip-echo.txt
+
+          echo '[초기화 및 패키지 최신화/설치내역 암호화] 완료' > clean.log
+
       - name: 📂 [분산 디렉토리 생성] 병렬 처리
         run: |
           dirs="collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs"
