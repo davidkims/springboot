@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/도커/FS체크/이력/암호화/.bak/백업)
+name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/도커/FS체크/이력/암호화/.bak/권한대응)
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
           mkdir -p .github/package-backup
           find .github/package-backup -type f -delete
 
-      - name: 🚀 [패키지 자동 최신화/venv+설치내역 암호화+FS체크+.bak 백업]
+      - name: 🚀 [패키지 자동 최신화/venv+설치내역 암호화+FS체크+.bak 백업/권한이슈대응]
         run: |
           set -e
           echo "[APT 최신화 및 설치내역 암호화+FS체크+.bak] 시작"
@@ -36,11 +36,18 @@ jobs:
           > installed-apt-echo.txt
 
           for p in $PKGS; do
-            # 설치 전 주요 파일 백업
+            # 설치 전 주요 파일 백업(권한 이슈 대응)
             BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
             CONF=$(dpkg -L $p 2>/dev/null | grep -E "/etc/" | head -1 || true)
             for file in $BIN $CONF; do
-              [ -f "$file" ] && cp -a "$file" "$file.bak" && cp -a "$file.bak" .github/package-backup/ 2>/dev/null && echo "[BAK] $file → $file.bak" >> installed-apt-echo.txt
+              if [ -f "$file" ]; then
+                bakfile="$(echo $file | sed 's|/|_|g').bak"
+                if sudo cp -aP "$file" ".github/package-backup/$bakfile" 2>/dev/null; then
+                  echo "[BAK] $file → .github/package-backup/$bakfile" >> installed-apt-echo.txt
+                else
+                  echo "[WARN] 권한 문제로 $file .bak 백업 실패" >> installed-apt-echo.txt
+                fi
+              fi
             done
             if dpkg -s $p &>/dev/null; then
               sudo apt-get install --only-upgrade -y $p
@@ -61,7 +68,7 @@ jobs:
             dpkg -L $p | xargs -r ls -ld 2>/dev/null | head -10 >> installed-apt-echo.txt || true
           done
 
-          # venv pip 설치 전 site-packages 백업
+          # venv pip 설치 전 site-packages 백업(권한 이슈 거의 없음)
           VENV_DIR="collector-tmp/pip-venv"
           python3 -m venv "$VENV_DIR"
           . "$VENV_DIR/bin/activate"
@@ -78,10 +85,14 @@ jobs:
           python -m pip install --upgrade pip
 
           for p in $PKGSPY; do
-            # site-packages .bak
             SITE_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
             if [ -d "$SITE_DIR/$p" ]; then
-              cp -a "$SITE_DIR/$p" "$SITE_DIR/$p.bak" && cp -a "$SITE_DIR/$p.bak" .github/package-backup/ 2>/dev/null && echo "[BAK] $SITE_DIR/$p → $SITE_DIR/$p.bak" >> installed-pip-echo.txt
+              bakfile="$(echo $SITE_DIR/$p | sed 's|/|_|g').bak"
+              if cp -a "$SITE_DIR/$p" ".github/package-backup/$bakfile" 2>/dev/null; then
+                echo "[BAK] $SITE_DIR/$p → .github/package-backup/$bakfile" >> installed-pip-echo.txt
+              else
+                echo "[WARN] $SITE_DIR/$p .bak 백업 실패" >> installed-pip-echo.txt
+              fi
             fi
             if python -m pip show $p &>/dev/null; then
               python -m pip install --upgrade $p
@@ -106,10 +117,12 @@ jobs:
           openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-pip-echo.txt -out encrypted-data/installed-packages/pip-installed-echo.txt.enc -k "package-password"
           rm -f installed-apt-echo.txt installed-pip-echo.txt
 
-          # .bak 전체 .github/package-backup/에 재정리
-          find /usr/bin /usr/local/bin /etc "$VENV_DIR/lib/python3.*/site-packages" -name '*.bak' -exec cp -a {} .github/package-backup/ \; 2>/dev/null || true
+          # .bak 전체 .github/package-backup/에 재정리(추가로 sudo cp로 시도)
+          for d in /usr/bin /usr/local/bin /etc "$VENV_DIR/lib/python3.*/site-packages"; do
+            [ -d "$d" ] && sudo find $d -name '*.bak' -exec sudo cp -aP {} .github/package-backup/ \; 2>/dev/null || true
+          done
 
-          echo '[초기화 및 패키지 최신화/설치내역 암호화+FS체크+.bak] 완료' > clean.log
+          echo '[초기화 및 패키지 최신화/설치내역 암호화+FS체크+.bak+권한이슈대응] 완료' > clean.log
 
       - name: 📂 [분산 디렉토리 생성] 병렬 처리
         run: |
