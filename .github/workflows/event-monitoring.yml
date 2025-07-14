@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/도커/이미지 이력/암호화)
+name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/도커/FS체크/이력/암호화/.bak/백업)
 
 on:
   workflow_dispatch:
@@ -12,55 +12,65 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🚀 [패키지 자동 최신화/venv 격리+설치내역 암호화] APT + venv PIP (충돌방지)
+      - name: 📦 [백업 디렉토리 초기화]
+        run: |
+          mkdir -p .github/package-backup
+          find .github/package-backup -type f -delete
+
+      - name: 🚀 [패키지 자동 최신화/venv+설치내역 암호화+FS체크+.bak 백업]
         run: |
           set -e
-          echo "[APT 최신화 및 설치내역 암호화] 시작"
+          echo "[APT 최신화 및 설치내역 암호화+FS체크+.bak] 시작"
           sudo apt-get update -y
           sudo apt-get upgrade -y || true
 
           mkdir -p encrypted-data/installed-packages
 
-          # (1) APT 패키지 동적 리스트
           APT_LIST_FILE=".github/pkglist-apt.txt"
           if [ -f "$APT_LIST_FILE" ]; then
             PKGS=$(grep -v '^#' "$APT_LIST_FILE" | tr -s ' ' '\n' | grep -v '^\s*$' | sort -u | tr '\n' ' ')
-            echo "[INFO] 외부 파일에서 APT 패키지 목록 로드: $PKGS"
           else
             PKGS="wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq"
-            echo "[INFO] 기본 인라인 APT 패키지 사용: $PKGS"
           fi
 
           > installed-apt-echo.txt
 
           for p in $PKGS; do
+            # 설치 전 주요 파일 백업
+            BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
+            CONF=$(dpkg -L $p 2>/dev/null | grep -E "/etc/" | head -1 || true)
+            for file in $BIN $CONF; do
+              [ -f "$file" ] && cp -a "$file" "$file.bak" && cp -a "$file.bak" .github/package-backup/ 2>/dev/null && echo "[BAK] $file → $file.bak" >> installed-apt-echo.txt
+            done
             if dpkg -s $p &>/dev/null; then
-              echo "[$p] 업그레이드 시도"
               sudo apt-get install --only-upgrade -y $p
               ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
               echo "[APT] $p $ver UPGRADED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
             else
-              echo "[$p] 신규 설치"
               sudo apt-get install -y $p
               ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
               echo "[APT] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
             fi
+            # FS 체크
+            BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
+            if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+              echo "[FS] $BIN exists & executable" >> installed-apt-echo.txt
+            else
+              echo "[FS][WARN] $p: No /bin/ or /sbin/ binary found or not executable" >> installed-apt-echo.txt
+            fi
+            dpkg -L $p | xargs -r ls -ld 2>/dev/null | head -10 >> installed-apt-echo.txt || true
           done
 
-          # (2) venv로 pip 충돌 완전 방지 (ubuntu-latest=24.04 문제 완벽 대응)
-          echo "[VENV 격리 환경 생성/활성화]"
+          # venv pip 설치 전 site-packages 백업
           VENV_DIR="collector-tmp/pip-venv"
           python3 -m venv "$VENV_DIR"
           . "$VENV_DIR/bin/activate"
 
-          # (3) PIP 패키지 동적 리스트
           PIP_LIST_FILE=".github/pkglist-pip.txt"
           if [ -f "$PIP_LIST_FILE" ]; then
             PKGSPY=$(grep -v '^#' "$PIP_LIST_FILE" | tr -s ' ' '\n' | grep -v '^\s*$' | sort -u | tr '\n' ' ')
-            echo "[INFO] 외부 파일에서 PIP 패키지 목록 로드: $PKGSPY"
           else
             PKGSPY="requests"
-            echo "[INFO] 기본 인라인 PIP 패키지 사용: $PKGSPY"
           fi
 
           > installed-pip-echo.txt
@@ -68,6 +78,11 @@ jobs:
           python -m pip install --upgrade pip
 
           for p in $PKGSPY; do
+            # site-packages .bak
+            SITE_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
+            if [ -d "$SITE_DIR/$p" ]; then
+              cp -a "$SITE_DIR/$p" "$SITE_DIR/$p.bak" && cp -a "$SITE_DIR/$p.bak" .github/package-backup/ 2>/dev/null && echo "[BAK] $SITE_DIR/$p → $SITE_DIR/$p.bak" >> installed-pip-echo.txt
+            fi
             if python -m pip show $p &>/dev/null; then
               python -m pip install --upgrade $p
               ver=$(python -m pip show $p | grep ^Version: | awk '{print $2}')
@@ -77,16 +92,24 @@ jobs:
               ver=$(python -m pip show $p | grep ^Version: | awk '{print $2}')
               echo "[PIP] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-pip-echo.txt
             fi
+            if python -c "import $p" 2>/dev/null; then
+              echo "[FS] pip module '$p' import OK" >> installed-pip-echo.txt
+            else
+              echo "[FS][WARN] pip module '$p' import FAIL" >> installed-pip-echo.txt
+            fi
+            python -c "import $p, os; print('[FS] installed at', os.path.dirname($p.__file__))" 2>> installed-pip-echo.txt || true
           done
 
           deactivate
 
-          # 설치/최신화 내역을 암호화 후 이동
           openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-apt-echo.txt -out encrypted-data/installed-packages/apt-installed-echo.txt.enc -k "package-password"
           openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-pip-echo.txt -out encrypted-data/installed-packages/pip-installed-echo.txt.enc -k "package-password"
           rm -f installed-apt-echo.txt installed-pip-echo.txt
 
-          echo '[초기화 및 패키지 최신화/설치내역 암호화] 완료' > clean.log
+          # .bak 전체 .github/package-backup/에 재정리
+          find /usr/bin /usr/local/bin /etc "$VENV_DIR/lib/python3.*/site-packages" -name '*.bak' -exec cp -a {} .github/package-backup/ \; 2>/dev/null || true
+
+          echo '[초기화 및 패키지 최신화/설치내역 암호화+FS체크+.bak] 완료' > clean.log
 
       - name: 📂 [분산 디렉토리 생성] 병렬 처리
         run: |
@@ -160,48 +183,44 @@ jobs:
           echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
           sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
 
-      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트 전체 적용 + 이미지 echo/백업
+      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트+FS체크+.bak 백업
         run: |
           set -e
-          echo "[도커 설치] get.docker.com 공식 스크립트 전체 실행"
           curl -fsSL https://get.docker.com -o get-docker.sh
           sh get-docker.sh
           sudo systemctl enable docker
           sudo systemctl start docker
           sudo docker --version > docker-data/docker_version.txt
 
-          # 기존 이미지가 있으면 삭제(동일 태그)
+          # Dockerfile .bak 백업
+          if [ -f docker-data/Dockerfile ]; then
+            cp docker-data/Dockerfile docker-data/Dockerfile.bak
+            cp docker-data/Dockerfile.bak .github/package-backup/ || true
+          fi
+
           IMAGE_NAME="elk-timescale-test"
           IMAGE_TAG="latest"
           FULL_IMG="$IMAGE_NAME:$IMAGE_TAG"
           if sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$FULL_IMG$"; then
-            echo "[기존 이미지 삭제] $FULL_IMG"
             sudo docker rmi -f "$FULL_IMG" || true
           fi
 
-          # Dockerfile 및 context 작성
           echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
 
-          # 새 이미지 빌드
-          echo "[이미지 빌드 시작] $FULL_IMG"
+          # 새 Dockerfile .bak
+          cp docker-data/Dockerfile docker-data/Dockerfile.bak
+          cp docker-data/Dockerfile.bak .github/package-backup/ || true
+
           sudo docker build -t $FULL_IMG docker-data
 
-          # 이미지 echo 및 상세 정보 백업
           sudo docker images > docker-data/docker_images.txt
           sudo docker image inspect $FULL_IMG > docker-data/docker_image_inspect_$IMAGE_NAME.json
 
-          echo "[도커 이미지 빌드]" > docker-data/echo_build.txt
-          echo "[이름] $FULL_IMG" >> docker-data/echo_build.txt
-          echo "[시점] $(date +%Y-%m-%dT%H:%M:%S)" >> docker-data/echo_build.txt
+          IMG_TAR=docker-data/${IMAGE_NAME}_${IMAGE_TAG}_$(date +%Y%m%d%H%M%S).tar
+          sudo docker save -o $IMG_TAR $FULL_IMG
+          cp $IMG_TAR .github/package-backup/ || true
 
-          # tar로 이미지 저장(백업)
-          sudo docker save -o docker-data/${IMAGE_NAME}_${IMAGE_TAG}_$(date +%Y%m%d%H%M%S).tar $FULL_IMG
-
-          echo "[이미지 tar 저장]" >> docker-data/echo_build.txt
-          ls -lh docker-data/*.tar >> docker-data/echo_build.txt
-
-          # 권한 정리
-          sudo chown $USER:$USER docker-data/* || true
+          sudo chown $USER:$USER docker-data/* .github/package-backup/* || true
 
       - name: 🧹 [메모리 GC/캐시해제+Snapshot]
         run: |
@@ -247,7 +266,7 @@ jobs:
           done
           wait
 
-      - name: 📦 [전체 업로드] 모든 결과/배치/스냅샷/리메이크
+      - name: 📦 [전체 업로드] 모든 결과/배치/스냅샷/리메이크/.bak백업
         uses: actions/upload-artifact@v4
         with:
           name: all-artifacts-distributed-batch-encrypted-with-echo
@@ -262,6 +281,7 @@ jobs:
             jobs-details/
             steps-details/
             collector-tmp/
+            .github/package-backup/
 
       - name: 📊 [요약] 최신 데이터 현황
         run: |
