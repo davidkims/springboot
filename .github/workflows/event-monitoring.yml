@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (BrokenPipe/SHA최신/venv/FS/bak/Echo/암호화/권한)
+name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (권한/백업/echo/오류안전 완전판)
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
           mkdir -p .github/package-backup
           find .github/package-backup -type f -delete
 
-      - name: 🚀 [패키지 자동 최신화/venv+설치내역 암호화+FS체크+.bak 백업/권한이슈대응]
+      - name: 🚀 [패키지 최신화/venv+설치내역 암호화+FS체크+백업/echo/권한에러 안전]
         run: |
           set -e
           sudo apt-get update -y
@@ -35,7 +35,6 @@ jobs:
           > installed-apt-echo.txt
 
           for p in $PKGS; do
-            # 설치 전 주요 파일 백업(권한 이슈 대응)
             BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
             CONF=$(dpkg -L $p 2>/dev/null | grep -E "/etc/" | head -1 || true)
             for file in $BIN $CONF; do
@@ -44,7 +43,7 @@ jobs:
                 if sudo cp -aP "$file" ".github/package-backup/$bakfile" 2>/dev/null; then
                   echo "[BAK] $file → .github/package-backup/$bakfile" >> installed-apt-echo.txt
                 else
-                  echo "[WARN] 권한 문제로 $file .bak 백업 실패" >> installed-apt-echo.txt
+                  echo "[WARN] $file .bak 백업 실패(권한/존재)" >> installed-apt-echo.txt
                 fi
               fi
             done
@@ -57,7 +56,6 @@ jobs:
               ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
               echo "[APT] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
             fi
-            # FS 체크
             BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
             if [ -n "$BIN" ] && [ -x "$BIN" ]; then
               echo "[FS] $BIN exists & executable" >> installed-apt-echo.txt
@@ -67,7 +65,6 @@ jobs:
             dpkg -L $p | xargs -r ls -ld 2>/dev/null | head -10 >> installed-apt-echo.txt || true
           done
 
-          # venv pip 설치 전 site-packages 백업(권한 이슈 거의 없음)
           VENV_DIR="collector-tmp/pip-venv"
           python3 -m venv "$VENV_DIR"
           . "$VENV_DIR/bin/activate"
@@ -116,12 +113,20 @@ jobs:
           openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-pip-echo.txt -out encrypted-data/installed-packages/pip-installed-echo.txt.enc -k "package-password"
           rm -f installed-apt-echo.txt installed-pip-echo.txt
 
-          # .bak 전체 .github/package-backup/에 재정리(추가로 sudo cp로 시도)
+          # .bak 전체 .github/package-backup/에 재정리 (sudo cp로 시도, 에러시 echo)
           for d in /usr/bin /usr/local/bin /etc "$VENV_DIR/lib/python3.*/site-packages"; do
-            [ -d "$d" ] && sudo find $d -name '*.bak' -exec sudo cp -aP {} .github/package-backup/ \; 2>/dev/null || true
+            [ -d "$d" ] && sudo find $d -name '*.bak' -exec bash -c 'sudo cp -aP "$0" .github/package-backup/ || echo "[WARN] $0 .bak 복사 실패"' {} \; 2>/dev/null || true
           done
 
-          echo '[초기화 및 패키지 최신화/설치내역 암호화+FS체크+.bak+권한이슈대응] 완료' > clean.log
+          # 최종 권한 정리 및 echo 기록
+          if [ -d .github/package-backup ]; then
+            sudo chown -R $USER:$USER .github/package-backup/ || echo "[WARN] .github/package-backup chown 실패" >> .github/package-backup/echo_permission.txt
+            sudo chmod -R u+rwX .github/package-backup/ || echo "[WARN] .github/package-backup chmod 실패" >> .github/package-backup/echo_permission.txt
+          else
+            echo "[WARN] .github/package-backup 디렉토리 없음" >> .github/package-backup/echo_permission.txt
+          fi
+
+          echo '[초기화 및 패키지 최신화/설치내역 암호화+FS체크+백업/echo/권한에러 안전] 완료' > clean.log
 
       - name: 📂 [분산 디렉토리 생성] 병렬 처리
         run: |
@@ -195,44 +200,61 @@ jobs:
           echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
           sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
 
-      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트+FS체크+.bak 백업
+      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트+FS체크+백업/echo/권한보강
         run: |
           set -e
+          echo "[도커 설치] get.docker.com 공식 스크립트 실행"
           curl -fsSL https://get.docker.com -o get-docker.sh
           sh get-docker.sh
           sudo systemctl enable docker
           sudo systemctl start docker
           sudo docker --version > docker-data/docker_version.txt
 
-          # Dockerfile .bak 백업
+          mkdir -p .github/package-backup
           if [ -f docker-data/Dockerfile ]; then
-            cp docker-data/Dockerfile docker-data/Dockerfile.bak
-            cp docker-data/Dockerfile.bak .github/package-backup/ || true
+            cp docker-data/Dockerfile docker-data/Dockerfile.bak || echo "[WARN] Dockerfile.bak 복사 실패" >> docker-data/echo_dockerfile.txt
+            cp docker-data/Dockerfile.bak .github/package-backup/ || echo "[WARN] Dockerfile.bak .github/package-backup 복사 실패" >> docker-data/echo_dockerfile.txt
           fi
 
           IMAGE_NAME="elk-timescale-test"
           IMAGE_TAG="latest"
           FULL_IMG="$IMAGE_NAME:$IMAGE_TAG"
           if sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$FULL_IMG$"; then
-            sudo docker rmi -f "$FULL_IMG" || true
+            sudo docker rmi -f "$FULL_IMG" || echo "[WARN] 기존 이미지 삭제 실패" >> docker-data/echo_dockerfile.txt
           fi
 
           echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
-
-          # 새 Dockerfile .bak
-          cp docker-data/Dockerfile docker-data/Dockerfile.bak
-          cp docker-data/Dockerfile.bak .github/package-backup/ || true
+          cp docker-data/Dockerfile docker-data/Dockerfile.bak || echo "[WARN] Dockerfile.bak 생성 실패" >> docker-data/echo_dockerfile.txt
+          cp docker-data/Dockerfile.bak .github/package-backup/ || echo "[WARN] Dockerfile.bak .github/package-backup 복사 실패" >> docker-data/echo_dockerfile.txt
 
           sudo docker build -t $FULL_IMG docker-data
-
           sudo docker images > docker-data/docker_images.txt
           sudo docker image inspect $FULL_IMG > docker-data/docker_image_inspect_$IMAGE_NAME.json
 
           IMG_TAR=docker-data/${IMAGE_NAME}_${IMAGE_TAG}_$(date +%Y%m%d%H%M%S).tar
+          echo "[도커 이미지 tar 저장 시도] $IMG_TAR" >> docker-data/echo_dockerfile.txt
           sudo docker save -o $IMG_TAR $FULL_IMG
-          cp $IMG_TAR .github/package-backup/ || true
 
-          sudo chown $USER:$USER docker-data/* .github/package-backup/* || true
+          if [ -f "$IMG_TAR" ]; then
+            sudo chmod 644 "$IMG_TAR"
+            sudo chown $USER:$USER "$IMG_TAR" || echo "[WARN] $IMG_TAR chown 실패" >> docker-data/echo_dockerfile.txt
+            cp "$IMG_TAR" .github/package-backup/ && \
+              echo "[OK] $IMG_TAR → .github/package-backup/" >> docker-data/echo_dockerfile.txt || \
+              echo "[WARN] $IMG_TAR .github/package-backup 복사 실패" >> docker-data/echo_dockerfile.txt
+          else
+            echo "[WARN] $IMG_TAR 생성 안됨" >> docker-data/echo_dockerfile.txt
+          fi
+
+          if [ -d .github/package-backup ]; then
+            sudo chown -R $USER:$USER .github/package-backup/ || echo "[WARN] .github/package-backup chown 실패" >> docker-data/echo_dockerfile.txt
+            sudo chmod -R u+rwX .github/package-backup/ || echo "[WARN] .github/package-backup chmod 실패" >> docker-data/echo_dockerfile.txt
+          else
+            echo "[WARN] .github/package-backup 디렉토리 없음" >> docker-data/echo_dockerfile.txt
+          fi
+
+          echo "[도커 전체 이미지 및 파일 백업 완료]" >> docker-data/echo_dockerfile.txt
+          ls -lh docker-data/ >> docker-data/echo_dockerfile.txt || true
+          ls -lh .github/package-backup/ >> docker-data/echo_dockerfile.txt || true
 
       - name: 🧹 [메모리 GC/캐시해제+Snapshot]
         run: |
@@ -260,7 +282,6 @@ jobs:
           cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
           jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, head_sha, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
 
-          # SHA 최신값 추출 및 저장
           jq -r '.[].head_sha' all-runs-summary.json | grep -v '^null$' | sort -u > snapshot/sha_latest_list.txt
           head -5 snapshot/sha_latest_list.txt > snapshot/sha_latest_preview.txt
 
