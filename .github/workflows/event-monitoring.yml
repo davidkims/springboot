@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/격리+암호화 완벽 대응)
+name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (패키지 자동 최신화/venv/도커/이미지 이력/암호화)
 
 on:
   workflow_dispatch:
@@ -160,13 +160,48 @@ jobs:
           echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
           sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
 
-      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트+최소화
+      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트 전체 적용 + 이미지 echo/백업
         run: |
-          curl -fsSL https://get.docker.com | sh
+          set -e
+          echo "[도커 설치] get.docker.com 공식 스크립트 전체 실행"
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
+          sudo systemctl enable docker
+          sudo systemctl start docker
           sudo docker --version > docker-data/docker_version.txt
+
+          # 기존 이미지가 있으면 삭제(동일 태그)
+          IMAGE_NAME="elk-timescale-test"
+          IMAGE_TAG="latest"
+          FULL_IMG="$IMAGE_NAME:$IMAGE_TAG"
+          if sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$FULL_IMG$"; then
+            echo "[기존 이미지 삭제] $FULL_IMG"
+            sudo docker rmi -f "$FULL_IMG" || true
+          fi
+
+          # Dockerfile 및 context 작성
           echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
-          sudo docker build -t elk-timescale-test:latest docker-data &
-          wait
+
+          # 새 이미지 빌드
+          echo "[이미지 빌드 시작] $FULL_IMG"
+          sudo docker build -t $FULL_IMG docker-data
+
+          # 이미지 echo 및 상세 정보 백업
+          sudo docker images > docker-data/docker_images.txt
+          sudo docker image inspect $FULL_IMG > docker-data/docker_image_inspect_$IMAGE_NAME.json
+
+          echo "[도커 이미지 빌드]" > docker-data/echo_build.txt
+          echo "[이름] $FULL_IMG" >> docker-data/echo_build.txt
+          echo "[시점] $(date +%Y-%m-%dT%H:%M:%S)" >> docker-data/echo_build.txt
+
+          # tar로 이미지 저장(백업)
+          sudo docker save -o docker-data/${IMAGE_NAME}_${IMAGE_TAG}_$(date +%Y%m%d%H%M%S).tar $FULL_IMG
+
+          echo "[이미지 tar 저장]" >> docker-data/echo_build.txt
+          ls -lh docker-data/*.tar >> docker-data/echo_build.txt
+
+          # 권한 정리
+          sudo chown $USER:$USER docker-data/* || true
 
       - name: 🧹 [메모리 GC/캐시해제+Snapshot]
         run: |
@@ -234,4 +269,5 @@ jobs:
           echo "▶️ [encrypted-data]"; ls -lh encrypted-data | grep '\.enc' || echo '[⚠️] 없음'
           echo "▶️ [remake-batch/sample]"; ls -l remake-batch/sample | grep sample_data_ || echo '[⚠️] 없음'
           echo "▶️ [remake-batch/logs]"; ls -l remake-batch/logs | grep log_ || echo '[⚠️] 없음'
+          echo "▶️ [docker-data/*]"; ls -lh docker-data | head -20 || true
           echo "▶️ [all-runs-summary.json]"; head -40 all-runs-summary.json || echo '[⚠️] 없음'
