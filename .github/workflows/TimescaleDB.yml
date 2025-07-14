@@ -2,6 +2,8 @@ name: 📦 전문가 분산 저장/설치/스냅샷 자동화 워크플로우 (P
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *' # 10분마다 자동 실행 (UTC 기준)
 
 jobs:
   distributed-setup:
@@ -49,80 +51,3 @@ jobs:
           sudo apt-get install -y openjdk-11-jre wget apt-transport-https
           wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor | sudo tee /usr/share/keyrings/elasticsearch.gpg > /dev/null
           echo "deb [signed-by=/usr/share/keyrings/elasticsearch.gpg] https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
-          sudo apt-get update
-          sudo apt-get install -y elasticsearch logstash kibana
-          sudo apt-get upgrade -y || true
-          sudo systemctl daemon-reload
-          sudo systemctl enable elasticsearch.service || true
-          sudo systemctl enable kibana.service || true
-          sudo systemctl enable logstash.service || true
-          sudo systemctl start elasticsearch.service || true
-          sudo systemctl start kibana.service || true
-          sudo systemctl start logstash.service || true
-          (elasticsearch --version > elk-data/elasticsearch_version.txt 2>&1 || /usr/share/elasticsearch/bin/elasticsearch --version >> elk-data/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> elk-data/elasticsearch_version.txt)
-          (kibana --version > elk-data/kibana_version.txt 2>&1 || /usr/share/kibana/bin/kibana --version >> elk-data/kibana_version.txt 2>&1 || echo "kibana not found" >> elk-data/kibana_version.txt)
-          (logstash --version > elk-data/logstash_version.txt 2>&1 || /usr/share/logstash/bin/logstash --version >> elk-data/logstash_version.txt 2>&1 || echo "logstash not found" >> elk-data/logstash_version.txt)
-          dpkg -l | grep elasticsearch > elk-data/dpkg_elasticsearch.txt || true
-          dpkg -l | grep kibana > elk-data/dpkg_kibana.txt || true
-          dpkg -l | grep logstash > elk-data/dpkg_logstash.txt || true
-          sudo systemctl status elasticsearch.service > elk-data/elasticsearch_systemctl.txt || true
-          sudo systemctl status kibana.service > elk-data/kibana_systemctl.txt || true
-          sudo systemctl status logstash.service > elk-data/logstash_systemctl.txt || true
-          echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
-          sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
-
-      - name: 📝 집계 샘플 데이터 분산 저장
-        run: |
-          echo '샘플 집계 데이터' > collector-data/sample-data.txt
-          echo '[파일 생성] collector-data/sample-data.txt' > collector-data/echo_sample.txt
-          sha256sum collector-data/sample-data.txt > collector-data/sample-data-sha256.txt
-
-      - name: 📁 암호화 데이터 분산 처리
-        run: |
-          cp collector-data/sample-data.txt encrypted-data/sample-data.txt
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/sample-data.txt -out encrypted-data/sample-data.txt.enc -k testpassword
-          echo '[암호화] encrypted-data/sample-data.txt.enc' > encrypted-data/echo_encrypt.txt
-          rm -f encrypted-data/sample-data.txt
-          sha256sum encrypted-data/sample-data.txt.enc > encrypted-data/sample-data-enc-sha256.txt
-
-      - name: 🐳 Docker 분산 설치, 이미지 및 snapshot
-        run: |
-          sudo apt-get remove -y docker docker-engine docker.io containerd runc containerd.io || true
-          sudo apt-get purge -y docker docker-engine docker.io containerd runc containerd.io || true
-          sudo apt-get autoremove -y || true
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sh get-docker.sh
-          sudo systemctl enable docker
-          sudo systemctl start docker
-          sudo docker --version > docker-data/docker_version.txt
-          sudo docker images > docker-data/docker_images.txt
-          echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
-          echo '[이미지 Dockerfile 생성] docker-data/Dockerfile' > docker-data/echo_dockerfile.txt
-          sudo docker build -t elk-timescale-test:latest docker-data
-          echo '[도커 이미지 빌드 완료] elk-timescale-test:latest' > docker-data/echo_build.txt
-
-      - name: 🧹 메모리 누수 방지(GC/캐시 해제) 및 snapshot
-        run: |
-          sync; sudo sysctl -w vm.drop_caches=3
-          echo '[메모리 캐시 정리, GC 완료]' > snapshot/echo_gc.txt
-          free -h > snapshot/memory_after_gc.txt
-          vmstat 1 3 > snapshot/vmstat_after_gc.txt
-
-      - name: 📦 전체 분산 데이터/echo/snapshot 아티팩트 업로드
-        uses: actions/upload-artifact@v4
-        with:
-          name: all-distributed-artifacts-with-echo-and-snapshots
-          path: |
-            collector-data/
-            elk-data/
-            docker-data/
-            encrypted-data/
-            snapshot/
-
-      - name: 최신 상태 요약(collector-data 기준)
-        run: |
-          if [ -s collector-data/sample-data.txt ]; then
-            head -20 collector-data/sample-data.txt
-          else
-            echo '[⚠️] collector-data/sample-data.txt 없음'
-          fi
