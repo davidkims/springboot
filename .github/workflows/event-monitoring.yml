@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화
+name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (최적화)
 
 on:
   workflow_dispatch:
@@ -12,219 +12,153 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📛 1. [초기화] 기존 데이터/암호화/분산/워크플로우/스냅샷/리메이크 모두 삭제
+      - name: 🚀 [초기화+설치] 최적화 패키지 설치/업데이트 및 클린업 (1회)
         run: |
-          echo "echo '[초기화] 전체 데이터, 암호화, 리메이크, 워크플로우, 스냅샷 삭제...'"
+          echo "[속도최적화] apt-get update/upgrade 1회만 실행"
+          sudo apt-get update -y
+          sudo apt-get upgrade -y || true
+          sudo apt-get install -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip curl tree jq
+          sudo mkdir -p /usr/share/keyrings
+          sudo pip3 install requests --no-cache-dir --disable-pip-version-check
           rm -rf collector-data elk-data docker-data encrypted-data snapshot
           rm -rf runs-details jobs-details steps-details collector-tmp remake-batch
           rm -f all-runs-*.json
-          echo '[초기화] 기존 모든 데이터, 암호화, 리메이크, 워크플로우, 스냅샷 삭제됨' > clean.log
+          echo '[초기화 및 설치] 완료' > clean.log
 
-      - name: 📂 2. [생성] 분산/암호화/스냅샷/워크플로우/리메이크 디렉토리 재생성 및 echo 로깅
+      - name: 📂 [분산 디렉토리 생성] 병렬 처리
         run: |
-          for d in collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs; do
-            echo "echo '[생성] $d'"
-            mkdir -p $d
-            echo "[생성] $d" > $d/echo_dir.txt
-          done
+          echo "[병렬 디렉토리 생성]"
+          dirs="collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs"
+          echo $dirs | xargs -n 1 -P 8 bash -c 'mkdir -p "$0"; echo "[생성] $0" > "$0/echo_dir.txt"'
           tree -a > snapshot/dirs_tree_init.txt || ls -lR > snapshot/dirs_tree_init.txt
 
-      - name: 🔐 3. [기존 데이터] 생성 및 암호화
+      - name: 🔐 [데이터 생성+암호화] 병렬화
         run: |
-          echo "echo '[기존 데이터] 샘플 2개 생성...'"
-          echo '기존 데이터 샘플 1' > collector-data/old-data-1.txt
-          echo '기존 데이터 샘플 2' > collector-data/old-data-2.txt
-          echo '[기존 데이터] 2개 파일 생성' > collector-data/echo_old.txt
-          sha256sum collector-data/old-data-1.txt > collector-data/old-data-1-sha256.txt
-          sha256sum collector-data/old-data-2.txt > collector-data/old-data-2-sha256.txt
+          (
+            echo '기존 데이터 샘플 1' > collector-data/old-data-1.txt
+            echo '기존 데이터 샘플 2' > collector-data/old-data-2.txt
+            sha256sum collector-data/old-data-1.txt > collector-data/old-data-1-sha256.txt
+            sha256sum collector-data/old-data-2.txt > collector-data/old-data-2-sha256.txt
+            cp collector-data/old-data-1.txt encrypted-data/old-data-1.txt
+            cp collector-data/old-data-2.txt encrypted-data/old-data-2.txt
+            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/old-data-1.txt -out encrypted-data/old-data-1.txt.enc -k oldpassword &
+            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/old-data-2.txt -out encrypted-data/old-data-2.txt.enc -k oldpassword &
+            wait
+            rm -f encrypted-data/old-data-1.txt encrypted-data/old-data-2.txt
+            sha256sum encrypted-data/old-data-1.txt.enc > encrypted-data/old-data-1-sha256.txt
+            sha256sum encrypted-data/old-data-2.txt.enc > encrypted-data/old-data-2-sha256.txt
+          ) &
 
-          # 암호화
-          cp collector-data/old-data-1.txt encrypted-data/old-data-1.txt
-          cp collector-data/old-data-2.txt encrypted-data/old-data-2.txt
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/old-data-1.txt -out encrypted-data/old-data-1.txt.enc -k oldpassword
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/old-data-2.txt -out encrypted-data/old-data-2.txt.enc -k oldpassword
-          echo '[기존 데이터 암호화 완료]' > encrypted-data/echo_old_encrypt.txt
-          rm -f encrypted-data/old-data-1.txt encrypted-data/old-data-2.txt
-          sha256sum encrypted-data/old-data-1.txt.enc > encrypted-data/old-data-1-sha256.txt
-          sha256sum encrypted-data/old-data-2.txt.enc > encrypted-data/old-data-2-sha256.txt
+          (
+            echo '신규 데이터 샘플 1' > collector-data/new-data-1.txt
+            echo '신규 데이터 샘플 2' > collector-data/new-data-2.txt
+            sha256sum collector-data/new-data-1.txt > collector-data/new-data-1-sha256.txt
+            sha256sum collector-data/new-data-2.txt > collector-data/new-data-2-sha256.txt
+            cp collector-data/new-data-1.txt encrypted-data/new-data-1.txt
+            cp collector-data/new-data-2.txt encrypted-data/new-data-2.txt
+            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/new-data-1.txt -out encrypted-data/new-data-1.txt.enc -k newpassword &
+            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/new-data-2.txt -out encrypted-data/new-data-2.txt.enc -k newpassword &
+            wait
+            rm -f encrypted-data/new-data-1.txt encrypted-data/new-data-2.txt
+            sha256sum encrypted-data/new-data-1.txt.enc > encrypted-data/new-data-1-sha256.txt
+            sha256sum encrypted-data/new-data-2.txt.enc > encrypted-data/new-data-2-sha256.txt
+          ) &
+          wait
+          echo "[데이터 생성/암호화] 완료"
 
-      - name: 🆕 4. [신규 데이터] 생성 및 암호화
+      - name: 🧹 [리메이크 배치/로그/샘플] xargs로 병렬 생성
         run: |
-          echo "echo '[신규 데이터] 샘플 2개 생성...'"
-          echo '신규 데이터 샘플 1' > collector-data/new-data-1.txt
-          echo '신규 데이터 샘플 2' > collector-data/new-data-2.txt
-          echo '[신규 데이터] 2개 파일 생성' > collector-data/echo_new.txt
-          sha256sum collector-data/new-data-1.txt > collector-data/new-data-1-sha256.txt
-          sha256sum collector-data/new-data-2.txt > collector-data/new-data-2-sha256.txt
+          echo "[샘플/로그 병렬 생성]"
+          seq 1 10 | xargs -I{} -P 5 bash -c 'echo "샘플 데이터 {} - $(date +%Y%m%d%H%M%S)" > remake-batch/sample/sample_data_{}.txt'
+          seq 1 5 | xargs -I{} -P 5 bash -c 'echo "로그 기록 {} - $(date +%Y-%m-%dT%H:%M:%S)" > remake-batch/logs/log_{}.log'
+          echo "[샘플/로그 데이터 생성 완료]" > remake-batch/batch_done.txt
 
-          cp collector-data/new-data-1.txt encrypted-data/new-data-1.txt
-          cp collector-data/new-data-2.txt encrypted-data/new-data-2.txt
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/new-data-1.txt -out encrypted-data/new-data-1.txt.enc -k newpassword
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/new-data-2.txt -out encrypted-data/new-data-2.txt.enc -k newpassword
-          echo '[신규 데이터 암호화 완료]' > encrypted-data/echo_new_encrypt.txt
-          rm -f encrypted-data/new-data-1.txt encrypted-data/new-data-2.txt
-          sha256sum encrypted-data/new-data-1.txt.enc > encrypted-data/new-data-1-sha256.txt
-          sha256sum encrypted-data/new-data-2.txt.enc > encrypted-data/new-data-2-sha256.txt
-
-      - name: 🧹 5. [리메이크/배치] 샘플/로그/테스트 데이터 생성
+      - name: 🐘 [TimescaleDB/Postgres 15 설치(GPG 최신화)]
         run: |
-          echo "echo '[리메이크/배치] 샘플 10개, 로그 5개 생성...'"
-          for i in $(seq 1 10); do
-            echo "샘플 데이터 $i - $(date +%Y%m%d%H%M%S)" > remake-batch/sample/sample_data_$i.txt
-            echo "[샘플] sample_data_$i.txt 생성" >> remake-batch/sample/echo_create.txt
-          done
-          for i in $(seq 1 5); do
-            echo "로그 기록 $i - $(date +%Y-%m-%dT%H:%M:%S)" > remake-batch/logs/log_$i.log
-            echo "[로그] log_$i.log 생성" >> remake-batch/logs/echo_create.txt
-          done
-          echo "[배치] 샘플/로그 데이터 생성 완료" > remake-batch/batch_done.txt
-
-      - name: 🐘 6. [분산 설치] TimescaleDB(Postgres 15) (GPG 최신화)
-        run: |
-          echo "echo '[TimescaleDB/PostgreSQL 설치 시작]'"
-          set -e
-          sudo apt-get update
-          sudo apt-get upgrade -y || true
-          sudo apt-get install -y wget gnupg ca-certificates lsb-release
-          sudo mkdir -p /usr/share/keyrings
+          echo "[PostgreSQL/Timescale 설치]"
           wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor | sudo tee /usr/share/keyrings/postgresql.gpg > /dev/null
           echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y postgresql-15 postgresql-server-dev-15 || true
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-15 postgresql-server-dev-15
           wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor | sudo tee /usr/share/keyrings/timescale-archive-keyring.gpg > /dev/null
           echo "deb [signed-by=/usr/share/keyrings/timescale-archive-keyring.gpg] https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main" | sudo tee /etc/apt/sources.list.d/timescaledb.list
-          sudo apt-get update
-          sudo apt-get install -y timescaledb-2-postgresql-15 timescaledb-2-loader-postgresql-15 timescaledb-tools timescaledb-toolkit-postgresql-15 || (sudo apt-get -f install -y && sudo apt-get install -y timescaledb-2-postgresql-15 timescaledb-2-loader-postgresql-15 timescaledb-tools timescaledb-toolkit-postgresql-15)
-          sudo apt-get upgrade -y || true
-          echo '[설치/업그레이드 완료] TimescaleDB/PostgreSQL' > collector-data/echo_timescaledb.txt
-          dpkg -l | grep postgresql > collector-data/dpkg_postgres.txt || true
-          dpkg -l | grep timescaledb > collector-data/dpkg_timescaledb.txt || true
-          psql --version > collector-data/psql_version.txt || true
+          sudo apt-get update -y
+          sudo apt-get install -y timescaledb-2-postgresql-15 timescaledb-2-loader-postgresql-15 timescaledb-tools timescaledb-toolkit-postgresql-15
           echo '샘플 TimescaleDB 데이터' > collector-data/sample-tsdb.txt
           sha256sum collector-data/sample-tsdb.txt > collector-data/sample-tsdb-sha256.txt
 
-      - name: 🔎 7. [분산 설치] ELK Stack 및 snapshot
+      - name: 🔎 [ELK Stack 설치]
         run: |
-          echo "echo '[ELK 설치 및 버전 확인]'"
-          sudo apt-get update
-          sudo apt-get upgrade -y || true
-          sudo apt-get install -y openjdk-11-jre wget apt-transport-https
+          echo "[ELK 설치]"
           wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor | sudo tee /usr/share/keyrings/elasticsearch.gpg > /dev/null
           echo "deb [signed-by=/usr/share/keyrings/elasticsearch.gpg] https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y elasticsearch logstash kibana
-          sudo apt-get upgrade -y || true
-          sudo systemctl daemon-reload
-          sudo systemctl enable elasticsearch.service || true
-          sudo systemctl enable kibana.service || true
-          sudo systemctl enable logstash.service || true
-          sudo systemctl start elasticsearch.service || true
-          sudo systemctl start kibana.service || true
-          sudo systemctl start logstash.service || true
-          (elasticsearch --version > elk-data/elasticsearch_version.txt 2>&1 || /usr/share/elasticsearch/bin/elasticsearch --version >> elk-data/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> elk-data/elasticsearch_version.txt)
-          (kibana --version > elk-data/kibana_version.txt 2>&1 || /usr/share/kibana/bin/kibana --version >> elk-data/kibana_version.txt 2>&1 || echo "kibana not found" >> elk-data/kibana_version.txt)
-          (logstash --version > elk-data/logstash_version.txt 2>&1 || /usr/share/logstash/bin/logstash --version >> elk-data/logstash_version.txt 2>&1 || echo "logstash not found" >> elk-data/logstash_version.txt)
-          dpkg -l | grep elasticsearch > elk-data/dpkg_elasticsearch.txt || true
-          dpkg -l | grep kibana > elk-data/dpkg_kibana.txt || true
-          dpkg -l | grep logstash > elk-data/dpkg_logstash.txt || true
-          sudo systemctl status elasticsearch.service > elk-data/elasticsearch_systemctl.txt || true
-          sudo systemctl status kibana.service > elk-data/kibana_systemctl.txt || true
-          sudo systemctl status logstash.service > elk-data/logstash_systemctl.txt || true
+          sudo systemctl enable elasticsearch.service kibana.service logstash.service
+          sudo systemctl start elasticsearch.service kibana.service logstash.service
+          (elasticsearch --version > elk-data/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> elk-data/elasticsearch_version.txt)
+          (kibana --version > elk-data/kibana_version.txt 2>&1 || echo "kibana not found" >> elk-data/kibana_version.txt)
+          (logstash --version > elk-data/logstash_version.txt 2>&1 || echo "logstash not found" >> elk-data/logstash_version.txt)
           echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
           sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
 
-      - name: 🐳 8. [분산 설치] Docker, 이미지, snapshot
+      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트+최소화
         run: |
-          echo "echo '[Docker 설치 및 이미지 빌드]'"
-          sudo apt-get remove -y docker docker-engine docker.io containerd runc containerd.io || true
-          sudo apt-get purge -y docker docker-engine docker.io containerd runc containerd.io || true
-          sudo apt-get autoremove -y || true
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sh get-docker.sh
-          sudo systemctl enable docker
-          sudo systemctl start docker
+          echo "[Docker 설치 및 빌드]"
+          curl -fsSL https://get.docker.com | sh
           sudo docker --version > docker-data/docker_version.txt
-          sudo docker images > docker-data/docker_images.txt
           echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
-          echo '[이미지 Dockerfile 생성] docker-data/Dockerfile' > docker-data/echo_dockerfile.txt
-          sudo docker build -t elk-timescale-test:latest docker-data
-          echo '[도커 이미지 빌드 완료] elk-timescale-test:latest' > docker-data/echo_build.txt
+          sudo docker build -t elk-timescale-test:latest docker-data &
+          wait
+          echo '[도커 이미지 빌드 완료]' > docker-data/echo_build.txt
 
-      - name: 🧹 9. [메모리] GC/캐시 해제 및 snapshot
+      - name: 🧹 [메모리 GC/캐시해제+Snapshot]
         run: |
-          echo "echo '[메모리 캐시 및 GC 실행]'"
           sync; sudo sysctl -w vm.drop_caches=3
-          echo '[메모리 캐시 정리, GC 완료]' > snapshot/echo_gc.txt
           free -h > snapshot/memory_after_gc.txt
-          vmstat 1 3 > snapshot/vmstat_after_gc.txt
 
-      - name: 📝 10. [워크플로우 수집] 대량 데이터 수집 및 분산 저장 (rate-limit-safe)
+      - name: 📝 [워크플로우 실행 수집] (병렬화/빠른 파싱)
         run: |
-          echo "echo '[워크플로우 실행 데이터 수집 및 요약 생성]'"
           > all-runs-arrays.json
           RATE_LIMITED=0
+          # 병렬로 5개까지 요청
           for page in $(seq 1 10); do
-            resp=$(curl -s \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page")
-            msg=$(echo "$resp" | jq -r '.message // empty')
-            if [[ "$msg" == *"rate limit"* ]] || [[ "$msg" == *"API rate limit exceeded"* ]]; then
-              RATE_LIMITED=1
-              break
-            fi
-            runs=$(echo "$resp" | jq '.workflow_runs // []')
-            echo "$runs" >> all-runs-arrays.json
+            (
+              resp=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page")
+              msg=$(echo "$resp" | jq -r '.message // empty')
+              if [[ "$msg" == *"rate limit"* ]] || [[ "$msg" == *"API rate limit exceeded"* ]]; then
+                echo "[]" > all-runs-page-$page.json
+                exit
+              fi
+              echo "$resp" | jq '.workflow_runs // []' > all-runs-page-$page.json
+            ) &
           done
-          if [ "$RATE_LIMITED" -eq 1 ]; then
-            echo '[]' > all-runs-flat.json
-            echo '[]' > all-runs-summary.json
-            echo "RATE_LIMITED=1" >> $GITHUB_ENV
-          else
-            cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
-            if [ ! -s all-runs-flat.json ]; then echo "[]" > all-runs-flat.json; fi
-            jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
-            if [ ! -s all-runs-summary.json ]; then echo "[]" > all-runs-summary.json; fi
-          fi
+          wait
+          cat all-runs-page-*.json > all-runs-arrays.json
+          cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
+          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
 
-      - name: 11. [상세 수집] 워크플로우 실행 상세 분산 저장
+      - name: [상세수집] 워크플로우 상세/잡/스텝 데이터 분산 저장 (병렬)
         run: |
-          echo "echo '[워크플로우 상세, 잡, 스텝 데이터 분산 저장]'"
-          ids=$(cat all-runs-summary.json 2>/dev/null | jq -r '.[].id' | head -1000 || true)
-          i=0
+          ids=$(cat all-runs-summary.json 2>/dev/null | jq -r '.[].id' | head -50 || true)
           for rid in $ids; do
-            run_resp=$(curl -s \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid")
-            if [ -n "$run_resp" ] && [ "$(echo "$run_resp" | jq -r '.id // empty')" != "" ]; then
+            (
+              run_resp=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid")
               echo "$run_resp" > runs-details/run-$rid.json
-            else
-              echo '{ "error": "수집 실패 또는 RateLimit" }' > runs-details/run-$rid.json
-            fi
-            jobs_resp=$(curl -s \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid/jobs")
-            if [ -n "$jobs_resp" ] && [ "$(echo "$jobs_resp" | jq -r '.jobs // empty')" != "" ]; then
+              jobs_resp=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid/jobs")
               echo "$jobs_resp" > jobs-details/jobs-$rid.json
-              cat jobs-details/jobs-$rid.json | jq '[.jobs // [] | .[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps // [] | .[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json
-            else
-              echo '{ "error": "수집 실패 또는 RateLimit" }' > jobs-details/jobs-$rid.json
-              echo '[]' > steps-details/steps-$rid.json
-            fi
-            i=$((i+1))
-            if [ $i -ge 1000 ]; then break; fi
+              echo "$jobs_resp" | jq '[.jobs // [] | .[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps // [] | .[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json
+            ) &
           done
+          wait
 
-      - name: 🛠️ 12. [Python] 집계 서버 CLI 환경 준비 (requests 설치)
-        run: |
-          echo "echo '[Python3 + requests 설치]'"
-          sudo apt-get update -y
-          sudo apt-get install -y python3 python3-pip
-          pip3 install requests
-
-      - name: 📦 13. [결과] 전체 아티팩트/분산/암호화/워크플로우/스냅샷/리메이크 배치 업로드
+      - name: 📦 [전체 업로드] 모든 결과/배치/스냅샷/리메이크
         uses: actions/upload-artifact@v4
         with:
           name: all-artifacts-distributed-batch-encrypted-with-echo
@@ -240,25 +174,10 @@ jobs:
             steps-details/
             collector-tmp/
 
-      - name: 📊 14. [최신 현황 요약] (워크플로우+분산+암호+리메이크 배치)
+      - name: 📊 [요약] 최신 데이터 현황
         run: |
-          echo "▶️ [collector-data/*] (샘플/신규/기존/암호화 데이터 파일 현황):"
-          ls -lh collector-data | head -20 || true
-          echo ""
-          echo "▶️ [encrypted-data] (암호화 데이터 4개 이상):"
-          ls -lh encrypted-data | grep '\.enc' || echo '[⚠️] 암호화 없음'
-          echo ""
-          echo "▶️ [remake-batch/sample] (샘플 데이터 10개):"
-          ls -l remake-batch/sample | grep sample_data_ || echo '[⚠️] 샘플 데이터 없음'
-          head -5 remake-batch/sample/sample_data_1.txt 2>/dev/null || true
-          echo ""
-          echo "▶️ [remake-batch/logs] (로그 5개):"
-          ls -l remake-batch/logs | grep log_ || echo '[⚠️] 로그 없음'
-          head -5 remake-batch/logs/log_1.log 2>/dev/null || true
-          echo ""
-          echo "▶️ [all-runs-summary.json] (최근 40건 워크플로우 요약):"
-          if [ -s all-runs-summary.json ]; then
-            jq -r '.[] | "워크플로: \(.display_title // .name) (#\(.run_number))\n상태: \(.status)/\(.conclusion)\nURL: \(.html_url)\n-----"' all-runs-summary.json | head -40
-          else
-            echo '[⚠️] 워크플로우 데이터 없음'
-          fi
+          echo "▶️ [collector-data/*]"; ls -lh collector-data | head -20 || true
+          echo "▶️ [encrypted-data]"; ls -lh encrypted-data | grep '\.enc' || echo '[⚠️] 없음'
+          echo "▶️ [remake-batch/sample]"; ls -l remake-batch/sample | grep sample_data_ || echo '[⚠️] 없음'
+          echo "▶️ [remake-batch/logs]"; ls -l remake-batch/logs | grep log_ || echo '[⚠️] 없음'
+          echo "▶️ [all-runs-summary.json]"; head -40 all-runs-summary.json || echo '[⚠️] 없음'
