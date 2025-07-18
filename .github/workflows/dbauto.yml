@@ -1,4 +1,4 @@
-name: 🗂️ All Workflow YAMLs → DB+LOB+DB별마이그레이션+SQL(DB타입별 자동실행/자동업그레이드/echo)
+name: 🗂️ All Workflow YAMLs → DB+LOB+DB별마이그레이션+SQL+자동업그레이드(다중ALTER/DB별정책/echo)
 
 on:
   schedule:
@@ -31,7 +31,7 @@ jobs:
           echo "echo 'pyyaml' > requirements.txt"
           echo 'pyyaml' > requirements.txt
 
-      - name: 🐍 workflow2db.py 전체 echo 생성 (Indent/업그레이드/에러방지)
+      - name: 🐍 workflow2db.py 전체 echo 생성 (실제 .sql 업그레이드/DB별정책/다중ALTER)
         run: |
           echo "echo 'import os' > workflow2db.py"
           echo 'import os' > workflow2db.py
@@ -109,8 +109,8 @@ jobs:
           echo '                    lowerline = line.lower()' >> workflow2db.py
           echo '                    if any(kw in lowerline for kw in migration_sections):' >> workflow2db.py
           echo '                        migration_texts.append(line.strip())' >> workflow2db.py
-          echo '                        if "alter table" in lowerline or "upgrade" in lowerline:' >> workflow2db.py
-          echo '                            upgrade_lines.append(line.strip())' >> workflow2db.py
+          echo '                        if "alter table" in lowerline or "upgrade" in lowerline or ("create table" in lowerline and "if not exists" not in lowerline):' >> workflow2db.py
+          echo '                            upgrade_lines.append((db_type_found, line.strip()))' >> workflow2db.py
           echo '            workflows.append({' >> workflow2db.py
           echo '                "filename": filename,' >> workflow2db.py
           echo '                "name": name,' >> workflow2db.py
@@ -165,13 +165,20 @@ jobs:
           echo '        if file_dbtype and file_dbtype not in db_type_set:' >> workflow2db.py
           echo '            continue' >> workflow2db.py
           echo '        with open(os.path.join(SQL_DIR, sqlfile), "r", encoding="utf-8") as f:' >> workflow2db.py
-          echo '            sql_stmts = f.read().split(";")' >> workflow2db.py
+          echo '            sql_raw = f.read()' >> workflow2db.py
+          echo '            # 다중 ALTER/CREATE/DDL도 모두 세미콜론으로 분리 실행' >> workflow2db.py
+          echo '            sql_stmts = [s.strip() for s in sql_raw.split(";") if s.strip()]' >> workflow2db.py
           echo '            for stmt in sql_stmts:' >> workflow2db.py
-          echo '                stmt = stmt.strip()' >> workflow2db.py
-          echo '                if not stmt:' >> workflow2db.py
-          echo '                    continue' >> workflow2db.py
-          echo '                if file_dbtype and file_dbtype != "sqlite":' >> workflow2db.py
+          echo '                # DB별 업그레이드 룰 예시' >> workflow2db.py
+          echo '                if file_dbtype == "mysql":' >> workflow2db.py
           echo '                    stmt = stmt.replace("AUTO_INCREMENT", "AUTOINCREMENT").replace("`", "\"")' >> workflow2db.py
+          echo '                elif file_dbtype == "postgresql":' >> workflow2db.py
+          echo '                    stmt = stmt.replace("SERIAL", "INTEGER").replace("::", "")' >> workflow2db.py
+          echo '                elif file_dbtype == "oracle":' >> workflow2db.py
+          echo '                    stmt = stmt.replace("NUMBER", "INTEGER")' >> workflow2db.py
+          echo '                elif file_dbtype == "mssql":' >> workflow2db.py
+          echo '                    stmt = stmt.replace("IDENTITY(1,1)", "AUTOINCREMENT")' >> workflow2db.py
+          echo '                # SQLite는 그대로 실행' >> workflow2db.py
           echo '                try:' >> workflow2db.py
           echo '                    c.execute(stmt)' >> workflow2db.py
           echo '                    conn.commit()' >> workflow2db.py
@@ -185,15 +192,23 @@ jobs:
           echo '    conn = sqlite3.connect(DB_PATH)' >> workflow2db.py
           echo '    c = conn.cursor()' >> workflow2db.py
           echo '    now = datetime.now().isoformat()' >> workflow2db.py
-          echo '    for line in upgrade_lines:' >> workflow2db.py
+          echo '    for dbtype, line in upgrade_lines:' >> workflow2db.py
           echo '        stmt = line' >> workflow2db.py
-          echo '        if "alter table" in stmt.lower() or "upgrade" in stmt.lower():' >> workflow2db.py
-          echo '            try:' >> workflow2db.py
-          echo '                c.execute(stmt)' >> workflow2db.py
-          echo '                conn.commit()' >> workflow2db.py
-          echo '                c.execute("INSERT INTO migration_result (sqlfile, db_type, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)", ("AUTO_UPGRADE", "", stmt, "ok", 1, now, ""))' >> workflow2db.py
-          echo '            except Exception as e:' >> workflow2db.py
-          echo '                c.execute("INSERT INTO migration_result (sqlfile, db_type, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)", ("AUTO_UPGRADE", "", stmt, "error", 0, now, str(e)))' >> workflow2db.py
+          echo '        # DB별 업그레이드 룰 반영' >> workflow2db.py
+          echo '        if dbtype == "mysql":' >> workflow2db.py
+          echo '            stmt = stmt.replace("AUTO_INCREMENT", "AUTOINCREMENT").replace("`", "\"")' >> workflow2db.py
+          echo '        elif dbtype == "postgresql":' >> workflow2db.py
+          echo '            stmt = stmt.replace("SERIAL", "INTEGER").replace("::", "")' >> workflow2db.py
+          echo '        elif dbtype == "oracle":' >> workflow2db.py
+          echo '            stmt = stmt.replace("NUMBER", "INTEGER")' >> workflow2db.py
+          echo '        elif dbtype == "mssql":' >> workflow2db.py
+          echo '            stmt = stmt.replace("IDENTITY(1,1)", "AUTOINCREMENT")' >> workflow2db.py
+          echo '        try:' >> workflow2db.py
+          echo '            c.execute(stmt)' >> workflow2db.py
+          echo '            conn.commit()' >> workflow2db.py
+          echo '            c.execute("INSERT INTO migration_result (sqlfile, db_type, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)", ("AUTO_UPGRADE", dbtype, stmt, "ok", 1, now, ""))' >> workflow2db.py
+          echo '        except Exception as e:' >> workflow2db.py
+          echo '            c.execute("INSERT INTO migration_result (sqlfile, db_type, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)", ("AUTO_UPGRADE", dbtype, stmt, "error", 0, now, str(e)))' >> workflow2db.py
           echo '    conn.commit()' >> workflow2db.py
           echo '    conn.close()' >> workflow2db.py
           echo '' >> workflow2db.py
@@ -204,7 +219,7 @@ jobs:
           echo '    db_type_set = set([w.get("db_type") for w in workflows if w.get("db_type")])' >> workflow2db.py
           echo '    execute_sqlfiles(db_type_set)' >> workflow2db.py
           echo '    auto_upgrade_sql(upgrade_lines)' >> workflow2db.py
-          echo '    print(f"[OK] {len(workflows)}개 워크플로우 DB+LOB+Migration+SQL(DB타입별)+업그레이드 실행 완료! (DB: {DB_PATH})")' >> workflow2db.py
+          echo '    print(f"[OK] {len(workflows)}개 워크플로우 DB+LOB+Migration+SQL+자동업그레이드(다중ALTER/DB별정책) 완료! (DB: {DB_PATH})")' >> workflow2db.py
 
       - name: 🧪 파이썬 및 패키지 설치 (pip)
         run: |
@@ -217,15 +232,15 @@ jobs:
           echo "pip install -r requirements.txt"
           pip install -r requirements.txt
 
-      - name: 🚀 workflow2db.py 실행 (DB별/SQL자동실행/파싱/자동업그레이드)
+      - name: 🚀 workflow2db.py 실행 (DB별/SQL/다중ALTER/업그레이드)
         run: |
-          echo '[실행] workflow2db.py (DB별/SQL자동실행/파싱/LOB/마이그레이션/자동업그레이드)'
+          echo '[실행] workflow2db.py (SQL자동실행/다중ALTER/DB별업그레이드)'
           python3 workflow2db.py
 
-      - name: 📂 결과 확인 (.github/workflows.db, SQL(DB별) 실행/업그레이드)
+      - name: 📂 결과 확인 (.github/workflows.db, 업그레이드 적용)
         run: |
-          echo '[결과] .github/workflows.db 및 테이블/SQL(DB별) 실행/업그레이드 정보'
+          echo '[결과] .github/workflows.db 및 migration_result 업그레이드 정보'
           ls -lh .github/workflows.db
           echo '.tables' | sqlite3 .github/workflows.db
           echo 'PRAGMA table_info(migration_result);' | sqlite3 .github/workflows.db
-          echo 'SELECT * FROM migration_result ORDER BY id DESC LIMIT 15;' | sqlite3 .github/workflows.db
+          echo 'SELECT * FROM migration_result ORDER BY id DESC LIMIT 20;' | sqlite3 .github/workflows.db
