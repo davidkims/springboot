@@ -1,4 +1,4 @@
-name: 🗂️ All Workflow YAMLs → DB+LOB+Migration+SQL+AutoUpgrade+ErrorLog+에러출력만 (echo, 구문에러0%)
+name: 🗂️ All Workflow YAMLs → DB+LOB+Migration+SQL+AutoUpgrade+ErrorLog+재수행+비활성화(echo, 구문에러0%)
 
 on:
   schedule:
@@ -35,7 +35,7 @@ jobs:
           echo "echo 'pyyaml' > requirements.txt"
           echo 'pyyaml' > requirements.txt
 
-      - name: 🐍 workflow2db.py 전체 echo 생성 (구문에러0%, f-string, 에러로그, 강제종료X, 에러메시지만)
+      - name: 🐍 workflow2db.py 전체 echo 생성 (재수행/비활성화까지 포함)
         run: |
           echo "echo 'import os' > workflow2db.py"
           echo 'import os' > workflow2db.py
@@ -56,6 +56,7 @@ jobs:
           echo "DB_PATH = '.github/workflows.db'" >> workflow2db.py
           echo "SQL_DIR = '.github/sql'" >> workflow2db.py
           echo "ERROR_LOG_DIR = '.github/error_logs'" >> workflow2db.py
+          echo "DISABLED_FILE = os.path.join(ERROR_LOG_DIR, 'disabled_workflows.txt')" >> workflow2db.py
           echo '' >> workflow2db.py
           echo 'def log_error(workflow_name, message):' >> workflow2db.py
           echo '    if not os.path.exists(ERROR_LOG_DIR):' >> workflow2db.py
@@ -63,6 +64,87 @@ jobs:
           echo '    err_file = os.path.join(ERROR_LOG_DIR, f"{workflow_name}.log")' >> workflow2db.py
           echo '    with open(err_file, "a", encoding="utf-8") as ef:' >> workflow2db.py
           echo '        ef.write(f"[{datetime.now().isoformat()}] {message}\\n")' >> workflow2db.py
+          echo '' >> workflow2db.py
+          echo 'def log_disable(workflow_name, reason):' >> workflow2db.py
+          echo '    with open(DISABLED_FILE, "a", encoding="utf-8") as f:' >> workflow2db.py
+          echo '        f.write(f"{workflow_name}\\t{reason}\\t{datetime.now().isoformat()}\\n")' >> workflow2db.py
+          echo '' >> workflow2db.py
+          echo 'def parse_one_workflow(filename):' >> workflow2db.py
+          echo '    path = os.path.join(WORKFLOWS_DIR, filename)' >> workflow2db.py
+          echo '    try:' >> workflow2db.py
+          echo '        with open(path, "rb") as frb:' >> workflow2db.py
+          echo '            raw_bytes = frb.read()' >> workflow2db.py
+          echo '        with open(path, "r", encoding="utf-8") as f:' >> workflow2db.py
+          echo '            y = yaml.safe_load(f)' >> workflow2db.py
+          echo '        if not y:' >> workflow2db.py
+          echo '            return None' >> workflow2db.py
+          echo '        name = y.get("name", "")' >> workflow2db.py
+          echo '        triggers = list(y.get("on", {}).keys()) if isinstance(y.get("on"), dict) else y.get("on")' >> workflow2db.py
+          echo '        jobs = y.get("jobs", {})' >> workflow2db.py
+          echo '        with open(path, "r", encoding="utf-8") as fr:' >> workflow2db.py
+          echo '            raw_yaml = fr.read()' >> workflow2db.py
+          echo '        yaml_crc = binascii.crc32(raw_bytes)' >> workflow2db.py
+          echo '        yaml_size = len(raw_bytes)' >> workflow2db.py
+          echo '        comp_blob = zlib.compress(raw_bytes)' >> workflow2db.py
+          echo '        comp_size = len(comp_blob)' >> workflow2db.py
+          echo '        migration_keywords = ["db", "database", "schema", "sql", "migrate", "migration", "upgrade", "alter"]' >> workflow2db.py
+          echo '        db_types = ["mysql", "postgresql", "mariadb", "sqlite", "mssql", "oracle"]' >> workflow2db.py
+          echo '        migration_sections = []' >> workflow2db.py
+          echo '        db_type_found = ""' >> workflow2db.py
+          echo '        for db_type in db_types:' >> workflow2db.py
+          echo '            if db_type in raw_yaml.lower():' >> workflow2db.py
+          echo '                db_type_found = db_type' >> workflow2db.py
+          echo '                break' >> workflow2db.py
+          echo '        for k in migration_keywords:' >> workflow2db.py
+          echo '            if k in raw_yaml.lower():' >> workflow2db.py
+          echo '                migration_sections.append(k)' >> workflow2db.py
+          echo '        migration_texts = []' >> workflow2db.py
+          echo '        upgrade_lines = []' >> workflow2db.py
+          echo '        if migration_sections:' >> workflow2db.py
+          echo '            for line in raw_yaml.split("\\n"):' >> workflow2db.py
+          echo '                lowerline = line.lower()' >> workflow2db.py
+          echo '                if any(kw in lowerline for kw in migration_sections):' >> workflow2db.py
+          echo '                    migration_texts.append(line.strip())' >> workflow2db.py
+          echo '                    if "alter table" in lowerline or "upgrade" in lowerline or ("create table" in lowerline and "if not exists" not in lowerline):' >> workflow2db.py
+          echo '                        upgrade_lines.append((db_type_found, line.strip(), filename))' >> workflow2db.py
+          echo '        return {' >> workflow2db.py
+          echo '            "filename": filename,' >> workflow2db.py
+          echo '            "name": name,' >> workflow2db.py
+          echo '            "triggers": triggers,' >> workflow2db.py
+          echo '            "jobs": jobs,' >> workflow2db.py
+          echo '            "raw_yaml": raw_yaml,' >> workflow2db.py
+          echo '            "raw_yaml_blob": raw_bytes,' >> workflow2db.py
+          echo '            "yaml_crc": yaml_crc,' >> workflow2db.py
+          echo '            "yaml_size": yaml_size,' >> workflow2db.py
+          echo '            "comp_blob": comp_blob,' >> workflow2db.py
+          echo '            "comp_size": comp_size,' >> workflow2db.py
+          echo '            "migration_lines": migration_texts,' >> workflow2db.py
+          echo '            "upgrade_lines": upgrade_lines,' >> workflow2db.py
+          echo '            "db_type": db_type_found' >> workflow2db.py
+          echo '        }' >> workflow2db.py
+          echo '    except Exception as e:' >> workflow2db.py
+          echo '        log_error(filename, f"워크플로우 파싱실패: {e}")' >> workflow2db.py
+          echo '        return None' >> workflow2db.py
+          echo '' >> workflow2db.py
+          echo 'def parse_workflows_with_retry(max_retry=1):' >> workflow2db.py
+          echo '    files = [f for f in os.listdir(WORKFLOWS_DIR) if f.endswith(".yml") or f.endswith(".yaml")]' >> workflow2db.py
+          echo '    disabled = set()' >> workflow2db.py
+          echo '    workflows = []' >> workflow2db.py
+          echo '    upgrade_lines = []' >> workflow2db.py
+          echo '    for filename in files:' >> workflow2db.py
+          echo '        result = None' >> workflow2db.py
+          echo '        for attempt in range(max_retry+1):' >> workflow2db.py
+          echo '            result = parse_one_workflow(filename)' >> workflow2db.py
+          echo '            if result:' >> workflow2db.py
+          echo '                break' >> workflow2db.py
+          echo '        if result:' >> workflow2db.py
+          echo '            workflows.append(result)' >> workflow2db.py
+          echo '            upgrade_lines.extend(result.get("upgrade_lines", []))' >> workflow2db.py
+          echo '        else:' >> workflow2db.py
+          echo '            log_disable(filename, "워크플로우 2회 연속 실패 → 비활성화")' >> workflow2db.py
+          echo '            disabled.add(filename)' >> workflow2db.py
+          echo '    return workflows, upgrade_lines, disabled' >> workflow2db.py
+          # 이하 DB적재/SQL/AutoUpgrade 부분은 이전과 동일하게 아래로 이어짐
           echo '' >> workflow2db.py
           echo 'def init_db():' >> workflow2db.py
           echo '    conn = sqlite3.connect(DB_PATH)' >> workflow2db.py
@@ -80,72 +162,6 @@ jobs:
           echo '    c.execute("CREATE INDEX IF NOT EXISTS idx_sqlfile ON migration_result(sqlfile);")' >> workflow2db.py
           echo '    conn.commit()' >> workflow2db.py
           echo '    conn.close()' >> workflow2db.py
-          echo '' >> workflow2db.py
-          echo 'def parse_workflows():' >> workflow2db.py
-          echo '    files = [f for f in os.listdir(WORKFLOWS_DIR) if f.endswith(".yml") or f.endswith(".yaml")]' >> workflow2db.py
-          echo '    workflows = []' >> workflow2db.py
-          echo '    migration_keywords = ["db", "database", "schema", "sql", "migrate", "migration", "upgrade", "alter"]' >> workflow2db.py
-          echo '    db_types = ["mysql", "postgresql", "mariadb", "sqlite", "mssql", "oracle"]' >> workflow2db.py
-          echo '    upgrade_lines = []' >> workflow2db.py
-          echo '    error_count = 0' >> workflow2db.py
-          echo '    for filename in files:' >> workflow2db.py
-          echo '        path = os.path.join(WORKFLOWS_DIR, filename)' >> workflow2db.py
-          echo '        try:' >> workflow2db.py
-          echo '            with open(path, "rb") as frb:' >> workflow2db.py
-          echo '                raw_bytes = frb.read()' >> workflow2db.py
-          echo '            with open(path, "r", encoding="utf-8") as f:' >> workflow2db.py
-          echo '                try:' >> workflow2db.py
-          echo '                    y = yaml.safe_load(f)' >> workflow2db.py
-          echo '                except Exception as e:' >> workflow2db.py
-          echo '                    log_error(filename, f"YAML 파싱 실패: {e}")' >> workflow2db.py
-          echo '                    error_count += 1' >> workflow2db.py
-          echo '                    continue' >> workflow2db.py
-          echo '            if not y:' >> workflow2db.py
-          echo '                continue' >> workflow2db.py
-          echo '            name = y.get("name", "")' >> workflow2db.py
-          echo '            triggers = list(y.get("on", {}).keys()) if isinstance(y.get("on"), dict) else y.get("on")' >> workflow2db.py
-          echo '            jobs = y.get("jobs", {})' >> workflow2db.py
-          echo '            with open(path, "r", encoding="utf-8") as fr:' >> workflow2db.py
-          echo '                raw_yaml = fr.read()' >> workflow2db.py
-          echo '            yaml_crc = binascii.crc32(raw_bytes)' >> workflow2db.py
-          echo '            yaml_size = len(raw_bytes)' >> workflow2db.py
-          echo '            comp_blob = zlib.compress(raw_bytes)' >> workflow2db.py
-          echo '            comp_size = len(comp_blob)' >> workflow2db.py
-          echo '            migration_sections = []' >> workflow2db.py
-          echo '            db_type_found = ""' >> workflow2db.py
-          echo '            for db_type in db_types:' >> workflow2db.py
-          echo '                if db_type in raw_yaml.lower():' >> workflow2db.py
-          echo '                    db_type_found = db_type' >> workflow2db.py
-          echo '                    break' >> workflow2db.py
-          echo '            for k in migration_keywords:' >> workflow2db.py
-          echo '                if k in raw_yaml.lower():' >> workflow2db.py
-          echo '                    migration_sections.append(k)' >> workflow2db.py
-          echo '            migration_texts = []' >> workflow2db.py
-          echo '            if migration_sections:' >> workflow2db.py
-          echo '                for line in raw_yaml.split("\\n"):' >> workflow2db.py
-          echo '                    lowerline = line.lower()' >> workflow2db.py
-          echo '                    if any(kw in lowerline for kw in migration_sections):' >> workflow2db.py
-          echo '                        migration_texts.append(line.strip())' >> workflow2db.py
-          echo '                        if "alter table" in lowerline or "upgrade" in lowerline or ("create table" in lowerline and "if not exists" not in lowerline):' >> workflow2db.py
-          echo '                            upgrade_lines.append((db_type_found, line.strip(), filename))' >> workflow2db.py
-          echo '            workflows.append({' >> workflow2db.py
-          echo '                "filename": filename,' >> workflow2db.py
-          echo '                "name": name,' >> workflow2db.py
-          echo '                "triggers": triggers,' >> workflow2db.py
-          echo '                "jobs": jobs,' >> workflow2db.py
-          echo '                "raw_yaml": raw_yaml,' >> workflow2db.py
-          echo '                "raw_yaml_blob": raw_bytes,' >> workflow2db.py
-          echo '                "yaml_crc": yaml_crc,' >> workflow2db.py
-          echo '                "yaml_size": yaml_size,' >> workflow2db.py
-          echo '                "comp_blob": comp_blob,' >> workflow2db.py
-          echo '                "comp_size": comp_size,' >> workflow2db.py
-          echo '                "migration_lines": migration_texts,' >> workflow2db.py
-          echo '                "db_type": db_type_found' >> workflow2db.py
-          echo '            })' >> workflow2db.py
-          echo '        except Exception as e:' >> workflow2db.py
-          echo '            log_error(filename, f"파일 전체 처리 실패: {e}")' >> workflow2db.py
-          echo '            error_count += 1' >> workflow2db.py
-          echo '    return workflows, upgrade_lines, error_count' >> workflow2db.py
           echo '' >> workflow2db.py
           echo 'def save_to_db(workflows):' >> workflow2db.py
           echo '    conn = sqlite3.connect(DB_PATH)' >> workflow2db.py
@@ -167,6 +183,8 @@ jobs:
           echo '    c.execute("COMMIT;")' >> workflow2db.py
           echo '    conn.commit()' >> workflow2db.py
           echo '    conn.close()' >> workflow2db.py
+          # 이하 execute_sqlfiles, auto_upgrade_sql, 등은 이전 버전과 동일
+
           echo '' >> workflow2db.py
           echo 'def execute_sqlfiles(db_type_set):' >> workflow2db.py
           echo '    conn = sqlite3.connect(DB_PATH)' >> workflow2db.py
@@ -239,14 +257,16 @@ jobs:
           echo '' >> workflow2db.py
           echo 'if __name__ == "__main__":' >> workflow2db.py
           echo '    init_db()' >> workflow2db.py
-          echo '    workflows, upgrade_lines, wf_err = parse_workflows()' >> workflow2db.py
+          echo '    workflows, upgrade_lines, disabled = parse_workflows_with_retry(max_retry=1)' >> workflow2db.py
           echo '    save_to_db(workflows)' >> workflow2db.py
           echo '    db_type_set = set([w.get("db_type") for w in workflows if w.get("db_type")])' >> workflow2db.py
           echo '    sql_err = execute_sqlfiles(db_type_set)' >> workflow2db.py
-          echo '    upgrade_err = auto_upgrade_sql(upgrade_lines)' >> workflow2db.py
-          echo '    total_err = wf_err + sql_err + upgrade_err' >> workflow2db.py
+          echo '    upgrade_err = auto_upgrade_sql([ul for ul in upgrade_lines if ul[2] not in disabled])' >> workflow2db.py
+          echo '    total_err = len(disabled) + sql_err + upgrade_err' >> workflow2db.py
+          echo '    if len(disabled) > 0:' >> workflow2db.py
+          echo '        print(f"[DISABLED] 비활성화 워크플로우: {len(disabled)}개 → .github/error_logs/disabled_workflows.txt 확인")' >> workflow2db.py
           echo '    if total_err > 0:' >> workflow2db.py
-          echo '        print(f"[ERROR] 치명적 에러 {total_err}건 발생. error_logs 확인!")' >> workflow2db.py
+          echo '        print(f"[ERROR] 에러/비활성 워크플로우: {total_err}건 발생. error_logs 확인!")' >> workflow2db.py
           echo '    else:' >> workflow2db.py
           echo '        print(f"[OK] {len(workflows)}개 워크플로우 DB+LOB+Migration+SQL+자동업그레이드 완료! (DB: {DB_PATH})")' >> workflow2db.py
 
@@ -261,16 +281,17 @@ jobs:
           echo "pip install -r requirements.txt"
           pip install -r requirements.txt
 
-      - name: 🚀 workflow2db.py 실행 (에러 echo/에러출력만)
+      - name: 🚀 workflow2db.py 실행 (재수행+비활성화)
         run: |
-          echo '[실행] workflow2db.py (에러 echo/에러출력만)'
+          echo '[실행] workflow2db.py (재수행+비활성화)'
           python3 workflow2db.py
 
-      - name: 📂 결과 확인 (.github/workflows.db, error_logs)
+      - name: 📂 결과 확인 (.github/workflows.db, error_logs, 비활성화)
         run: |
-          echo '[결과] .github/workflows.db 및 error_logs 정보'
+          echo '[결과] .github/workflows.db, error_logs, 비활성화 목록'
           ls -lh .github/workflows.db
           echo '.tables' | sqlite3 .github/workflows.db
           echo 'ls -l .github/error_logs || true'
           ls -l .github/error_logs || true
           echo 'head -20 .github/error_logs/* || true'
+          echo 'cat .github/error_logs/disabled_workflows.txt || true'
