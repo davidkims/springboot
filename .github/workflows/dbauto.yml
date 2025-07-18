@@ -1,8 +1,8 @@
-name: 🗂️ All Workflow YAMLs → DB+LOB+DB별마이그레이션+SQL실행 (echo, 1분자동, 트랜잭션, 확장)
+name: 🗂️ All Workflow YAMLs → DB+LOB+DB별마이그레이션+SQL(DB타입별 자동실행/echo)
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # 1분마다 자동 실행
+    - cron: '*/1 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
           echo "echo 'pyyaml' > requirements.txt"
           echo 'pyyaml' > requirements.txt
 
-      - name: 🐍 workflow2db.py 전체 echo 생성 (DB별, SQL자동실행, 확장)
+      - name: 🐍 workflow2db.py 전체 echo 생성 (DB별 SQL자동실행/구문파싱)
         run: |
           echo "echo 'import os' > workflow2db.py"
           echo 'import os' > workflow2db.py
@@ -58,7 +58,7 @@ jobs:
           echo '    c.execute("CREATE TABLE IF NOT EXISTS job (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER, job_name TEXT, runs_on TEXT, created_at TEXT, updated_at TEXT, job_yaml TEXT, job_yaml_blob BLOB, job_crc INTEGER, job_size INTEGER, FOREIGN KEY(workflow_id) REFERENCES workflow(id));")' >> workflow2db.py
           echo '    c.execute("CREATE TABLE IF NOT EXISTS workflow_lob (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER, lob_type TEXT, data_text TEXT, data_blob BLOB, blob_crc INTEGER, blob_size INTEGER, comp_blob BLOB, comp_size INTEGER, created_at TEXT, updated_at TEXT, note TEXT, FOREIGN KEY(workflow_id) REFERENCES workflow(id));")' >> workflow2db.py
           echo '    c.execute("CREATE TABLE IF NOT EXISTS migration (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER, filename TEXT, migration_text TEXT, migration_type TEXT, db_type TEXT, created_at TEXT, updated_at TEXT, note TEXT, FOREIGN KEY(workflow_id) REFERENCES workflow(id));")' >> workflow2db.py
-          echo '    c.execute("CREATE TABLE IF NOT EXISTS migration_result (id INTEGER PRIMARY KEY AUTOINCREMENT, sqlfile TEXT, sql_stmt TEXT, result TEXT, success INTEGER, executed_at TEXT, error_msg TEXT);")' >> workflow2db.py
+          echo '    c.execute("CREATE TABLE IF NOT EXISTS migration_result (id INTEGER PRIMARY KEY AUTOINCREMENT, sqlfile TEXT, db_type TEXT, sql_stmt TEXT, result TEXT, success INTEGER, executed_at TEXT, error_msg TEXT);")' >> workflow2db.py
           echo '    c.execute("CREATE INDEX IF NOT EXISTS idx_workflow_filename ON workflow(filename);")' >> workflow2db.py
           echo '    c.execute("CREATE INDEX IF NOT EXISTS idx_job_workflow_id ON job(workflow_id);")' >> workflow2db.py
           echo '    c.execute("CREATE INDEX IF NOT EXISTS idx_lob_type ON workflow_lob(lob_type);")' >> workflow2db.py
@@ -68,7 +68,7 @@ jobs:
           echo '    conn.commit()' >> workflow2db.py
           echo '    conn.close()' >> workflow2db.py
           echo '' >> workflow2db.py
-          echo "# 2. 워크플로우 파일 추출 및 파싱 (LOB/압축/CRC/DB별마이그레이션)" >> workflow2db.py
+          echo "# 2. 워크플로우 파일 추출 및 파싱 (DB별/마이그레이션)" >> workflow2db.py
           echo "def parse_workflows():" >> workflow2db.py
           echo "    files = [f for f in os.listdir(WORKFLOWS_DIR) if f.endswith('.yml') or f.endswith('.yaml')]" >> workflow2db.py
           echo "    workflows = []" >> workflow2db.py
@@ -146,26 +146,38 @@ jobs:
           echo "    conn.commit()" >> workflow2db.py
           echo "    conn.close()" >> workflow2db.py
           echo '' >> workflow2db.py
-          echo "# 4. .github/sql 하위 모든 SQL파일 자동 실행 및 로그" >> workflow2db.py
-          echo "def execute_sqlfiles():" >> workflow2db.py
+          echo "# 4. .github/sql 하위 모든 SQL파일 자동 실행 및 DB타입별 파싱/실행" >> workflow2db.py
+          echo "def execute_sqlfiles(db_type_set):" >> workflow2db.py
           echo "    conn = sqlite3.connect(DB_PATH)" >> workflow2db.py
           echo "    c = conn.cursor()" >> workflow2db.py
           echo "    now = datetime.now().isoformat()" >> workflow2db.py
           echo "    if not os.path.exists(SQL_DIR): return" >> workflow2db.py
           echo "    sqlfiles = [f for f in os.listdir(SQL_DIR) if f.endswith('.sql')]" >> workflow2db.py
           echo "    for sqlfile in sqlfiles:" >> workflow2db.py
-          echo "        fullpath = os.path.join(SQL_DIR, sqlfile)" >> workflow2db.py
-          echo "        with open(fullpath, 'r', encoding='utf-8') as f:" >> workflow2db.py
+          echo "        lowerfile = sqlfile.lower()" >> workflow2db.py
+          echo "        file_dbtype = None" >> workflow2db.py
+          echo "        for dbtype in ['mysql', 'postgresql', 'sqlite', 'oracle', 'mariadb', 'mssql']:" >> workflow2db.py
+          echo "            if dbtype in lowerfile:" >> workflow2db.py
+          echo "                file_dbtype = dbtype" >> workflow2db.py
+          echo "                break" >> workflow2db.py
+          echo "        # DB 타입 필터링: DB타입이 지정되어 있고, workflows에서 감지된 타입이 없거나 일치하지 않으면 skip" >> workflow2db.py
+          echo "        if file_dbtype and file_dbtype not in db_type_set:" >> workflow2db.py
+          echo "            continue" >> workflow2db.py
+          echo "        with open(os.path.join(SQL_DIR, sqlfile), 'r', encoding='utf-8') as f:" >> workflow2db.py
           echo "            sql_stmts = f.read().split(';')" >> workflow2db.py
           echo "            for stmt in sql_stmts:" >> workflow2db.py
           echo "                stmt = stmt.strip()" >> workflow2db.py
           echo "                if not stmt: continue" >> workflow2db.py
+          echo "                # SQLite에 맞는 구문 변환/파싱(아주 기초 예시, 실전은 각 DB별 문법 변환기로 확장 가능)" >> workflow2db.py
+          echo "                if file_dbtype and file_dbtype != 'sqlite':" >> workflow2db.py
+          echo "                    # 예: AUTO_INCREMENT -> AUTOINCREMENT, ` -> \" 등 단순 치환" >> workflow2db.py
+          echo "                    stmt = stmt.replace('AUTO_INCREMENT', 'AUTOINCREMENT').replace('`', '\"')" >> workflow2db.py
           echo "                try:" >> workflow2db.py
           echo "                    c.execute(stmt)" >> workflow2db.py
           echo "                    conn.commit()" >> workflow2db.py
-          echo "                    c.execute('INSERT INTO migration_result (sqlfile, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?)', (sqlfile, stmt, 'ok', 1, now, ''))" >> workflow2db.py
+          echo "                    c.execute('INSERT INTO migration_result (sqlfile, db_type, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)', (sqlfile, file_dbtype, stmt, 'ok', 1, now, ''))" >> workflow2db.py
           echo "                except Exception as e:" >> workflow2db.py
-          echo "                    c.execute('INSERT INTO migration_result (sqlfile, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?)', (sqlfile, stmt, 'error', 0, now, str(e)))" >> workflow2db.py
+          echo "                    c.execute('INSERT INTO migration_result (sqlfile, db_type, sql_stmt, result, success, executed_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)', (sqlfile, file_dbtype, stmt, 'error', 0, now, str(e)))" >> workflow2db.py
           echo "    conn.commit()" >> workflow2db.py
           echo "    conn.close()" >> workflow2db.py
           echo '' >> workflow2db.py
@@ -173,8 +185,9 @@ jobs:
           echo "    init_db()" >> workflow2db.py
           echo "    workflows = parse_workflows()" >> workflow2db.py
           echo "    save_to_db(workflows)" >> workflow2db.py
-          echo "    execute_sqlfiles()" >> workflow2db.py
-          echo "    print(f'[OK] {len(workflows)}개 워크플로우 DB+LOB+Migration+SQL실행 저장 완료! (DB: {DB_PATH})')" >> workflow2db.py
+          echo "    db_type_set = set([w.get('db_type') for w in workflows if w.get('db_type')])" >> workflow2db.py
+          echo "    execute_sqlfiles(db_type_set)" >> workflow2db.py
+          echo "    print(f'[OK] {len(workflows)}개 워크플로우 DB+LOB+Migration+SQL(DB타입별) 실행 완료! (DB: {DB_PATH})')" >> workflow2db.py
 
       - name: 🧪 파이썬 및 패키지 설치 (pip)
         run: |
@@ -187,22 +200,15 @@ jobs:
           echo "pip install -r requirements.txt"
           pip install -r requirements.txt
 
-      - name: 🚀 workflow2db.py 실행 (DB별/SQL자동실행/확장)
+      - name: 🚀 workflow2db.py 실행 (DB별/SQL자동실행/파싱)
         run: |
-          echo '[실행] workflow2db.py (DB별/SQL실행/인덱스/트랜잭션/LOB/마이그레이션)'
+          echo '[실행] workflow2db.py (DB별/SQL자동실행/파싱/LOB/마이그레이션)'
           python3 workflow2db.py
 
-      - name: 📂 결과 확인 (.github/workflows.db, 인덱스/LOB/마이그레이션/SQL실행)
+      - name: 📂 결과 확인 (.github/workflows.db, SQL(DB별) 실행)
         run: |
-          echo '[결과] .github/workflows.db 및 테이블/LOB/마이그레이션/SQL실행 정보'
+          echo '[결과] .github/workflows.db 및 테이블/SQL(DB별) 실행 정보'
           ls -lh .github/workflows.db
           echo '.tables' | sqlite3 .github/workflows.db
-          echo 'PRAGMA table_info(workflow);' | sqlite3 .github/workflows.db
-          echo 'PRAGMA table_info(job);' | sqlite3 .github/workflows.db
-          echo 'PRAGMA table_info(workflow_lob);' | sqlite3 .github/workflows.db
-          echo 'PRAGMA table_info(migration);' | sqlite3 .github/workflows.db
           echo 'PRAGMA table_info(migration_result);' | sqlite3 .github/workflows.db
           echo 'SELECT * FROM migration_result ORDER BY id DESC LIMIT 10;' | sqlite3 .github/workflows.db
-          echo 'SELECT id, filename, name, yaml_crc, yaml_size FROM workflow;' | sqlite3 .github/workflows.db
-          echo 'SELECT id, workflow_id, lob_type, blob_crc, comp_size FROM workflow_lob;' | sqlite3 .github/workflows.db
-          echo 'SELECT id, workflow_id, filename, migration_text, db_type FROM migration;' | sqlite3 .github/workflows.db
