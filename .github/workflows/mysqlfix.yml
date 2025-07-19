@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x root 복구 + robust_admin + 계속 업그레이드 + 가상메일 + 계정/권한 echo
+name: 🐬 MySQL 8.x root 복구 + robust_admin + echo/권한 + 가상메일/Postfix 통합 자동화
 
 on:
   workflow_dispatch:
@@ -33,30 +33,44 @@ jobs:
           echo "echo 'sudo systemctl restart mysql'" ; sudo systemctl restart mysql || true
           echo "echo 'sudo systemctl restart postfix'" ; sudo systemctl restart postfix || true
 
-      - name: 🚨 MySQL root 소켓 복구 + robust_admin 생성(기동 보장/권한 완전정상화/echo)
+      - name: 🚨 root/robust_admin 복구 + 계정/권한 echo 테이블/파일 (최강 복구/자동화)
         run: |
           set -e
-          # mysqld 프로세스/소켓/런타임/권한 완전정리
+
+          # 0. 디렉토리/소유권 복구
+          sudo mkdir -p /var/lib/mysql /var/run/mysqld /var/log/mysql
+          sudo chown -R mysql:mysql /var/lib/mysql /var/run/mysqld /var/log/mysql
+          sudo chmod 750 /var/lib/mysql
+          sudo chmod 770 /var/run/mysqld
+          sudo chmod 755 /var/log/mysql
+
+          # 1. 모든 프로세스/소켓/로그 완전 정리
           sudo systemctl stop mysql || true
           sudo pkill -f mysqld || true
-          sudo rm -rf /var/run/mysqld /var/lib/mysql/mysql.sock /var/log/mysql /var/log/mysql* /tmp/mysql.sock*
+          sudo rm -f /var/lib/mysql/*.err /var/lib/mysql/*.pid /var/lib/mysql/*.sock /var/lib/mysql/*.lock /tmp/mysql.sock* /var/run/mysqld/mysqld.sock*
+          sudo rm -rf /var/run/mysqld/*
+
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
 
-          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
-          for i in {1..10}; do
-            sleep 2
+          # 2. skip-grant-tables 기동 시도(실패시 에러로그 즉시 출력, 재시도)
+          for k in 1 2 3; do
+            nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
+            sleep 8
             if sudo lsof -iTCP:3306 -sTCP:LISTEN || sudo lsof | grep mysqld; then
               break
             fi
-            if [ $i -eq 10 ]; then
+            if [ $k -eq 3 ]; then
               cat .github/logs/mysql_skipgrant.log || true
+              sudo cat /var/log/mysql/error.log || true
               exit 1
             fi
+            sudo pkill -f mysqld || true
+            sleep 3
           done
           sleep 3
 
-          # root 권한 복구 SQL 및 echo
+          # 3. root 권한 복구 SQL 및 echo
           cat <<EOSQL > .github/echo/root-repair.sql
           FLUSH PRIVILEGES;
           CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY '';
@@ -65,11 +79,12 @@ jobs:
           FLUSH PRIVILEGES;
           EOSQL
           echo "sudo mysql --user=root < .github/echo/root-repair.sql" > .github/echo/root-repair.cmd
-          sudo mysql --user=root < .github/echo/root-repair.sql
+          sudo mysql --user=root < .github/echo/root-repair.sql || (cat .github/logs/mysql_skipgrant.log || true)
 
           sudo pkill -f mysqld || true
           sleep 5
 
+          # 4. 런타임 디렉토리/소유권 복구 후 서비스 정상기동(재시도)
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
           for i in {1..5}; do
@@ -80,11 +95,12 @@ jobs:
             fi
             if [ $i -eq 5 ]; then
               sudo journalctl -u mysql | tail -30 || true
+              sudo cat /var/log/mysql/error.log || true
               exit 1
             fi
           done
 
-          # robust_admin 계정 생성/권한 부여 + echo
+          # 5. robust_admin 계정 생성/권한 부여 + echo
           cat <<EOSQL > .github/echo/robust_admin-create.sql
           DROP USER IF EXISTS 'robust_admin'@'localhost';
           DROP USER IF EXISTS 'robust_admin'@'%';
@@ -97,7 +113,7 @@ jobs:
           echo "sudo mysql < .github/echo/robust_admin-create.sql" > .github/echo/robust_admin-create.cmd
           sudo mysql < .github/echo/robust_admin-create.sql
 
-          # 계정 목록/권한/이력 echo 테이블/파일 생성
+          # 6. 계정 목록/권한/이력 echo 테이블/파일 생성
           echo "SHOW GRANTS FOR 'robust_admin'@'%';" > .github/echo/show-grants-robust_admin.sql
           echo "SHOW GRANTS FOR 'robust_admin'@'localhost';" >> .github/echo/show-grants-robust_admin.sql
           echo "SELECT user,host,plugin,account_locked FROM mysql.user;" > .github/echo/show-users.sql
