@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x + robust echo/권한/가상 메일 자동화
+name: 🐬 MySQL 8.x + robust DROP/CREATE root/admin + echo/권한/가상메일 자동화
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
           echo "echo 'sudo systemctl start mysql'" ; sudo systemctl start mysql || true
           sleep 4
 
-      - name: 🚨 MySQL 8.x robust root/admin 권한+비번+echo/보안 자동화
+      - name: 🚨 MySQL 8.x robust root/admin DROP + CREATE + 권한 + echo 자동화
         run: |
           set -e
           # 1. skip-grant-tables 모드 진입 (echo)
@@ -45,18 +45,30 @@ jobs:
           sudo systemctl stop mysql || true
           sudo pkill -f mysqld || true
           sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
+
           nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
           sleep 10
 
-          # 2. root 패스워드 null(비번 없음), plugin 변경, host=localhost/%, 권한부여 (echo/SQL 분리)
-          cat <<EOSQL > .github/echo/root-reset.sql
-          UPDATE mysql.user SET plugin='mysql_native_password', authentication_string='' WHERE User='root';
-          UPDATE mysql.user SET host='%', plugin='mysql_native_password', authentication_string='' WHERE User='root';
+          # 2. root/admin 완전 DROP → CREATE USER로 신규 생성 (echo/SQL 분리)
+          cat <<EOSQL > .github/echo/root-drop-recreate.sql
+          DROP USER IF EXISTS 'root'@'localhost';
+          DROP USER IF EXISTS 'root'@'%';
+          CREATE USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';
+          CREATE USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY 'rootpass123';
+          GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+          GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+          FLUSH PRIVILEGES;
+          DROP USER IF EXISTS 'robust_admin'@'localhost';
+          DROP USER IF EXISTS 'robust_admin'@'%';
+          CREATE USER 'robust_admin'@'localhost' IDENTIFIED WITH mysql_native_password BY 'robustpass123';
+          CREATE USER 'robust_admin'@'%' IDENTIFIED WITH mysql_native_password BY 'robustpass123';
+          GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'localhost' WITH GRANT OPTION;
+          GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'%' WITH GRANT OPTION;
           FLUSH PRIVILEGES;
           EOSQL
 
-          echo "echo 'sudo mysql < .github/echo/root-reset.sql (skip-grant-tables)'" | tee -a .github/echo/step-root-reset.txt
-          sudo mysql < .github/echo/root-reset.sql || (cat .github/logs/mysql_skipgrant.log || true)
+          echo "echo 'sudo mysql < .github/echo/root-drop-recreate.sql (skip-grant-tables)'" | tee -a .github/echo/step-root-reset.txt
+          sudo mysql < .github/echo/root-drop-recreate.sql || (cat .github/logs/mysql_skipgrant.log || true)
 
           sleep 2
           sudo pkill -f mysqld || true
@@ -67,49 +79,11 @@ jobs:
           sudo systemctl start mysql
           sleep 8
 
-          # 4. root 패스워드/host/권한 robust (ALTER USER 공식 사용, echo/SQL 분리)
-          cat <<EOSQL > .github/echo/root-alter.sql
-          ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';
-          ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY 'rootpass123';
-          GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
-          GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
-          FLUSH PRIVILEGES;
-          EOSQL
+          # 4. 인증/권한 robust 확인
+          echo "echo 'mysql -uroot -prootpass123 -e \"SELECT user,host,plugin FROM mysql.user\"'" | tee -a .github/echo/step-root-reset.txt
+          mysql -uroot -prootpass123 -e "SELECT user,host,plugin FROM mysql.user" | tee .github/echo/step-root-userlist.txt
 
-          echo "echo 'sudo mysql -u root < .github/echo/root-alter.sql (normal mode)'" | tee -a .github/echo/step-root-reset.txt
-
-          for i in {1..8}; do
-            if sudo mysql -u root < .github/echo/root-alter.sql; then
-              echo "[✔] root alter+권한 성공!" | tee -a .github/echo/step-root-reset.txt
-              break
-            else
-              echo "[!] root alter 재시도 ($i/8)..." | tee -a .github/echo/step-root-reset.txt
-              sleep 2
-            fi
-          done
-
-          # 5. robust_admin 계정 robust 생성/권한 (echo/SQL 분리, host=%/localhost, 권한구분)
-          cat <<EOSQL > .github/echo/admin-reset.sql
-          CREATE USER IF NOT EXISTS 'robust_admin'@'%' IDENTIFIED WITH mysql_native_password BY 'robustpass123';
-          CREATE USER IF NOT EXISTS 'robust_admin'@'localhost' IDENTIFIED WITH mysql_native_password BY 'robustpass123';
-          GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'%' WITH GRANT OPTION;
-          GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'localhost' WITH GRANT OPTION;
-          FLUSH PRIVILEGES;
-          EOSQL
-
-          echo "echo 'sudo mysql -u root -prootpass123 < .github/echo/admin-reset.sql (normal mode)'" | tee -a .github/echo/step-root-reset.txt
-          sudo mysql -u root -prootpass123 < .github/echo/admin-reset.sql
-
-          sleep 2
-
-          # 6. 모든 echo/SQL/비밀번호 파일 chmod 600 (보안강화)
-          echo "echo 'chmod 600 .github/echo/*.sql .github/echo/*.txt'" ; chmod 600 .github/echo/*.sql .github/echo/*.txt
-
-          # 7. 루트 권한·DB 계정·비번 설정 결과 확인
-          echo "echo 'mysql -uroot -prootpass123 -e \"SELECT user,host,plugin,authentication_string FROM mysql.user\"'" | tee -a .github/echo/step-root-reset.txt
-          mysql -uroot -prootpass123 -e "SELECT user,host,plugin,authentication_string FROM mysql.user" | tee .github/echo/step-root-userlist.txt
-
-          echo "echo '모든 단계 완료! (root/admin 권한, 인증, host/비번 robust 보장)'" | tee -a .github/echo/step-root-reset.txt
+          echo "echo '모든 단계 완료! (root/admin DROP+CREATE로 권한/인증 꼬임까지 robust 복구)'" | tee -a .github/echo/step-root-reset.txt
 
       - name: ✅ MySQL root robust 인증 체크 (재시도 포함)
         run: |
