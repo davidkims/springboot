@@ -1,34 +1,42 @@
-name: 🐬 MySQL 8.x + ATM/REST/환전소 robust 자동화 (Access Denied 완전방지, 메일/echo/로깅)
+name: 🐬 MySQL 8.x + 메일/서비스 분산 업그레이드 + robust 자동화 (5분단위, echo, 충돌방지)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '*/5 * * * *'
 
 jobs:
-  mysql-atm-exchange-full-auto:
+  # [1] 메인 robust 자동화 서비스 (에코+메일+DB+권한 모두 robust)
+  mysql-email:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 Echo/로그/ATM/REST/Exchange 디렉토리 및 파일 robust 생성
+      - name: 📂 Echo/로그/메일/소켓/메일박스 robust 디렉토리 생성
         run: |
           set -e
-          for d in .github/echo .github/logs .github/atm .github/atm/rest .github/exchange .github/exchange/rest /tmp/echo; do
-            echo "echo 'mkdir -p $d'" ; mkdir -p $d
-            echo "[OK] $d 디렉토리 생성" | tee -a .github/echo/dir-init.txt
+          for d in .github/echo .github/logs /tmp/echo /var/mail /var/spool/mail /var/run/mysqld; do
+            echo "echo 'mkdir -p $d'" ; sudo mkdir -p $d
           done
-          for f in .github/echo/atm.txt .github/echo/rest.txt .github/echo/exchange.txt .github/echo/mail.txt .github/atm/atm.log .github/atm/rest/rest.log .github/exchange/exchange.log .github/exchange/rest/rest.log; do
-            echo "echo 'touch $f'" ; touch $f
-            echo "[OK] $f 파일 생성" | tee -a .github/echo/file-init.txt
-          done
-          echo "[OK] 디렉토리/파일 robust echo 완료" | tee -a .github/echo/dir-init.txt
+          echo "echo 'sudo chown mysql:mysql /var/run/mysqld'" ; sudo chown mysql:mysql /var/run/mysqld || true
+          if id ubuntu >/dev/null 2>&1; then
+            echo "echo 'touch /var/mail/ubuntu'" ; sudo touch /var/mail/ubuntu
+            echo "echo 'chown ubuntu:ubuntu /var/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
+            echo "echo 'touch /var/spool/mail/ubuntu'" ; sudo touch /var/spool/mail/ubuntu
+            echo "echo 'chown ubuntu:ubuntu /var/spool/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+          else
+            echo "echo 'touch /var/mail/root'" ; sudo touch /var/mail/root
+            echo "echo 'chown root:mail /var/mail/root'" ; sudo chown root:mail /var/mail/root || true
+            echo "echo 'touch /var/spool/mail/root'" ; sudo touch /var/spool/mail/root
+            echo "echo 'chown root:mail /var/spool/mail/root'" ; sudo chown root:mail /var/spool/mail/root || true
+          fi
 
-      - name: 📦 시스템 전체 패키지 업그레이드 및 설치 (echo/재시도/로그)
+      - name: 📦 시스템 전체 패키지 업그레이드/설치 (echo/재시도/로그)
         run: |
           set -e
+          echo "echo '[trycmd 함수 선언]'" 
           trycmd() {
             local cmd="$1"
             local logfile="$2"
@@ -46,38 +54,22 @@ jobs:
             done
             echo "[✔] $cmd 성공." | tee -a "$logfile"
           }
-          echo "echo '[+] apt-get update -y'" ; trycmd "sudo apt-get update -y" ".github/echo/step-01-apt-update.txt"
-          echo "echo '[+] apt-get upgrade -y'" ; trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" ".github/echo/step-02-apt-upgrade.txt"
-          echo "echo '[+] apt-get dist-upgrade -y'" ; trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y" ".github/echo/step-03-dist-upgrade.txt"
-          echo "echo '[+] apt-get autoremove -y'" ; trycmd "sudo apt-get autoremove -y" ".github/echo/step-04-autoremove.txt"
-          echo "echo '[+] python3-pip, npm, nodejs 설치'" ; trycmd "sudo apt-get install -y python3-pip python3-venv npm nodejs" ".github/echo/step-05-pkgs.txt"
+          trycmd "sudo apt-get update -y" ".github/echo/step-01-apt-update.txt"
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" ".github/echo/step-02-apt-upgrade.txt"
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y" ".github/echo/step-03-dist-upgrade.txt"
+          trycmd "sudo apt-get autoremove -y" ".github/echo/step-04-autoremove.txt"
+          trycmd "sudo apt-get install -y postfix mailutils python3-pip python3-venv npm nodejs" ".github/echo/step-05-pkgs.txt"
 
-      - name: 📬 메일 서버(Postfix + mailutils) robust 설치 (echo/재시도/로그)
+      - name: 📬 메일 서버 robust 설치/로컬 모드 (echo/로그)
         run: |
           set -e
-          echo "echo 'mkdir -p /tmp/echo/mail'" ; mkdir -p /tmp/echo/mail
-          trycmd() {
-            local cmd="$1"
-            local logfile="$2"
-            local max_try=3
-            local n=1
-            until eval "$cmd" >> "$logfile" 2>&1; do
-              echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
-              sleep 3
-              ((n++))
-              if [ $n -gt $max_try ]; then
-                echo "[❌] $cmd 명령이 $max_try회 실패. 중단." | tee -a "$logfile"
-                exit 1
-              fi
-              echo "[+] $cmd 재시도 ($n/$max_try)..." | tee -a "$logfile"
-            done
-            echo "[✔] $cmd 성공." | tee -a "$logfile"
-          }
-          echo "echo '[+] Installing Postfix (Local only) & mailutils...'" ; trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils" ".github/echo/step-06-mailutils.txt"
-          echo "echo 'sudo systemctl restart postfix'" ; sudo systemctl restart postfix
-          echo "echo 'sudo ls -l /var/mail || sudo ls -l /var/spool/mail'" ; sudo ls -l /var/mail || sudo ls -l /var/spool/mail
+          echo "echo '[+] Postfix+mailutils 로컬 robust 설치'" | tee .github/echo/step-06-mailutils.txt
+          sudo systemctl stop postfix || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils >> .github/echo/step-06-mailutils.txt 2>&1
+          sudo systemctl restart postfix || true
+          sudo ls -l /var/mail >> .github/echo/step-06-mailutils.txt || sudo ls -l /var/spool/mail >> .github/echo/step-06-mailutils.txt
 
-      - name: 🧩 MySQL 8.x robust 설치/초기화/권한/소켓/비번 리셋/24.04 완전대응 (Access Denied 완전 방지)
+      - name: 🧩 MySQL 8.x robust 설치/초기화/권한/소켓/비번 리셋 (Access Denied 방지)
         run: |
           set -e
           echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
@@ -93,27 +85,22 @@ jobs:
               echo "[❌] MySQL 데몬 기동 실패!"; exit 1
             fi
           done
-
-          # --- robust root 권한/비번 초기화 절대 실패 방지 skip-grant-tables ---
-          echo "echo '[MySQL] skip-grant-tables 모드 진입'" ; sudo systemctl stop mysql || true
+          # skip-grant-tables robust unlock
+          echo "echo '[MySQL] skip-grant-tables 진입'" ; sudo systemctl stop mysql || true
           sudo pkill -f mysqld || true
           sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
           nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
           sleep 12
-          echo "echo '[MySQL] root plugin, authentication_string 초기화'" ; \
-          echo "UPDATE mysql.user SET plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root' AND Host='localhost';" | sudo mysql || true
+          echo "UPDATE mysql.user SET plugin='mysql_native_password' WHERE User='root' AND Host='localhost';" | sudo mysql || true
           echo "FLUSH PRIVILEGES;" | sudo mysql || true
           sleep 2
           sudo pkill -f mysqld || true
           sleep 2
-
           echo "echo '[MySQL] 정상모드 기동 및 최종 root 패스워드 재설정'" ; sudo systemctl start mysql
           sleep 6
           echo "ALTER USER 'root'@'localhost' IDENTIFIED BY 'rootpass123';" | sudo mysql -u root || true
           echo "FLUSH PRIVILEGES;" | sudo mysql -u root || true
           sleep 2
-
-          # robust check
           export MYSQL_PWD=rootpass123
           for i in 1 2 3; do
             if mysqladmin -u root ping; then
@@ -127,123 +114,7 @@ jobs:
           echo "[❌] MySQL root 인증 최종 실패! 전체 중단." | tee -a .github/echo/step-root-login.txt
           exit 1
 
-      - name: 🏧 ATM CLI robust 설치/에코 기록
-        run: |
-          set -e
-          echo "echo '[ATM] ATM CLI(시뮬레이터) robust 설치 시작'" | tee .github/echo/step-atm-install.txt
-          npm install -g atm-cli || {
-            echo "[ATM] atm-cli 설치 실패, 직접 시뮬레이터 대체" | tee -a .github/echo/step-atm-install.txt
-            cat <<EOT > .github/atm/atm-sim.sh
-            #!/bin/bash
-            echo '[ATM] Virtual ATM Transaction: Withdraw 10000 KRW'
-            echo 'Transaction complete. Remaining: 90000 KRW'
-            exit 0
-            EOT
-            chmod +x .github/atm/atm-sim.sh
-          }
-          echo "atm --version" | tee -a .github/echo/step-atm-install.txt
-          atm --version 2>&1 | tee -a .github/echo/step-atm-install.txt || true
-          echo "[ATM] Test Run" | tee -a .github/echo/step-atm-install.txt
-          atm withdraw 10000 2>&1 | tee -a .github/echo/step-atm-install.txt || .github/atm/atm-sim.sh | tee -a .github/echo/step-atm-install.txt
-
-      - name: 🚦 ATM REST 서버(FastAPI) robust 설치/기동/에코 기록
-        run: |
-          set -e
-          echo "echo '[ATM REST] FastAPI ATM REST robust 설치/기동'" | tee .github/echo/step-atm-rest.txt
-          pip install fastapi uvicorn > .github/echo/step-atm-rest.txt 2>&1
-          cat <<EOPY > .github/atm/rest/atm_rest.py
-          from fastapi import FastAPI
-          from pydantic import BaseModel
-
-          app = FastAPI()
-
-          class ATMRequest(BaseModel):
-              user: str
-              action: str
-              amount: int
-
-          @app.post("/atm/withdraw")
-          def withdraw(req: ATMRequest):
-              return {"result": f"{req.user} {req.amount}원 출금 완료", "remain": 100000 - req.amount}
-
-          @app.get("/atm/ping")
-          def ping():
-              return {"status": "ok", "service": "ATM REST"}
-
-          if __name__ == "__main__":
-              import uvicorn
-              uvicorn.run(app, host="0.0.0.0", port=5555)
-          EOPY
-          nohup uvicorn .github.atm.rest.atm_rest:app --host 0.0.0.0 --port 5555 > .github/atm/rest/rest.log 2>&1 &
-          sleep 3
-          curl -s http://localhost:5555/atm/ping | tee -a .github/echo/step-atm-rest.txt
-
-      - name: 💱 환전소 REST robust 설치/오픈/에코 기록
-        run: |
-          set -e
-          echo "echo '[Exchange REST] 환전소 FastAPI REST robust 설치/오픈'" | tee .github/echo/step-exchange-rest.txt
-          pip install fastapi uvicorn > .github/echo/step-exchange-rest.txt 2>&1
-          cat <<EOFX > .github/exchange/rest/exchange_rest.py
-          from fastapi import FastAPI
-          from pydantic import BaseModel
-
-          app = FastAPI()
-
-          class ExchangeRequest(BaseModel):
-              from_currency: str
-              to_currency: str
-              amount: float
-
-          @app.post("/exchange")
-          def exchange(req: ExchangeRequest):
-              # 환율은 예시 고정값
-              rate = 1400 if req.from_currency == "USD" and req.to_currency == "KRW" else 0.001
-              exchanged = req.amount * rate
-              return {
-                  "from": req.from_currency,
-                  "to": req.to_currency,
-                  "amount": req.amount,
-                  "exchanged": exchanged,
-                  "rate": rate,
-                  "msg": f"{req.amount} {req.from_currency} → {exchanged:.2f} {req.to_currency}"
-              }
-
-          @app.get("/exchange/ping")
-          def ping():
-              return {"status": "ok", "service": "Exchange REST"}
-
-          if __name__ == "__main__":
-              import uvicorn
-              uvicorn.run(app, host="0.0.0.0", port=6666)
-          EOFX
-          nohup uvicorn .github.exchange.rest.exchange_rest:app --host 0.0.0.0 --port 6666 > .github/exchange/rest/rest.log 2>&1 &
-          sleep 3
-          curl -s http://localhost:6666/exchange/ping | tee -a .github/echo/step-exchange-rest.txt
-
-      - name: ✅ MySQL root robust 인증 및 DB/테이블 robust 생성 (echo/중복OK)
-        run: |
-          set -e
-          export MYSQL_PWD=rootpass123
-          for i in 1 2 3; do
-            if mysql -u root -prootpass123 -e 'SHOW DATABASES;'; then
-              mysql -u root -prootpass123 -e "CREATE DATABASE IF NOT EXISTS logistics;"
-              mysql -u root -prootpass123 -D logistics -e "
-                CREATE TABLE IF NOT EXISTS echo_log (
-                  id INT AUTO_INCREMENT PRIMARY KEY,
-                  step_name VARCHAR(128),
-                  echo_cmd TEXT,
-                  executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  status VARCHAR(32) DEFAULT 'success',
-                  message TEXT
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
-              exit 0
-            else
-              sleep 3
-            fi
-          done
-          exit 1
-
-      - name: 📧 전체 결과/로그 이메일 "가상발송" (ATM/REST/환전소/DB/echo 포함)
+      - name: ✅ MySQL root robust 인증 및 DB/테이블 robust 생성
         run: |
           set -e
           export MYSQL_PWD=rootpass123
@@ -257,71 +128,119 @@ jobs:
               status VARCHAR(32) DEFAULT 'success',
               message TEXT
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
-          mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('mail', '전체 결과 메일발송시작', 'start', NOW());"
-          echo '========= ATM CLI 설치 및 트랜잭션 결과 =========' > .github/logs/mail_result_all.txt
-          cat .github/echo/step-atm-install.txt >> .github/logs/mail_result_all.txt
-          echo '' >> .github/logs/mail_result_all.txt
-          echo '========= ATM REST 서버 결과 =========' >> .github/logs/mail_result_all.txt
-          cat .github/echo/step-atm-rest.txt >> .github/logs/mail_result_all.txt
-          echo '' >> .github/logs/mail_result_all.txt
-          echo '========= 환전소 REST 설치/오픈 결과 =========' >> .github/logs/mail_result_all.txt
-          cat .github/echo/step-exchange-rest.txt >> .github/logs/mail_result_all.txt
-          echo '' >> .github/logs/mail_result_all.txt
-          echo '========= DB 정보 =========' >> .github/logs/mail_result_all.txt
-          mysql -u root -prootpass123 -e 'SHOW DATABASES;' >> .github/logs/mail_result_all.txt
-          echo '' >> .github/logs/mail_result_all.txt
-          echo '========= echo_log 테이블(최근 10건) =========' >> .github/logs/mail_result_all.txt
-          mysql -u root -prootpass123 -D logistics -e 'SELECT * FROM echo_log ORDER BY id DESC LIMIT 10;' >> .github/logs/mail_result_all.txt
-          echo '' >> .github/logs/mail_result_all.txt
-          echo '========= 주요 echo/로그 =========' >> .github/logs/mail_result_all.txt
-          cat .github/echo/dir-init.txt >> .github/logs/mail_result_all.txt
-          cat .github/echo/file-init.txt >> .github/logs/mail_result_all.txt
-          echo '' >> .github/logs/mail_result_all.txt
-          echo '========= 실행 환경 =========' >> .github/logs/mail_result_all.txt
-          uname -a >> .github/logs/mail_result_all.txt
-          echo '========= 완료시각 =========' >> .github/logs/mail_result_all.txt
-          date >> .github/logs/mail_result_all.txt
-          if id ubuntu >/dev/null 2>&1; then
-            to_addr="ubuntu"
-          else
-            to_addr="root"
-          fi
-          subject="[ATM/환전소 자동화] 전체 결과 리포트 ($(date '+%Y-%m-%d %H:%M'))"
-          cat .github/logs/mail_result_all.txt | mail -s "$subject" "$to_addr"
-          mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('mail', '전체 결과 메일발송완료', 'success', NOW());"
+          mysql -u root -prootpass123 -D logistics -e "
+            INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES
+            ('init', 'robust DB/테이블 생성', 'success', NOW());"
+          echo "echo '[DB/테이블 robust 생성 완료]'" | tee -a .github/echo/step-db-init.txt
+
+      - name: 📧 인증 및 결과 이메일 "가상발송"(echo/로그)
+        run: |
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mail_send'" ; mkdir -p /tmp/echo/mail_send
+          export MYSQL_PWD=rootpass123
+          echo "echo '[+] Sending MySQL result email (virtual local mailbox)...'" | tee .github/echo/step-99-mail-send.txt
+          mailbody=".github/logs/mailbody.txt"
+          mysql -u root -prootpass123 -e 'SHOW DATABASES;' > .github/logs/mail_db_list.txt
+          mysql -u root -prootpass123 -e 'SELECT * FROM information_schema.USER_PRIVILEGES;' > .github/logs/mail_privs.txt || true
+          mysql -u root -prootpass123 -e 'SELECT * FROM mysql.user;' > .github/logs/mail_users.txt || true
+          mysql -u root -prootpass123 -D logistics -e 'SELECT * FROM echo_log;' > .github/logs/mail_echo_log.txt || true
+          {
+            echo "MySQL 8.x robust 자동화 결과"
+            echo ""
+            echo "[SHOW DATABASES]"
+            cat .github/logs/mail_db_list.txt
+            echo ""
+            echo "[USER_PRIVILEGES]"
+            cat .github/logs/mail_privs.txt
+            echo ""
+            echo "[mysql.user]"
+            cat .github/logs/mail_users.txt
+            echo ""
+            echo "[logistics.echo_log]"
+            cat .github/logs/mail_echo_log.txt
+            echo ""
+            echo "실행 환경: $(uname -a)"
+            echo "완료시각: $(date)"
+          } > $mailbody
+          if id ubuntu >/dev/null 2>&1; then to_addr="ubuntu"; else to_addr="root"; fi
+          subject="[MySQL robust] 결과 리포트 ($(date '+%Y-%m-%d %H:%M'))"
+          cat $mailbody | mail -s "$subject" "$to_addr"
 
       - name: 📬 가상 메일 수신함 robust 출력 (echo/권한/존재보장)
         run: |
           set -e
-          mkdir -p /tmp/echo/mail_recv
-          echo '[+] Show virtual mailbox (가상수신 결과)' | tee .github/echo/step-100-mail-recv.txt
+          echo "echo '[+] Show virtual mailbox (가상수신 결과)'" | tee .github/echo/step-100-mail-recv.txt
           if id ubuntu >/dev/null 2>&1; then
-            sudo touch /var/mail/ubuntu
-            sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
-            sudo touch /var/spool/mail/ubuntu
-            sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
             sudo cat /var/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
             sudo cat /var/spool/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
             echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
           else
-            sudo touch /var/mail/root
-            sudo chown root:mail /var/mail/root || true
-            sudo touch /var/spool/mail/root
-            sudo chown root:mail /var/spool/mail/root || true
             sudo cat /var/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
             sudo cat /var/spool/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
             echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
           fi
-          echo '[+] Virtual mailbox dump complete.' | tee -a .github/echo/step-100-mail-recv.txt
+          echo "echo '[+] Virtual mailbox dump complete.'" | tee -a .github/echo/step-100-mail-recv.txt
 
-      - name: 🟩 Directory/File Permission 확인 (echo/파일)
+      - name: 🟩 Directory/File Permission robust 체크 (echo)
         run: |
           set -e
-          echo '[+] Directory & file permission check...' | tee .github/echo/step-101-perm.txt
-          ls -lR .github/atm | tee -a .github/echo/step-101-perm.txt || true
-          ls -lR .github/exchange | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo '[+] Directory & file permission check...'" | tee .github/echo/step-101-perm.txt
           ls -lR .github/logs | tee -a .github/echo/step-101-perm.txt || true
           ls -lR .github/echo | tee -a .github/echo/step-101-perm.txt || true
           ls -lR /var/mail | tee -a .github/echo/step-101-perm.txt || true
           ls -lR /var/spool/mail | tee -a .github/echo/step-101-perm.txt || true
           ls -lR /var/run/mysqld | tee -a .github/echo/step-101-perm.txt || true
+
+  # [2] .github/workflows 내 모든 mysql 관련 워크플로 서비스 분산 업그레이드/충돌방지
+  distributed-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    strategy:
+      matrix:
+        id: [0, 1, 2, 3, 4]
+
+    steps:
+      - name: 📁 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🧩 워크플로 파일 분산 업그레이드/충돌방지 (echo)
+        run: |
+          set -e
+          mkdir -p .github/echo
+          echo "echo '[분산] MySQL 관련 워크플로 파일 검색 및 분배'" | tee .github/echo/distributed-init.txt
+          find .github/workflows -type f -name '*.yml' -o -name '*.yaml' | grep -i mysql | sort > .github/echo/mysql_workflows.txt
+          idx=${{ matrix.id }}
+          files=($(cat .github/echo/mysql_workflows.txt))
+          total=${#files[@]}
+          selected=()
+          for ((i=0; i<${total}; i++)); do
+            if (( i % 5 == idx )); then selected+=("${files[$i]}"); fi
+          done
+          echo "echo '[분산] matrix.id=${idx}, 할당:${#selected[@]}'" | tee -a .github/echo/distributed-init.txt
+          for file in "${selected[@]}"; do
+            name=$(basename "$file")
+            lockfile="/tmp/${name}.lock"
+            (
+              echo "echo '[분산] $name 업그레이드 시작'" | tee -a .github/echo/distributed-upgrade.txt
+              if ( set -o noclobber; echo "$$" > "$lockfile" ) 2> /dev/null; then
+                trap 'rm -f "$lockfile"; exit $?' INT TERM EXIT
+                sudo apt-get update -y
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server mysql-client || true
+                sudo apt-get upgrade -y mysql-server mysql-client || true
+                echo "[분산] $name mysql upgrade OK" | tee -a .github/echo/distributed-upgrade.txt
+                sleep $(( (RANDOM % 10) + 1 ))   # 분산 스태거 1~10초 랜덤
+                rm -f "$lockfile"
+              else
+                echo "[분산] $name 락파일 존재, skip" | tee -a .github/echo/distributed-upgrade.txt
+              fi
+            ) &
+          done
+          wait
+          echo "echo '[분산] 전체 분배/병렬 업그레이드 완료'" | tee -a .github/echo/distributed-upgrade.txt
+
+      - name: 📧 분산 업그레이드 전체 결과 메일(에코)
+        run: |
+          set -e
+          to_addr=$(id ubuntu >/dev/null 2>&1 && echo ubuntu || echo root)
+          subject="[분산 MySQL 업그레이드] 전체 결과 ($(date '+%Y-%m-%d %H:%M'))"
+          cat .github/echo/distributed-upgrade.txt | mail -s "$subject" "$to_addr"
