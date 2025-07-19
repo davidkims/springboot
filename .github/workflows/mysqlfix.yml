@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x 안전권한/가상메일/업그레이드 자동화 (root는 소켓, robust_admin만 운영)
+name: 🐬 MySQL 8.x root 소켓 복구 + robust_admin + 계속 업그레이드 + 가상메일 자동화
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
             echo "echo 'chmod 700 $d'" ; chmod 700 $d
           done
 
-      - name: 🔄 시스템 계속 업그레이드 & MySQL/Postfix/mailutils robust 설치
+      - name: 🔄 계속 업그레이드 & MySQL/Postfix/mailutils robust 설치
         run: |
           set -e
           echo "echo 'sudo apt-get update -y'" ; sudo apt-get update -y | tee .github/echo/step-01-apt-update.txt
@@ -42,10 +42,27 @@ jobs:
           echo "echo 'sudo systemctl start mysql'" ; sudo systemctl start mysql || true
           sleep 4
 
-      - name: 🚨 root 소켓 인증으로 robust_admin 재생성 및 권한 보장 (비번/관리계정만 전권)
+      - name: 🚨 root 소켓 인증 복구(꼬임시) + robust_admin 계정 재생성(최종)
         run: |
           set -e
-          # 1. 소켓 인증으로 robust_admin 계정 완전 재생성(비밀번호로 전권)
+          # 1. root 소켓 인증 복구 (비밀번호 없이 auth_socket, 권한 최대로)
+          sudo systemctl stop mysql || true
+          sudo pkill -f mysqld || true
+          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
+          sleep 10
+          sudo mysql --user=root <<EOF
+          FLUSH PRIVILEGES;
+          CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY '';
+          GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+          UPDATE mysql.user SET plugin='auth_socket' WHERE user='root' AND host='localhost';
+          FLUSH PRIVILEGES;
+          EOF
+          sudo pkill -f mysqld || true
+          sleep 4
+          sudo systemctl start mysql
+          sleep 6
+
+          # 2. robust_admin 재생성 (비밀번호 인증, 운영/자동화 전용)
           cat <<EOSQL > .github/echo/robust_admin-create.sql
           DROP USER IF EXISTS 'robust_admin'@'localhost';
           DROP USER IF EXISTS 'robust_admin'@'%';
@@ -57,7 +74,6 @@ jobs:
           EOSQL
           sudo mysql < .github/echo/robust_admin-create.sql
 
-          # robust_admin 인증 체크
           for i in 1 2 3 4 5; do
             if mysql -u robust_admin -probstpass123 -e "SELECT 1"; then
               echo "[✔] robust_admin 인증 성공!"
