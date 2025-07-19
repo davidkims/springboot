@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x root 소켓 복구 + robust_admin + 계속 업그레이드 + 가상메일 자동화
+name: 🐬 MySQL 8.x root 복구 + robust_admin + 계속 업그레이드 + 가상메일 + 계정/권한 echo
 
 on:
   workflow_dispatch:
@@ -33,36 +33,58 @@ jobs:
           echo "echo 'sudo systemctl restart mysql'" ; sudo systemctl restart mysql || true
           echo "echo 'sudo systemctl restart postfix'" ; sudo systemctl restart postfix || true
 
-      - name: 🧩 MySQL robust daemon/socket/perm 계속 보장
+      - name: 🚨 MySQL root 소켓 복구 + robust_admin 생성(기동 보장/권한 완전정상화/echo)
         run: |
           set -e
-          echo "echo 'sudo systemctl stop mysql || true'" ; sudo systemctl stop mysql || true
-          echo "echo 'sudo pkill -f mysqld || true'" ; sudo pkill -f mysqld || true
-          echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-          echo "echo 'sudo systemctl start mysql'" ; sudo systemctl start mysql || true
-          sleep 4
-
-      - name: 🚨 root 소켓 인증 복구(꼬임시) + robust_admin 계정 재생성(최종)
-        run: |
-          set -e
-          # 1. root 소켓 인증 복구 (비밀번호 없이 auth_socket, 권한 최대로)
+          # mysqld 프로세스/소켓/런타임/권한 완전정리
           sudo systemctl stop mysql || true
           sudo pkill -f mysqld || true
+          sudo rm -rf /var/run/mysqld /var/lib/mysql/mysql.sock /var/log/mysql /var/log/mysql* /tmp/mysql.sock*
+          sudo mkdir -p /var/run/mysqld
+          sudo chown mysql:mysql /var/run/mysqld
+
           nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
-          sleep 10
-          sudo mysql --user=root <<EOF
+          for i in {1..10}; do
+            sleep 2
+            if sudo lsof -iTCP:3306 -sTCP:LISTEN || sudo lsof | grep mysqld; then
+              break
+            fi
+            if [ $i -eq 10 ]; then
+              cat .github/logs/mysql_skipgrant.log || true
+              exit 1
+            fi
+          done
+          sleep 3
+
+          # root 권한 복구 SQL 및 echo
+          cat <<EOSQL > .github/echo/root-repair.sql
           FLUSH PRIVILEGES;
           CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY '';
           GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
           UPDATE mysql.user SET plugin='auth_socket' WHERE user='root' AND host='localhost';
           FLUSH PRIVILEGES;
-          EOF
-          sudo pkill -f mysqld || true
-          sleep 4
-          sudo systemctl start mysql
-          sleep 6
+          EOSQL
+          echo "sudo mysql --user=root < .github/echo/root-repair.sql" > .github/echo/root-repair.cmd
+          sudo mysql --user=root < .github/echo/root-repair.sql
 
-          # 2. robust_admin 재생성 (비밀번호 인증, 운영/자동화 전용)
+          sudo pkill -f mysqld || true
+          sleep 5
+
+          sudo mkdir -p /var/run/mysqld
+          sudo chown mysql:mysql /var/run/mysqld
+          for i in {1..5}; do
+            sudo systemctl start mysql
+            sleep 5
+            if [ -S /var/run/mysqld/mysqld.sock ]; then
+              break
+            fi
+            if [ $i -eq 5 ]; then
+              sudo journalctl -u mysql | tail -30 || true
+              exit 1
+            fi
+          done
+
+          # robust_admin 계정 생성/권한 부여 + echo
           cat <<EOSQL > .github/echo/robust_admin-create.sql
           DROP USER IF EXISTS 'robust_admin'@'localhost';
           DROP USER IF EXISTS 'robust_admin'@'%';
@@ -72,19 +94,42 @@ jobs:
           GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'localhost' WITH GRANT OPTION;
           FLUSH PRIVILEGES;
           EOSQL
+          echo "sudo mysql < .github/echo/robust_admin-create.sql" > .github/echo/robust_admin-create.cmd
           sudo mysql < .github/echo/robust_admin-create.sql
 
+          # 계정 목록/권한/이력 echo 테이블/파일 생성
+          echo "SHOW GRANTS FOR 'robust_admin'@'%';" > .github/echo/show-grants-robust_admin.sql
+          echo "SHOW GRANTS FOR 'robust_admin'@'localhost';" >> .github/echo/show-grants-robust_admin.sql
+          echo "SELECT user,host,plugin,account_locked FROM mysql.user;" > .github/echo/show-users.sql
+          mysql -u robust_admin -probstpass123 -e "SELECT user,host,plugin,account_locked FROM mysql.user;" > .github/echo/user_list.txt
+          mysql -u robust_admin -probstpass123 < .github/echo/show-grants-robust_admin.sql > .github/echo/grants_robust_admin.txt
+
+          # 권한/계정 echo 테이블
+          mysql -u robust_admin -probstpass123 -e "
+            CREATE DATABASE IF NOT EXISTS echo_info;
+            CREATE TABLE IF NOT EXISTS echo_info.account_audit (
+              id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+              ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              user VARCHAR(64), host VARCHAR(64), plugin VARCHAR(64), grants TEXT
+            );
+            INSERT INTO echo_info.account_audit (user,host,plugin,grants)
+              SELECT user,host,plugin,
+                CONCAT_WS('|', (SELECT GROUP_CONCAT(grantor, ':', privilege_type) FROM information_schema.user_privileges WHERE grantee=CONCAT('''', user, '''@''', host, '''')))
+              FROM mysql.user;
+          " > .github/echo/echo_table_create_and_insert.txt
+
+          # robust_admin 인증 체크(반복)
           for i in 1 2 3 4 5; do
             if mysql -u robust_admin -probstpass123 -e "SELECT 1"; then
-              echo "[✔] robust_admin 인증 성공!"
+              echo "[✔] robust_admin 인증 성공!" | tee -a .github/echo/robust_admin-auth.txt
               break
             else
-              echo "[!] robust_admin 인증 실패($i), 4초후 재시도..."
+              echo "[!] robust_admin 인증 실패($i), 4초후 재시도..." | tee -a .github/echo/robust_admin-auth.txt
               sleep 4
             fi
           done
 
-      - name: 📨 MySQL 가상메일 테이블/샘플계정 자동 생성 (robust_admin 계정)
+      - name: 📨 MySQL 가상메일 테이블/샘플계정 자동 생성 (robust_admin 계정, echo)
         run: |
           set -e
           cat <<'EOSQL' > .github/echo/virtual_mail_schema.sql
@@ -119,7 +164,7 @@ jobs:
             VALUES (1, 'alias@example.com', 'test@example.com');
           EOSQL
 
-          echo "echo 'mysql -u robust_admin -probstpass123 < .github/echo/virtual_mail_schema.sql'" | tee .github/echo/step-mail-schema.txt
+          echo "mysql -u robust_admin -probstpass123 < .github/echo/virtual_mail_schema.sql" > .github/echo/virtual_mail_schema.cmd
           mysql -u robust_admin -probstpass123 < .github/echo/virtual_mail_schema.sql
 
       - name: 📮 Postfix 가상메일 연동 config/echo/테스트메일 (robust_admin 계정)
@@ -134,13 +179,17 @@ jobs:
           query = SELECT email FROM virtual_users WHERE email='%s'
           EOF
 
-          echo "echo 'sudo postconf -e \"virtual_mailbox_domains=mysql:/etc/postfix/mysql-virtual-domains.cf\"'" | tee .github/echo/step-postfix-echo.txt
-          echo "echo 'sudo postconf -e \"virtual_mailbox_maps=mysql:/etc/postfix/mysql-virtual-mailbox.cf\"'" | tee -a .github/echo/step-postfix-echo.txt
-          echo "echo 'sudo postconf -e \"virtual_alias_maps=mysql:/etc/postfix/mysql-virtual-alias.cf\"'" | tee -a .github/echo/step-postfix-echo.txt
+          echo "sudo cp .github/echo/postfix-mysql-virtual.cf /etc/postfix/mysql-virtual-mailbox.cf" > .github/echo/postfix-cp-mailbox.cmd
+          echo "sudo cp .github/echo/postfix-mysql-virtual.cf /etc/postfix/mysql-virtual-alias.cf" > .github/echo/postfix-cp-alias.cmd
+          echo "sudo cp .github/echo/postfix-mysql-virtual.cf /etc/postfix/mysql-virtual-domains.cf" > .github/echo/postfix-cp-domains.cmd
 
           sudo cp .github/echo/postfix-mysql-virtual.cf /etc/postfix/mysql-virtual-mailbox.cf
           sudo cp .github/echo/postfix-mysql-virtual.cf /etc/postfix/mysql-virtual-alias.cf
           sudo cp .github/echo/postfix-mysql-virtual.cf /etc/postfix/mysql-virtual-domains.cf
+
+          echo "sudo postconf -e \"virtual_mailbox_domains=mysql:/etc/postfix/mysql-virtual-domains.cf\"" > .github/echo/postfixconf-mailbox_domains.cmd
+          echo "sudo postconf -e \"virtual_mailbox_maps=mysql:/etc/postfix/mysql-virtual-mailbox.cf\"" > .github/echo/postfixconf-mailbox_maps.cmd
+          echo "sudo postconf -e \"virtual_alias_maps=mysql:/etc/postfix/mysql-virtual-alias.cf\"" > .github/echo/postfixconf-alias_maps.cmd
 
           sudo postconf -e "virtual_mailbox_domains=mysql:/etc/postfix/mysql-virtual-domains.cf"
           sudo postconf -e "virtual_mailbox_maps=mysql:/etc/postfix/mysql-virtual-mailbox.cf"
@@ -148,5 +197,5 @@ jobs:
 
           sudo systemctl restart postfix
 
-          echo "echo 'echo \"테스트메일\" | mail -s \"[Test] Virtual Mail\" test@example.com'" | tee .github/echo/step-mail-test.txt
+          echo "echo \"테스트메일\" | mail -s \"[Test] Virtual Mail\" test@example.com" > .github/echo/step-mail-test.cmd
           echo "테스트메일" | mail -s "[Test] Virtual Mail" test@example.com || true
