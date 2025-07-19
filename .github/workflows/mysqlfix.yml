@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x 완전 자동화 + 패스워드 워닝/노출방지 (MYSQL_PWD, echo, 재시도)
+name: 🐬 MySQL 8.x + 가상 메일 수신 자동화 (로컬 메일박스, echo/재시도/수신확인)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: '0 0 * * *'
 
 jobs:
-  mysql-init:
+  mysql-email:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,31 +30,46 @@ jobs:
               echo "[+] $cmd 재시도 ($n/$max_try)..."
             done
           }
-          echo "echo '[+] apt-get update -y'"
           echo '[+] apt-get update -y'
           trycmd "sudo apt-get update -y"
-
-          echo "echo '[+] apt-get upgrade -y (시스템 전체 업그레이드)'"
-          echo '[+] apt-get upgrade -y (시스템 전체 업그레이드)'
+          echo '[+] apt-get upgrade -y'
           trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
-
-          echo "echo '[+] apt-get dist-upgrade -y (커널/의존성 포함)'"
-          echo '[+] apt-get dist-upgrade -y (커널/의존성 포함)'
+          echo '[+] apt-get dist-upgrade -y'
           trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y"
-
-          echo "echo '[+] apt-get autoremove -y (불필요 패키지 정리)'"
-          echo '[+] apt-get autoremove -y (불필요 패키지 정리)'
+          echo '[+] apt-get autoremove -y'
           trycmd "sudo apt-get autoremove -y"
+
+      - name: 📬 메일 서버(Postfix + mailutils) 설치/로컬모드 (echo, 재시도)
+        run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
+          echo "[+] Installing Postfix (Local only) & mailutils for virtual mailbox..."
+          echo "postfix postfix/mailname string github-actions.local" | sudo debconf-set-selections
+          echo "postfix postfix/main_mailer_type string 'Local only'" | sudo debconf-set-selections
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils"
+          sudo systemctl restart postfix
+          echo "[+] Postfix(local) and mailutils install complete."
+          echo "[+] Mailbox will be /var/mail/ubuntu or /var/mail/root etc."
+          sudo ls -l /var/mail || sudo ls -l /var/spool/mail
 
       - name: 📂 Pre-create Directories (with echo)
         run: |
-          echo "echo '[+] Creating log and data directories...'"
           echo '[+] Creating log and data directories...'
-          echo "mkdir -p .github/logs"
           mkdir -p .github/logs
-          echo "sudo mkdir -p /opt/logistics/virtual_customer_data"
           sudo mkdir -p /opt/logistics/virtual_customer_data
-          echo "touch .github/logs/mysql_init.log"
           touch .github/logs/mysql_init.log
 
       - name: 🧩 Install MySQL Server (재시도, echo)
@@ -74,13 +89,11 @@ jobs:
               echo "[+] $cmd 재시도 ($n/$max_try)..."
             done
           }
-          echo "echo '[+] Installing MySQL server (최신).' "
           echo '[+] Installing MySQL server (최신).'
           trycmd "sudo apt-get update -y"
           trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server"
           trycmd "sudo systemctl stop mysql || true"
           trycmd "sudo systemctl enable mysql"
-          echo "echo '[+] MySQL install complete.'"
           echo '[+] MySQL install complete.'
 
       - name: 🚨 Start MySQL in --skip-grant-tables Mode for Root Reset (재시도, echo)
@@ -100,24 +113,18 @@ jobs:
               echo "[+] $cmd 재시도 ($n/$max_try)..."
             done
           }
-          echo "echo '[+] Starting MySQL in --skip-grant-tables mode for root auth reset...'"
           echo '[+] Starting MySQL in --skip-grant-tables mode for root auth reset...'
           trycmd "sudo systemctl stop mysql || true"
-          echo "echo '[+] Launching mysqld_safe --skip-grant-tables &'"
           nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skip.log 2>&1 &
           sleep 10
-          echo "echo '[+] mysqld_safe --skip-grant-tables started.'"
           echo '[+] mysqld_safe --skip-grant-tables started.'
 
       - name: 🔑 Root 플러그인/패스워드 초기화 (skip-grant-tables, echo)
         run: |
-          echo "echo '[+] Updating root plugin and password (skip-grant-tables)...'"
           echo '[+] Updating root plugin and password (skip-grant-tables)...'
           echo "UPDATE mysql.user SET plugin='mysql_native_password', authentication_string='' WHERE User='root' AND Host='localhost';" > .github/logs/root_reset.sql
           echo "FLUSH PRIVILEGES;" >> .github/logs/root_reset.sql
-          echo "echo 'sudo mysql < .github/logs/root_reset.sql'"
           sudo mysql < .github/logs/root_reset.sql
-          echo "echo '[+] Root plugin and password blanked.'"
           echo '[+] Root plugin and password blanked.'
 
       - name: 🚨 Kill skip-grant-tables and Restart MySQL (재시도, echo)
@@ -137,12 +144,10 @@ jobs:
               echo "[+] $cmd 재시도 ($n/$max_try)..."
             done
           }
-          echo "echo '[+] Stopping mysqld_safe --skip-grant-tables ...'"
           echo '[+] Stopping mysqld_safe --skip-grant-tables ...'
           trycmd "sudo pkill -f mysqld_safe || true"
           trycmd "sudo pkill -f mysqld || true"
           sleep 5
-          echo "echo '[+] Restarting mysql service...'"
           echo '[+] Restarting mysql service...'
           trycmd "sudo systemctl start mysql"
           sleep 5
@@ -150,28 +155,22 @@ jobs:
 
       - name: 🔑 비밀번호 없이 root 로그인 → 패스워드 지정 (echo, MYSQL_PWD)
         run: |
-          echo "echo '[+] Setting root password via ALTER USER in normal mode...'"
           echo '[+] Setting root password via ALTER USER in normal mode...'
           echo "ALTER USER 'root'@'localhost' IDENTIFIED BY 'rootpass123';" > .github/logs/root_reset2.sql
           echo "FLUSH PRIVILEGES;" >> .github/logs/root_reset2.sql
-          echo "echo 'mysql -u root < .github/logs/root_reset2.sql'"
           mysql -u root < .github/logs/root_reset2.sql
-          echo "echo '[+] ALTER USER root 완료.'"
           echo '[+] ALTER USER root 완료.'
 
       - name: ✅ Root 비밀번호 인증 테스트 (echo, MYSQL_PWD)
         run: |
-          echo "echo '[+] Testing root password login...'"
           echo '[+] Testing root password login...'
           export MYSQL_PWD=rootpass123
-          mysqladmin -u root ping || (echo "echo '[❌] Root password set failed!'" && echo '[❌] Root password set failed!' && exit 1)
-          echo "echo '[✔] MySQL root password set and tested'"
+          mysqladmin -u root ping || (echo '[❌] Root password set failed!' && exit 1)
           echo '[✔] MySQL root password set and tested'
 
       - name: 🗃️ Generate Full SQL Schema/Data File (with echo, bulk data)
         run: |
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
-          echo "echo '[+] Generating SQL file for schema & bulk data...'"
           echo '[+] Generating SQL file for schema & bulk data...'
           {
             echo "-- logistics schema/tables"
@@ -234,11 +233,8 @@ jobs:
           }
           export MYSQL_PWD=rootpass123
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
-          echo "echo '[+] Creating and importing DB/schema/data...'"
           echo '[+] Creating and importing DB/schema/data...'
-          echo "mysql -u root < \$SCRIPT"
           trycmd "mysql -u root < \$SCRIPT"
-          echo "echo '[✔] MySQL logistics DB initialized (all schema, data)'"
           echo '[✔] MySQL logistics DB initialized (all schema, data)' | tee .github/logs/mysql_init.log
 
       - name: 🛠️ MySQL Test Select All (재시도, echo, MYSQL_PWD)
@@ -259,18 +255,47 @@ jobs:
             done
           }
           export MYSQL_PWD=rootpass123
-          echo "echo '[+] Select all customers and transactions (log below)...'"
           echo '[+] Select all customers and transactions (log below)...'
-          echo "mysql -u root -e 'SELECT * FROM logistics.customers;'"
           trycmd "mysql -u root -e 'SELECT * FROM logistics.customers;'"
-          echo "mysql -u root -e 'SELECT * FROM logistics.card_transactions;'"
           trycmd "mysql -u root -e 'SELECT * FROM logistics.card_transactions;'"
+
+      - name: 📧 인증 및 결과 이메일 "가상발송" (로컬 메일박스, echo)
+        run: |
+          echo '[+] Sending MySQL result email (virtual local mailbox)...'
+          export MYSQL_PWD=rootpass123
+          mysql -u root -e 'SHOW DATABASES;' > .github/logs/mail_db_list.txt
+          mysql -u root -e 'SELECT * FROM logistics.customers;' > .github/logs/mail_customers.txt
+          mysql -u root -e 'SELECT * FROM logistics.card_transactions;' > .github/logs/mail_txns.txt
+          mailbody=".github/logs/mailbody.txt"
+          {
+            echo "MySQL 8.x 자동화 인증/테스트 결과입니다."
+            echo ""
+            echo "[SHOW DATABASES]"
+            cat .github/logs/mail_db_list.txt
+            echo ""
+            echo "[logistics.customers]"
+            cat .github/logs/mail_customers.txt
+            echo ""
+            echo "[logistics.card_transactions]"
+            cat .github/logs/mail_txns.txt
+            echo ""
+            echo "실행 환경: $(uname -a)"
+            echo "완료시각: $(date)"
+          } > $mailbody
+          # 수신자: ubuntu(가상환경 기본유저) 또는 root(원하면 testuser 추가 생성 가능)
+          to_addr="ubuntu"
+          subject="[MySQL 자동화] 인증/테스트/데이터 결과 리포트 ($(date '+%Y-%m-%d %H:%M'))"
+          echo "메일발송(가상, 로컬메일박스): $to_addr, 제목: $subject"
+          cat $mailbody | mail -s "$subject" "$to_addr"
+
+      - name: 📬 가상 메일 수신함(log) 출력
+        run: |
+          echo '[+] Show virtual mailbox /var/mail/ubuntu (가상수신 결과)'
+          sudo cat /var/mail/ubuntu || sudo cat /var/spool/mail/ubuntu || echo '[No mail]'
+          echo '[+] Virtual mailbox dump complete.'
 
       - name: 🟩 Permission 확인 (echo)
         run: |
-          echo "echo '[+] Directory & file permission check...'"
           echo '[+] Directory & file permission check...'
-          echo "ls -lR /opt/logistics/virtual_customer_data"
           ls -lR /opt/logistics/virtual_customer_data
-          echo "ls -lR .github/logs"
           ls -lR .github/logs
