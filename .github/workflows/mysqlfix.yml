@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x 완전 robust 설치/초기화/echo_log/인증/aiter 등 통합
+name: 🐬 MySQL 8.x Ubuntu 24.04 완전 robust 설치/초기화/비번/echo_log 자동화
 
 on:
   workflow_dispatch:
@@ -20,10 +20,10 @@ jobs:
           #!/bin/bash
           for i in 1 2 3; do
             sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-            mysql -u root -e "CREATE DATABASE IF NOT EXISTS logistics;" 2>/dev/null && break || sleep 3
+            sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;" 2>/dev/null && break || sleep 3
           done
           for i in 1 2 3; do
-            mysql -u root -D logistics -e "
+            sudo mysql -D logistics -e "
             CREATE TABLE IF NOT EXISTS echo_log (
               id INT AUTO_INCREMENT PRIMARY KEY,
               step_name VARCHAR(128),
@@ -36,7 +36,7 @@ jobs:
           EOF
           chmod +x ensure_logistics_db.sh
 
-      - name: 🧩 MySQL robust 설치/초기화/소켓/퍼미션/비번 리셋
+      - name: 🧩 MySQL 설치/초기화/소켓/권한/비번 robust
         run: |
           set -e
           export MYSQL_PWD=''
@@ -49,7 +49,7 @@ jobs:
           # 데몬 기동(최대 3회 재시도)
           for i in 1 2 3; do
             sudo systemctl start mysql || true
-            sleep 6
+            sleep 7
             if sudo systemctl status mysql | grep -qi 'active (running)'; then break; fi
             if [ $i -eq 3 ]; then
               sudo journalctl -u mysql | tail -30
@@ -57,38 +57,15 @@ jobs:
             fi
           done
 
-          # MySQL 기본 root 인증/소켓 robust
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-          # 플러그인/패스워드 완전 초기화 (skip-grant-tables 이용)
-          sudo systemctl stop mysql || true
-          sudo pkill -f mysqld_safe || true
-          sudo pkill -f mysqld || true
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-
-          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
-          sleep 8
-          # 플러그인/비밀번호 모두 초기화
-          echo "UPDATE mysql.user SET plugin='mysql_native_password', authentication_string='' WHERE User='root' AND Host='localhost';" | sudo mysql
-          echo "FLUSH PRIVILEGES;" | sudo mysql
-
-          # skip-grant-tables 모드 종료 및 일반모드 전환
-          sudo pkill -f mysqld_safe || true
-          sudo pkill -f mysqld || true
-          sleep 2
-          sudo systemctl start mysql
-          sleep 8
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-
-          # root 패스워드 강제 재설정(rootpass123)
-          echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';" | sudo mysql -u root
-          echo "FLUSH PRIVILEGES;" | sudo mysql -u root
+          # Ubuntu 24.04 환경은 sudo mysql 만 허용, root 비번 초기화
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';"
+          sudo mysql -e "FLUSH PRIVILEGES;"
           sleep 2
 
           # root 인증 robust 체크 (최대3회)
-          export MYSQL_PWD=rootpass123
           for i in 1 2 3; do
             sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-            if mysqladmin -u root ping; then
+            if mysql -u root -prootpass123 -e 'select version();'; then
               echo "[✔] MySQL root 인증 성공"
               exit 0
             else
@@ -99,12 +76,12 @@ jobs:
           sudo journalctl -u mysql | tail -30
           exit 1
 
-      - name: 🗄️ echo_log robust 보장
+      - name: 🗄️ echo_log robust 생성
         run: |
           set -e
           export MYSQL_PWD=rootpass123
           ./ensure_logistics_db.sh
-          mysql -u root -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('echo_log', '테스트', 'success', '테이블 생성/DB접근 OK');"
+          mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('echo_log', '테스트', 'success', '테이블 생성/DB접근 OK');"
 
       - name: 🌀 aiter/aim/airflow robust 설치 및 echo_log 기록
         run: |
@@ -117,11 +94,11 @@ jobs:
             while : ; do
               if python3 -m pip install "$pkg" >> .github/echo/step-install-$pkg.txt 2>&1; then
                 ./ensure_logistics_db.sh
-                mysql -u root -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('${pkg} install', 'pip install $pkg', 'success', '정상수행($n회)');"
+                mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('${pkg} install', 'pip install $pkg', 'success', '정상수행($n회)');"
                 break
               else
                 ./ensure_logistics_db.sh
-                mysql -u root -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('${pkg} install', 'pip install $pkg', 'failed', '실패($n회)');"
+                mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('${pkg} install', 'pip install $pkg', 'failed', '실패($n회)');"
                 sleep 3; ((n++)); if [ $n -gt $max_try ]; then exit 1; fi
               fi
             done
@@ -133,4 +110,4 @@ jobs:
           set -e
           export MYSQL_PWD=rootpass123
           ./ensure_logistics_db.sh
-          mysql -u root -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('END', 'all done', 'success', '최종 성공');"
+          mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('END', 'all done', 'success', '최종 성공');"
