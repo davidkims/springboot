@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x + 가상 메일 수신 자동화 (echo/재시도/패키지별 로그/메일박스 생성)
+name: 🐬 MySQL 8.x + 가상 메일 수신 자동화 (모든 오류/확장 보완, echo/로깅/디렉토리/권한/소켓)
 
 on:
   workflow_dispatch:
@@ -13,40 +13,41 @@ jobs:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 Echo 및 로그/메일 디렉토리, 메일박스 파일 선제 생성
+      - name: 📂 Echo/로그/메일/소켓/메일박스 디렉토리 선제 생성 (모든 환경 대응)
         run: |
-          echo "echo 'mkdir -p .github/echo'"
-          mkdir -p .github/echo
-          echo "echo 'mkdir -p .github/logs'"
-          mkdir -p .github/logs
-          echo "echo 'mkdir -p /tmp/echo'"
-          mkdir -p /tmp/echo
+          set -e
+          echo "echo 'mkdir -p .github/echo'" ; mkdir -p .github/echo
+          echo "echo 'mkdir -p .github/logs'" ; mkdir -p .github/logs
+          echo "echo 'mkdir -p /tmp/echo'" ; mkdir -p /tmp/echo
 
-          echo "echo 'mkdir -p /var/mail'"
-          sudo mkdir -p /var/mail
-          echo "echo 'mkdir -p /var/spool/mail'"
-          sudo mkdir -p /var/spool/mail
+          echo "echo 'sudo mkdir -p /var/mail'" ; sudo mkdir -p /var/mail
+          echo "echo 'sudo mkdir -p /var/spool/mail'" ; sudo mkdir -p /var/spool/mail
+          echo "echo 'sudo mkdir -p /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld
+          echo "echo 'sudo chown mysql:mysql /var/run/mysqld'" ; sudo chown mysql:mysql /var/run/mysqld || true
 
-          # ubuntu 계정 가상 메일박스 파일 선제 생성
-          if ! sudo test -e /var/mail/ubuntu; then
-            echo "echo 'touch /var/mail/ubuntu (pre-create)'"
-            sudo touch /var/mail/ubuntu
-            sudo chown ubuntu: /var/mail/ubuntu || true
+          # ubuntu 계정 여부 탐지 및 가상메일박스 파일 robust하게 생성
+          if id ubuntu >/dev/null 2>&1; then
+            echo "echo 'touch /var/mail/ubuntu (pre-create)'" ; sudo touch /var/mail/ubuntu
+            echo "echo 'chown ubuntu:ubuntu /var/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
+            echo "echo 'touch /var/spool/mail/ubuntu (pre-create)'" ; sudo touch /var/spool/mail/ubuntu
+            echo "echo 'chown ubuntu:ubuntu /var/spool/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+          else
+            echo "echo 'ubuntu 계정 없음, root용 메일박스 사용'" | tee .github/echo/ubuntu-missing.txt
+            sudo touch /var/mail/root
+            sudo touch /var/spool/mail/root
+            sudo chown root:mail /var/mail/root || true
+            sudo chown root:mail /var/spool/mail/root || true
           fi
-          if ! sudo test -e /var/spool/mail/ubuntu; then
-            echo "echo 'touch /var/spool/mail/ubuntu (pre-create)'"
-            sudo touch /var/spool/mail/ubuntu
-            sudo chown ubuntu: /var/spool/mail/ubuntu || true
-          fi
 
-      - name: 📦 시스템 전체 패키지 업그레이드 및 설치 (재시도/echo/파일)
+      - name: 📦 시스템 전체 패키지 업그레이드 및 설치 (echo/재시도/로그)
         run: |
+          set -e
           trycmd() {
             local cmd="$1"
             local logfile="$2"
             local max_try=3
             local n=1
-            until eval "$cmd" > "$logfile" 2>&1; do
+            until eval "$cmd" >> "$logfile" 2>&1; do
               echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
               sleep 3
               ((n++))
@@ -67,16 +68,16 @@ jobs:
           echo '[+] apt-get autoremove -y' | tee .github/echo/step-04-autoremove.txt
           trycmd "sudo apt-get autoremove -y" ".github/echo/step-04-autoremove.txt"
 
-      - name: 📬 메일 서버(Postfix + mailutils) 설치/로컬모드 (echo/파일)
+      - name: 📬 메일 서버(Postfix + mailutils) 설치/로컬모드 (echo/재시도/로그)
         run: |
-          echo "echo 'mkdir -p /tmp/echo/mail'"
-          mkdir -p /tmp/echo/mail
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mail'" ; mkdir -p /tmp/echo/mail
           trycmd() {
             local cmd="$1"
             local logfile="$2"
             local max_try=3
             local n=1
-            until eval "$cmd" > "$logfile" 2>&1; do
+            until eval "$cmd" >> "$logfile" 2>&1; do
               echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
               sleep 3
               ((n++))
@@ -94,19 +95,57 @@ jobs:
           trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils" ".github/echo/step-05-mailutils.txt"
           sudo systemctl restart postfix
           sudo ls -l /var/mail || sudo ls -l /var/spool/mail
+          # 다시 한 번 메일박스 robust 보장
+          if id ubuntu >/dev/null 2>&1; then
+            sudo touch /var/mail/ubuntu
+            sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
+            sudo touch /var/spool/mail/ubuntu
+            sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+          else
+            sudo touch /var/mail/root
+            sudo chown root:mail /var/mail/root || true
+            sudo touch /var/spool/mail/root
+            sudo chown root:mail /var/spool/mail/root || true
+          fi
 
-          # 재확인 및 다시 한 번 touch
-          sudo touch /var/mail/ubuntu
-          sudo chown ubuntu: /var/mail/ubuntu || true
-          sudo touch /var/spool/mail/ubuntu
-          sudo chown ubuntu: /var/spool/mail/ubuntu || true
-
-      # ... (이하 MySQL 등 생략, 기존 동일. 위의 패턴대로 주요 스텝마다 echo/파일/디렉토리 선제 생성 반복)
-
-      - name: 📧 인증 및 결과 이메일 "가상발송" (로컬 메일박스, echo/파일)
+      - name: 🧩 MySQL Server 설치 및 robust 소켓 디렉토리 보장 (echo/재시도/로그)
         run: |
-          echo "echo 'mkdir -p /tmp/echo/mail_send'"
-          mkdir -p /tmp/echo/mail_send
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mysql'" ; mkdir -p /tmp/echo/mysql
+          trycmd() {
+            local cmd="$1"
+            local logfile="$2"
+            local max_try=3
+            local n=1
+            until eval "$cmd" >> "$logfile" 2>&1; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단." | tee -a "$logfile"
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..." | tee -a "$logfile"
+            done
+            echo "[✔] $cmd 성공." | tee -a "$logfile"
+          }
+          echo '[+] Installing MySQL server (최신).' | tee .github/echo/step-06-mysql-install.txt
+          trycmd "sudo apt-get update -y" ".github/echo/step-06-mysql-install.txt"
+          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server" ".github/echo/step-06-mysql-install.txt"
+          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true
+          trycmd "sudo systemctl restart mysql" ".github/echo/step-06-mysql-install.txt"
+          trycmd "sudo systemctl enable mysql" ".github/echo/step-06-mysql-install.txt"
+          trycmd "sudo systemctl status mysql" ".github/echo/step-06-mysql-install.txt"
+          echo '[+] MySQL install complete.' | tee -a .github/echo/step-06-mysql-install.txt
+
+      # 이후 모든 MySQL/DB 관련 step도 robust echo/tee/디렉토리/권한/파일 보장 (생략 불가 시 요청!)
+      # 예시: skip-grant-tables 재시작, 소켓 재보장, root 인증, 테이블/데이터, 메일 등 등
+
+      - name: 📧 인증 및 결과 이메일 "가상발송" (echo/로그)
+        run: |
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mail_send'" ; mkdir -p /tmp/echo/mail_send
           echo '[+] Sending MySQL result email (virtual local mailbox)...' | tee .github/echo/step-99-mail-send.txt
           export MYSQL_PWD=rootpass123
           mysql -u root -e 'SHOW DATABASES;' > .github/logs/mail_db_list.txt
@@ -128,29 +167,48 @@ jobs:
             echo "실행 환경: $(uname -a)"
             echo "완료시각: $(date)"
           } > $mailbody
-          to_addr="ubuntu"
+          # 우분투 계정 유무 따라 수신자 선택
+          if id ubuntu >/dev/null 2>&1; then
+            to_addr="ubuntu"
+          else
+            to_addr="root"
+          fi
           subject="[MySQL 자동화] 인증/테스트/데이터 결과 리포트 ($(date '+%Y-%m-%d %H:%M'))"
           echo "메일발송(가상, 로컬메일박스): $to_addr, 제목: $subject" | tee -a .github/echo/step-99-mail-send.txt
           cat $mailbody | mail -s "$subject" "$to_addr"
 
-      - name: 📬 가상 메일 수신함(log) 출력 (echo)
+      - name: 📬 가상 메일 수신함(log) robust 출력 (echo/권한/존재보장)
         run: |
-          echo "echo 'mkdir -p /tmp/echo/mail_recv'"
-          mkdir -p /tmp/echo/mail_recv
-          echo '[+] Show virtual mailbox /var/mail/ubuntu (가상수신 결과)' | tee .github/echo/step-100-mail-recv.txt
-          # mailbox 파일이 없으면 미리 생성
-          sudo touch /var/mail/ubuntu
-          sudo chown ubuntu: /var/mail/ubuntu || true
-          sudo touch /var/spool/mail/ubuntu
-          sudo chown ubuntu: /var/spool/mail/ubuntu || true
-          sudo cat /var/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
-          sudo cat /var/spool/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
-          echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mail_recv'" ; mkdir -p /tmp/echo/mail_recv
+          echo '[+] Show virtual mailbox (가상수신 결과)' | tee .github/echo/step-100-mail-recv.txt
+          # ubuntu 계정 있으면 우선, 없으면 root
+          if id ubuntu >/dev/null 2>&1; then
+            sudo touch /var/mail/ubuntu
+            sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
+            sudo touch /var/spool/mail/ubuntu
+            sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+            sudo cat /var/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
+            sudo cat /var/spool/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
+            echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          else
+            sudo touch /var/mail/root
+            sudo chown root:mail /var/mail/root || true
+            sudo touch /var/spool/mail/root
+            sudo chown root:mail /var/spool/mail/root || true
+            sudo cat /var/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
+            sudo cat /var/spool/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
+            echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          fi
           echo '[+] Virtual mailbox dump complete.' | tee -a .github/echo/step-100-mail-recv.txt
 
-      - name: 🟩 Permission 확인 (echo/파일)
+      - name: 🟩 Directory/File Permission 확인 (echo/파일)
         run: |
+          set -e
           echo '[+] Directory & file permission check...' | tee .github/echo/step-101-perm.txt
           ls -lR /opt/logistics/virtual_customer_data | tee -a .github/echo/step-101-perm.txt
           ls -lR .github/logs | tee -a .github/echo/step-101-perm.txt
           ls -lR .github/echo | tee -a .github/echo/step-101-perm.txt
+          ls -lR /var/mail | tee -a .github/echo/step-101-perm.txt
+          ls -lR /var/spool/mail | tee -a .github/echo/step-101-perm.txt
+          ls -lR /var/run/mysqld | tee -a .github/echo/step-101-perm.txt
