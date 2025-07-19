@@ -16,91 +16,95 @@ jobs:
       - name: 📂 Echo/logs/dir robust create
         run: |
           set -e
-          echo "mkdir -p .github/echo"
-          mkdir -p .github/echo
-          echo "mkdir -p .github/logs"
-          mkdir -p .github/logs
-          echo "sudo mkdir -p /var/mail"
-          sudo mkdir -p /var/mail
-          echo "sudo mkdir -p /var/run/mysqld"
-          sudo mkdir -p /var/run/mysqld
-          echo "sudo chown mysql:mysql /var/run/mysqld"
-          sudo chown mysql:mysql /var/run/mysqld || true
+          echo "echo 'mkdir -p .github/echo'" ; mkdir -p .github/echo
+          echo "echo 'mkdir -p .github/logs'" ; mkdir -p .github/logs
+          echo "echo 'sudo mkdir -p /var/mail'" ; sudo mkdir -p /var/mail
+          echo "echo 'sudo mkdir -p /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld
+          echo "echo 'sudo chown mysql:mysql /var/run/mysqld'" ; sudo chown mysql:mysql /var/run/mysqld || true
 
       - name: 📦 System Upgrade & MySQL/Postfix robust install
         run: |
           set -e
-          echo "sudo apt-get update -y"
-          sudo apt-get update -y | tee .github/echo/step-01-apt-update.txt
-          echo "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y | tee .github/echo/step-02-apt-upgrade.txt
-          echo "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server postfix mailutils"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server postfix mailutils | tee .github/echo/step-03-apt-install.txt
+          echo "echo 'sudo apt-get update -y'" ; sudo apt-get update -y | tee .github/echo/step-01-apt-update.txt
+          echo "echo 'sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'" ; sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y | tee .github/echo/step-02-apt-upgrade.txt
+          echo "echo 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server postfix mailutils'" ; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server postfix mailutils | tee .github/echo/step-03-apt-install.txt
 
       - name: 🧩 MySQL robust daemon/socket/perm
         run: |
           set -e
-          echo "sudo systemctl stop mysql || true"
-          sudo systemctl stop mysql || true
-          echo "sudo pkill -f mysqld || true"
-          sudo pkill -f mysqld || true
-          echo "sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld"
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-          echo "sudo systemctl start mysql"
-          sudo systemctl start mysql || true
+          echo "echo 'sudo systemctl stop mysql || true'" ; sudo systemctl stop mysql || true
+          echo "echo 'sudo pkill -f mysqld || true'" ; sudo pkill -f mysqld || true
+          echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
+          echo "echo 'sudo systemctl start mysql'" ; sudo systemctl start mysql || true
           sleep 4
 
       - name: 🚨 MySQL root/admin robust reset/privilege (echo+SQL 완전 분리)
         run: |
           set -e
-          # 1. skip-grant-tables 진입
-          echo "[MySQL] skip-grant-tables entry" | tee -a .github/echo/step-root-reset.txt
+
+          # [1] skip-grant-tables 모드로 진입
+          echo "echo '[MySQL] skip-grant-tables entry'" | tee -a .github/echo/step-root-reset.txt
           sudo systemctl stop mysql || true
           sudo pkill -f mysqld || true
           sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
-          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
-          sleep 10
 
-          # 2. root 해시 직접 초기화
-          echo "UPDATE mysql.user SET plugin='mysql_native_password', authentication_string='*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19' WHERE User='root';" > .github/echo/root-reset.sql
+          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
+          sleep 12
+
+          # [2] root 해시(비번: root) 직접 초기화
+          echo "UPDATE mysql.user SET plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root';" > .github/echo/root-reset.sql
           echo "FLUSH PRIVILEGES;" >> .github/echo/root-reset.sql
-          echo "sudo mysql < .github/echo/root-reset.sql (skip-grant-tables)" | tee -a .github/echo/step-root-reset.txt
-          sudo mysql < .github/echo/root-reset.sql
+
+          echo "echo 'sudo mysql < .github/echo/root-reset.sql (skip-grant-tables)'" | tee -a .github/echo/step-root-reset.txt
+          sudo mysql < .github/echo/root-reset.sql || (cat .github/logs/mysql_skipgrant.log || true)
 
           sleep 2
           sudo pkill -f mysqld || true
           sleep 2
-          sudo systemctl start mysql
-          sleep 6
 
-          # 3. 정상모드 root alter/host/비밀번호 robust
+          # [3] 정상모드로 재기동
+          echo "echo 'sudo systemctl start mysql'" | tee -a .github/echo/step-root-reset.txt
+          sudo systemctl start mysql
+          sleep 8
+
+          # [4] root 패스워드 변경(정상모드, host=localhost, %)
           echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';" > .github/echo/root-alter.sql
           echo "ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY 'rootpass123';" >> .github/echo/root-alter.sql
           echo "FLUSH PRIVILEGES;" >> .github/echo/root-alter.sql
-          echo "sudo mysql < .github/echo/root-alter.sql (normal mode)" | tee -a .github/echo/step-root-reset.txt
-          sudo mysql < .github/echo/root-alter.sql
+          echo "echo 'sudo mysql -u root -prootpass123 < .github/echo/root-alter.sql (normal mode)'" | tee -a .github/echo/step-root-reset.txt
 
-          # 4. robust_admin 계정 robust 생성
+          for i in {1..5}; do
+            if sudo mysql -u root -prootpass123 < .github/echo/root-alter.sql; then
+              echo "[✔] root alter 성공!" | tee -a .github/echo/step-root-reset.txt
+              break
+            else
+              echo "[!] root alter 재시도 ($i/5)..." | tee -a .github/echo/step-root-reset.txt
+              sleep 3
+            fi
+          done
+
+          # [5] robust_admin 계정 robust 생성
           echo "CREATE USER IF NOT EXISTS 'robust_admin'@'%' IDENTIFIED WITH mysql_native_password BY 'robustpass123';" > .github/echo/admin-reset.sql
           echo "GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'%' WITH GRANT OPTION;" >> .github/echo/admin-reset.sql
           echo "FLUSH PRIVILEGES;" >> .github/echo/admin-reset.sql
-          echo "sudo mysql < .github/echo/admin-reset.sql (normal mode)" | tee -a .github/echo/step-root-reset.txt
-          sudo mysql < .github/echo/admin-reset.sql
+          echo "echo 'sudo mysql -u root -prootpass123 < .github/echo/admin-reset.sql (normal mode)'" | tee -a .github/echo/step-root-reset.txt
+          sudo mysql -u root -prootpass123 < .github/echo/admin-reset.sql
+
           sleep 2
 
-      - name: ✅ MySQL root robust 인증 체크
+      - name: ✅ MySQL root robust 인증 체크 (재시도 포함)
         run: |
           set -e
           echo "[+] MySQL root robust password test..." | tee .github/echo/step-root-login.txt
           export MYSQL_PWD=rootpass123
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             echo "mysqladmin -u root ping" | tee -a .github/echo/step-root-login.txt
             if mysqladmin -u root ping; then
               echo "[✔] MySQL root robust 인증 성공!" | tee -a .github/echo/step-root-login.txt
               exit 0
             else
-              echo "[!] root 인증 실패($i). 3초후 재시도..." | tee -a .github/echo/step-root-login.txt
-              sleep 3
+              echo "[!] root 인증 실패($i). 4초후 재시도..." | tee -a .github/echo/step-root-login.txt
+              sleep 4
             fi
           done
           echo "[❌] MySQL root robust 인증 실패! 전체 중단." | tee -a .github/echo/step-root-login.txt
