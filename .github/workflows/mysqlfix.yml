@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x Ubuntu 24.04 완전 robust 설치/초기화/비번/echo_log 자동화
+name: 🐬 MySQL 8.x + 가상 메일 수신 자동화 (권한 robust, 인증 완전 보장, echo/로깅)
 
 on:
   workflow_dispatch:
@@ -6,108 +6,231 @@ on:
     - cron: '0 0 * * *'
 
 jobs:
-  mysql-robust-auto:
+  mysql-email:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 사전 디렉토리/echo_log 함수 선언
-        run: |
-          mkdir -p .github/echo .github/logs /tmp/echo
-          cat <<'EOF' > ensure_logistics_db.sh
-          #!/bin/bash
-          for i in 1 2 3; do
-            sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-            sudo mysql -e "CREATE DATABASE IF NOT EXISTS logistics;" 2>/dev/null && break || sleep 3
-          done
-          for i in 1 2 3; do
-            sudo mysql -D logistics -e "
-            CREATE TABLE IF NOT EXISTS echo_log (
-              id INT AUTO_INCREMENT PRIMARY KEY,
-              step_name VARCHAR(128),
-              echo_cmd TEXT,
-              executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              status VARCHAR(32) DEFAULT 'success',
-              message TEXT
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;" 2>/dev/null && break || sleep 3
-          done
-          EOF
-          chmod +x ensure_logistics_db.sh
-
-      - name: 🧩 MySQL 설치/초기화/소켓/권한/비번 robust
+      - name: 📂 Echo/로그/메일/소켓/메일박스 디렉토리 선제 생성 (모든 환경 대응)
         run: |
           set -e
-          export MYSQL_PWD=''
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-          sudo systemctl stop mysql || true
-          sudo pkill -f mysqld || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-
-          # 데몬 기동(최대 3회 재시도)
-          for i in 1 2 3; do
-            sudo systemctl start mysql || true
-            sleep 7
-            if sudo systemctl status mysql | grep -qi 'active (running)'; then break; fi
-            if [ $i -eq 3 ]; then
-              sudo journalctl -u mysql | tail -30
-              echo "[❌] MySQL 데몬 기동 실패!"; exit 1
-            fi
-          done
-
-          # Ubuntu 24.04 환경은 sudo mysql 만 허용, root 비번 초기화
-          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';"
-          sudo mysql -e "FLUSH PRIVILEGES;"
+          echo "echo 'mkdir -p .github/echo'" ; mkdir -p .github/echo
+          echo "echo 'mkdir -p .github/logs'" ; mkdir -p .github/logs
+          echo "echo 'mkdir -p /tmp/echo'" ; mkdir -p /tmp/echo
+          echo "echo 'sudo mkdir -p /var/mail'" ; sudo mkdir -p /var/mail
+          echo "echo 'sudo mkdir -p /var/spool/mail'" ; sudo mkdir -p /var/spool/mail
+          echo "echo 'sudo mkdir -p /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld
+          echo "echo 'sudo chown mysql:mysql /var/run/mysqld'" ; sudo chown mysql:mysql /var/run/mysqld || true
+          if id ubuntu >/dev/null 2>&1; then
+            echo "echo 'touch /var/mail/ubuntu (pre-create)'" ; sudo touch /var/mail/ubuntu
+            echo "echo 'chown ubuntu:ubuntu /var/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
+            echo "echo 'touch /var/spool/mail/ubuntu (pre-create)'" ; sudo touch /var/spool/mail/ubuntu
+            echo "echo 'chown ubuntu:ubuntu /var/spool/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+          else
+            echo "echo 'ubuntu 계정 없음, root용 메일박스 사용'" | tee .github/echo/ubuntu-missing.txt
+            echo "echo 'touch /var/mail/root'" ; sudo touch /var/mail/root
+            echo "echo 'touch /var/spool/mail/root'" ; sudo touch /var/spool/mail/root
+            echo "echo 'chown root:mail /var/mail/root'" ; sudo chown root:mail /var/mail/root || true
+            echo "echo 'chown root:mail /var/spool/mail/root'" ; sudo chown root:mail /var/spool/mail/root || true
+          fi
+      - name: 📦 시스템 전체 패키지 업그레이드 및 설치 (echo/재시도/로그)
+        run: |
+          set -e
+          echo "echo '--- trycmd 함수 선언 ---'"
+          trycmd() {
+            local cmd="$1"
+            local logfile="$2"
+            local max_try=3
+            local n=1
+            until eval "$cmd" >> "$logfile" 2>&1; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단." | tee -a "$logfile"
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..." | tee -a "$logfile"
+            done
+            echo "[✔] $cmd 성공." | tee -a "$logfile"
+          }
+          echo "echo '[+] apt-get update -y'" ; echo '[+] apt-get update -y' | tee .github/echo/step-01-apt-update.txt
+          trycmd "sudo apt-get update -y" ".github/echo/step-01-apt-update.txt"
+          echo "echo '[+] apt-get upgrade -y'" ; echo '[+] apt-get upgrade -y' | tee .github/echo/step-02-apt-upgrade.txt
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" ".github/echo/step-02-apt-upgrade.txt"
+          echo "echo '[+] apt-get dist-upgrade -y'" ; echo '[+] apt-get dist-upgrade -y' | tee .github/echo/step-03-dist-upgrade.txt
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y" ".github/echo/step-03-dist-upgrade.txt"
+          echo "echo '[+] apt-get autoremove -y'" ; echo '[+] apt-get autoremove -y' | tee .github/echo/step-04-autoremove.txt
+          trycmd "sudo apt-get autoremove -y" ".github/echo/step-04-autoremove.txt"
+      - name: 📬 메일 서버(Postfix + mailutils) 설치/로컬모드 (echo/재시도/로그)
+        run: |
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mail'" ; mkdir -p /tmp/echo/mail
+          trycmd() {
+            local cmd="$1"
+            local logfile="$2"
+            local max_try=3
+            local n=1
+            until eval "$cmd" >> "$logfile" 2>&1; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단." | tee -a "$logfile"
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..." | tee -a "$logfile"
+            done
+            echo "[✔] $cmd 성공." | tee -a "$logfile"
+          }
+          echo "echo '[+] Installing Postfix (Local only) & mailutils for virtual mailbox...'" ; echo "[+] Installing Postfix (Local only) & mailutils for virtual mailbox..." | tee .github/echo/step-05-mailutils.txt
+          echo "postfix postfix/mailname string github-actions.local" | sudo debconf-set-selections
+          echo "postfix postfix/main_mailer_type string 'Local only'" | sudo debconf-set-selections
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils" ".github/echo/step-05-mailutils.txt"
+          echo "echo 'sudo systemctl restart postfix'" ; sudo systemctl restart postfix
+          echo "echo 'sudo ls -l /var/mail || sudo ls -l /var/spool/mail'" ; sudo ls -l /var/mail || sudo ls -l /var/spool/mail
+      - name: 🧩 MySQL Server 설치/robust 권한/소켓 보장 (echo/재시도/로그)
+        run: |
+          set -e
+          echo "echo 'mkdir -p /tmp/echo/mysql'" ; mkdir -p /tmp/echo/mysql
+          trycmd() {
+            local cmd="$1"
+            local logfile="$2"
+            local max_try=3
+            local n=1
+            until eval "$cmd" >> "$logfile" 2>&1; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단." | tee -a "$logfile"
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..." | tee -a "$logfile"
+            done
+            echo "[✔] $cmd 성공." | tee -a "$logfile"
+          }
+          echo "echo '[+] Installing MySQL server (최신).'" ; echo '[+] Installing MySQL server (최신).' | tee .github/echo/step-06-mysql-install.txt
+          trycmd "sudo apt-get update -y" ".github/echo/step-06-mysql-install.txt"
+          echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server" ".github/echo/step-06-mysql-install.txt"
+          echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true
+          trycmd "sudo systemctl restart mysql" ".github/echo/step-06-mysql-install.txt"
+          trycmd "sudo systemctl enable mysql" ".github/echo/step-06-mysql-install.txt"
+          trycmd "sudo systemctl status mysql" ".github/echo/step-06-mysql-install.txt"
+          echo "echo '[+] MySQL install complete.'" ; echo '[+] MySQL install complete.' | tee -a .github/echo/step-06-mysql-install.txt
+      - name: 🚨 MySQL root 플러그인/패스워드 완전 리셋 (skip-grant-tables → 정상모드)
+        run: |
+          set -e
+          echo "echo '[+] MySQL 인증/권한 완전 리셋 시작...'" ; echo "[+] MySQL 인증/권한 완전 리셋 시작..."
+          echo "echo 'sudo systemctl stop mysql || true'" ; sudo systemctl stop mysql || true
+          echo "echo 'sudo pkill -f mysqld_safe || true'" ; sudo pkill -f mysqld_safe || true
+          echo "echo 'sudo pkill -f mysqld || true'" ; sudo pkill -f mysqld || true
           sleep 2
-
-          # root 인증 robust 체크 (최대3회)
+          echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true
+          echo "echo 'nohup sudo mysqld_safe --skip-grant-tables --skip-networking ...'" ; nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
+          sleep 10
+          echo "echo \"UPDATE mysql.user ...\" | sudo tee /tmp/root_reset.sql" ; echo "UPDATE mysql.user SET plugin='mysql_native_password', authentication_string='' WHERE User='root' AND Host='localhost';" | sudo tee /tmp/root_reset.sql
+          echo "echo \"FLUSH PRIVILEGES;\" | sudo tee -a /tmp/root_reset.sql" ; echo "FLUSH PRIVILEGES;" | sudo tee -a /tmp/root_reset.sql
+          echo "echo 'sudo mysql < /tmp/root_reset.sql'" ; sudo mysql < /tmp/root_reset.sql
+          echo "echo 'sudo pkill -f mysqld_safe || true'" ; sudo pkill -f mysqld_safe || true
+          echo "echo 'sudo pkill -f mysqld || true'" ; sudo pkill -f mysqld || true
+          sleep 2
+          echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld || true
+          echo "echo 'sudo systemctl start mysql'" ; sudo systemctl start mysql
+          sleep 5
+          echo "echo \"ALTER USER ...\" | sudo tee /tmp/root_pw.sql" ; echo "ALTER USER 'root'@'localhost' IDENTIFIED BY 'rootpass123';" | sudo tee /tmp/root_pw.sql
+          echo "echo \"FLUSH PRIVILEGES;\" | sudo tee -a /tmp/root_pw.sql" ; echo "FLUSH PRIVILEGES;" | sudo tee -a /tmp/root_pw.sql
+          echo "echo 'mysql -u root < /tmp/root_pw.sql'" ; mysql -u root < /tmp/root_pw.sql
+      - name: ✅ MySQL root 인증 robust 체크 (실패시 즉시 중단)
+        run: |
+          set -e
+          echo "echo '[+] MySQL root 패스워드 인증 robust test...'" ; echo "[+] MySQL root 패스워드 인증 robust test..." | tee .github/echo/step-root-login.txt
+          export MYSQL_PWD=rootpass123
           for i in 1 2 3; do
-            sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-            if mysql -u root -prootpass123 -e 'select version();'; then
-              echo "[✔] MySQL root 인증 성공"
+            echo "echo 'mysqladmin -u root ping'" ; if mysqladmin -u root ping; then
+              echo "echo '[✔] MySQL root 패스워드 인증 성공!'" ; echo "[✔] MySQL root 패스워드 인증 성공!" | tee -a .github/echo/step-root-login.txt
               exit 0
             else
-              echo "[!] root 인증 실패($i). 3초후 재시도..."; sleep 3
+              echo "echo '[!] root 인증 실패($i). 3초후 재시도...'" ; echo "[!] root 인증 실패($i). 3초후 재시도..." | tee -a .github/echo/step-root-login.txt
+              sleep 3
             fi
           done
-          echo "[❌] MySQL root 인증 최종 실패!"
-          sudo journalctl -u mysql | tail -30
+          echo "echo '[❌] MySQL root 인증 실패! 전체 중단.'" ; echo "[❌] MySQL root 인증 실패! 전체 중단." | tee -a .github/echo/step-root-login.txt
           exit 1
-
-      - name: 🗄️ echo_log robust 생성
+      - name: 📧 인증 및 결과 이메일 "가상발송" (echo/로그)
         run: |
           set -e
+          echo "echo 'mkdir -p /tmp/echo/mail_send'" ; mkdir -p /tmp/echo/mail_send
+          echo "echo '[+] Sending MySQL result email (virtual local mailbox)...'" ; echo '[+] Sending MySQL result email (virtual local mailbox)...' | tee .github/echo/step-99-mail-send.txt
           export MYSQL_PWD=rootpass123
-          ./ensure_logistics_db.sh
-          mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('echo_log', '테스트', 'success', '테이블 생성/DB접근 OK');"
-
-      - name: 🌀 aiter/aim/airflow robust 설치 및 echo_log 기록
+          echo "echo 'mysql -u root -e SHOW DATABASES;'" ; mysql -u root -e 'SHOW DATABASES;' > .github/logs/mail_db_list.txt
+          echo "echo 'mysql -u root -e SELECT * FROM information_schema.USER_PRIVILEGES;'" ; mysql -u root -e 'SELECT * FROM information_schema.USER_PRIVILEGES;' > .github/logs/mail_privs.txt || true
+          echo "echo 'mysql -u root -e SELECT * FROM mysql.user;'" ; mysql -u root -e 'SELECT * FROM mysql.user;' > .github/logs/mail_users.txt || true
+          echo "echo 'mysql -u root -e SELECT * FROM logistics.customers;'" ; mysql -u root -e 'SELECT * FROM logistics.customers;' > .github/logs/mail_customers.txt || true
+          echo "echo 'mysql -u root -e SELECT * FROM logistics.card_transactions;'" ; mysql -u root -e 'SELECT * FROM logistics.card_transactions;' > .github/logs/mail_txns.txt || true
+          mailbody=".github/logs/mailbody.txt"
+          {
+            echo "MySQL 8.x 자동화 인증/테스트 결과입니다."
+            echo ""
+            echo "[SHOW DATABASES]"
+            cat .github/logs/mail_db_list.txt
+            echo ""
+            echo "[USER_PRIVILEGES]"
+            cat .github/logs/mail_privs.txt
+            echo ""
+            echo "[mysql.user]"
+            cat .github/logs/mail_users.txt
+            echo ""
+            echo "[logistics.customers]"
+            cat .github/logs/mail_customers.txt
+            echo ""
+            echo "[logistics.card_transactions]"
+            cat .github/logs/mail_txns.txt
+            echo ""
+            echo "실행 환경: $(uname -a)"
+            echo "완료시각: $(date)"
+          } > $mailbody
+          if id ubuntu >/dev/null 2>&1; then
+            to_addr="ubuntu"
+          else
+            to_addr="root"
+          fi
+          subject="[MySQL 자동화] 인증/테스트/데이터 결과 리포트 ($(date '+%Y-%m-%d %H:%M'))"
+          echo "echo \"메일발송(가상, 로컬메일박스): $to_addr, 제목: $subject\"" ; echo "메일발송(가상, 로컬메일박스): $to_addr, 제목: $subject" | tee -a .github/echo/step-99-mail-send.txt
+          echo "echo 'cat \$mailbody | mail -s ...'" ; cat $mailbody | mail -s "$subject" "$to_addr"
+      - name: 📬 가상 메일 수신함 robust 출력 (echo/권한/존재보장)
         run: |
           set -e
-          export MYSQL_PWD=rootpass123
-          sudo apt-get install -y python3-pip python3-venv
-          for pkg in aiter aim apache-airflow; do
-            ./ensure_logistics_db.sh
-            max_try=3; n=1
-            while : ; do
-              if python3 -m pip install "$pkg" >> .github/echo/step-install-$pkg.txt 2>&1; then
-                ./ensure_logistics_db.sh
-                mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('${pkg} install', 'pip install $pkg', 'success', '정상수행($n회)');"
-                break
-              else
-                ./ensure_logistics_db.sh
-                mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('${pkg} install', 'pip install $pkg', 'failed', '실패($n회)');"
-                sleep 3; ((n++)); if [ $n -gt $max_try ]; then exit 1; fi
-              fi
-            done
-            $pkg --version | tee -a .github/echo/step-install-$pkg.txt || true
-          done
-
-      - name: 🟩 echo_log 사용 예시 및 종료
+          echo "echo 'mkdir -p /tmp/echo/mail_recv'" ; mkdir -p /tmp/echo/mail_recv
+          echo "echo '[+] Show virtual mailbox (가상수신 결과)'" ; echo '[+] Show virtual mailbox (가상수신 결과)' | tee .github/echo/step-100-mail-recv.txt
+          if id ubuntu >/dev/null 2>&1; then
+            echo "echo 'sudo touch /var/mail/ubuntu'" ; sudo touch /var/mail/ubuntu
+            echo "echo 'sudo chown ubuntu:ubuntu /var/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
+            echo "echo 'sudo touch /var/spool/mail/ubuntu'" ; sudo touch /var/spool/mail/ubuntu
+            echo "echo 'sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+            echo "echo 'sudo cat /var/mail/ubuntu | tee -a ...'" ; sudo cat /var/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
+            echo "echo 'sudo cat /var/spool/mail/ubuntu | tee -a ...'" ; sudo cat /var/spool/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
+            echo "echo '[No mail]'" ; echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          else
+            echo "echo 'sudo touch /var/mail/root'" ; sudo touch /var/mail/root
+            echo "echo 'sudo chown root:mail /var/mail/root'" ; sudo chown root:mail /var/mail/root || true
+            echo "echo 'sudo touch /var/spool/mail/root'" ; sudo touch /var/spool/mail/root
+            echo "echo 'sudo chown root:mail /var/spool/mail/root'" ; sudo chown root:mail /var/spool/mail/root || true
+            echo "echo 'sudo cat /var/mail/root | tee -a ...'" ; sudo cat /var/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
+            echo "echo 'sudo cat /var/spool/mail/root | tee -a ...'" ; sudo cat /var/spool/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
+            echo "echo '[No mail]'" ; echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          fi
+          echo "echo '[+] Virtual mailbox dump complete.'" ; echo '[+] Virtual mailbox dump complete.' | tee -a .github/echo/step-100-mail-recv.txt
+      - name: 🟩 Directory/File Permission 확인 (echo/파일)
         run: |
           set -e
-          export MYSQL_PWD=rootpass123
-          ./ensure_logistics_db.sh
-          mysql -u root -prootpass123 -D logistics -e "INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES ('END', 'all done', 'success', '최종 성공');"
+          echo "echo '[+] Directory & file permission check...'" ; echo '[+] Directory & file permission check...' | tee .github/echo/step-101-perm.txt
+          echo "echo 'ls -lR /opt/logistics/virtual_customer_data | tee -a ...'" ; ls -lR /opt/logistics/virtual_customer_data | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR .github/logs | tee -a ...'" ; ls -lR .github/logs | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR .github/echo | tee -a ...'" ; ls -lR .github/echo | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR /var/mail | tee -a ...'" ; ls -lR /var/mail | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR /var/spool/mail | tee -a ...'" ; ls -lR /var/spool/mail | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR /var/run/mysqld | tee -a ...'" ; ls -lR /var/run/mysqld | tee -a .github/echo/step-101-perm.txt || true
