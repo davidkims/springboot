@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x + 메일/서비스 분산 업그레이드 + robust 자동화 (5분단위, echo, 충돌방지)
+name: 🐬 MySQL 8.x + robust 메일/DB + 분산 업그레이드 + echo (권한오류 완전방지, 5분단위, mailutils 에러 완전방지)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: '*/5 * * * *'
 
 jobs:
-  # [1] 메인 robust 자동화 서비스 (에코+메일+DB+권한 모두 robust)
+  # === 1. 메인 robust 메일/DB 자동화 ===
   mysql-email:
     runs-on: ubuntu-latest
 
@@ -14,29 +14,26 @@ jobs:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 Echo/로그/메일/소켓/메일박스 robust 디렉토리 생성
+      - name: 📂 Echo/로그/메일 robust 디렉토리 생성 (sudo 구분)
         run: |
           set -e
-          for d in .github/echo .github/logs /tmp/echo /var/mail /var/spool/mail /var/run/mysqld; do
-            echo "echo 'mkdir -p $d'" ; sudo mkdir -p $d
+          for d in .github/echo .github/logs /tmp/echo; do
+            echo "echo 'mkdir -p $d'" ; mkdir -p $d
           done
-          echo "echo 'sudo chown mysql:mysql /var/run/mysqld'" ; sudo chown mysql:mysql /var/run/mysqld || true
+          # 시스템 폴더만 sudo, echo/logs는 일반 권한!
+          sudo mkdir -p /var/mail /var/spool/mail /var/run/mysqld
+          sudo chown mysql:mysql /var/run/mysqld || true
           if id ubuntu >/dev/null 2>&1; then
-            echo "echo 'touch /var/mail/ubuntu'" ; sudo touch /var/mail/ubuntu
-            echo "echo 'chown ubuntu:ubuntu /var/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu || true
-            echo "echo 'touch /var/spool/mail/ubuntu'" ; sudo touch /var/spool/mail/ubuntu
-            echo "echo 'chown ubuntu:ubuntu /var/spool/mail/ubuntu'" ; sudo chown ubuntu:ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/spool/mail/ubuntu || true
+            sudo touch /var/mail/ubuntu /var/spool/mail/ubuntu
+            sudo chown ubuntu:ubuntu /var/mail/ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu /var/spool/mail/ubuntu || true
           else
-            echo "echo 'touch /var/mail/root'" ; sudo touch /var/mail/root
-            echo "echo 'chown root:mail /var/mail/root'" ; sudo chown root:mail /var/mail/root || true
-            echo "echo 'touch /var/spool/mail/root'" ; sudo touch /var/spool/mail/root
-            echo "echo 'chown root:mail /var/spool/mail/root'" ; sudo chown root:mail /var/spool/mail/root || true
+            sudo touch /var/mail/root /var/spool/mail/root
+            sudo chown root:mail /var/mail/root /var/spool/mail/root || true
           fi
 
-      - name: 📦 시스템 전체 패키지 업그레이드/설치 (echo/재시도/로그)
+      - name: 📦 시스템 전체 패키지 업그레이드/설치 (echo/재시도/로그/권한fix)
         run: |
           set -e
-          echo "echo '[trycmd 함수 선언]'" 
           trycmd() {
             local cmd="$1"
             local logfile="$2"
@@ -54,18 +51,21 @@ jobs:
             done
             echo "[✔] $cmd 성공." | tee -a "$logfile"
           }
+          for f in step-01-apt-update.txt step-02-apt-upgrade.txt step-03-dist-upgrade.txt step-04-autoremove.txt step-05-pkgs.txt; do
+            touch .github/echo/$f
+          done
           trycmd "sudo apt-get update -y" ".github/echo/step-01-apt-update.txt"
           trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" ".github/echo/step-02-apt-upgrade.txt"
           trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y" ".github/echo/step-03-dist-upgrade.txt"
           trycmd "sudo apt-get autoremove -y" ".github/echo/step-04-autoremove.txt"
-          trycmd "sudo apt-get install -y postfix mailutils python3-pip python3-venv npm nodejs" ".github/echo/step-05-pkgs.txt"
+          trycmd "sudo apt-get install -y postfix mailutils bsd-mailx python3-pip python3-venv npm nodejs" ".github/echo/step-05-pkgs.txt"
 
       - name: 📬 메일 서버 robust 설치/로컬 모드 (echo/로그)
         run: |
           set -e
           echo "echo '[+] Postfix+mailutils 로컬 robust 설치'" | tee .github/echo/step-06-mailutils.txt
           sudo systemctl stop postfix || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils >> .github/echo/step-06-mailutils.txt 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils bsd-mailx >> .github/echo/step-06-mailutils.txt 2>&1
           sudo systemctl restart postfix || true
           sudo ls -l /var/mail >> .github/echo/step-06-mailutils.txt || sudo ls -l /var/spool/mail >> .github/echo/step-06-mailutils.txt
 
@@ -133,9 +133,15 @@ jobs:
             ('init', 'robust DB/테이블 생성', 'success', NOW());"
           echo "echo '[DB/테이블 robust 생성 완료]'" | tee -a .github/echo/step-db-init.txt
 
-      - name: 📧 인증 및 결과 이메일 "가상발송"(echo/로그)
+      - name: 📧 인증 및 결과 이메일 "가상발송"(echo/로그, mailutils 확인)
         run: |
           set -e
+          sudo apt-get update -y
+          sudo apt-get install -y mailutils bsd-mailx
+          if ! command -v mail >/dev/null 2>&1; then
+            echo "[❌] mail 명령 미설치! mailutils 설치 실패"
+            exit 1
+          fi
           echo "echo 'mkdir -p /tmp/echo/mail_send'" ; mkdir -p /tmp/echo/mail_send
           export MYSQL_PWD=rootpass123
           echo "echo '[+] Sending MySQL result email (virtual local mailbox)...'" | tee .github/echo/step-99-mail-send.txt
@@ -191,7 +197,7 @@ jobs:
           ls -lR /var/spool/mail | tee -a .github/echo/step-101-perm.txt || true
           ls -lR /var/run/mysqld | tee -a .github/echo/step-101-perm.txt || true
 
-  # [2] .github/workflows 내 모든 mysql 관련 워크플로 서비스 분산 업그레이드/충돌방지
+  # === 2. .github/workflows 내 모든 mysql 관련 서비스 분산 업그레이드/충돌방지 ===
   distributed-upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 28
@@ -207,6 +213,8 @@ jobs:
         run: |
           set -e
           mkdir -p .github/echo
+          touch .github/echo/distributed-init.txt
+          touch .github/echo/distributed-upgrade.txt
           echo "echo '[분산] MySQL 관련 워크플로 파일 검색 및 분배'" | tee .github/echo/distributed-init.txt
           find .github/workflows -type f -name '*.yml' -o -name '*.yaml' | grep -i mysql | sort > .github/echo/mysql_workflows.txt
           idx=${{ matrix.id }}
@@ -238,9 +246,15 @@ jobs:
           wait
           echo "echo '[분산] 전체 분배/병렬 업그레이드 완료'" | tee -a .github/echo/distributed-upgrade.txt
 
-      - name: 📧 분산 업그레이드 전체 결과 메일(에코)
+      - name: 📧 분산 업그레이드 전체 결과 메일(에코, mailutils 확인)
         run: |
           set -e
+          sudo apt-get update -y
+          sudo apt-get install -y mailutils bsd-mailx
+          if ! command -v mail >/dev/null 2>&1; then
+            echo "[❌] mail 명령 미설치! mailutils 설치 실패" | tee -a .github/echo/distributed-upgrade.txt
+            exit 1
+          fi
           to_addr=$(id ubuntu >/dev/null 2>&1 && echo ubuntu || echo root)
           subject="[분산 MySQL 업그레이드] 전체 결과 ($(date '+%Y-%m-%d %H:%M'))"
           cat .github/echo/distributed-upgrade.txt | mail -s "$subject" "$to_addr"
