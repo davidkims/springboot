@@ -1,260 +1,137 @@
-name: 🐬 MySQL 8.x + robust 메일/DB + 분산 업그레이드 + echo (권한오류 완전방지, 5분단위, mailutils 에러 완전방지)
+name: 🐬 MySQL 8.x + robust echo/권한/가상 메일 수신 자동화
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 0 * * *'
 
 jobs:
-  # === 1. 메인 robust 메일/DB 자동화 ===
-  mysql-email:
+  mysql-robust:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 Echo/로그/메일 robust 디렉토리 생성 (sudo 구분)
+      - name: 📂 Echo/로그/디렉토리 robust 생성
         run: |
           set -e
-          for d in .github/echo .github/logs /tmp/echo; do
-            echo "echo 'mkdir -p $d'" ; mkdir -p $d
-          done
-          # 시스템 폴더만 sudo, echo/logs는 일반 권한!
-          sudo mkdir -p /var/mail /var/spool/mail /var/run/mysqld
-          sudo chown mysql:mysql /var/run/mysqld || true
-          if id ubuntu >/dev/null 2>&1; then
-            sudo touch /var/mail/ubuntu /var/spool/mail/ubuntu
-            sudo chown ubuntu:ubuntu /var/mail/ubuntu /var/spool/mail/ubuntu || sudo chown ubuntu /var/mail/ubuntu /var/spool/mail/ubuntu || true
-          else
-            sudo touch /var/mail/root /var/spool/mail/root
-            sudo chown root:mail /var/mail/root /var/spool/mail/root || true
-          fi
+          echo "echo 'mkdir -p .github/echo'" ; mkdir -p .github/echo
+          echo "echo 'mkdir -p .github/logs'" ; mkdir -p .github/logs
+          echo "echo 'sudo mkdir -p /var/mail'" ; sudo mkdir -p /var/mail
+          echo "echo 'sudo mkdir -p /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld
+          echo "echo 'sudo chown mysql:mysql /var/run/mysqld'" ; sudo chown mysql:mysql /var/run/mysqld || true
 
-      - name: 📦 시스템 전체 패키지 업그레이드/설치 (echo/재시도/로그/권한fix)
+      - name: 📦 시스템 패키지 업그레이드 및 MySQL/Postfix robust 설치
         run: |
           set -e
-          trycmd() {
-            local cmd="$1"
-            local logfile="$2"
-            local max_try=3
-            local n=1
-            until eval "$cmd" >> "$logfile" 2>&1; do
-              echo "[!] $cmd 실패 ($n회). 3초후 재시도..." | tee -a "$logfile"
-              sleep 3
-              ((n++))
-              if [ $n -gt $max_try ]; then
-                echo "[❌] $cmd 명령이 $max_try회 실패. 중단." | tee -a "$logfile"
-                exit 1
-              fi
-              echo "[+] $cmd 재시도 ($n/$max_try)..." | tee -a "$logfile"
-            done
-            echo "[✔] $cmd 성공." | tee -a "$logfile"
-          }
-          for f in step-01-apt-update.txt step-02-apt-upgrade.txt step-03-dist-upgrade.txt step-04-autoremove.txt step-05-pkgs.txt; do
-            touch .github/echo/$f
-          done
-          trycmd "sudo apt-get update -y" ".github/echo/step-01-apt-update.txt"
-          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" ".github/echo/step-02-apt-upgrade.txt"
-          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y" ".github/echo/step-03-dist-upgrade.txt"
-          trycmd "sudo apt-get autoremove -y" ".github/echo/step-04-autoremove.txt"
-          trycmd "sudo apt-get install -y postfix mailutils bsd-mailx python3-pip python3-venv npm nodejs" ".github/echo/step-05-pkgs.txt"
+          echo "echo 'sudo apt-get update -y'" ; sudo apt-get update -y | tee .github/echo/step-01-apt-update.txt
+          echo "echo 'sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'" ; sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y | tee .github/echo/step-02-apt-upgrade.txt
+          echo "echo 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server postfix mailutils'" ; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server postfix mailutils | tee .github/echo/step-03-apt-install.txt
 
-      - name: 📬 메일 서버 robust 설치/로컬 모드 (echo/로그)
+      - name: 🧩 MySQL robust 데몬/소켓/권한 보장
         run: |
           set -e
-          echo "echo '[+] Postfix+mailutils 로컬 robust 설치'" | tee .github/echo/step-06-mailutils.txt
-          sudo systemctl stop postfix || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils bsd-mailx >> .github/echo/step-06-mailutils.txt 2>&1
-          sudo systemctl restart postfix || true
-          sudo ls -l /var/mail >> .github/echo/step-06-mailutils.txt || sudo ls -l /var/spool/mail >> .github/echo/step-06-mailutils.txt
-
-      - name: 🧩 MySQL 8.x robust 설치/초기화/권한/소켓/비번 리셋 (Access Denied 방지)
-        run: |
-          set -e
+          echo "echo 'sudo systemctl stop mysql || true'" ; sudo systemctl stop mysql || true
+          echo "echo 'sudo pkill -f mysqld || true'" ; sudo pkill -f mysqld || true
           echo "echo 'sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld'" ; sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && sudo chmod 770 /var/run/mysqld
-          sudo systemctl stop mysql || true
-          sudo pkill -f mysqld || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-          for i in 1 2 3; do
-            sudo systemctl start mysql || true
-            sleep 7
-            if sudo systemctl status mysql | grep -qi 'active (running)'; then break; fi
-            if [ $i -eq 3 ]; then
-              sudo journalctl -u mysql | tail -30
-              echo "[❌] MySQL 데몬 기동 실패!"; exit 1
-            fi
-          done
-          # skip-grant-tables robust unlock
-          echo "echo '[MySQL] skip-grant-tables 진입'" ; sudo systemctl stop mysql || true
-          sudo pkill -f mysqld || true
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
-          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
-          sleep 12
-          echo "UPDATE mysql.user SET plugin='mysql_native_password' WHERE User='root' AND Host='localhost';" | sudo mysql || true
-          echo "FLUSH PRIVILEGES;" | sudo mysql || true
+          echo "echo 'sudo systemctl start mysql'" ; sudo systemctl start mysql || true
+          sleep 4
+
+      - name: 🚨 MySQL robust root/robust_admin 초기화/권한 robust (echo→실행 완전분리)
+        run: |
+          set -e
+
+          # [1] root robust 패스워드/플러그인 초기화 (echo → 실행 완전 분리)
+          echo "echo 'cat <<EOF | sudo mysql'" | tee -a .github/echo/step-root-reset.txt
+          echo "echo \"UPDATE mysql.user SET plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root' AND Host='localhost';\"" | tee -a .github/echo/step-root-reset.txt
+          echo "echo \"UPDATE mysql.user SET host='%', plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root';\"" | tee -a .github/echo/step-root-reset.txt
+          echo "echo \"FLUSH PRIVILEGES;\"" | tee -a .github/echo/step-root-reset.txt
+
+          echo "cat <<EOF | sudo mysql
+UPDATE mysql.user SET plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root' AND Host='localhost';
+UPDATE mysql.user SET host='%', plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root';
+FLUSH PRIVILEGES;
+EOF"
+          cat <<EOF | sudo mysql
+UPDATE mysql.user SET plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root' AND Host='localhost';
+UPDATE mysql.user SET host='%', plugin='mysql_native_password', authentication_string=PASSWORD('rootpass123') WHERE User='root';
+FLUSH PRIVILEGES;
+EOF
+
           sleep 2
-          sudo pkill -f mysqld || true
+
+          # [2] robust_admin robust 계정/권한 생성 (echo → 실행 완전 분리)
+          echo "echo 'cat <<EOF | sudo mysql'" | tee -a .github/echo/step-root-reset.txt
+          echo "echo \"CREATE USER IF NOT EXISTS 'robust_admin'@'%' IDENTIFIED BY 'robustpass123';\"" | tee -a .github/echo/step-root-reset.txt
+          echo "echo \"GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'%' WITH GRANT OPTION;\"" | tee -a .github/echo/step-root-reset.txt
+          echo "echo \"FLUSH PRIVILEGES;\"" | tee -a .github/echo/step-root-reset.txt
+
+          echo "cat <<EOF | sudo mysql
+CREATE USER IF NOT EXISTS 'robust_admin'@'%' IDENTIFIED BY 'robustpass123';
+GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'%' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF"
+          cat <<EOF | sudo mysql
+CREATE USER IF NOT EXISTS 'robust_admin'@'%' IDENTIFIED BY 'robustpass123';
+GRANT ALL PRIVILEGES ON *.* TO 'robust_admin'@'%' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF
+
           sleep 2
-          echo "echo '[MySQL] 정상모드 기동 및 최종 root 패스워드 재설정'" ; sudo systemctl start mysql
-          sleep 6
-          echo "ALTER USER 'root'@'localhost' IDENTIFIED BY 'rootpass123';" | sudo mysql -u root || true
-          echo "FLUSH PRIVILEGES;" | sudo mysql -u root || true
-          sleep 2
+
+      - name: ✅ MySQL root robust 인증 체크
+        run: |
+          set -e
+          echo "echo '[+] MySQL root 패스워드 인증 robust test...'" ; echo "[+] MySQL root 패스워드 인증 robust test..." | tee .github/echo/step-root-login.txt
           export MYSQL_PWD=rootpass123
           for i in 1 2 3; do
-            if mysqladmin -u root ping; then
-              echo "[✔] MySQL root 패스워드 인증 성공!" | tee -a .github/echo/step-root-login.txt
+            echo "echo 'mysqladmin -u root ping'" ; if mysqladmin -u root ping; then
+              echo "echo '[✔] MySQL root 패스워드 인증 성공!'" ; echo "[✔] MySQL root 패스워드 인증 성공!" | tee -a .github/echo/step-root-login.txt
               exit 0
             else
-              echo "[!] root 인증 실패($i). 3초후 재시도..." | tee -a .github/echo/step-root-login.txt
+              echo "echo '[!] root 인증 실패($i). 3초후 재시도...'" ; echo "[!] root 인증 실패($i). 3초후 재시도..." | tee -a .github/echo/step-root-login.txt
               sleep 3
             fi
           done
-          echo "[❌] MySQL root 인증 최종 실패! 전체 중단." | tee -a .github/echo/step-root-login.txt
+          echo "echo '[❌] MySQL root 인증 실패! 전체 중단.'" ; echo "[❌] MySQL root 인증 실패! 전체 중단." | tee -a .github/echo/step-root-login.txt
           exit 1
 
-      - name: ✅ MySQL root robust 인증 및 DB/테이블 robust 생성
+      - name: 📧 robust 인증 결과 가상 메일 발송
         run: |
           set -e
-          export MYSQL_PWD=rootpass123
-          mysql -u root -prootpass123 -e "CREATE DATABASE IF NOT EXISTS logistics;"
-          mysql -u root -prootpass123 -D logistics -e "
-            CREATE TABLE IF NOT EXISTS echo_log (
-              id INT AUTO_INCREMENT PRIMARY KEY,
-              step_name VARCHAR(128),
-              echo_cmd TEXT,
-              executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              status VARCHAR(32) DEFAULT 'success',
-              message TEXT
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
-          mysql -u root -prootpass123 -D logistics -e "
-            INSERT INTO echo_log (step_name, echo_cmd, status, message) VALUES
-            ('init', 'robust DB/테이블 생성', 'success', NOW());"
-          echo "echo '[DB/테이블 robust 생성 완료]'" | tee -a .github/echo/step-db-init.txt
-
-      - name: 📧 인증 및 결과 이메일 "가상발송"(echo/로그, mailutils 확인)
-        run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y mailutils bsd-mailx
-          if ! command -v mail >/dev/null 2>&1; then
-            echo "[❌] mail 명령 미설치! mailutils 설치 실패"
-            exit 1
-          fi
           echo "echo 'mkdir -p /tmp/echo/mail_send'" ; mkdir -p /tmp/echo/mail_send
           export MYSQL_PWD=rootpass123
-          echo "echo '[+] Sending MySQL result email (virtual local mailbox)...'" | tee .github/echo/step-99-mail-send.txt
+          echo "echo 'mysql -u root -e SHOW DATABASES;'" ; mysql -u root -e 'SHOW DATABASES;' > .github/logs/mail_db_list.txt
+          echo "echo 'mysql -u root -e SELECT * FROM mysql.user;'" ; mysql -u root -e 'SELECT * FROM mysql.user;' > .github/logs/mail_users.txt || true
           mailbody=".github/logs/mailbody.txt"
-          mysql -u root -prootpass123 -e 'SHOW DATABASES;' > .github/logs/mail_db_list.txt
-          mysql -u root -prootpass123 -e 'SELECT * FROM information_schema.USER_PRIVILEGES;' > .github/logs/mail_privs.txt || true
-          mysql -u root -prootpass123 -e 'SELECT * FROM mysql.user;' > .github/logs/mail_users.txt || true
-          mysql -u root -prootpass123 -D logistics -e 'SELECT * FROM echo_log;' > .github/logs/mail_echo_log.txt || true
           {
-            echo "MySQL 8.x robust 자동화 결과"
-            echo ""
+            echo "MySQL robust 인증/권한/테스트 결과"
             echo "[SHOW DATABASES]"
             cat .github/logs/mail_db_list.txt
-            echo ""
-            echo "[USER_PRIVILEGES]"
-            cat .github/logs/mail_privs.txt
-            echo ""
             echo "[mysql.user]"
             cat .github/logs/mail_users.txt
-            echo ""
-            echo "[logistics.echo_log]"
-            cat .github/logs/mail_echo_log.txt
-            echo ""
-            echo "실행 환경: $(uname -a)"
             echo "완료시각: $(date)"
           } > $mailbody
-          if id ubuntu >/dev/null 2>&1; then to_addr="ubuntu"; else to_addr="root"; fi
-          subject="[MySQL robust] 결과 리포트 ($(date '+%Y-%m-%d %H:%M'))"
-          cat $mailbody | mail -s "$subject" "$to_addr"
-
-      - name: 📬 가상 메일 수신함 robust 출력 (echo/권한/존재보장)
-        run: |
-          set -e
-          echo "echo '[+] Show virtual mailbox (가상수신 결과)'" | tee .github/echo/step-100-mail-recv.txt
-          if id ubuntu >/dev/null 2>&1; then
-            sudo cat /var/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
-            sudo cat /var/spool/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || \
-            echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
-          else
-            sudo cat /var/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
-            sudo cat /var/spool/mail/root | tee -a .github/echo/step-100-mail-recv.txt || \
-            echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
-          fi
-          echo "echo '[+] Virtual mailbox dump complete.'" | tee -a .github/echo/step-100-mail-recv.txt
-
-      - name: 🟩 Directory/File Permission robust 체크 (echo)
-        run: |
-          set -e
-          echo "echo '[+] Directory & file permission check...'" | tee .github/echo/step-101-perm.txt
-          ls -lR .github/logs | tee -a .github/echo/step-101-perm.txt || true
-          ls -lR .github/echo | tee -a .github/echo/step-101-perm.txt || true
-          ls -lR /var/mail | tee -a .github/echo/step-101-perm.txt || true
-          ls -lR /var/spool/mail | tee -a .github/echo/step-101-perm.txt || true
-          ls -lR /var/run/mysqld | tee -a .github/echo/step-101-perm.txt || true
-
-  # === 2. .github/workflows 내 모든 mysql 관련 서비스 분산 업그레이드/충돌방지 ===
-  distributed-upgrade:
-    runs-on: ubuntu-latest
-    timeout-minutes: 28
-    strategy:
-      matrix:
-        id: [0, 1, 2, 3, 4]
-
-    steps:
-      - name: 📁 Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: 🧩 워크플로 파일 분산 업그레이드/충돌방지 (echo)
-        run: |
-          set -e
-          mkdir -p .github/echo
-          touch .github/echo/distributed-init.txt
-          touch .github/echo/distributed-upgrade.txt
-          echo "echo '[분산] MySQL 관련 워크플로 파일 검색 및 분배'" | tee .github/echo/distributed-init.txt
-          find .github/workflows -type f -name '*.yml' -o -name '*.yaml' | grep -i mysql | sort > .github/echo/mysql_workflows.txt
-          idx=${{ matrix.id }}
-          files=($(cat .github/echo/mysql_workflows.txt))
-          total=${#files[@]}
-          selected=()
-          for ((i=0; i<${total}; i++)); do
-            if (( i % 5 == idx )); then selected+=("${files[$i]}"); fi
-          done
-          echo "echo '[분산] matrix.id=${idx}, 할당:${#selected[@]}'" | tee -a .github/echo/distributed-init.txt
-          for file in "${selected[@]}"; do
-            name=$(basename "$file")
-            lockfile="/tmp/${name}.lock"
-            (
-              echo "echo '[분산] $name 업그레이드 시작'" | tee -a .github/echo/distributed-upgrade.txt
-              if ( set -o noclobber; echo "$$" > "$lockfile" ) 2> /dev/null; then
-                trap 'rm -f "$lockfile"; exit $?' INT TERM EXIT
-                sudo apt-get update -y
-                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server mysql-client || true
-                sudo apt-get upgrade -y mysql-server mysql-client || true
-                echo "[분산] $name mysql upgrade OK" | tee -a .github/echo/distributed-upgrade.txt
-                sleep $(( (RANDOM % 10) + 1 ))   # 분산 스태거 1~10초 랜덤
-                rm -f "$lockfile"
-              else
-                echo "[분산] $name 락파일 존재, skip" | tee -a .github/echo/distributed-upgrade.txt
-              fi
-            ) &
-          done
-          wait
-          echo "echo '[분산] 전체 분배/병렬 업그레이드 완료'" | tee -a .github/echo/distributed-upgrade.txt
-
-      - name: 📧 분산 업그레이드 전체 결과 메일(에코, mailutils 확인)
-        run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y mailutils bsd-mailx
-          if ! command -v mail >/dev/null 2>&1; then
-            echo "[❌] mail 명령 미설치! mailutils 설치 실패" | tee -a .github/echo/distributed-upgrade.txt
-            exit 1
-          fi
           to_addr=$(id ubuntu >/dev/null 2>&1 && echo ubuntu || echo root)
-          subject="[분산 MySQL 업그레이드] 전체 결과 ($(date '+%Y-%m-%d %H:%M'))"
-          cat .github/echo/distributed-upgrade.txt | mail -s "$subject" "$to_addr"
+          subject="[MySQL robust] 인증/권한 결과 ($(date '+%Y-%m-%d %H:%M'))"
+          echo "echo 'cat \$mailbody | mail -s ...'" ; cat $mailbody | mail -s "$subject" "$to_addr"
+
+      - name: 📬 가상 메일 robust 수신함 출력
+        run: |
+          set -e
+          echo "echo '[+] Show virtual mailbox (가상수신 결과)'" ; echo '[+] Show virtual mailbox (가상수신 결과)' | tee .github/echo/step-100-mail-recv.txt
+          if id ubuntu >/dev/null 2>&1; then
+            echo "echo 'sudo cat /var/mail/ubuntu | tee -a ...'" ; sudo cat /var/mail/ubuntu | tee -a .github/echo/step-100-mail-recv.txt || echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          else
+            echo "echo 'sudo cat /var/mail/root | tee -a ...'" ; sudo cat /var/mail/root | tee -a .github/echo/step-100-mail-recv.txt || echo '[No mail]' | tee -a .github/echo/step-100-mail-recv.txt
+          fi
+
+      - name: 🟩 Directory/File Permission robust 체크
+        run: |
+          set -e
+          echo "echo '[+] Directory & file permission check...'" ; echo '[+] Directory & file permission check...' | tee .github/echo/step-101-perm.txt
+          echo "echo 'ls -lR .github/logs | tee -a ...'" ; ls -lR .github/logs | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR .github/echo | tee -a ...'" ; ls -lR .github/echo | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR /var/mail | tee -a ...'" ; ls -lR /var/mail | tee -a .github/echo/step-101-perm.txt || true
+          echo "echo 'ls -lR /var/run/mysqld | tee -a ...'" ; ls -lR /var/run/mysqld | tee -a .github/echo/step-101-perm.txt || true
