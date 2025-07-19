@@ -1,6 +1,4 @@
-# .github/workflows/mysql-init.yml
-
-name: 🐬 MySQL Root Setup and DB Init
+name: 🐬 MySQL Full Schema/Data Init with Echo & Permission Guard
 
 on:
   workflow_dispatch:
@@ -15,47 +13,122 @@ jobs:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🧩 Install MySQL Server
+      - name: 🧩 Install MySQL Server (with echo)
         run: |
-          echo "[+] Installing MySQL server..."
-          sudo apt-get update
+          echo "echo '[+] Installing MySQL server...'"
+          echo '[+] Installing MySQL server...'
+          sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-
-      - name: 🔁 Start MySQL Service
-        run: |
-          echo "[+] Starting MySQL service..."
           sudo systemctl enable mysql
           sudo systemctl start mysql
-          sudo systemctl status mysql || true
           sleep 5
+          sudo systemctl status mysql || true
 
-      - name: 🔐 Configure MySQL Root Password
+      - name: 🔐 Set MySQL Root Password (All Fallbacks + echo)
         run: |
-          echo "[+] Reconfiguring MySQL root user for password login"
-          sudo mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123'; FLUSH PRIVILEGES;" || echo "[!] Root password may already be set. Skipping."
-          echo "[✔] Root user now uses password"
+          echo "echo '[+] Setting MySQL root password (all plugin fallback)...'"
+          echo '[+] Setting MySQL root password (all plugin fallback)...'
+          sudo mysql -u root <<'EOSQL'
+            ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';
+            FLUSH PRIVILEGES;
+          EOSQL
 
-      - name: 🗃️ Create Logistics Database and Tables
+          mysqladmin -u root -prootpass123 ping || (
+            echo "echo '[!] Password login failed, reapplying native_password...'"
+            echo '[!] Password login failed, reapplying native_password...'
+            sudo mysql -u root <<'EOSQL'
+              ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';
+              FLUSH PRIVILEGES;
+            EOSQL
+          )
+          mysqladmin -u root -prootpass123 ping || (echo "echo '[❌] Root password set failed!'" && echo '[❌] Root password set failed!' && exit 1)
+          echo "echo '[✔] MySQL root password set and tested'"
+          echo '[✔] MySQL root password set and tested'
+
+      - name: 📂 Create Directories and SQL File (with echo)
         run: |
-          echo "[+] Creating logistics DB and schema..."
+          echo "echo '[+] Creating data/script directories and SQL script file...'"
+          echo '[+] Creating data/script directories and SQL script file...'
+          echo "sudo mkdir -p /opt/logistics/virtual_customer_data"
+          sudo mkdir -p /opt/logistics/virtual_customer_data
+          echo "mkdir -p .github/logs"
+          mkdir -p .github/logs
+          echo "touch .github/logs/mysql_init.log"
+          touch .github/logs/mysql_init.log
+
+      - name: 🗃️ Generate Full SQL Schema/Data File (with echo, 대량 데이터)
+        run: |
+          SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
+          echo "echo '[+] Generating SQL file for schema & bulk data...'"
+          echo '[+] Generating SQL file for schema & bulk data...'
+          {
+            echo "-- logistics schema/tables"
+            echo "DROP DATABASE IF EXISTS logistics;"
+            echo "CREATE DATABASE logistics DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
+            echo "USE logistics;"
+            echo "CREATE TABLE IF NOT EXISTS customers ("
+            echo "  customer_id INT PRIMARY KEY AUTO_INCREMENT,"
+            echo "  name VARCHAR(100) NOT NULL,"
+            echo "  email VARCHAR(128),"
+            echo "  registered_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            echo ");"
+            echo "CREATE TABLE IF NOT EXISTS card_transactions ("
+            echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT,"
+            echo "  customer_id INT NOT NULL,"
+            echo "  card_type ENUM('credit','debit','prepaid') NOT NULL,"
+            echo "  amount DECIMAL(10,2) NOT NULL,"
+            echo "  merchant VARCHAR(100),"
+            echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id)"
+            echo ");"
+            echo "-- bulk customer data"
+            echo "INSERT INTO customers (name, email) VALUES"
+            for i in {1..10}; do
+              n=$(printf "User%02d" $i)
+              e=$(printf "user%02d@email.com" $i)
+              echo "  ('$n', '$e')"$(if [ $i -lt 10 ]; then echo ','; else echo ';'; fi)
+            done
+            echo "-- bulk card_transactions"
+            echo "INSERT INTO card_transactions (customer_id, card_type, amount, merchant, transaction_time) VALUES"
+            txid=1
+            for cid in {1..10}; do
+              for j in {1..3}; do
+                ctype=$([ $(( (cid+j) % 3 )) -eq 0 ] && echo "credit" || ([ $((j % 2)) -eq 0 ] && echo "debit" || echo "prepaid"))
+                amt=$(awk "BEGIN {printf \"%.2f\", (RANDOM%10000)/100+10}")
+                merch=$(printf "Merchant%02d" $j)
+                d="2023-07-$((10+cid)) 12:$(printf "%02d" $((j*7+cid)))"
+                sep=','
+                [ $cid -eq 10 ] && [ $j -eq 3 ] && sep=';'
+                echo "  ($cid, '$ctype', $amt, '$merch', '$d')$sep"
+              done
+            done
+          } | sudo tee $SCRIPT
+
+      - name: 🚦 MySQL DB/Table/Data Init & Import (echo)
+        run: |
           DB_PASSWORD=rootpass123
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
-          sudo mkdir -p $(dirname $SCRIPT)
-          echo "CREATE TABLE customers (customer_id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL);" > $SCRIPT
-          echo "CREATE TABLE card_transactions (" >> $SCRIPT
-          echo "  transaction_id INT PRIMARY KEY AUTO_INCREMENT," >> $SCRIPT
-          echo "  customer_id INT NOT NULL," >> $SCRIPT
-          echo "  card_type ENUM('credit','debit') NOT NULL," >> $SCRIPT
-          echo "  amount DECIMAL(10,2) NOT NULL," >> $SCRIPT
-          echo "  transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP," >> $SCRIPT
-          echo "  FOREIGN KEY (customer_id) REFERENCES customers(customer_id));" >> $SCRIPT
-          echo "INSERT INTO customers (name) VALUES ('Alice'),('Bob'),('Charlie');" >> $SCRIPT
-          echo "INSERT INTO card_transactions (customer_id, card_type, amount) VALUES (1,'credit',250.00),(1,'debit',50.00),(2,'credit',120.00),(3,'debit',75.50);" >> $SCRIPT
+          echo "echo '[+] Creating and importing DB/schema/data...'"
+          echo '[+] Creating and importing DB/schema/data...'
+          echo "mysql -u root -p\$DB_PASSWORD < \$SCRIPT"
+          mysql -u root -p$DB_PASSWORD < $SCRIPT
+          echo "echo '[✔] MySQL logistics DB initialized (all schema, data)'"
+          echo '[✔] MySQL logistics DB initialized (all schema, data)' | tee .github/logs/mysql_init.log
 
-          echo "[+] Creating database..."
-          mysql -u root -p$DB_PASSWORD -e "CREATE DATABASE IF NOT EXISTS logistics;"
+      - name: 🛠️ MySQL Test Select All (echo)
+        run: |
+          echo "echo '[+] Select all customers and transactions (log below)...'"
+          echo '[+] Select all customers and transactions (log below)...'
+          echo "mysql -u root -prootpass123 -e 'SELECT * FROM logistics.customers;'"
+          mysql -u root -prootpass123 -e "SELECT * FROM logistics.customers;"
+          echo "mysql -u root -prootpass123 -e 'SELECT * FROM logistics.card_transactions;'"
+          mysql -u root -prootpass123 -e "SELECT * FROM logistics.card_transactions;"
 
-          echo "[+] Importing data..."
-          mysql -u root -p$DB_PASSWORD logistics < $SCRIPT
-
-          echo "[✔] MySQL logistics DB initialized" > .github/logs/mysql_init.log
+      - name: 🟩 DB/Table 권한 및 파일/디렉토리 Permission 확인 (echo)
+        run: |
+          echo "echo '[+] Directory & file permission check...'"
+          echo '[+] Directory & file permission check...'
+          echo "ls -lR /opt/logistics/virtual_customer_data"
+          ls -lR /opt/logistics/virtual_customer_data
+          echo "ls -lR .github/logs"
+          ls -lR .github/logs
