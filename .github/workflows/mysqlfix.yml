@@ -1,4 +1,4 @@
-name: 🐬 MySQL 8.x 완전 자동화 패스워드 초기화 (Access Denied/1290 완벽해결, echo)
+name: 🐬 MySQL 8.x Access Denied/구문 오류 완벽 우회 자동화 (echo, 재시도)
 
 on:
   workflow_dispatch:
@@ -13,23 +13,38 @@ jobs:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📦 시스템 전체 패키지 업그레이드 (with echo)
+      - name: 📦 시스템 전체 패키지 업그레이드 및 설치 (재시도/echo)
         run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
           echo "echo '[+] apt-get update -y'"
           echo '[+] apt-get update -y'
-          sudo apt-get update -y
+          trycmd "sudo apt-get update -y"
 
           echo "echo '[+] apt-get upgrade -y (시스템 전체 업그레이드)'"
           echo '[+] apt-get upgrade -y (시스템 전체 업그레이드)'
-          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
 
-          echo "echo '[+] apt-get dist-upgrade -y (권장: 커널/의존성 포함)'"
-          echo '[+] apt-get dist-upgrade -y (권장: 커널/의존성 포함)'
-          sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y
+          echo "echo '[+] apt-get dist-upgrade -y (커널/의존성 포함)'"
+          echo '[+] apt-get dist-upgrade -y (커널/의존성 포함)'
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y"
 
           echo "echo '[+] apt-get autoremove -y (불필요 패키지 정리)'"
           echo '[+] apt-get autoremove -y (불필요 패키지 정리)'
-          sudo apt-get autoremove -y
+          trycmd "sudo apt-get autoremove -y"
 
       - name: 📂 Pre-create Directories (with echo)
         run: |
@@ -42,62 +57,122 @@ jobs:
           echo "touch .github/logs/mysql_init.log"
           touch .github/logs/mysql_init.log
 
-      - name: 🧩 Install MySQL Server (with echo, after upgrade)
+      - name: 🧩 Install MySQL Server (재시도, echo)
         run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
           echo "echo '[+] Installing MySQL server (최신).' "
-          echo '[+] Installing MySQL server (최신).' 
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-          sudo systemctl stop mysql || true
-          sudo systemctl enable mysql
+          echo '[+] Installing MySQL server (최신).'
+          trycmd "sudo apt-get update -y"
+          trycmd "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server"
+          trycmd "sudo systemctl stop mysql || true"
+          trycmd "sudo systemctl enable mysql"
           echo "echo '[+] MySQL install complete.'"
           echo '[+] MySQL install complete.'
 
-      - name: 🚨 Start MySQL in --skip-grant-tables Mode for Root Reset (echo)
+      - name: 🚨 Start MySQL in --skip-grant-tables Mode for Root Reset (재시도, echo)
         run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
           echo "echo '[+] Starting MySQL in --skip-grant-tables mode for root auth reset...'"
           echo '[+] Starting MySQL in --skip-grant-tables mode for root auth reset...'
-          sudo systemctl stop mysql || true
+          trycmd "sudo systemctl stop mysql || true"
           echo "echo '[+] Launching mysqld_safe --skip-grant-tables &'"
           nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skip.log 2>&1 &
           sleep 10
           echo "echo '[+] mysqld_safe --skip-grant-tables started.'"
           echo '[+] mysqld_safe --skip-grant-tables started.'
 
-      - name: 🔑 Root 패스워드 테이블 직접 업데이트 (echo, 1290 완전우회)
+      - name: 🔑 Root 플러그인만 직접 UPDATE (echo, 8.x 구문에러 완벽 방지)
         run: |
-          echo "echo '[+] Updating mysql.user table directly (skip-grant-tables)...'"
-          echo '[+] Updating mysql.user table directly (skip-grant-tables)...'
-          echo "UPDATE mysql.user SET authentication_string=PASSWORD('rootpass123'), plugin='mysql_native_password' WHERE User='root' AND Host='localhost';" > .github/logs/root_reset.sql
+          echo "echo '[+] Updating root plugin only (skip-grant-tables, no password change)...'"
+          echo '[+] Updating root plugin only (skip-grant-tables, no password change)...'
+          echo "UPDATE mysql.user SET plugin='mysql_native_password' WHERE User='root' AND Host='localhost';" > .github/logs/root_reset.sql
           echo "FLUSH PRIVILEGES;" >> .github/logs/root_reset.sql
           echo "echo 'sudo mysql < .github/logs/root_reset.sql'"
           sudo mysql < .github/logs/root_reset.sql
-          echo "echo '[+] Root password and plugin updated in user table.'"
-          echo '[+] Root password and plugin updated in user table.'
+          echo "echo '[+] Root plugin updated in user table.'"
+          echo '[+] Root plugin updated in user table.'
 
-      - name: 🚨 Kill skip-grant-tables and Restart MySQL (echo)
+      - name: 🚨 Kill skip-grant-tables and Restart MySQL (재시도, echo)
         run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
           echo "echo '[+] Stopping mysqld_safe --skip-grant-tables ...'"
           echo '[+] Stopping mysqld_safe --skip-grant-tables ...'
-          sudo pkill -f mysqld_safe || true
-          sudo pkill -f mysqld || true
+          trycmd "sudo pkill -f mysqld_safe || true"
+          trycmd "sudo pkill -f mysqld || true"
           sleep 5
           echo "echo '[+] Restarting mysql service...'"
           echo '[+] Restarting mysql service...'
-          sudo systemctl start mysql
+          trycmd "sudo systemctl start mysql"
           sleep 5
-          sudo systemctl status mysql || true
+          trycmd "sudo systemctl status mysql || true"
 
-      - name: 🔑 Root 패스워드/플러그인 2차 안전 마무리 (정상모드에서 ALTER USER) (echo)
+      - name: 🔑 Root 비밀번호 설정 (정상모드에서 ALTER USER, echo)
         run: |
-          echo "echo '[+] Running ALTER USER for root (정상모드에서 한번 더)...'"
-          echo '[+] Running ALTER USER for root (정상모드에서 한번 더)...'
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
+          echo "echo '[+] ALTER USER로 root 비밀번호 설정(정상모드)...'"
+          echo '[+] ALTER USER로 root 비밀번호 설정(정상모드)...'
           echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123';" > .github/logs/root_reset2.sql
           echo "FLUSH PRIVILEGES;" >> .github/logs/root_reset2.sql
-          echo "echo 'mysql -u root -prootpass123 < .github/logs/root_reset2.sql'"
-          mysql -u root -prootpass123 < .github/logs/root_reset2.sql
-          echo "echo '[+] ALTER USER root 마무리 완료.'"
-          echo '[+] ALTER USER root 마무리 완료.'
+          echo "echo 'mysql -u root < .github/logs/root_reset2.sql'"
+          trycmd "mysql -u root < .github/logs/root_reset2.sql"
+          echo "echo '[+] ALTER USER root 완료.'"
+          echo '[+] ALTER USER root 완료.'
 
       - name: ✅ Root 비밀번호 인증 테스트 (echo)
         run: |
@@ -154,25 +229,55 @@ jobs:
             done
           } | sudo tee $SCRIPT
 
-      - name: 🚦 MySQL DB/Table/Data Init & Import (echo)
+      - name: 🚦 MySQL DB/Table/Data Init & Import (재시도, echo)
         run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
           DB_PASSWORD=rootpass123
           SCRIPT=/opt/logistics/virtual_customer_data/init_db.sql
           echo "echo '[+] Creating and importing DB/schema/data...'"
           echo '[+] Creating and importing DB/schema/data...'
           echo "mysql -u root -p\$DB_PASSWORD < \$SCRIPT"
-          mysql -u root -p$DB_PASSWORD < $SCRIPT
+          trycmd "mysql -u root -p\$DB_PASSWORD < \$SCRIPT"
           echo "echo '[✔] MySQL logistics DB initialized (all schema, data)'"
           echo '[✔] MySQL logistics DB initialized (all schema, data)' | tee .github/logs/mysql_init.log
 
-      - name: 🛠️ MySQL Test Select All (echo)
+      - name: 🛠️ MySQL Test Select All (재시도, echo)
         run: |
+          trycmd() {
+            local cmd="$1"
+            local max_try=3
+            local n=1
+            until eval "$cmd"; do
+              echo "[!] $cmd 실패 ($n회). 3초후 재시도..."
+              sleep 3
+              ((n++))
+              if [ $n -gt $max_try ]; then
+                echo "[❌] $cmd 명령이 $max_try회 실패. 중단."
+                exit 1
+              fi
+              echo "[+] $cmd 재시도 ($n/$max_try)..."
+            done
+          }
           echo "echo '[+] Select all customers and transactions (log below)...'"
           echo '[+] Select all customers and transactions (log below)...'
           echo "mysql -u root -prootpass123 -e 'SELECT * FROM logistics.customers;'"
-          mysql -u root -prootpass123 -e "SELECT * FROM logistics.customers;"
+          trycmd "mysql -u root -prootpass123 -e 'SELECT * FROM logistics.customers;'"
           echo "mysql -u root -prootpass123 -e 'SELECT * FROM logistics.card_transactions;'"
-          mysql -u root -prootpass123 -e "SELECT * FROM logistics.card_transactions;"
+          trycmd "mysql -u root -prootpass123 -e 'SELECT * FROM logistics.card_transactions;'"
 
       - name: 🟩 Permission 확인 (echo)
         run: |
