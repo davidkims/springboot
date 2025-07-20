@@ -1,130 +1,132 @@
-name: 📦 전문가 분산/집계/설치/암호화/리메이크/스냅샷 자동화 (권한/백업/echo/오류안전 완전판)
+name: 📦 전문가 분산/메일서버/ELK/DB/도커/암호화/스냅샷 통합 자동화
 
 on:
   workflow_dispatch:
-  repository_dispatch:
-    types: [workflow_run]
   schedule:
     - cron: '*/5 * * * *'
 
 jobs:
-  all-in-one-monitor:
+  all-in-one:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📦 [백업 디렉토리 초기화]
+      # 0. 디렉토리/초기화/백업
+      - name: 📦 [백업/로그/분산 디렉토리 초기화]
         run: |
-          echo "echo '[백업 디렉토리 초기화]'"
-          mkdir -p .github/package-backup
+          for d in .github/package-backup .github/email_logs .github/email_echo .github/email_accounts collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs; do
+            echo "echo 'mkdir -p $d'"
+            mkdir -p $d
+          done
           find .github/package-backup -type f -delete
-          echo "[OK] .github/package-backup 디렉토리 초기화" > .github/package-backup/echo_init.txt
+          echo "[OK] .github/package-backup 초기화" > .github/package-backup/echo_init.txt
 
-      - name: 🚀 [패키지 최신화/venv+설치내역 암호화+FS체크+백업/echo/권한에러 안전]
+      # 1. 가상 메일계정
+      - name: 📧 [메일 가상계정/비번 echo]
         run: |
-          echo "echo '[패키지 최신화 및 백업/암호화/권한 점검]'"
+          EMAIL_USER="testuser"
+          EMAIL_DOMAIN="example.com"
+          EMAIL_ADDR="$EMAIL_USER@$EMAIL_DOMAIN"
+          EMAIL_PASS="$(date +%s | sha256sum | head -c 12)"
+          echo "$EMAIL_ADDR:$EMAIL_PASS" > .github/email_accounts/test_account.txt
+          echo "[가상메일 계정] $EMAIL_ADDR / PW: $EMAIL_PASS" > .github/email_accounts/echo_account.txt
+
+      # 2. 메일서버 방화벽(권한)
+      - name: 🔥 [메일서버 방화벽 설정/echo]
+        run: |
+          for port in 25 465 587 993 995 110 143; do
+            echo "[방화벽: 포트 허용] $port" | tee -a .github/email_echo/echo_firewall.txt
+            sudo ufw allow $port/tcp 2>&1 | tee -a .github/email_echo/echo_firewall.txt || echo "[WARN] ufw $port 실패" >> .github/email_echo/echo_firewall.txt
+          done
+          sudo ufw reload 2>&1 | tee -a .github/email_echo/echo_firewall.txt || true
+          echo "[방화벽 적용 완료]" | tee -a .github/email_echo/echo_firewall.txt
+
+      # 3. 메일서버 8종 설치/테스트/echo
+      - name: 📮 [메일서버 8종 설치/테스트/echo]
+        run: |
           set -e
-          sudo apt-get update -y
-          sudo apt-get upgrade -y || true
-          mkdir -p encrypted-data/installed-packages
-          APT_LIST_FILE=".github/pkglist-apt.txt"
-          if [ -f "$APT_LIST_FILE" ]; then
-            PKGS=$(grep -v '^#' "$APT_LIST_FILE" | tr -s ' ' '\n' | grep -v '^\s*$' | sort -u | tr '\n' ' ')
-          else
-            PKGS="wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq"
-          fi
-          > installed-apt-echo.txt
-          for p in $PKGS; do
-            BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
-            CONF=$(dpkg -L $p 2>/dev/null | grep -E "/etc/" | head -1 || true)
-            for file in $BIN $CONF; do
-              if [ -f "$file" ]; then
-                bakfile="$(echo $file | sed 's|/|_|g').bak"
-                if sudo cp -aP "$file" ".github/package-backup/$bakfile" 2>/dev/null; then
-                  echo "[BAK] $file → .github/package-backup/$bakfile" >> installed-apt-echo.txt
-                else
-                  echo "[WARN] $file .bak 백업 실패(권한/존재)" >> installed-apt-echo.txt
-                fi
-              fi
-            done
-            if dpkg -s $p &>/dev/null; then
-              sudo apt-get install --only-upgrade -y $p
-              ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
-              echo "[APT] $p $ver UPGRADED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
-            else
-              sudo apt-get install -y $p
-              ver=$(dpkg -s $p | grep '^Version:' | awk '{print $2}')
-              echo "[APT] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-apt-echo.txt
-            fi
-            BIN=$(dpkg -L $p 2>/dev/null | grep -E "/bin/|/sbin/" | head -1 || true)
-            if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-              echo "[FS] $BIN exists & executable" >> installed-apt-echo.txt
-            else
-              echo "[FS][WARN] $p: No /bin/ or /sbin/ binary found or not executable" >> installed-apt-echo.txt
-            fi
-            dpkg -L $p | xargs -r ls -ld 2>/dev/null | head -10 >> installed-apt-echo.txt || true
-          done
-          VENV_DIR="collector-tmp/pip-venv"
-          python3 -m venv "$VENV_DIR"
-          . "$VENV_DIR/bin/activate"
-          PIP_LIST_FILE=".github/pkglist-pip.txt"
-          if [ -f "$PIP_LIST_FILE" ]; then
-            PKGSPY=$(grep -v '^#' "$PIP_LIST_FILE" | tr -s ' ' '\n' | grep -v '^\s*$' | sort -u | tr '\n' ' ')
-          else
-            PKGSPY="requests"
-          fi
-          > installed-pip-echo.txt
-          python -m pip install --upgrade pip
-          for p in $PKGSPY; do
-            SITE_DIR=$(python -c "import site; print(site.getsitepackages()[0])")
-            if [ -d "$SITE_DIR/$p" ]; then
-              bakfile="$(echo $SITE_DIR/$p | sed 's|/|_|g').bak"
-              if cp -a "$SITE_DIR/$p" ".github/package-backup/$bakfile" 2>/dev/null; then
-                echo "[BAK] $SITE_DIR/$p → .github/package-backup/$bakfile" >> installed-pip-echo.txt
-              else
-                echo "[WARN] $SITE_DIR/$p .bak 백업 실패" >> installed-pip-echo.txt
-              fi
-            fi
-            if python -m pip show $p &>/dev/null; then
-              python -m pip install --upgrade $p
-              ver=$(python -m pip show $p | grep ^Version: | awk '{print $2}')
-              echo "[PIP] $p $ver UPGRADED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-pip-echo.txt
-            else
-              python -m pip install $p
-              ver=$(python -m pip show $p | grep ^Version: | awk '{print $2}')
-              echo "[PIP] $p $ver INSTALLED $(date +%Y-%m-%dT%H:%M:%S)" >> installed-pip-echo.txt
-            fi
-            if python -c "import $p" 2>/dev/null; then
-              echo "[FS] pip module '$p' import OK" >> installed-pip-echo.txt
-            else
-              echo "[FS][WARN] pip module '$p' import FAIL" >> installed-pip-echo.txt
-            fi
-            python -c "import $p, os; print('[FS] installed at', os.path.dirname($p.__file__))" 2>> installed-pip-echo.txt || true
-          done
-          deactivate
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-apt-echo.txt -out encrypted-data/installed-packages/apt-installed-echo.txt.enc -k "package-password"
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in installed-pip-echo.txt -out encrypted-data/installed-packages/pip-installed-echo.txt.enc -k "package-password"
-          rm -f installed-apt-echo.txt installed-pip-echo.txt
-          for d in /usr/bin /usr/local/bin /etc "$VENV_DIR/lib/python3.*/site-packages"; do
-            [ -d "$d" ] && sudo find $d -name '*.bak' -exec bash -c 'sudo cp -aP "$0" .github/package-backup/ || echo "[WARN] $0 .bak 복사 실패"' {} \; 2>/dev/null || true
-          done
-          if [ -d .github/package-backup ]; then
-            sudo chown -R $USER:$USER .github/package-backup/ || echo "[WARN] .github/package-backup chown 실패" >> .github/package-backup/echo_permission.txt
-            sudo chmod -R u+rwX .github/package-backup/ || echo "[WARN] .github/package-backup chmod 실패" >> .github/package-backup/echo_permission.txt
-          else
-            echo "[WARN] .github/package-backup 디렉토리 없음" >> .github/package-backup/echo_permission.txt
-          fi
-          echo '[초기화 및 패키지 최신화/설치내역 암호화+FS체크+백업/echo/권한에러 안전] 완료' > clean.log
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils
+          sudo systemctl enable postfix || true
+          sudo systemctl start postfix || true
+          echo "Test mail from Postfix" | mail -s "Postfix test" root && echo "[OK] Postfix 메일 전송 완료" || echo "[WARN] Postfix 메일 전송 오류"
+          sudo apt-get install -y exim4 mailutils
+          sudo systemctl enable exim4 || true
+          sudo systemctl start exim4 || true
+          echo "Test mail from Exim" | mail -s "Exim test" root && echo "[OK] Exim 메일 전송 완료" || echo "[WARN] Exim 메일 전송 오류"
+          sudo apt-get install -y sendmail mailutils
+          sudo systemctl enable sendmail || true
+          sudo systemctl start sendmail || true
+          echo "Test mail from Sendmail" | mail -s "Sendmail test" root && echo "[OK] Sendmail 메일 전송 완료" || echo "[WARN] Sendmail 메일 전송 오류"
+          sudo apt-get install -y opensmtpd mailutils
+          sudo systemctl enable smtpd || true
+          sudo systemctl start smtpd || true
+          echo "Test mail from OpenSMTPD" | mail -s "OpenSMTPD test" root && echo "[OK] OpenSMTPD 메일 전송 완료" || echo "[WARN] OpenSMTPD 메일 전송 오류"
+          sudo apt-get install -y courier-mta courier-imap courier-pop
+          sudo systemctl enable courier-mta || true
+          sudo systemctl start courier-mta || true
+          sudo apt-get install -y npm
+          sudo npm install -g Haraka
+          mkdir -p haraka-test
+          cd haraka-test && haraka -i . && nohup haraka -c . > ../.github/email_logs/haraka_run.log 2>&1 &
+          cd ..
 
-      - name: 📂 [분산 디렉토리 생성] 병렬 처리
+      # 4. Mailu compose.yaml (echo 변환, 누락 없이)
+      - name: 📦 [Mailu Docker compose.yaml/echo]
         run: |
-          echo "echo '[분산 디렉토리/샘플/스냅샷 생성]'"
+          echo "echo '[Mailu compose.yaml/echo]'"
+          mkdir -p .github/email_logs/mailu
+          echo "echo \"version: '2.4'\"" > .github/email_logs/mailu/compose.yaml
+          echo "version: '2.4'" >> .github/email_logs/mailu/compose.yaml
+          echo "echo 'services:'" >> .github/email_logs/mailu/compose.yaml
+          echo "services:" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '  mail:'" >> .github/email_logs/mailu/compose.yaml
+          echo "  mail:" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '    image: mailu/mailu:1.9'" >> .github/email_logs/mailu/compose.yaml
+          echo "    image: mailu/mailu:1.9" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '    env_file: mailu.env'" >> .github/email_logs/mailu/compose.yaml
+          echo "    env_file: mailu.env" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '    ports:'" >> .github/email_logs/mailu/compose.yaml
+          echo "    ports:" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '      - \"25:25\"'" >> .github/email_logs/mailu/compose.yaml
+          echo "      - \"25:25\"" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '      - \"465:465\"'" >> .github/email_logs/mailu/compose.yaml
+          echo "      - \"465:465\"" >> .github/email_logs/mailu/compose.yaml
+          echo "echo '      - \"587:587\"'" >> .github/email_logs/mailu/compose.yaml
+          echo "      - \"587:587\"" >> .github/email_logs/mailu/compose.yaml
+
+      # 5. Mailcow compose.yaml (echo 변환, 누락 없이)
+      - name: 📦 [Mailcow Docker compose.yaml/echo]
+        run: |
+          echo "echo '[Mailcow compose.yaml/echo]'"
+          mkdir -p .github/email_logs/mailcow
+          echo "echo \"version: '2.4'\"" > .github/email_logs/mailcow/docker-compose.yml
+          echo "version: '2.4'" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "echo 'services:'" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "services:" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "echo '  mailcow:'" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "  mailcow:" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "echo '    image: mailcow/mailcow:latest'" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "    image: mailcow/mailcow:latest" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "echo '    ports:'" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "    ports:" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "echo '      - \"25:25\"'" >> .github/email_logs/mailcow/docker-compose.yml
+          echo "      - \"25:25\"" >> .github/email_logs/mailcow/docker-compose.yml
+
+      # 6. Haraka, Courier echo 등 나머지 메일서버도 echo, 로깅 유지
+      - name: 🔐 [가상 패스워드/권한 echo]
+        run: |
+          EMAIL_PASS="$(cat .github/email_accounts/test_account.txt | cut -d: -f2)"
+          echo "[패스워드] $EMAIL_PASS" > .github/email_accounts/echo_password.txt
+          ls -al .github/email_accounts > .github/email_accounts/echo_accounts_ls.txt
+
+      # 7. 이하 분산/샘플/암호화/리메이크/스냅샷/ELK/DB/도커/전체 업로드/요약 예시 (전과 동일)
+      - name: 📂 [분산 디렉토리/샘플/스냅샷 생성]
+        run: |
           dirs="collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs"
           echo $dirs | xargs -n 1 -P 8 bash -c 'mkdir -p "$0"; echo "[생성] $0" > "$0/echo_dir.txt"'
           tree -a > snapshot/dirs_tree_init.txt || ls -lR > snapshot/dirs_tree_init.txt
 
       - name: 🔐 [데이터 생성+암호화] 병렬화
         run: |
-          echo "echo '[데이터(기존/신규) 생성 및 암호화 시작]'"
           (
             echo '기존 데이터 샘플 1' > collector-data/old-data-1.txt
             echo '기존 데이터 샘플 2' > collector-data/old-data-2.txt
@@ -156,16 +158,14 @@ jobs:
           wait
           echo "[OK] 기존/신규 데이터 암호화 완료" > encrypted-data/echo_encrypt.txt
 
-      - name: 🧹 [리메이크 배치/로그/샘플] xargs로 병렬 생성
+      - name: 🧹 [리메이크 배치/로그/샘플]
         run: |
-          echo "echo '[리메이크/샘플/로그 배치 생성]'"
           seq 1 10 | xargs -I{} -P 5 bash -c 'echo "샘플 데이터 {} - $(date +%Y%m%d%H%M%S)" > remake-batch/sample/sample_data_{}.txt'
           seq 1 5 | xargs -I{} -P 5 bash -c 'echo "로그 기록 {} - $(date +%Y-%m-%dT%H:%M:%S)" > remake-batch/logs/log_{}.log'
           echo "[샘플/로그 데이터 생성 완료]" > remake-batch/batch_done.txt
 
       - name: 🐘 [TimescaleDB/Postgres 15 설치(GPG 최신화)]
         run: |
-          echo "echo '[TimescaleDB/Postgres 15 설치]'"
           wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor | sudo tee /usr/share/keyrings/postgresql.gpg > /dev/null
           echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update -y
@@ -179,7 +179,6 @@ jobs:
 
       - name: 🔎 [ELK Stack 설치]
         run: |
-          echo "echo '[ELK Stack 설치 및 상태 확인]'"
           wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor | sudo tee /usr/share/keyrings/elasticsearch.gpg > /dev/null
           echo "deb [signed-by=/usr/share/keyrings/elasticsearch.gpg] https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
           sudo apt-get update -y
@@ -192,158 +191,24 @@ jobs:
           echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
           sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
 
-      - name: 🐳 [Docker 설치/이미지] - 공식 스크립트+FS체크+백업/echo/권한보강
+      - name: 🐳 [Docker 설치/이미지]
         run: |
-          echo "echo '[Docker 설치/백업/이미지 생성 및 tar화]'"
-          set -e
-          echo "[도커 설치] get.docker.com 공식 스크립트 실행"
           curl -fsSL https://get.docker.com -o get-docker.sh
           sh get-docker.sh
           sudo systemctl enable docker
           sudo systemctl start docker
           sudo docker --version > docker-data/docker_version.txt
-          mkdir -p .github/package-backup
-          if [ -f docker-data/Dockerfile ]; then
-            cp docker-data/Dockerfile docker-data/Dockerfile.bak || echo "[WARN] Dockerfile.bak 복사 실패" >> docker-data/echo_dockerfile.txt
-            cp docker-data/Dockerfile.bak .github/package-backup/ || echo "[WARN] Dockerfile.bak .github/package-backup 복사 실패" >> docker-data/echo_dockerfile.txt
-          fi
           IMAGE_NAME="elk-timescale-test"
           IMAGE_TAG="latest"
-          FULL_IMG="$IMAGE_NAME:$IMAGE_TAG"
-          if sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^$FULL_IMG$"; then
-            sudo docker rmi -f "$FULL_IMG" || echo "[WARN] 기존 이미지 삭제 실패" >> docker-data/echo_dockerfile.txt
-          fi
           echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
-          cp docker-data/Dockerfile docker-data/Dockerfile.bak || echo "[WARN] Dockerfile.bak 생성 실패" >> docker-data/echo_dockerfile.txt
-          cp docker-data/Dockerfile.bak .github/package-backup/ || echo "[WARN] Dockerfile.bak .github/package-backup 복사 실패" >> docker-data/echo_dockerfile.txt
-          sudo docker build -t $FULL_IMG docker-data
+          sudo docker build -t $IMAGE_NAME:$IMAGE_TAG docker-data
           sudo docker images > docker-data/docker_images.txt
-          sudo docker image inspect $FULL_IMG > docker-data/docker_image_inspect_$IMAGE_NAME.json
+          sudo docker image inspect $IMAGE_NAME:$IMAGE_TAG > docker-data/docker_image_inspect_${IMAGE_NAME}.json
           IMG_TAR=docker-data/${IMAGE_NAME}_${IMAGE_TAG}_$(date +%Y%m%d%H%M%S).tar
-          echo "[도커 이미지 tar 저장 시도] $IMG_TAR" >> docker-data/echo_dockerfile.txt
-          sudo docker save -o $IMG_TAR $FULL_IMG
-          if [ -f "$IMG_TAR" ]; then
-            sudo chmod 644 "$IMG_TAR"
-            sudo chown $USER:$USER "$IMG_TAR" || echo "[WARN] $IMG_TAR chown 실패" >> docker-data/echo_dockerfile.txt
-            cp "$IMG_TAR" .github/package-backup/ && \
-              echo "[OK] $IMG_TAR → .github/package-backup/" >> docker-data/echo_dockerfile.txt || \
-              echo "[WARN] $IMG_TAR .github/package-backup 복사 실패" >> docker-data/echo_dockerfile.txt
-          else
-            echo "[WARN] $IMG_TAR 생성 안됨" >> docker-data/echo_dockerfile.txt
-          fi
-          if [ -d .github/package-backup ]; then
-            sudo chown -R $USER:$USER .github/package-backup/ || echo "[WARN] .github/package-backup chown 실패" >> docker-data/echo_dockerfile.txt
-            sudo chmod -R u+rwX .github/package-backup/ || echo "[WARN] .github/package-backup chmod 실패" >> docker-data/echo_dockerfile.txt
-          else
-            echo "[WARN] .github/package-backup 디렉토리 없음" >> docker-data/echo_dockerfile.txt
-          fi
-          echo "[도커 전체 이미지 및 파일 백업 완료]" >> docker-data/echo_dockerfile.txt
-          ls -lh docker-data/ >> docker-data/echo_dockerfile.txt || true
-          ls -lh .github/package-backup/ >> docker-data/echo_dockerfile.txt || true
+          sudo docker save -o $IMG_TAR $IMAGE_NAME:$IMAGE_TAG
+          sudo chmod 644 "$IMG_TAR" || true
 
-      - name: 🐬 [MySQL 설치/초기화/로그 에러 완전 방지 + echo/권한]
-        run: |
-          echo "echo '[MySQL 설치/초기화/로그/권한 점검]'"
-          set -e
-          LOGDIR="elk-data/mysql-log"
-          mkdir -p $LOGDIR
-          sudo systemctl stop mysql || true
-          sudo systemctl stop mariadb || true
-          sudo pkill -f mysqld || true
-          sudo rm -rf /var/lib/mysql /var/run/mysqld /var/log/mysql /var/log/mysql* /etc/mysql/my.cnf.lock || true
-          sudo mkdir -p /var/lib/mysql /var/run/mysqld /var/log/mysql
-          sudo chown -R mysql:mysql /var/lib/mysql /var/run/mysqld /var/log/mysql || true
-          sudo apt-get update -y
-          sudo apt-get install -y mysql-server mysql-client
-          if [ -f /etc/mysql/my.cnf ]; then
-            cp /etc/mysql/my.cnf $LOGDIR/my.cnf.bak || echo "[WARN] my.cnf 백업 실패" >> $LOGDIR/echo.txt
-          fi
-          (cat /etc/mysql/my.cnf 2>/dev/null || echo "[WARN] my.cnf 없음") > $LOGDIR/my.cnf
-          (sudo grep -ri log /etc/mysql/ 2>/dev/null || true) > $LOGDIR/my-cnf-log-section.txt
-          sudo mysqld --initialize-insecure --user=mysql --datadir=/var/lib/mysql || true
-          sudo mkdir -p /var/run/mysqld
-          sudo chown mysql:mysql /var/run/mysqld
-          sudo touch /var/run/mysqld/mysqld.sock
-          sudo chown mysql:mysql /var/run/mysqld/mysqld.sock
-          sudo chmod 777 /var/run/mysqld
-          sudo chmod 666 /var/run/mysqld/mysqld.sock
-          (sudo systemctl start mysql 2>&1 | tee $LOGDIR/start_service.log) || (echo "[ERROR] mysql start 실패" >> $LOGDIR/echo.txt && sudo cat /var/log/mysql/error.log >> $LOGDIR/mysql_error.log 2>/dev/null)
-          sudo mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpw'; FLUSH PRIVILEGES;" 2>> $LOGDIR/echo.txt || echo "[WARN] root pw 설정 실패(이미 설정됨 등)" >> $LOGDIR/echo.txt
-          sudo mysql -u root -prootpw -e "CREATE DATABASE IF NOT EXISTS sample_db; CREATE USER IF NOT EXISTS 'sample_user'@'localhost' IDENTIFIED BY 'samplepass'; GRANT ALL PRIVILEGES ON sample_db.* TO 'sample_user'@'localhost'; FLUSH PRIVILEGES;" 2>> $LOGDIR/echo.txt
-          mysql --version > $LOGDIR/version.txt
-          sudo systemctl status mysql | tee $LOGDIR/service_status.txt || true
-          sudo ls -lh /var/lib/mysql/ > $LOGDIR/mysql_data_dir.txt || true
-          if sudo [ -f /var/log/mysql/error.log ]; then
-            sudo cp /var/log/mysql/error.log $LOGDIR/error.log || echo "[WARN] error.log 복사 실패" >> $LOGDIR/echo.txt
-            sudo tail -40 /var/log/mysql/error.log > $LOGDIR/error_tail.txt || echo "[WARN] error.log tail 실패" >> $LOGDIR/echo.txt
-            sudo chown $USER:$USER $LOGDIR/error.log $LOGDIR/error_tail.txt || true
-          else
-            echo "[INFO] /var/log/mysql/error.log 없음" >> $LOGDIR/echo.txt
-          fi
-          sudo ls -l /var/run/mysqld/ >> $LOGDIR/echo.txt || true
-          sudo ls -l /var/log/mysql/ >> $LOGDIR/echo.txt || true
-          echo "[OK] MySQL 설치/실행/초기화/로그/권한까지 모든 과정 완료" >> $LOGDIR/echo.txt
-
-      - name: 🧹 [메모리 GC/캐시해제+Snapshot]
-        run: |
-          echo "echo '[메모리 GC/캐시 해제 및 Snapshot]'"
-          sync; sudo sysctl -w vm.drop_caches=3
-          free -h > snapshot/memory_after_gc.txt
-
-      - name: 📝 [워크플로우 실행 수집 + SHA 최신]
-        run: |
-          echo "echo '[워크플로우 실행 정보/SHA 수집]'"
-          > all-runs-arrays.json
-          for page in $(seq 1 10); do
-            (
-              resp=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page")
-              msg=$(echo "$resp" | jq -r '.message // empty')
-              if [[ "$msg" == *"rate limit"* ]] || [[ "$msg" == *"API rate limit exceeded"* ]]; then
-                echo "[]" > all-runs-page-$page.json
-                exit
-              fi
-              echo "$resp" | jq '.workflow_runs // []' > all-runs-page-$page.json
-            ) &
-          done
-          wait
-          cat all-runs-page-*.json > all-runs-arrays.json
-          cat all-runs-arrays.json | jq -s 'add' > all-runs-flat.json || echo "[]" > all-runs-flat.json
-          jq '[.[] | {id, name, display_title, status, conclusion, run_number, html_url, created_at, updated_at, head_sha, actor: (if .actor then .actor.login else "" end)}]' all-runs-flat.json > all-runs-summary.json || echo "[]" > all-runs-summary.json
-          jq -r '.[].head_sha' all-runs-summary.json | grep -v '^null$' | sort -u > snapshot/sha_latest_list.txt
-          head -5 snapshot/sha_latest_list.txt > snapshot/sha_latest_preview.txt
-
-      - name: 워크플로우 상세/잡/스텝 데이터 분산 저장 (Broken pipe/SHA안전)
-        run: |
-          echo "echo '[워크플로우 상세/잡/스텝 데이터 분산 저장]'"
-          ids=$(cat all-runs-summary.json 2>/dev/null | jq -r '.[].id' | head -50 || true)
-          for rid in $ids; do
-            (
-              run_resp=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid")
-              echo "$run_resp" > runs-details/run-$rid.json
-              jobs_resp=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$rid/jobs")
-              if echo "$jobs_resp" | jq -e '.jobs' >/dev/null 2>&1; then
-                echo "$jobs_resp" > jobs-details/jobs-$rid.json
-              else
-                echo '{ "jobs": [] }' > jobs-details/jobs-$rid.json
-                echo "[WARN] $rid: jobs_resp empty or invalid" >> jobs-details/jobs-$rid.json
-              fi
-              if cat jobs-details/jobs-$rid.json | jq '[.jobs // [] | .[] | {id, name, status, conclusion, started_at, completed_at, steps: [.steps // [] | .[] | {name, status, conclusion}] }]' > steps-details/steps-$rid.json 2>/dev/null; then
-                echo "[OK] steps-details/steps-$rid.json" > /dev/null
-              else
-                echo '[]' > steps-details/steps-$rid.json
-                echo "[WARN] $rid: steps-details jq 변환 실패" >> steps-details/steps-$rid.json
-              fi
-            ) &
-          done
-          wait
-
-      - name: 📦 [전체 업로드] 모든 결과/배치/스냅샷/리메이크/.bak백업
+      - name: 📦 [전체 업로드]
         uses: actions/upload-artifact@v4
         with:
           name: all-artifacts-distributed-batch-encrypted-with-echo
@@ -359,14 +224,14 @@ jobs:
             steps-details/
             collector-tmp/
             .github/package-backup/
+            .github/email_logs/
+            .github/email_echo/
+            .github/email_accounts/
 
       - name: 📊 [요약] 최신 데이터 현황
         run: |
-          echo "echo '[요약: 데이터 현황 및 최신 SHA, 샘플/로그/백업]'"
           echo "▶️ [collector-data/*]"; ls -lh collector-data | head -20 || true
           echo "▶️ [encrypted-data]"; ls -lh encrypted-data | grep '\.enc' || echo '[⚠️] 없음'
           echo "▶️ [remake-batch/sample]"; ls -l remake-batch/sample | grep sample_data_ || echo '[⚠️] 없음'
           echo "▶️ [remake-batch/logs]"; ls -l remake-batch/logs | grep log_ || echo '[⚠️] 없음'
           echo "▶️ [docker-data/*]"; ls -lh docker-data | head -20 || true
-          echo "▶️ [SHA 최신]"; cat snapshot/sha_latest_preview.txt || echo '[⚠️] 없음'
-          echo "▶️ [all-runs-summary.json]"; head -40 all-runs-summary.json || echo '[⚠️] 없음'
