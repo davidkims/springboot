@@ -1,93 +1,57 @@
-name: 🚨 완전 방지 Mailu/Compose/도커/SMTP/echo 자동화 (APT 잔여 미러 0%)
+name: 📨 Mailu 자동화 + Docker 복구/에코 통합
 
 on:
   workflow_dispatch:
 
 jobs:
-  mailu-robust:
+  mailu-auto-full:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📂 [필수] Checkout
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🛠️ [APT 잔여 미러/소스/잔존 파일 완전삭제+echo/리트라이]
+      - name: 🛠️ [APT/도커/compose-plugin 완전 복구 및 환경보장]
         run: |
           set -e
-          echo "echo '[APT 소스/미러 복구 및 완전 echo, 디렉토리/에러파일 보장]'"
+          echo "echo '[APT/도커 완전 복구/에코/디렉토리/에러파일/포트까지 전체]'"
           mkdir -p .github/package-backup .github/error_logs .github/email_logs .github/email_echo
-          
-          # 무한 루프(최대 5회)로 apt 미러, 리스트, 잔여 라인 완전 삭제 시도
-          for loop in {1..5}; do
+
+          # 미러/sources.list/sources.list.d 클린
+          for i in {1..5}; do
             sudo rm -f /etc/apt/apt-mirrors.txt
-            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-              if [ -f "$f" ]; then
-                sudo sed -i '/mirror\+file:/d' "$f"
-                sudo sed -i '/file:\/etc\/apt\/apt-mirrors.txt/d' "$f"
-                sudo sed -i '/deb file:/d' "$f"
-                sudo sed -i '/mirror+file:/d' "$f"
-              fi
-            done
-            # 혹시 남아있으면 강제로 빈파일 덮어쓰기 (완전 초기화)
-            sudo cp /dev/null /etc/apt/apt-mirrors.txt 2>/dev/null || true
-
-            # sources.list.d에 확장자 오류, 잔여 미러 리스트 삭제
+            sudo sed -i '/mirror\+file:/d;/file:\/etc\/apt\/apt-mirrors.txt/d;/deb file:/d;/mirror+file:/d' /etc/apt/sources.list || true
             find /etc/apt/sources.list.d -type f \( -name '*.bak*' -o -name '*apt-mirrors*' -o -name '*.distUpgrade*' \) -exec sudo rm -f {} \; || true
-
-            # 패키지리스트/캐시/lock 완전 삭제
             sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/lock /var/lib/dpkg/lock* /var/cache/debconf/*-old || true
-
-            # echo 로그 남김
-            echo "[LOOP:$loop] 미러 및 sources.list, sources.list.d 잔여라인 삭제" >> .github/error_logs/echo_apt_cleanloop.txt
-            sleep 2
+            sleep 1
           done
 
-          # apt-get update 무한(최대 5회) 리트라이
-          for try in {1..5}; do
-            echo "[APT update try $try]" > .github/error_logs/echo_apt_update_try${try}.txt
-            sudo apt-get clean
-            sudo apt-get autoclean
-            sudo apt-get update --fix-missing -y && break
-            echo "[WARN] APT update $try회 실패" > .github/error_logs/echo_apt_update_warn${try}.txt
-            sleep 2
+          sudo apt-get clean
+          sudo apt-get autoclean
+          sudo apt-get update --fix-missing -y || true
+          sudo apt-get upgrade --fix-missing -y || true
+
+          # docker compose-plugin (moby-engine/moby-cli/docker-compose-plugin)
+          for i in {1..5}; do
+            sudo apt-get install --fix-missing -y moby-engine moby-cli docker-compose-plugin && break || sleep 2
           done
 
-          sudo apt-get upgrade --fix-missing -y || (echo "[WARN] upgrade 실패" > .github/error_logs/echo_apt_upgrade_warn.txt; true)
-
-          # 핵심 패키지는 무한 재시도 (apt-get/pip 동시)
-          for p in wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq npm docker.io docker-compose netcat-traditional; do
-            for i in {1..5}; do
-              sudo apt-get install --fix-missing -y $p && break || sleep 1
-            done
-          done
-
-          # pip fallback(docker, docker-compose)
-          python3 -m pip install --upgrade pip || true
-          for pkg in docker docker-compose; do
-            for i in {1..3}; do
-              python3 -m pip install --force-reinstall --break-system-packages $pkg && break || sleep 1
-            done
-          done
-
-          # 도커 서비스 리셋
-          sudo systemctl enable --now docker
+          sudo systemctl enable --now docker || true
           sudo usermod -aG docker $USER || true
           sleep 2
 
-          # docker info echo
           docker --version > .github/email_logs/echo_docker_ver.txt || echo "[WARN] docker 미설치" > .github/email_logs/echo_docker_ver.txt
-          docker-compose --version > .github/email_logs/echo_docker_compose_ver.txt || echo "[WARN] docker-compose 미설치" > .github/email_logs/echo_docker_compose_ver.txt
+          docker compose version > .github/email_logs/echo_docker_compose_ver.txt || echo "[WARN] docker compose 미설치" > .github/email_logs/echo_docker_compose_ver.txt
 
-      - name: 🔓 [모든 포트 오픈/echo]
-        run: |
           for port in 25 465 587 993 995 110 143; do
             sudo ufw allow $port/tcp || true
             echo "[포트허용] $port" >> .github/email_echo/echo_firewall.txt
           done
 
-      - name: 📦 [Mailu Compose.yaml + mailu.env (echo/실행)]
+      - name: 📦 [Mailu compose.yaml + mailu.env (echo/실행/로깅)]
         run: |
           mkdir -p .github/email_logs/mailu
+
           echo "echo \"version: '2.4'\""           | tee  .github/email_logs/mailu/compose.yaml.echo
           echo "version: '2.4'"                   >> .github/email_logs/mailu/compose.yaml
           echo "echo 'services:'"                 | tee -a .github/email_logs/mailu/compose.yaml.echo
@@ -118,15 +82,15 @@ jobs:
           echo "echo 'PASSWORD=$(date +%s | sha256sum | head -c 12)'" | tee -a .github/email_logs/mailu/mailu.env.echo
           echo "PASSWORD=$(date +%s | sha256sum | head -c 12)"        >> .github/email_logs/mailu/mailu.env
 
-          echo "echo '[docker-compose up Mailu 실행]'"
-          docker-compose -f .github/email_logs/mailu/compose.yaml --env-file .github/email_logs/mailu/mailu.env up -d \
-            || echo "[WARN] Mailu docker-compose 실패" > .github/email_logs/mailu/echo_up_warn.txt
+          echo "echo '[docker compose up Mailu 실행]'"
+          docker compose -f .github/email_logs/mailu/compose.yaml --env-file .github/email_logs/mailu/mailu.env up -d \
+            || echo "[WARN] Mailu docker compose 실패" > .github/email_logs/mailu/echo_up_warn.txt
 
-      - name: 🗂️ [설치결과/echo파일/버전]
+      - name: 🗂️ [설치결과/echo파일/버전 출력]
         run: |
           echo "▶️ docker --version"
           cat .github/email_logs/echo_docker_ver.txt
-          echo "▶️ docker-compose --version"
+          echo "▶️ docker compose version"
           cat .github/email_logs/echo_docker_compose_ver.txt
           echo "▶️ compose.yaml"
           cat .github/email_logs/mailu/compose.yaml
