@@ -1,4 +1,4 @@
-name: 🐬 MySQL FullOps (No Empty PW, No Deprecated Opt, Health Robust, Pattern Users, VPN/Firewall, Export, Echo All)
+name: 🐬 MySQL FullOps (No Empty PW, No Deprecated Opt, Health Robust, Pattern Users, VPN/Firewall, Export, Echo All, Mass Table)
 
 on:
   schedule:
@@ -23,6 +23,8 @@ jobs:
       MYSQL_PASSWORD: rootpass123
       MYSQL_DB: sample_db
       VIRTUAL_USER_COUNT: 7
+      MASS_TABLE_COUNT: 10
+      MASS_ORACLE_TABLE_COUNT: 5
 
     steps:
       - name: 📦 [echo] Checkout Repository
@@ -44,8 +46,8 @@ jobs:
 
       - name: 📁 [echo] Prepare Directories (All Log/Echo)
         run: |
-          echo "echo '[📁] mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings'"
-          mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings
+          echo "echo '[📁] mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings .github/echo/oracle_ddl .github/echo_data_backup'"
+          mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings .github/echo/oracle_ddl .github/echo_data_backup
           for f in .github/logs/mysql_workflow.log .github/mysql_logs/mysql_echo.txt .github/mysql_logs/warnings/mysql_warnings.txt .github/mysql_logs/warnings/mysql_warnings_only.txt .github/echo/virtual_account.txt .github/echo/virtual_password.txt .github/echo/firewall_rules.txt .github/echo/vpn_rules.txt; do
             echo "echo '[📁] touch $f'"
             touch $f
@@ -130,6 +132,39 @@ jobs:
             echo "echo 'Password for vuser${i}: $PW1'" >> .github/echo/virtual_password.txt
           done
 
+      - name: 💽 [echo] MySQL 대량 테이블 및 데이터 echo 생성
+        run: |
+          echo "echo '[💽] MySQL 대량 테이블/데이터 echo 생성 ...'"
+          N=${MASS_TABLE_COUNT:-10}
+          for i in $(seq 1 $N); do
+            TBL="mass_table_$i"
+            SQL="CREATE TABLE IF NOT EXISTS $TBL (id INT PRIMARY KEY AUTO_INCREMENT, data VARCHAR(100), reg_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"
+            echo "$SQL" > "sql/ddl_$TBL.sql"
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < "sql/ddl_$TBL.sql"
+            # echo SQL문
+            echo "echo '$SQL'" >> .github/echo/ddl_mysql_mass.txt
+            # 랜덤 데이터 100개 INSERT
+            echo "USE $MYSQL_DB;" > "sql/ins_$TBL.sql"
+            for j in $(seq 1 100); do
+              DATUM="TestData_${i}_$(openssl rand -hex 4)"
+              echo "INSERT INTO $TBL (data) VALUES ('$DATUM');" >> "sql/ins_$TBL.sql"
+            done
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < "sql/ins_$TBL.sql"
+            echo "echo '[INSERT 100 rows to $TBL]'" >> .github/echo/ddl_mysql_mass.txt
+          done
+
+      - name: 🟠 [echo] Oracle 대량 DDL 테이블 echo 생성 (DDL 파일만)
+        run: |
+          echo "echo '[🟠] Oracle DDL(예시) N개 echo 생성 ...'"
+          N=${MASS_ORACLE_TABLE_COUNT:-5}
+          mkdir -p .github/echo/oracle_ddl
+          for i in $(seq 1 $N); do
+            OTBL="ORCL_TABLE_$i"
+            ODDL="CREATE TABLE $OTBL (ID NUMBER PRIMARY KEY, DATA VARCHAR2(100), REG_AT DATE DEFAULT SYSDATE);"
+            echo "$ODDL" > .github/echo/oracle_ddl/ddl_$OTBL.sql
+            echo "echo '$ODDL'" >> .github/echo/oracle_ddl/ddl_echo.txt
+          done
+
       - name: 🌍 [echo] VPN 정책/구성 예시 (국가/부서/OS별)
         run: |
           echo "echo '[🌍] VPN 정책/예시(Nation, Dept, OS별)'"
@@ -194,19 +229,24 @@ jobs:
       - name: 📄 [echo] MySQL Table/Export/Backup Example
         run: |
           echo "echo '[📄] MySQL 테이블/CSV/백업 예시 ...'"
-          # init.sql 생성 및 실행
           echo "USE sample_db;" > sql/init.sql
           echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);" >> sql/init.sql
           echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/init.sql
-          # CSV Export
           echo "id,name" > export/users.csv
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -B -e "SELECT id, name FROM users;" | tail -n +2 >> export/users.csv
-          # 백업
           MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > backup/backup.sql
           zip -j backup/backup.zip backup/backup.sql
 
-      - name: 🚀 [echo] Upload Artifacts (echo, csv, log, warnings, backup)
+      - name: 🟣 [echo] 복사본 백업 디렉토리 생성 및 복제
+        run: |
+          echo "echo '[🟣] export/ 및 backup/ 디렉토리 .github/echo_data_backup/로 복사'"
+          mkdir -p .github/echo_data_backup
+          cp -r export .github/echo_data_backup/export_bak
+          cp -r backup .github/echo_data_backup/backup_bak
+          echo "echo '[🟣] 복사 완료. tree 확인 ...'"
+
+      - name: 🚀 [echo] Upload Artifacts (echo, csv, log, warnings, backup, 복사본)
         uses: actions/upload-artifact@v4
         with:
           name: mysql-fullops-artifacts-${{ github.run_id }}
@@ -214,6 +254,8 @@ jobs:
             .github/logs/*.log
             .github/mysql_logs/*
             .github/echo/*.txt
+            .github/echo/oracle_ddl/*
+            .github/echo_data_backup/*
             export/*.csv
             backup/*.zip
 
@@ -224,6 +266,8 @@ jobs:
           tree export || true
           tree backup || true
           tree .github/echo || true
+          tree .github/echo/oracle_ddl || true
+          tree .github/echo_data_backup || true
           tree .github/mysql_logs || true
           tree .github/logs || true
-          ls -lh sql/ export/ backup/ .github/echo/ .github/mysql_logs/ .github/logs/
+          ls -lh sql/ export/ backup/ .github/echo/ .github/echo/oracle_ddl/ .github/echo_data_backup/ .github/mysql_logs/ .github/logs/
