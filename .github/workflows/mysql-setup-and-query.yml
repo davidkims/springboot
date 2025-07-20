@@ -1,4 +1,4 @@
-name: 🐬 Full MySQL Workflow (Echo, Recovery, Multi-Backup, GPG, CSV, ZIP)
+name: 🐬 Full MySQL Workflow (Echo/Log, All Warnings/Echo File/Dir 생성 자동화)
 
 on:
   schedule:
@@ -32,44 +32,50 @@ jobs:
       - name: 📦 [echo] Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 [echo] Prepare Directories
+      - name: 📁 [echo] Prepare Directories (All Log/Echo)
         run: |
-          echo "echo '[📁] mkdir -p sql export backup .github/queries .github/echo .github/logs'"
-          mkdir -p sql export backup .github/queries .github/echo .github/logs
-          echo "echo '[📁] touch .github/logs/mysql_workflow.log'"
-          touch .github/logs/mysql_workflow.log
+          echo "echo '[📁] mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings'"
+          mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings
+          for f in .github/logs/mysql_workflow.log .github/mysql_logs/mysql_echo.txt .github/mysql_logs/warnings/mysql_warnings.txt; do
+            echo "echo '[📁] touch $f'"
+            touch $f
+          done
 
       - name: 🩺 [echo] Wait for MySQL Health or Restart
         run: |
-          echo "echo '[🩺] docker ps -q --filter \"ancestor=mysql:8.0\"'"
+          echo "echo '[🩺] MySQL Health Check ...'"
           CID=$(docker ps -q --filter "ancestor=mysql:8.0")
           for i in {1..30}; do
             STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CID)
             echo "Health status: $STATUS (attempt $i)"
             if [[ "$STATUS" == "healthy" ]]; then
               echo "[✔] MySQL is healthy"
-              exit 0
+              break
             fi
             sleep 2
           done
-          echo "[!] Restarting MySQL container..."
-          docker logs $CID
-          docker restart $CID
-          sleep 10
+          docker logs $CID > .github/mysql_logs/container.log 2>&1
+          echo "echo '[🩺] MySQL container logs 저장: .github/mysql_logs/container.log'"
+          # 경고 및 워닝 추출
+          grep -i "warning" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings.txt || true
+          grep -i "note" .github/mysql_logs/container.log > .github/mysql_logs/mysql_notes.txt || true
+          echo "echo '[🩺] 경고, 노트 파일 분리 저장 완료'"
 
       - name: 🗃️ [echo] Load SQL DB from Dump if Exists
         run: |
-          echo "echo '[🗃️] Checking for sql/backup_dump.sql ...'"
+          echo "echo '[🗃️] sql/backup_dump.sql 여부 확인'"
           if [ -f "sql/backup_dump.sql" ]; then
-            echo "echo '[+] Loading sql/backup_dump.sql ...'"
+            echo "echo '[🗃️] sql/backup_dump.sql → import 시작'"
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/backup_dump.sql
+            echo "[OK] Loaded backup_dump.sql" >> .github/mysql_logs/mysql_echo.txt
           else
-            echo "echo '[!] No backup_dump.sql found.'"
+            echo "echo '[!] backup_dump.sql 없음'"
+            echo "[WARN] No backup_dump.sql found" >> .github/mysql_logs/mysql_echo.txt
           fi
 
       - name: 📄 [echo] Generate init.sql and Backup
         run: |
-          echo "echo '[📄] Creating sql/init.sql ...'"
+          echo "echo '[📄] sql/init.sql 생성'"
           {
             echo "USE sample_db;"
             echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);"
@@ -78,99 +84,101 @@ jobs:
             echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100) NOT NULL, registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"
             echo "INSERT INTO customers (customer_name) VALUES ('고객A'), ('고객B'), ('고객C');"
           } > sql/init.sql
-          echo "echo '[📄] cp sql/init.sql backup/init.sql.backup'"
+          echo "echo '[📄] sql/init.sql → backup/init.sql.backup 복사'"
           cp sql/init.sql backup/init.sql.backup
-          echo "echo '[📄] Importing init.sql ...'"
+          echo "echo '[📄] init.sql import'"
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/init.sql
+          echo "[OK] init.sql 생성 및 import" >> .github/mysql_logs/mysql_echo.txt
 
       - name: 🔁 [echo] Check and Create Missing Tables
         run: |
-          echo "echo '[🔁] Checking/Creating required tables ...'"
+          echo "echo '[🔁] 필수 테이블 존재 확인 및 자동생성 ...'"
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e "SHOW TABLES LIKE 'customers';" | grep customers || {
-            echo "echo '[!] Creating customers table ...'"
+            echo "echo '[!] customers 테이블 생성'"
             echo "CREATE TABLE IF NOT EXISTS customers (customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100) NOT NULL, registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" > sql/fix_customers.sql
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_customers.sql
+            echo "[OK] customers 테이블 생성" >> .github/mysql_logs/mysql_echo.txt
           }
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -e "SHOW TABLES LIKE 'credit_card_transactions';" | grep credit_card_transactions || {
-            echo "echo '[!] Creating credit_card_transactions table ...'"
+            echo "echo '[!] credit_card_transactions 테이블 생성'"
             echo "CREATE TABLE IF NOT EXISTS credit_card_transactions (transaction_id INT AUTO_INCREMENT PRIMARY KEY, customer_id INT NOT NULL, card_number VARCHAR(20) NOT NULL, amount DECIMAL(10,2) NOT NULL, transaction_time DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (customer_id) REFERENCES customers(customer_id));" > sql/fix_credit_card_transactions.sql
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/fix_credit_card_transactions.sql
+            echo "[OK] credit_card_transactions 테이블 생성" >> .github/mysql_logs/mysql_echo.txt
           }
 
       - name: 💳 [echo] Simulate Transactions with Valid Customers
         run: |
-          echo "echo '[💳] Generating simulated credit card transactions ...'"
+          echo "echo '[💳] 신용카드 거래 더미데이터 삽입 ...'"
           CUSTOMER_IDS=$(MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -Bse "SELECT customer_id FROM customers;")
           echo "USE sample_db;" > sql/simulate_transactions.sql
           for cid in $CUSTOMER_IDS; do
             amount=$(( (RANDOM % 100000) + 1000 ))
             echo "INSERT INTO credit_card_transactions (customer_id, card_number, amount) VALUES ($cid, '4111111111111111', $amount);" >> sql/simulate_transactions.sql
           done
-          echo "echo '[💳] Running transaction inserts ...'"
           for retry in {1..3}; do
             if MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/simulate_transactions.sql; then
-              echo "[✔] Transaction simulation succeeded"
+              echo "[OK] Transaction simulation" >> .github/mysql_logs/mysql_echo.txt
               break
             else
-              echo "[!] Transaction simulation failed on attempt $retry"
+              echo "[FAIL] Transaction simulation (retry $retry)" >> .github/mysql_logs/mysql_echo.txt
               sleep 2
             fi
             if [ $retry -eq 3 ]; then
-              echo "[x] Simulation failed after 3 attempts"
+              echo "[x] Simulation failed after 3 attempts" >> .github/mysql_logs/mysql_echo.txt
               exit 1
             fi
           done
 
       - name: 📤 [echo] Export customers.csv (Multi-Backup)
         run: |
-          echo "echo '[📤] Exporting customers table to CSV ...'"
+          echo "echo '[📤] customers.csv 추출 ...'"
           TODAY=$(date +%Y%m%d)
           OUTFILE="export/customers_${TODAY}.csv"
           echo "customer_id,customer_name,registered_at" > $OUTFILE
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e "SELECT customer_id, customer_name, registered_at FROM customers;" | tail -n +2 >> $OUTFILE
           ln -sf $(basename $OUTFILE) export/customers.csv
-          echo "echo '[✔] $OUTFILE created and symlinked to customers.csv'"
+          echo "[OK] customers.csv 백업" >> .github/mysql_logs/mysql_echo.txt
 
       - name: 📈 [echo] Export credit_card_transactions.csv (Multi-Backup)
         run: |
-          echo "echo '[📈] Exporting transactions table to CSV ...'"
+          echo "echo '[📈] 신용카드 거래 CSV 추출 ...'"
           TODAY=$(date +%Y%m%d)
           OUTFILE="export/credit_card_transactions_${TODAY}.csv"
           echo "transaction_id,customer_id,card_number,amount,transaction_time" > $OUTFILE
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D $MYSQL_DB -B -e "SELECT transaction_id, customer_id, card_number, amount, transaction_time FROM credit_card_transactions;" | tail -n +2 >> $OUTFILE
           ln -sf $(basename $OUTFILE) export/credit_card_transactions.csv
-          echo "echo '[✔] $OUTFILE created and symlinked to credit_card_transactions.csv'"
+          echo "[OK] 거래 CSV 백업" >> .github/mysql_logs/mysql_echo.txt
 
       - name: 🧷 [echo] Backup SQL Dump using mysqldump (Multi-Backup)
         run: |
-          echo "echo '[🧷] Running mysqldump ...'"
+          echo "echo '[🧷] mysqldump 전체 백업 ...'"
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
           BACKUP_FILE="sql/backup_dump_${TIMESTAMP}.sql"
           MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > $BACKUP_FILE
           ln -sf $(basename $BACKUP_FILE) sql/backup_dump.sql
           cp $BACKUP_FILE backup/
-          echo "echo '[✔] SQL dump complete: $BACKUP_FILE (also copied to backup/)'"
+          echo "[OK] mysqldump 완료" >> .github/mysql_logs/mysql_echo.txt
 
       - name: 🔐 [echo] GPG Encrypt SQL Backups (All)
         run: |
-          echo "echo '[🔐] GPG Encrypting all SQL dumps ...'"
+          echo "echo '[🔐] GPG 암호화 ...'"
           for SQLF in sql/backup_dump_*.sql; do
             GPGF="$SQLF.gpg"
             if [ ! -f "$GPGF" ]; then
               gpg --batch --yes --passphrase 'gpgtest123' --symmetric --cipher-algo AES256 -o "$GPGF" "$SQLF"
-              echo "echo '[✔] Encrypted $GPGF'"
+              echo "[OK] $GPGF 생성" >> .github/mysql_logs/mysql_echo.txt
             fi
           done
 
       - name: 📦 [echo] Compress SQL files into ZIP (daily, Multi-Backup)
         run: |
-          echo "echo '[📦] Compressing all SQL dumps to ZIP ...'"
+          echo "echo '[📦] ZIP 압축 ...'"
           TODAY=$(date +%Y%m%d)
           ZIP_FILE="backup/sql_backup_${TODAY}.zip"
           zip -j "$ZIP_FILE" sql/backup_dump_*.sql
-          echo "echo '[✔] ZIP archive created: $ZIP_FILE'"
+          echo "[OK] ZIP 압축완료" >> .github/mysql_logs/mysql_echo.txt
 
-      - name: 🚀 [echo] Upload Artifacts (All CSV, GPG, ZIP, backup)
+      - name: 🚀 [echo] Upload Artifacts (CSV, GPG, ZIP, log, warnings)
         uses: actions/upload-artifact@v4
         with:
           name: mysql-full-backup-${{ github.run_id }}
@@ -182,12 +190,14 @@ jobs:
             backup/*.zip
             backup/*.sql
             .github/logs/*.log
+            .github/mysql_logs/*
 
-      - name: 🗂️ [echo] Show backup/SQL/export structure
+      - name: 🗂️ [echo] Show backup/SQL/export/log structure
         run: |
-          echo "echo '[🗂️] Directory structure dump ...'"
+          echo "echo '[🗂️] tree 디렉토리 구조 ...'"
           sudo apt-get install -y tree
           tree sql || true
           tree export || true
           tree backup || true
-          ls -lh sql/ export/ backup/
+          tree .github/mysql_logs || true
+          ls -lh sql/ export/ backup/ .github/mysql_logs/
