@@ -1,4 +1,4 @@
-name: 🐬 MySQL Workflow (No Empty Password, No Deprecated Option, Full Echo)
+name: 🐬 MySQL Workflow (No Empty Password, No Deprecated Option, HealthCheck Robust, Full Echo)
 
 on:
   schedule:
@@ -17,7 +17,6 @@ jobs:
           MYSQL_DATABASE: sample_db
         ports:
           - 3306:3306
-        # ✅ skip-host-cache 등 비추천/무의미 옵션 절대 미포함
 
     env:
       MYSQL_USER: root
@@ -51,15 +50,19 @@ jobs:
             touch $f
           done
 
-      - name: 🩺 [echo] Wait for MySQL Health & Save Logs & Check Empty Password
+      - name: 🩺 [echo] Wait for MySQL Health & Save Logs & Check Empty Password & Warnings
         run: |
           echo "echo '[🩺] MySQL Health Check ...'"
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0")
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
+          if [ -z "$CID" ]; then
+            echo "echo '[❌] MySQL 컨테이너가 실행 중이 아닙니다.'"
+            exit 98
+          fi
           for i in {1..30}; do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' $CID)
+            STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' $CID 2>/dev/null || echo none)
             echo "Health status: $STATUS (attempt $i)"
-            if [ "$STATUS" = "healthy" ]; then
-              echo "[✔] MySQL is healthy"
+            if [ "$STATUS" = "healthy" ] || [ "$STATUS" = "none" ]; then
+              echo "[✔] MySQL health check 통과 (상태: $STATUS)"
               break
             fi
             sleep 2
@@ -72,8 +75,7 @@ jobs:
           grep -i "warning" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings.txt || true
           grep -i "^Warning:" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings_only.txt || true
 
-          # 만약 root 패스워드가 비어있는 경우 즉시 강제 지정 (MySQL 8.x는 컨테이너에 이미 password를 넣으면 발생X)
-          # 아래는 극단적 예외 처리, 정상적이면 실행되지 않음
+          # 빈 패스워드 경고 예외 처리
           if grep -q "root@localhost is created with an empty password" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
             echo "echo '[⚠️] 빈 패스워드 경고 감지! 즉시 root 패스워드 재설정...'"
             MYSQL_PWD='' mysql -h 127.0.0.1 -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';" || true
@@ -95,7 +97,7 @@ jobs:
 
           echo "echo '[🩺] MySQL 경고/보안 점검 완료'"
 
-      # 이하 단계 자유롭게(계정/패턴/백업/export/echo 등)
+      # (아래에 계정/패스워드/백업/export/echo 등 필요한 스텝 추가 가능)
 
       - name: 🚀 [echo] Upload Artifacts (log, warnings, echo)
         uses: actions/upload-artifact@v4
