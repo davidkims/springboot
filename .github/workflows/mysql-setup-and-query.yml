@@ -1,4 +1,4 @@
-name: 🐬 MySQL Workflow (No Empty Password, No Deprecated Option, HealthCheck Robust, Full Echo)
+name: 🐬 MySQL FullOps (No Empty PW, No Deprecated Opt, Health Robust, Pattern Users, VPN/Firewall, Export, Echo All)
 
 on:
   schedule:
@@ -13,7 +13,7 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: rootpass123           # ✅ 반드시 root 패스워드 지정!
+          MYSQL_ROOT_PASSWORD: rootpass123
           MYSQL_DATABASE: sample_db
         ports:
           - 3306:3306
@@ -22,6 +22,7 @@ jobs:
       MYSQL_USER: root
       MYSQL_PASSWORD: rootpass123
       MYSQL_DB: sample_db
+      VIRTUAL_USER_COUNT: 7
 
     steps:
       - name: 📦 [echo] Checkout Repository
@@ -45,7 +46,7 @@ jobs:
         run: |
           echo "echo '[📁] mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings'"
           mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings
-          for f in .github/logs/mysql_workflow.log .github/mysql_logs/mysql_echo.txt .github/mysql_logs/warnings/mysql_warnings.txt .github/mysql_logs/warnings/mysql_warnings_only.txt; do
+          for f in .github/logs/mysql_workflow.log .github/mysql_logs/mysql_echo.txt .github/mysql_logs/warnings/mysql_warnings.txt .github/mysql_logs/warnings/mysql_warnings_only.txt .github/echo/virtual_account.txt .github/echo/virtual_password.txt .github/echo/firewall_rules.txt .github/echo/vpn_rules.txt; do
             echo "echo '[📁] touch $f'"
             touch $f
           done
@@ -67,51 +68,162 @@ jobs:
             fi
             sleep 2
           done
-          # 전체 로그 저장
           docker logs $CID > .github/mysql_logs/container.log 2>&1
           echo "echo '[🩺] MySQL container logs 저장: .github/mysql_logs/container.log'"
-
-          # 경고만 분리 저장
           grep -i "warning" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings.txt || true
           grep -i "^Warning:" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings_only.txt || true
-
-          # 빈 패스워드 경고 예외 처리
           if grep -q "root@localhost is created with an empty password" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
             echo "echo '[⚠️] 빈 패스워드 경고 감지! 즉시 root 패스워드 재설정...'"
             MYSQL_PWD='' mysql -h 127.0.0.1 -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';" || true
             echo "[⚠️] 빈 루트 패스워드 강제 재설정 (보안 보완)" >> .github/mysql_logs/mysql_echo.txt
           fi
-
-          # --skip-host-cache 경고 사전 완화 (SQL 자동 실행)
           if grep -q "The syntax '--skip-host-cache' is deprecated" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
             echo "echo '[⚠️] --skip-host-cache 경고 감지! SET GLOBAL host_cache_size=0 실행'"
             MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SET GLOBAL host_cache_size=0;" || true
             echo "[⚠️] --skip-host-cache 완화 SQL 실행" >> .github/mysql_logs/mysql_echo.txt
           fi
-
-          # 이제 경고 없는 상태 확인(옵션)
           if grep -E "root@localhost is created with an empty password|--skip-host-cache" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
             echo "echo '[❌] 보안 경고 발생. 로그 확인 필요'"
             exit 99
           fi
-
           echo "echo '[🩺] MySQL 경고/보안 점검 완료'"
 
-      # (아래에 계정/패스워드/백업/export/echo 등 필요한 스텝 추가 가능)
+      - name: 👤 [echo] Generate Virtual Accounts (패턴+부서+직책+국제전화)
+        run: |
+          echo "echo '[👤] 가상계정 N개(부서, 직책, 국제전화 포함) 생성'"
+          N=${VIRTUAL_USER_COUNT:-7}
+          DOMAINS=(corp1.kr corp2.jp corp3.us)
+          DEPTS=("영업" "개발" "보안" "관리" "인사" "재무")
+          TITLES=("사원" "주임" "대리" "과장" "팀장" "실장" "임원")
+          PHONES=("+82-10" "+81-90" "+1-212" "+49-170" "+44-790" "+33-660" "+86-139")
+          for i in $(seq 1 $N); do
+            DEPTIDX=$(( (i-1) % ${#DEPTS[@]} ))
+            DOMAINIDX=$(( (i-1) % ${#DOMAINS[@]} ))
+            TITLEIDX=$(( (i-1) % ${#TITLES[@]} ))
+            PHONEIDX=$(( (i-1) % ${#PHONES[@]} ))
+            VUSER="$(tr '[:upper:]' '[:lower:]' <<< ${DEPTS[$DEPTIDX]})_${TITLEIDX}_$(printf '%02d' $i)"
+            VMAIL="${VUSER}@${DOMAINS[$DOMAINIDX]}"
+            VPHONE="${PHONES[$PHONEIDX]}-$(printf '%04d-%04d' $((RANDOM%9000+1000)) $((RANDOM%9000+1000)))"
+            TITLE="${TITLES[$TITLEIDX]}"
+            DEPT="${DEPTS[$DEPTIDX]}"
+            echo "Account: $VUSER, Email: $VMAIL, Phone: $VPHONE, Dept: $DEPT, Title: $TITLE" | tee -a .github/echo/virtual_account.txt
+            echo "echo 'Account: $VUSER, Email: $VMAIL, Phone: $VPHONE, Dept: $DEPT, Title: $TITLE'" >> .github/echo/virtual_account.txt
+          done
 
-      - name: 🚀 [echo] Upload Artifacts (log, warnings, echo)
+      - name: 🔑 [echo] Generate Virtual Passwords (강력정책, 12~20자, 특수/숫자/영문)
+        run: |
+          echo "echo '[🔑] 가상 패스워드 N개(강력정책, 12~20자, 특수/숫자/영문) 생성'"
+          N=${VIRTUAL_USER_COUNT:-7}
+          for i in $(seq 1 $N); do
+            LEN=$(( (RANDOM % 9) + 12 ))  # 12~20자
+            while true; do
+              PW1=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9!@#$%^&*_=+' | head -c$LEN)
+              HAS_UPPER=$(echo "$PW1" | grep -q '[A-Z]' && echo yes || echo no)
+              HAS_LOWER=$(echo "$PW1" | grep -q '[a-z]' && echo yes || echo no)
+              HAS_NUM=$(echo "$PW1" | grep -q '[0-9]' && echo yes || echo no)
+              HAS_SPEC=$(echo "$PW1" | grep -q '[!@#$%^&*_=+]' && echo yes || echo no)
+              if [ "$HAS_UPPER" = "yes" ] && [ "$HAS_LOWER" = "yes" ] && [ "$HAS_NUM" = "yes" ] && [ "$HAS_SPEC" = "yes" ]; then
+                break
+              fi
+            done
+            echo "Password for vuser${i}: $PW1" | tee -a .github/echo/virtual_password.txt
+            echo "echo 'Password for vuser${i}: $PW1'" >> .github/echo/virtual_password.txt
+          done
+
+      - name: 🌍 [echo] VPN 정책/구성 예시 (국가/부서/OS별)
+        run: |
+          echo "echo '[🌍] VPN 정책/예시(Nation, Dept, OS별)'"
+          mkdir -p .github/echo
+          {
+            echo "######## 한국 - 영업부 VPN ########"
+            echo "openvpn --config korea_sales.ovpn --auth-user-pass"
+            echo "vpncmd /SERVER:kr-vpn.corp1.kr"
+            echo ""
+            echo "######## 미국 - 개발팀 VPN ########"
+            echo "openvpn --config us_dev.ovpn --auth-user-pass"
+            echo "vpncmd /SERVER:us-vpn.corp3.us"
+            echo ""
+            echo "######## 일본 - 보안팀 VPN ########"
+            echo "openvpn --config jp_sec.ovpn --auth-user-pass"
+            echo "vpncmd /SERVER:jp-vpn.corp2.jp"
+            echo ""
+            echo "######## Windows VPN 예시 ########"
+            echo "rasdial 'corp_vpn' user password /DOMAIN:corp"
+            echo ""
+            echo "######## MacOS VPN 예시 ########"
+            echo "scutil --nc start 'Corporate VPN'"
+            echo ""
+            echo "[모든 예시는 echo용, 실제 VPN 인증/접속은 조직 정책/환경별 적용]"
+          } | tee .github/echo/vpn_rules.txt
+
+      - name: 🔥 [echo] Firewall Policy/Rule (Multi-OS, Cloud 포함)
+        run: |
+          echo "echo '[🔥] 방화벽 정책/명령어 echo (Linux/Windows/Mac/Cloud)'"
+          mkdir -p .github/echo
+          {
+            echo "######## Ubuntu/Debian(UFW) ########"
+            echo "sudo ufw allow 3306/tcp    # MySQL 포트 허용"
+            echo "sudo ufw allow 22/tcp      # SSH"
+            echo "sudo ufw deny 23/tcp       # Telnet 차단"
+            echo "sudo ufw enable"
+            echo ""
+            echo "######## CentOS/RHEL/Fedora(Firewalld) ########"
+            echo "sudo firewall-cmd --permanent --add-port=3306/tcp"
+            echo "sudo firewall-cmd --permanent --add-service=ssh"
+            echo "sudo firewall-cmd --permanent --remove-service=telnet"
+            echo "sudo firewall-cmd --reload"
+            echo ""
+            echo "######## Windows ########"
+            echo "netsh advfirewall firewall add rule name=\"MySQL\" dir=in action=allow protocol=TCP localport=3306"
+            echo "netsh advfirewall firewall add rule name=\"SSH\" dir=in action=allow protocol=TCP localport=22"
+            echo "netsh advfirewall firewall add rule name=\"Telnet Block\" dir=in action=block protocol=TCP localport=23"
+            echo ""
+            echo "######## MacOS ########"
+            echo "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/mysql/bin/mysqld"
+            echo "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/mysql/bin/mysqld"
+            echo ""
+            echo "######## AWS Cloud (SG) ########"
+            echo "aws ec2 authorize-security-group-ingress --group-id sg-xxxx --protocol tcp --port 3306 --cidr 0.0.0.0/0"
+            echo ""
+            echo "######## GCP Cloud (FW) ########"
+            echo "gcloud compute firewall-rules create allow-mysql --allow tcp:3306"
+            echo ""
+            echo "[실제 적용 명령 예시, Github Actions에서는 적용X, echo와 정책관리용]"
+          } | tee .github/echo/firewall_rules.txt
+
+      - name: 📄 [echo] MySQL Table/Export/Backup Example
+        run: |
+          echo "echo '[📄] MySQL 테이블/CSV/백업 예시 ...'"
+          # init.sql 생성 및 실행
+          echo "USE sample_db;" > sql/init.sql
+          echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);" >> sql/init.sql
+          echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/init.sql
+          # CSV Export
+          echo "id,name" > export/users.csv
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -B -e "SELECT id, name FROM users;" | tail -n +2 >> export/users.csv
+          # 백업
+          MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > backup/backup.sql
+          zip -j backup/backup.zip backup/backup.sql
+
+      - name: 🚀 [echo] Upload Artifacts (echo, csv, log, warnings, backup)
         uses: actions/upload-artifact@v4
         with:
-          name: mysql-full-backup-${{ github.run_id }}
+          name: mysql-fullops-artifacts-${{ github.run_id }}
           path: |
             .github/logs/*.log
             .github/mysql_logs/*
-            .github/mysql_logs/warnings/mysql_warnings.txt
-            .github/mysql_logs/warnings/mysql_warnings_only.txt
+            .github/echo/*.txt
+            export/*.csv
+            backup/*.zip
 
-      - name: 🗂️ [echo] Show log/warnings/echo structure
+      - name: 🗂️ [echo] Show All Structure
         run: |
-          echo "echo '[🗂️] tree 디렉토리 구조 ...'"
+          echo "echo '[🗂️] 전체 디렉토리 tree ...'"
+          tree sql || true
+          tree export || true
+          tree backup || true
+          tree .github/echo || true
           tree .github/mysql_logs || true
           tree .github/logs || true
-          ls -lh .github/mysql_logs/ .github/logs/
+          ls -lh sql/ export/ backup/ .github/echo/ .github/mysql_logs/ .github/logs/
