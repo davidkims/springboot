@@ -1,76 +1,41 @@
-name: PostgreSQL DB 백업 및 S3 업로드 (echo, 네트워크 점검 포함)
+name: S3 백업 업로드 (외부 DB 백업파일 다운로드 → S3 전송, echo 포함)
 
 on:
   workflow_dispatch:
+    inputs:
+      BACKUP_FILE_URL:
+        description: '다운로드할 PostgreSQL 백업(.sql) 파일의 외부 URL'
+        required: true
+        default: 'https://example.com/path/to/database_backup.sql'
 
 jobs:
-  backup_postgres:
+  upload_backup:
     runs-on: ubuntu-latest
     env:
-      DB_HOST: mydb-prod.ap-northeast-2.rds.amazonaws.com  # (반드시 실제 DNS에 존재하는 주소!)
-      DB_PORT: 5432
-      DB_USER: your_db_user
-      DB_NAME: your_db_name
-      PGPASSWORD: your_db_password
       AWS_REGION: ap-northeast-2
       S3_BUCKET_NAME: your-s3-backup-bucket
 
     steps:
-      - name: 📦 사전 준비:PostgreSQL 클라이언트 설치 (echo)
+      - name: 📁 /tmp/db_backups 디렉토리 생성 (echo)
         run: |
-          echo "echo '[0] apt-get update...'"
-          echo '[0] apt-get update...'
-          sudo apt-get update
-          echo "echo '[1] postgresql-client 설치...'"
-          echo '[1] postgresql-client 설치...'
-          sudo apt-get install -y postgresql-client
-
-      - name: 🛡️ DB 호스트 DNS/포트 접근 확인 (echo)
-        run: |
-          echo "echo '[DNS] DB 호스트 DNS 확인...'"
-          echo '[DNS] DB 호스트 DNS 확인...'
-          nslookup "${{ env.DB_HOST }}" || dig "${{ env.DB_HOST }}" || true
-          echo "echo '[NC] 포트 연결 체크...'"
-          echo '[NC] 포트 연결 체크...'
-          nc -vz "${{ env.DB_HOST }}" "${{ env.DB_PORT }}" || echo "포트 접근 불가"
-
-      - name: 🕒 타임스탬프 및 백업 파일 경로 설정 (echo)
-        id: set_vars
-        run: |
-          echo "echo '[2] 타임스탬프 및 파일명 설정...'"
-          echo '[2] 타임스탬프 및 파일명 설정...'
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
-          BACKUP_FILE_NAME="database_backup_${TIMESTAMP}.sql"
-          echo "echo '[3] /tmp/db_backups 디렉토리 생성...'"
-          echo '[3] /tmp/db_backups 디렉토리 생성...'
+          echo "echo '[1] /tmp/db_backups 디렉토리 생성...'"
+          echo '[1] /tmp/db_backups 디렉토리 생성...'
           mkdir -p /tmp/db_backups
+
+      - name: 🌐 DB 백업파일 다운로드 (echo)
+        id: download
+        run: |
+          echo "echo '[2] 백업 파일 다운로드...'"
+          echo '[2] 백업 파일 다운로드...'
+          BACKUP_FILE_URL="${{ github.event.inputs.BACKUP_FILE_URL }}"
+          BACKUP_FILE_NAME=$(basename "$BACKUP_FILE_URL")
           BACKUP_FILE_PATH="/tmp/db_backups/${BACKUP_FILE_NAME}"
-          echo "echo '[4] 파일명/경로 GitHub Output 등록...'"
-          echo '[4] 파일명/경로 GitHub Output 등록...'
-          echo "BACKUP_FILE_PATH=${BACKUP_FILE_PATH}" >> "$GITHUB_OUTPUT"
-          echo "BACKUP_FILE_NAME=${BACKUP_FILE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "TIMESTAMP=${TIMESTAMP}" >> "$GITHUB_OUTPUT"
-
-      - name: 💾 PostgreSQL 데이터베이스 백업 (pg_dump, echo)
-        run: |
-          echo "echo '[5] pg_dump 명령 실행...'"
-          echo '[5] pg_dump 명령 실행...'
-          echo "pg_dump -h \"${{ env.DB_HOST }}\" -p \"${{ env.DB_PORT }}\" -U \"${{ env.DB_USER }}\" -d \"${{ env.DB_NAME }}\" > \"${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}\""
-          pg_dump -h "${{ env.DB_HOST }}" -p "${{ env.DB_PORT }}" -U "${{ env.DB_USER }}" -d "${{ env.DB_NAME }}" > "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}"
-          echo "echo '✅ PostgreSQL 백업 완료: ${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}'"
-          echo "✅ PostgreSQL 백업 완료: ${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}"
-          echo "echo 'ls -lh \"${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}\"'"
-          ls -lh "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}"
-
-      - name: 🔐 백업 파일 암호화 (echo, 선택)
-        run: |
-          echo "echo '[6] 암호화 예시 (openssl enc)...'"
-          echo '[6] 암호화 예시 (openssl enc)...'
-          echo "echo \"openssl enc -aes-256-cbc -salt -in \\\"${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}\\\" -out \\\"${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}.enc\\\" -k 'your_encryption_key_here'\""
-          # 실제 암호화 명령 실행 시 아래 주석 해제:
-          # openssl enc -aes-256-cbc -salt -in "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}" -out "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}.enc" -k "your_encryption_key_here"
-          # rm "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}"
-          echo "암호화 단계는 보안 키 관리 방안에 따라 구현 필요"
+          echo "echo \"wget -O \\\"$BACKUP_FILE_PATH\\\" \\\"$BACKUP_FILE_URL\\\"\""
+          wget -O "$BACKUP_FILE_PATH" "$BACKUP_FILE_URL"
+          echo "echo \"다운로드 파일 경로: $BACKUP_FILE_PATH\""
+          echo "다운로드 파일 경로: $BACKUP_FILE_PATH"
+          echo "BACKUP_FILE_PATH=$BACKUP_FILE_PATH" >> $GITHUB_OUTPUT
+          echo "BACKUP_FILE_NAME=$BACKUP_FILE_NAME" >> $GITHUB_OUTPUT
 
       - name: ☁️ AWS 자격 증명 구성 (echo)
         uses: aws-actions/configure-aws-credentials@v4
@@ -81,19 +46,20 @@ jobs:
 
       - name: ⬆️ S3에 백업 업로드 (echo)
         run: |
-          echo "echo '[7] aws s3 cp 명령 실행...'"
-          echo '[7] aws s3 cp 명령 실행...'
-          echo "aws s3 cp \"${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}\" \"s3://${{ env.S3_BUCKET_NAME }}/backups/${{ steps.set_vars.outputs.BACKUP_FILE_NAME }}\""
-          aws s3 cp "${{ steps.set_vars.outputs.BACKUP_FILE_PATH }}" "s3://${{ env.S3_BUCKET_NAME }}/backups/${{ steps.set_vars.outputs.BACKUP_FILE_NAME }}"
-          echo "echo '✅ S3 업로드 완료: s3://${{ env.S3_BUCKET_NAME }}/backups/${{ steps.set_vars.outputs.BACKUP_FILE_NAME }}'"
-          echo "✅ S3 업로드 완료: s3://${{ env.S3_BUCKET_NAME }}/backups/${{ steps.set_vars.outputs.BACKUP_FILE_NAME }}"
+          BACKUP_FILE_PATH="${{ steps.download.outputs.BACKUP_FILE_PATH }}"
+          BACKUP_FILE_NAME="${{ steps.download.outputs.BACKUP_FILE_NAME }}"
+          echo "echo '[3] aws s3 cp 명령 실행...'"
+          echo '[3] aws s3 cp 명령 실행...'
+          echo "aws s3 cp \"$BACKUP_FILE_PATH\" \"s3://${{ env.S3_BUCKET_NAME }}/backups/$BACKUP_FILE_NAME\""
+          aws s3 cp "$BACKUP_FILE_PATH" "s3://${{ env.S3_BUCKET_NAME }}/backups/$BACKUP_FILE_NAME"
+          echo "echo '✅ S3 업로드 완료: s3://${{ env.S3_BUCKET_NAME }}/backups/$BACKUP_FILE_NAME'"
+          echo "✅ S3 업로드 완료: s3://${{ env.S3_BUCKET_NAME }}/backups/$BACKUP_FILE_NAME"
 
       - name: 🧹 로컬 백업 파일 정리 (echo)
         if: always()
         run: |
-          echo "echo '[8] 로컬 임시 백업 파일/폴더 삭제...'"
-          echo '[8] 로컬 임시 백업 파일/폴더 삭제...'
-          echo "rm -rf /tmp/db_backups"
+          echo "echo '[4] 로컬 임시 백업 파일/폴더 삭제...'"
+          echo '[4] 로컬 임시 백업 파일/폴더 삭제...'
           rm -rf /tmp/db_backups
           echo "echo '✅ 로컬 백업 파일 정리 완료'"
           echo "✅ 로컬 백업 파일 정리 완료"
