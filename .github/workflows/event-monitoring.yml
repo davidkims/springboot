@@ -20,7 +20,30 @@ jobs:
           find .github/package-backup -type f -delete
           echo "[OK] .github/package-backup 초기화" > .github/package-backup/echo_init.txt
 
-      # 1. 가상 메일계정
+      # 1. APT 미러 자동복구/설치 (mailutils, exim4, sendmail, opensmtpd, courier, npm 등 한 번에)
+      - name: 🛠️ [APT 소스 복구 및 최신화/백업/설치]
+        run: |
+          set -e
+          echo "echo '[APT 소스 복구/미러 문제 자동복원/백업/최신화/설치]'"
+          # APT 미러 오류/남아있는 mirror+file:/etc/apt/apt-mirrors.txt 제거
+          sudo cp -a /etc/apt/sources.list /etc/apt/sources.list.bak-$(date +%Y%m%d%H%M%S) || true
+          sudo grep -v "mirror+file:" /etc/apt/sources.list > sources.list.cleaned || sudo cp /etc/apt/sources.list sources.list.cleaned
+          sudo mv sources.list.cleaned /etc/apt/sources.list
+          sudo rm -f /etc/apt/apt-mirrors.txt || true
+
+          echo "echo '[APT update --fix-missing]'"
+          for try in 1 2 3; do
+            if sudo apt-get update --fix-missing -y; then break; fi
+            echo "[WARN] APT update $try회 실패, 2초 후 재시도" && sleep 2
+          done
+
+          echo "echo '[APT upgrade/install --fix-missing --yes]'"
+          sudo apt-get upgrade --fix-missing -y || true
+          sudo apt-get install --fix-missing -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq mailutils exim4 sendmail opensmtpd courier-mta courier-imap courier-pop npm || true
+
+          echo "[OK] APT 미러, 설치 자동복구/업데이트 완료" > .github/package-backup/echo_apt_repair.txt
+
+      # 2. 가상 메일계정
       - name: 📧 [메일 가상계정/비번 echo]
         run: |
           EMAIL_USER="testuser"
@@ -30,7 +53,7 @@ jobs:
           echo "$EMAIL_ADDR:$EMAIL_PASS" > .github/email_accounts/test_account.txt
           echo "[가상메일 계정] $EMAIL_ADDR / PW: $EMAIL_PASS" > .github/email_accounts/echo_account.txt
 
-      # 2. 메일서버 방화벽(권한)
+      # 3. 메일서버 방화벽(권한)
       - name: 🔥 [메일서버 방화벽 설정/echo]
         run: |
           for port in 25 465 587 993 995 110 143; do
@@ -40,36 +63,30 @@ jobs:
           sudo ufw reload 2>&1 | tee -a .github/email_echo/echo_firewall.txt || true
           echo "[방화벽 적용 완료]" | tee -a .github/email_echo/echo_firewall.txt
 
-      # 3. 메일서버 8종 설치/테스트/echo
+      # 4. 메일서버 8종 설치/테스트/echo
       - name: 📮 [메일서버 8종 설치/테스트/echo]
         run: |
           set -e
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils
           sudo systemctl enable postfix || true
           sudo systemctl start postfix || true
           echo "Test mail from Postfix" | mail -s "Postfix test" root && echo "[OK] Postfix 메일 전송 완료" || echo "[WARN] Postfix 메일 전송 오류"
-          sudo apt-get install -y exim4 mailutils
           sudo systemctl enable exim4 || true
           sudo systemctl start exim4 || true
           echo "Test mail from Exim" | mail -s "Exim test" root && echo "[OK] Exim 메일 전송 완료" || echo "[WARN] Exim 메일 전송 오류"
-          sudo apt-get install -y sendmail mailutils
           sudo systemctl enable sendmail || true
           sudo systemctl start sendmail || true
           echo "Test mail from Sendmail" | mail -s "Sendmail test" root && echo "[OK] Sendmail 메일 전송 완료" || echo "[WARN] Sendmail 메일 전송 오류"
-          sudo apt-get install -y opensmtpd mailutils
           sudo systemctl enable smtpd || true
           sudo systemctl start smtpd || true
           echo "Test mail from OpenSMTPD" | mail -s "OpenSMTPD test" root && echo "[OK] OpenSMTPD 메일 전송 완료" || echo "[WARN] OpenSMTPD 메일 전송 오류"
-          sudo apt-get install -y courier-mta courier-imap courier-pop
           sudo systemctl enable courier-mta || true
           sudo systemctl start courier-mta || true
-          sudo apt-get install -y npm
           sudo npm install -g Haraka
           mkdir -p haraka-test
           cd haraka-test && haraka -i . && nohup haraka -c . > ../.github/email_logs/haraka_run.log 2>&1 &
           cd ..
 
-      # 4. Mailu compose.yaml (echo 변환, 누락 없이)
+      # 5. Mailu compose.yaml (echo 변환, 누락 없이)
       - name: 📦 [Mailu Docker compose.yaml/echo]
         run: |
           echo "echo '[Mailu compose.yaml/echo]'"
@@ -93,7 +110,7 @@ jobs:
           echo "echo '      - \"587:587\"'" >> .github/email_logs/mailu/compose.yaml
           echo "      - \"587:587\"" >> .github/email_logs/mailu/compose.yaml
 
-      # 5. Mailcow compose.yaml (echo 변환, 누락 없이)
+      # 6. Mailcow compose.yaml (echo 변환, 누락 없이)
       - name: 📦 [Mailcow Docker compose.yaml/echo]
         run: |
           echo "echo '[Mailcow compose.yaml/echo]'"
@@ -111,14 +128,14 @@ jobs:
           echo "echo '      - \"25:25\"'" >> .github/email_logs/mailcow/docker-compose.yml
           echo "      - \"25:25\"" >> .github/email_logs/mailcow/docker-compose.yml
 
-      # 6. Haraka, Courier echo 등 나머지 메일서버도 echo, 로깅 유지
+      # 7. 패스워드 echo
       - name: 🔐 [가상 패스워드/권한 echo]
         run: |
           EMAIL_PASS="$(cat .github/email_accounts/test_account.txt | cut -d: -f2)"
           echo "[패스워드] $EMAIL_PASS" > .github/email_accounts/echo_password.txt
           ls -al .github/email_accounts > .github/email_accounts/echo_accounts_ls.txt
 
-      # 7. 이하 분산/샘플/암호화/리메이크/스냅샷/ELK/DB/도커/전체 업로드/요약 예시 (전과 동일)
+      # 8. 이하 분산/샘플/암호화/리메이크/스냅샷/ELK/DB/도커/전체 업로드/요약 (기존과 동일)
       - name: 📂 [분산 디렉토리/샘플/스냅샷 생성]
         run: |
           dirs="collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs"
