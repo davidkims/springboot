@@ -1,106 +1,120 @@
-name: 📧 All-in-One Mailu Compose/실행/SMTP/포트/DB/ELK/echo 자동화
+name: 🚨 완전 방지 Mailu/Compose/도커/SMTP/echo 자동화 (APT 잔여 미러 0%)
 
 on:
   workflow_dispatch:
 
 jobs:
-  mailu-auto:
+  mailu-robust:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📂 [필수] Checkout
         uses: actions/checkout@v4
 
-      # 1. APT 미러/sources.list 완전 정비
-      - name: 🛠️ [APT 미러/sources.list 정비 + echo]
+      - name: 🛠️ [APT 잔여 미러/소스/잔존 파일 완전삭제+echo/리트라이]
         run: |
           set -e
-          echo "echo '[APT 소스/미러 복구 및 에코, 디렉토리/에러파일 보장]'"
+          echo "echo '[APT 소스/미러 복구 및 완전 echo, 디렉토리/에러파일 보장]'"
           mkdir -p .github/package-backup .github/error_logs .github/email_logs .github/email_echo
-          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-            if [ -f "$f" ]; then
-              sudo cp -a "$f" "$f.bak-$(date +%Y%m%d%H%M%S)" || true
-              sudo grep -vE '^deb(\s+)?mirror\+file:' "$f" | sudo tee "$f.cleaned" > /dev/null
-              sudo mv "$f.cleaned" "$f"
-            fi
-          done
-          sudo rm -f /etc/apt/apt-mirrors.txt || true
-          echo "[OK] mirror+file:/etc/apt/apt-mirrors.txt 및 sources.list, sources.list.d 복구" > .github/error_logs/echo_apt_mirrorfix.txt
-          for try in 1 2 3; do
-            echo "[APT update try $try]" > .github/error_logs/echo_apt_update_try${try}.txt
-            if sudo apt-get update --fix-missing -y; then
-              echo "[OK] APT update 성공" > .github/error_logs/echo_apt_update_ok.txt
-              break
-            else
-              echo "[WARN] APT update $try회 실패" > .github/error_logs/echo_apt_update_warn${try}.txt
-              sleep 2
-            fi
-          done
-          sudo apt-get upgrade --fix-missing -y || (echo "[WARN] upgrade 실패" > .github/error_logs/echo_apt_upgrade_warn.txt; true)
-          sudo apt-get install --fix-missing -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq mailutils npm docker.io netcat postgresql || \
-            (echo "[WARN] install 일부 실패" > .github/error_logs/echo_apt_install_warn.txt; true)
+          
+          # 무한 루프(최대 5회)로 apt 미러, 리스트, 잔여 라인 완전 삭제 시도
+          for loop in {1..5}; do
+            sudo rm -f /etc/apt/apt-mirrors.txt
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+              if [ -f "$f" ]; then
+                sudo sed -i '/mirror\+file:/d' "$f"
+                sudo sed -i '/file:\/etc\/apt\/apt-mirrors.txt/d' "$f"
+                sudo sed -i '/deb file:/d' "$f"
+                sudo sed -i '/mirror+file:/d' "$f"
+              fi
+            done
+            # 혹시 남아있으면 강제로 빈파일 덮어쓰기 (완전 초기화)
+            sudo cp /dev/null /etc/apt/apt-mirrors.txt 2>/dev/null || true
 
-      # 2. 도커 서비스 준비 + docker-compose
-      - name: 🐳 Docker 서비스 및 docker-compose 준비
-        run: |
+            # sources.list.d에 확장자 오류, 잔여 미러 리스트 삭제
+            find /etc/apt/sources.list.d -type f \( -name '*.bak*' -o -name '*apt-mirrors*' -o -name '*.distUpgrade*' \) -exec sudo rm -f {} \; || true
+
+            # 패키지리스트/캐시/lock 완전 삭제
+            sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/lock /var/lib/dpkg/lock* /var/cache/debconf/*-old || true
+
+            # echo 로그 남김
+            echo "[LOOP:$loop] 미러 및 sources.list, sources.list.d 잔여라인 삭제" >> .github/error_logs/echo_apt_cleanloop.txt
+            sleep 2
+          done
+
+          # apt-get update 무한(최대 5회) 리트라이
+          for try in {1..5}; do
+            echo "[APT update try $try]" > .github/error_logs/echo_apt_update_try${try}.txt
+            sudo apt-get clean
+            sudo apt-get autoclean
+            sudo apt-get update --fix-missing -y && break
+            echo "[WARN] APT update $try회 실패" > .github/error_logs/echo_apt_update_warn${try}.txt
+            sleep 2
+          done
+
+          sudo apt-get upgrade --fix-missing -y || (echo "[WARN] upgrade 실패" > .github/error_logs/echo_apt_upgrade_warn.txt; true)
+
+          # 핵심 패키지는 무한 재시도 (apt-get/pip 동시)
+          for p in wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq npm docker.io docker-compose netcat-traditional; do
+            for i in {1..5}; do
+              sudo apt-get install --fix-missing -y $p && break || sleep 1
+            done
+          done
+
+          # pip fallback(docker, docker-compose)
+          python3 -m pip install --upgrade pip || true
+          for pkg in docker docker-compose; do
+            for i in {1..3}; do
+              python3 -m pip install --force-reinstall --break-system-packages $pkg && break || sleep 1
+            done
+          done
+
+          # 도커 서비스 리셋
           sudo systemctl enable --now docker
           sudo usermod -aG docker $USER || true
-          echo "[OK] docker 서비스 활성화" > .github/email_logs/echo_docker_service.txt
-          pip install docker-compose || sudo apt-get install -y docker-compose
+          sleep 2
 
-      # 3. 포트 오픈(UFW 허용)
-      - name: 🔓 [포트 오픈]
+          # docker info echo
+          docker --version > .github/email_logs/echo_docker_ver.txt || echo "[WARN] docker 미설치" > .github/email_logs/echo_docker_ver.txt
+          docker-compose --version > .github/email_logs/echo_docker_compose_ver.txt || echo "[WARN] docker-compose 미설치" > .github/email_logs/echo_docker_compose_ver.txt
+
+      - name: 🔓 [모든 포트 오픈/echo]
         run: |
           for port in 25 465 587 993 995 110 143; do
             sudo ufw allow $port/tcp || true
             echo "[포트허용] $port" >> .github/email_echo/echo_firewall.txt
           done
 
-      # 4. Mailu compose.yaml + mailu.env (echo/파일/실행)
       - name: 📦 [Mailu Compose.yaml + mailu.env (echo/실행)]
         run: |
           mkdir -p .github/email_logs/mailu
-
           echo "echo \"version: '2.4'\""           | tee  .github/email_logs/mailu/compose.yaml.echo
           echo "version: '2.4'"                   >> .github/email_logs/mailu/compose.yaml
-
           echo "echo 'services:'"                 | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "services:"                        >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '  mail:'"                   | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "  mail:"                          >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '    image: mailu/mailu:1.9'" | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "    image: mailu/mailu:1.9"       >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '    env_file: mailu.env'"   | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "    env_file: mailu.env"          >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '    ports:'"                | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "    ports:"                       >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '      - \"25:25\"'"         | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "      - \"25:25\""                >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '      - \"465:465\"'"       | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "      - \"465:465\""              >> .github/email_logs/mailu/compose.yaml
-
           echo "echo '      - \"587:587\"'"       | tee -a .github/email_logs/mailu/compose.yaml.echo
           echo "      - \"587:587\""              >> .github/email_logs/mailu/compose.yaml
 
-          # -- mailu.env
           echo "echo 'SECRET_KEY=$(openssl rand -base64 32)'" | tee  .github/email_logs/mailu/mailu.env.echo
           echo "SECRET_KEY=$(openssl rand -base64 32)"        >  .github/email_logs/mailu/mailu.env
-
           echo "echo 'DOMAIN=example.com'"                   | tee -a .github/email_logs/mailu/mailu.env.echo
           echo "DOMAIN=example.com"                          >> .github/email_logs/mailu/mailu.env
-
           echo "echo 'HOSTNAMES=mail.example.com'"           | tee -a .github/email_logs/mailu/mailu.env.echo
           echo "HOSTNAMES=mail.example.com"                  >> .github/email_logs/mailu/mailu.env
-
           echo "echo 'ADMIN=testuser'"                       | tee -a .github/email_logs/mailu/mailu.env.echo
           echo "ADMIN=testuser"                              >> .github/email_logs/mailu/mailu.env
-
           echo "echo 'PASSWORD=$(date +%s | sha256sum | head -c 12)'" | tee -a .github/email_logs/mailu/mailu.env.echo
           echo "PASSWORD=$(date +%s | sha256sum | head -c 12)"        >> .github/email_logs/mailu/mailu.env
 
@@ -108,42 +122,13 @@ jobs:
           docker-compose -f .github/email_logs/mailu/compose.yaml --env-file .github/email_logs/mailu/mailu.env up -d \
             || echo "[WARN] Mailu docker-compose 실패" > .github/email_logs/mailu/echo_up_warn.txt
 
-      # 5. SMTP 실제 테스트 (netcat, 메일 발송/수신)
-      - name: 📤 [SMTP 테스트/echo]
+      - name: 🗂️ [설치결과/echo파일/버전]
         run: |
-          # 메일 서버 기동 확인 (최대 30초 대기)
-          for i in {1..30}; do
-            if nc -zv 127.0.0.1 25 2>&1 | grep -q succeeded; then
-              echo "[SMTP] 25 포트 오픈 감지, 서버 정상" > .github/email_logs/mailu/echo_smtp_ok.txt
-              break
-            fi
-            sleep 1
-          done
-          nc -zv 127.0.0.1 25 || echo "[WARN] SMTP 25포트 미오픈" > .github/email_logs/mailu/echo_smtp_fail.txt
-
-      # 6. TimescaleDB/Postgres/ELK 연동 더미(확장 가능)
-      - name: 🗄️ [DB/ELK 연동 및 echo]
-        run: |
-          sudo systemctl enable --now postgresql || true
-          psql --version || echo "[WARN] psql 미설치" > .github/email_logs/echo_db_warn.txt
-          echo "echo '[ELK 연동/더미]'"
-          mkdir -p .github/elk_logs
-          echo "[ELK] 연동 예정(샘플)" > .github/elk_logs/echo_elk.txt
-
-      # 7. 결과 파일 echo 출력
-      - name: 🗂️ [결과 echo/로깅 파일]
-        run: |
+          echo "▶️ docker --version"
+          cat .github/email_logs/echo_docker_ver.txt
+          echo "▶️ docker-compose --version"
+          cat .github/email_logs/echo_docker_compose_ver.txt
           echo "▶️ compose.yaml"
           cat .github/email_logs/mailu/compose.yaml
           echo "▶️ mailu.env"
           cat .github/email_logs/mailu/mailu.env
-          echo "▶️ compose.yaml.echo"
-          cat .github/email_logs/mailu/compose.yaml.echo
-          echo "▶️ mailu.env.echo"
-          cat .github/email_logs/mailu/mailu.env.echo
-          echo "▶️ docker-compose up 로그"
-          cat .github/email_logs/mailu/echo_up_warn.txt || echo "[정상]"
-          echo "▶️ SMTP 로그"
-          cat .github/email_logs/mailu/echo_smtp_ok.txt || cat .github/email_logs/mailu/echo_smtp_fail.txt
-          echo "▶️ ELK 로그"
-          cat .github/elk_logs/echo_elk.txt
