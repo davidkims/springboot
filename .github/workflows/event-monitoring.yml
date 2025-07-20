@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/메일서버/ELK/DB/도커/암호화/스냅샷 통합 자동화 (APT/echo/오류안전)
+name: 📦 전문가 메일/분산/ELK/DB/암호화/실행/테스트/보안 자동화
 
 on:
   workflow_dispatch:
@@ -6,11 +6,11 @@ on:
     - cron: '*/5 * * * *'
 
 jobs:
-  all-in-one:
+  mailu-mailcow-elk-db:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. APT 미러/sources.list 완전정비 + echo/에러/디렉토리
+      # 1. APT 미러/sources.list 완전정비 + echo/에러/디렉토리 + noble 미지원 안내/echo
       - name: 🛠️ [APT 미러/sources.list 정비 + echo/에러/디렉토리]
         run: |
           set -e
@@ -36,12 +36,22 @@ jobs:
             fi
           done
           sudo apt-get upgrade --fix-missing -y || (echo "[WARN] upgrade 실패" > .github/error_logs/echo_apt_upgrade_warn.txt; true)
-          sudo apt-get install --fix-missing -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq mailutils exim4 sendmail opensmtpd npm || \
-            (echo "[WARN] install 일부 실패" > .github/error_logs/echo_apt_install_warn.txt; true)
-          echo "[INFO] courier-mta, courier-imap, courier-pop은 noble에서 패키지 미제공" > .github/error_logs/echo_apt_courier_unavailable.txt
+          sudo apt-get install --fix-missing -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq mailutils postfix docker.io || \
+            (echo "[WARN] install 일부 실패 (exim4/sendmail/opensmtpd/courier 등 noble 충돌 안내)" > .github/error_logs/echo_apt_install_warn.txt; true)
+          echo "[INFO] exim4, sendmail, opensmtpd, courier-mta 계열은 noble(24.04)에서 의존성 충돌/미지원. 설치 실패 정상, 에코로 안내됨." > .github/error_logs/echo_apt_mailpkg_unavailable.txt
           echo "[OK] APT 미러/sources.list 완전복구, echo/디렉토리/로그파일 모두 생성" > .github/package-backup/echo_apt_total_repair.txt
 
-      # 2. 가상 메일계정/비밀번호 생성 echo
+      # 2. Docker, 도커 컴포즈 최신화/권한
+      - name: 🐳 [Docker/Compose 최신화 및 그룹 권한]
+        run: |
+          sudo systemctl enable docker
+          sudo systemctl start docker
+          sudo usermod -aG docker $USER || true
+          pip install docker-compose || sudo apt-get install -y docker-compose || true
+          docker --version || true
+          docker-compose --version || true
+
+      # 3. 가상 메일계정/비번 echo
       - name: 📧 [메일 가상계정/비번 echo]
         run: |
           EMAIL_USER="testuser"
@@ -51,7 +61,7 @@ jobs:
           echo "$EMAIL_ADDR:$EMAIL_PASS" > .github/email_accounts/test_account.txt
           echo "[가상메일 계정] $EMAIL_ADDR / PW: $EMAIL_PASS" > .github/email_accounts/echo_account.txt
 
-      # 3. 메일서버 방화벽 설정 echo
+      # 4. 메일서버 방화벽 설정 echo
       - name: 🔥 [메일서버 방화벽 설정/echo]
         run: |
           for port in 25 465 587 993 995 110 143; do
@@ -61,8 +71,8 @@ jobs:
           sudo ufw reload 2>&1 | tee -a .github/email_echo/echo_firewall.txt || true
           echo "[방화벽 적용 완료]" | tee -a .github/email_echo/echo_firewall.txt
 
-      # 4. Mailu compose.yaml echo
-      - name: 📦 [Mailu Docker compose.yaml/echo]
+      # 5. Mailu compose.yaml echo + docker compose up
+      - name: 📦 [Mailu Docker compose.yaml/echo+실행]
         run: |
           mkdir -p .github/email_logs/mailu
           echo "echo '[Mailu compose.yaml/echo]'" > .github/email_logs/mailu/compose.yaml
@@ -75,9 +85,18 @@ jobs:
           echo "      - \"25:25\"" >> .github/email_logs/mailu/compose.yaml
           echo "      - \"465:465\"" >> .github/email_logs/mailu/compose.yaml
           echo "      - \"587:587\"" >> .github/email_logs/mailu/compose.yaml
+          # 간단 mailu.env
+          echo "echo '[Mailu env/echo]'" > .github/email_logs/mailu/mailu.env
+          echo "SECRET_KEY=$(openssl rand -base64 32)" >> .github/email_logs/mailu/mailu.env
+          echo "DOMAIN=example.com" >> .github/email_logs/mailu/mailu.env
+          echo "HOSTNAMES=mail.example.com" >> .github/email_logs/mailu/mailu.env
+          echo "ADMIN=testuser" >> .github/email_logs/mailu/mailu.env
+          echo "PASSWORD=$(date +%s | sha256sum | head -c 12)" >> .github/email_logs/mailu/mailu.env
+          # 실제 compose 실행 (백그라운드)
+          docker compose -f .github/email_logs/mailu/compose.yaml --env-file .github/email_logs/mailu/mailu.env up -d || echo "[WARN] Mailu docker-compose 실패" > .github/email_logs/mailu/echo_up_warn.txt
 
-      # 5. Mailcow compose.yaml echo
-      - name: 📦 [Mailcow Docker compose.yaml/echo]
+      # 6. Mailcow compose.yaml echo + docker compose up
+      - name: 📦 [Mailcow Docker compose.yaml/echo+실행]
         run: |
           mkdir -p .github/email_logs/mailcow
           echo "echo '[Mailcow compose.yaml/echo]'" > .github/email_logs/mailcow/docker-compose.yml
@@ -87,11 +106,14 @@ jobs:
           echo "    image: mailcow/mailcow:latest" >> .github/email_logs/mailcow/docker-compose.yml
           echo "    ports:" >> .github/email_logs/mailcow/docker-compose.yml
           echo "      - \"25:25\"" >> .github/email_logs/mailcow/docker-compose.yml
+          # 실제 compose 실행 (백그라운드)
+          docker compose -f .github/email_logs/mailcow/docker-compose.yml up -d || echo "[WARN] Mailcow docker-compose 실패" > .github/email_logs/mailcow/echo_up_warn.txt
 
-      # 6. Mailutils, Exim, Sendmail, OpenSMTPD 설치 후 echo
-      - name: 📨 [Postfix/Exim/Sendmail/OpenSMTPD 설치상태/echo]
+      # 7. postfix만 설치됨 (나머지는 noble 미지원 안내/echo)
+      - name: 📨 [Postfix만 설치/나머지 noble 미지원 안내/echo]
         run: |
-          for pkg in postfix exim4 sendmail opensmtpd; do
+          PKGS="postfix exim4 sendmail opensmtpd"
+          for pkg in $PKGS; do
             if dpkg -s $pkg &>/dev/null; then
               echo "[$pkg] 설치됨" >> .github/email_echo/echo_mailpkg.txt
             else
@@ -99,27 +121,70 @@ jobs:
             fi
           done
 
-      # 7. (샘플) 분산/암호화/ELK/DB/도커/샘플/요약 echo 등 원하는 단계 추가
-      # 예시로 echo만, 실제 실행은 이어붙여 자유롭게 추가
-      - name: 📂 [분산 디렉토리 생성 echo]
+      # 8. Postfix 실제 SMTP 송신 echo 테스트 (mailutils 설치됨 가정)
+      - name: 📬 [SMTP 테스트 메일 송신/echo]
         run: |
-          for d in collector-data elk-data docker-data encrypted-data snapshot remake-batch remake-batch/sample remake-batch/logs; do
-            echo "echo '[생성] $d'" > $d/echo_dir.txt
-          done
+          FROM_ADDR="testuser@example.com"
+          TO_ADDR="testuser@example.com"
+          echo "테스트 메일입니다 [$(date +%Y-%m-%dT%H:%M:%S)]" | mail -s "SMTP Test $(date +%H:%M:%S)" $TO_ADDR && \
+            echo "[OK] mailutils + postfix 메일 송신 성공" > .github/email_echo/echo_smtp_test_ok.txt || \
+            echo "[WARN] mailutils + postfix 메일 송신 실패" > .github/email_echo/echo_smtp_test_fail.txt
 
-      - name: 📊 [요약] 최신 데이터 현황/echo
+      # 9. ELK/TimescaleDB/Postgres15/암호화/분산 샘플
+      - name: 🗃️ [ELK/DB/암호화/분산 샘플 echo]
+        run: |
+          # TimescaleDB/Postgres 15
+          wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor | sudo tee /usr/share/keyrings/postgresql.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-15 timescaledb-2-postgresql-15
+          sudo systemctl start postgresql
+          echo '샘플 TimescaleDB 데이터' > collector-data/sample-tsdb.txt
+          sha256sum collector-data/sample-tsdb.txt > collector-data/sample-tsdb-sha256.txt
+          # ELK
+          wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor | sudo tee /usr/share/keyrings/elasticsearch.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/elasticsearch.gpg] https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
+          sudo apt-get update -y
+          sudo apt-get install -y elasticsearch logstash kibana
+          sudo systemctl enable elasticsearch.service kibana.service logstash.service
+          sudo systemctl start elasticsearch.service kibana.service logstash.service
+          (elasticsearch --version > elk-data/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> elk-data/elasticsearch_version.txt)
+          (kibana --version > elk-data/kibana_version.txt 2>&1 || echo "kibana not found" >> elk-data/kibana_version.txt)
+          (logstash --version > elk-data/logstash_version.txt 2>&1 || echo "logstash not found" >> elk-data/logstash_version.txt)
+          echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
+          sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
+          # 분산/암호화
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in collector-data/sample-tsdb.txt -out encrypted-data/tsdb.enc -k tsdbpw
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in elk-data/sample-elk-log.txt -out encrypted-data/elk.enc -k elkpw
+          echo "[분산/암호화 샘플 생성 완료]" > encrypted-data/echo_enc_ok.txt
+
+      # 10. 보안/실행 이벤트 샘플(로그, audit, 프로세스, sudo 히스토리 등)
+      - name: 🛡️ [보안/이벤트 수집 echo]
+        run: |
+          sudo last > snapshot/last_login.txt || true
+          sudo who > snapshot/who.txt || true
+          ps auxww > snapshot/proc_ps.txt || true
+          sudo tail -100 /var/log/auth.log > snapshot/authlog_tail.txt || echo "No auth.log" > snapshot/authlog_tail.txt
+          sudo dmesg | tail -100 > snapshot/dmesg_tail.txt || echo "No dmesg" > snapshot/dmesg_tail.txt
+          echo "[보안/이벤트/프로세스 로그 샘플 완료]" > snapshot/echo_eventlog.txt
+
+      # 11. 요약/echo
+      - name: 📊 [요약] 메일/분산/암호화/ELK/DB/이벤트
         run: |
           echo "▶️ [메일 echo]" ; ls -lh .github/email_echo | head -20 || true
           echo "▶️ [메일 compose]" ; ls -lh .github/email_logs/mailu .github/email_logs/mailcow || true
           echo "▶️ [에러 로그]" ; ls -lh .github/error_logs | head -20 || true
           echo "▶️ [가상계정]" ; cat .github/email_accounts/test_account.txt || true
           echo "▶️ [분산]" ; ls -lh collector-data elk-data docker-data encrypted-data snapshot remake-batch || true
+          echo "▶️ [암호화]" ; ls -lh encrypted-data | grep '\.enc' || echo '[⚠️] 없음'
+          echo "▶️ [ELK]" ; cat elk-data/elasticsearch_version.txt || true
+          echo "▶️ [DB]" ; sudo -u postgres psql -c '\l' || echo '[⚠️] DB 연결실패'
 
-      # 8. 전체 업로드
+      # 12. 전체 업로드
       - name: 📦 [전체 업로드]
         uses: actions/upload-artifact@v4
         with:
-          name: all-artifacts-distributed-batch-encrypted-with-echo
+          name: all-artifacts-distributed-mailu-mailcow-elk-db-encrypted-with-echo
           path: |
             .github/package-backup/
             .github/error_logs/
