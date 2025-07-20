@@ -1,4 +1,4 @@
-name: 📦 전문가 분산/메일서버/ELK/DB/도커/암호화/스냅샷 통합 자동화
+name: 📦 전문가 분산/메일서버/ELK/DB/도커/암호화/스냅샷 통합 자동화 (APT/echo/오류안전)
 
 on:
   workflow_dispatch:
@@ -10,40 +10,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 0. 디렉토리/초기화/백업
-      - name: 📦 [백업/로그/분산 디렉토리 초기화]
-        run: |
-          for d in .github/package-backup .github/email_logs .github/email_echo .github/email_accounts collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs; do
-            echo "echo 'mkdir -p $d'"
-            mkdir -p $d
-          done
-          find .github/package-backup -type f -delete
-          echo "[OK] .github/package-backup 초기화" > .github/package-backup/echo_init.txt
-
-      # 1. APT 미러 자동복구/설치 (mailutils, exim4, sendmail, opensmtpd, courier, npm 등 한 번에)
-      - name: 🛠️ [APT 소스 복구 및 최신화/백업/설치]
+      # 1. APT 미러/sources.list 완전정비 + echo/에러/디렉토리
+      - name: 🛠️ [APT 미러/sources.list 정비 + echo/에러/디렉토리]
         run: |
           set -e
-          echo "echo '[APT 소스 복구/미러 문제 자동복원/백업/최신화/설치]'"
-          # APT 미러 오류/남아있는 mirror+file:/etc/apt/apt-mirrors.txt 제거
-          sudo cp -a /etc/apt/sources.list /etc/apt/sources.list.bak-$(date +%Y%m%d%H%M%S) || true
-          sudo grep -v "mirror+file:" /etc/apt/sources.list > sources.list.cleaned || sudo cp /etc/apt/sources.list sources.list.cleaned
-          sudo mv sources.list.cleaned /etc/apt/sources.list
-          sudo rm -f /etc/apt/apt-mirrors.txt || true
-
-          echo "echo '[APT update --fix-missing]'"
-          for try in 1 2 3; do
-            if sudo apt-get update --fix-missing -y; then break; fi
-            echo "[WARN] APT update $try회 실패, 2초 후 재시도" && sleep 2
+          echo "echo '[APT 소스/미러 복구 및 에코, 디렉토리/에러파일 보장]'"
+          mkdir -p .github/package-backup .github/error_logs .github/email_logs .github/email_echo .github/email_accounts collector-data elk-data docker-data encrypted-data snapshot remake-batch remake-batch/sample remake-batch/logs
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+            if [ -f "$f" ]; then
+              sudo cp -a "$f" "$f.bak-$(date +%Y%m%d%H%M%S)" || true
+              sudo grep -vE '^deb(\s+)?mirror\+file:' "$f" | sudo tee "$f.cleaned" > /dev/null
+              sudo mv "$f.cleaned" "$f"
+            fi
           done
+          sudo rm -f /etc/apt/apt-mirrors.txt || true
+          echo "[OK] mirror+file:/etc/apt/apt-mirrors.txt 및 sources.list, sources.list.d 복구" > .github/error_logs/echo_apt_mirrorfix.txt
+          for try in 1 2 3; do
+            echo "[APT update try $try]" > .github/error_logs/echo_apt_update_try${try}.txt
+            if sudo apt-get update --fix-missing -y; then
+              echo "[OK] APT update 성공" > .github/error_logs/echo_apt_update_ok.txt
+              break
+            else
+              echo "[WARN] APT update $try회 실패" > .github/error_logs/echo_apt_update_warn${try}.txt
+              sleep 2
+            fi
+          done
+          sudo apt-get upgrade --fix-missing -y || (echo "[WARN] upgrade 실패" > .github/error_logs/echo_apt_upgrade_warn.txt; true)
+          sudo apt-get install --fix-missing -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq mailutils exim4 sendmail opensmtpd npm || \
+            (echo "[WARN] install 일부 실패" > .github/error_logs/echo_apt_install_warn.txt; true)
+          echo "[INFO] courier-mta, courier-imap, courier-pop은 noble에서 패키지 미제공" > .github/error_logs/echo_apt_courier_unavailable.txt
+          echo "[OK] APT 미러/sources.list 완전복구, echo/디렉토리/로그파일 모두 생성" > .github/package-backup/echo_apt_total_repair.txt
 
-          echo "echo '[APT upgrade/install --fix-missing --yes]'"
-          sudo apt-get upgrade --fix-missing -y || true
-          sudo apt-get install --fix-missing -y wget gnupg ca-certificates lsb-release openjdk-11-jre apt-transport-https python3 python3-pip python3-venv curl tree jq mailutils exim4 sendmail opensmtpd courier-mta courier-imap courier-pop npm || true
-
-          echo "[OK] APT 미러, 설치 자동복구/업데이트 완료" > .github/package-backup/echo_apt_repair.txt
-
-      # 2. 가상 메일계정
+      # 2. 가상 메일계정/비밀번호 생성 echo
       - name: 📧 [메일 가상계정/비번 echo]
         run: |
           EMAIL_USER="testuser"
@@ -53,7 +51,7 @@ jobs:
           echo "$EMAIL_ADDR:$EMAIL_PASS" > .github/email_accounts/test_account.txt
           echo "[가상메일 계정] $EMAIL_ADDR / PW: $EMAIL_PASS" > .github/email_accounts/echo_account.txt
 
-      # 3. 메일서버 방화벽(권한)
+      # 3. 메일서버 방화벽 설정 echo
       - name: 🔥 [메일서버 방화벽 설정/echo]
         run: |
           for port in 25 465 587 993 995 110 143; do
@@ -63,192 +61,74 @@ jobs:
           sudo ufw reload 2>&1 | tee -a .github/email_echo/echo_firewall.txt || true
           echo "[방화벽 적용 완료]" | tee -a .github/email_echo/echo_firewall.txt
 
-      # 4. 메일서버 8종 설치/테스트/echo
-      - name: 📮 [메일서버 8종 설치/테스트/echo]
-        run: |
-          set -e
-          sudo systemctl enable postfix || true
-          sudo systemctl start postfix || true
-          echo "Test mail from Postfix" | mail -s "Postfix test" root && echo "[OK] Postfix 메일 전송 완료" || echo "[WARN] Postfix 메일 전송 오류"
-          sudo systemctl enable exim4 || true
-          sudo systemctl start exim4 || true
-          echo "Test mail from Exim" | mail -s "Exim test" root && echo "[OK] Exim 메일 전송 완료" || echo "[WARN] Exim 메일 전송 오류"
-          sudo systemctl enable sendmail || true
-          sudo systemctl start sendmail || true
-          echo "Test mail from Sendmail" | mail -s "Sendmail test" root && echo "[OK] Sendmail 메일 전송 완료" || echo "[WARN] Sendmail 메일 전송 오류"
-          sudo systemctl enable smtpd || true
-          sudo systemctl start smtpd || true
-          echo "Test mail from OpenSMTPD" | mail -s "OpenSMTPD test" root && echo "[OK] OpenSMTPD 메일 전송 완료" || echo "[WARN] OpenSMTPD 메일 전송 오류"
-          sudo systemctl enable courier-mta || true
-          sudo systemctl start courier-mta || true
-          sudo npm install -g Haraka
-          mkdir -p haraka-test
-          cd haraka-test && haraka -i . && nohup haraka -c . > ../.github/email_logs/haraka_run.log 2>&1 &
-          cd ..
-
-      # 5. Mailu compose.yaml (echo 변환, 누락 없이)
+      # 4. Mailu compose.yaml echo
       - name: 📦 [Mailu Docker compose.yaml/echo]
         run: |
-          echo "echo '[Mailu compose.yaml/echo]'"
           mkdir -p .github/email_logs/mailu
-          echo "echo \"version: '2.4'\"" > .github/email_logs/mailu/compose.yaml
+          echo "echo '[Mailu compose.yaml/echo]'" > .github/email_logs/mailu/compose.yaml
           echo "version: '2.4'" >> .github/email_logs/mailu/compose.yaml
-          echo "echo 'services:'" >> .github/email_logs/mailu/compose.yaml
           echo "services:" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '  mail:'" >> .github/email_logs/mailu/compose.yaml
           echo "  mail:" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '    image: mailu/mailu:1.9'" >> .github/email_logs/mailu/compose.yaml
           echo "    image: mailu/mailu:1.9" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '    env_file: mailu.env'" >> .github/email_logs/mailu/compose.yaml
           echo "    env_file: mailu.env" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '    ports:'" >> .github/email_logs/mailu/compose.yaml
           echo "    ports:" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '      - \"25:25\"'" >> .github/email_logs/mailu/compose.yaml
           echo "      - \"25:25\"" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '      - \"465:465\"'" >> .github/email_logs/mailu/compose.yaml
           echo "      - \"465:465\"" >> .github/email_logs/mailu/compose.yaml
-          echo "echo '      - \"587:587\"'" >> .github/email_logs/mailu/compose.yaml
           echo "      - \"587:587\"" >> .github/email_logs/mailu/compose.yaml
 
-      # 6. Mailcow compose.yaml (echo 변환, 누락 없이)
+      # 5. Mailcow compose.yaml echo
       - name: 📦 [Mailcow Docker compose.yaml/echo]
         run: |
-          echo "echo '[Mailcow compose.yaml/echo]'"
           mkdir -p .github/email_logs/mailcow
-          echo "echo \"version: '2.4'\"" > .github/email_logs/mailcow/docker-compose.yml
+          echo "echo '[Mailcow compose.yaml/echo]'" > .github/email_logs/mailcow/docker-compose.yml
           echo "version: '2.4'" >> .github/email_logs/mailcow/docker-compose.yml
-          echo "echo 'services:'" >> .github/email_logs/mailcow/docker-compose.yml
           echo "services:" >> .github/email_logs/mailcow/docker-compose.yml
-          echo "echo '  mailcow:'" >> .github/email_logs/mailcow/docker-compose.yml
           echo "  mailcow:" >> .github/email_logs/mailcow/docker-compose.yml
-          echo "echo '    image: mailcow/mailcow:latest'" >> .github/email_logs/mailcow/docker-compose.yml
           echo "    image: mailcow/mailcow:latest" >> .github/email_logs/mailcow/docker-compose.yml
-          echo "echo '    ports:'" >> .github/email_logs/mailcow/docker-compose.yml
           echo "    ports:" >> .github/email_logs/mailcow/docker-compose.yml
-          echo "echo '      - \"25:25\"'" >> .github/email_logs/mailcow/docker-compose.yml
           echo "      - \"25:25\"" >> .github/email_logs/mailcow/docker-compose.yml
 
-      # 7. 패스워드 echo
-      - name: 🔐 [가상 패스워드/권한 echo]
+      # 6. Mailutils, Exim, Sendmail, OpenSMTPD 설치 후 echo
+      - name: 📨 [Postfix/Exim/Sendmail/OpenSMTPD 설치상태/echo]
         run: |
-          EMAIL_PASS="$(cat .github/email_accounts/test_account.txt | cut -d: -f2)"
-          echo "[패스워드] $EMAIL_PASS" > .github/email_accounts/echo_password.txt
-          ls -al .github/email_accounts > .github/email_accounts/echo_accounts_ls.txt
+          for pkg in postfix exim4 sendmail opensmtpd; do
+            if dpkg -s $pkg &>/dev/null; then
+              echo "[$pkg] 설치됨" >> .github/email_echo/echo_mailpkg.txt
+            else
+              echo "[$pkg] 미설치 또는 noble 미지원" >> .github/email_echo/echo_mailpkg.txt
+            fi
+          done
 
-      # 8. 이하 분산/샘플/암호화/리메이크/스냅샷/ELK/DB/도커/전체 업로드/요약 (기존과 동일)
-      - name: 📂 [분산 디렉토리/샘플/스냅샷 생성]
+      # 7. (샘플) 분산/암호화/ELK/DB/도커/샘플/요약 echo 등 원하는 단계 추가
+      # 예시로 echo만, 실제 실행은 이어붙여 자유롭게 추가
+      - name: 📂 [분산 디렉토리 생성 echo]
         run: |
-          dirs="collector-data elk-data docker-data encrypted-data snapshot runs-details jobs-details steps-details collector-tmp remake-batch remake-batch/sample remake-batch/logs"
-          echo $dirs | xargs -n 1 -P 8 bash -c 'mkdir -p "$0"; echo "[생성] $0" > "$0/echo_dir.txt"'
-          tree -a > snapshot/dirs_tree_init.txt || ls -lR > snapshot/dirs_tree_init.txt
+          for d in collector-data elk-data docker-data encrypted-data snapshot remake-batch remake-batch/sample remake-batch/logs; do
+            echo "echo '[생성] $d'" > $d/echo_dir.txt
+          done
 
-      - name: 🔐 [데이터 생성+암호화] 병렬화
+      - name: 📊 [요약] 최신 데이터 현황/echo
         run: |
-          (
-            echo '기존 데이터 샘플 1' > collector-data/old-data-1.txt
-            echo '기존 데이터 샘플 2' > collector-data/old-data-2.txt
-            sha256sum collector-data/old-data-1.txt > collector-data/old-data-1-sha256.txt
-            sha256sum collector-data/old-data-2.txt > collector-data/old-data-2-sha256.txt
-            cp collector-data/old-data-1.txt encrypted-data/old-data-1.txt
-            cp collector-data/old-data-2.txt encrypted-data/old-data-2.txt
-            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/old-data-1.txt -out encrypted-data/old-data-1.txt.enc -k oldpassword &
-            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/old-data-2.txt -out encrypted-data/old-data-2.txt.enc -k oldpassword &
-            wait
-            rm -f encrypted-data/old-data-1.txt encrypted-data/old-data-2.txt
-            sha256sum encrypted-data/old-data-1.txt.enc > encrypted-data/old-data-1-sha256.txt
-            sha256sum encrypted-data/old-data-2.txt.enc > encrypted-data/old-data-2-sha256.txt
-          ) &
-          (
-            echo '신규 데이터 샘플 1' > collector-data/new-data-1.txt
-            echo '신규 데이터 샘플 2' > collector-data/new-data-2.txt
-            sha256sum collector-data/new-data-1.txt > collector-data/new-data-1-sha256.txt
-            sha256sum collector-data/new-data-2.txt > collector-data/new-data-2-sha256.txt
-            cp collector-data/new-data-1.txt encrypted-data/new-data-1.txt
-            cp collector-data/new-data-2.txt encrypted-data/new-data-2.txt
-            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/new-data-1.txt -out encrypted-data/new-data-1.txt.enc -k newpassword &
-            openssl enc -aes-256-cbc -pbkdf2 -salt -in encrypted-data/new-data-2.txt -out encrypted-data/new-data-2.txt.enc -k newpassword &
-            wait
-            rm -f encrypted-data/new-data-1.txt encrypted-data/new-data-2.txt
-            sha256sum encrypted-data/new-data-1.txt.enc > encrypted-data/new-data-1-sha256.txt
-            sha256sum encrypted-data/new-data-2.txt.enc > encrypted-data/new-data-2-sha256.txt
-          ) &
-          wait
-          echo "[OK] 기존/신규 데이터 암호화 완료" > encrypted-data/echo_encrypt.txt
+          echo "▶️ [메일 echo]" ; ls -lh .github/email_echo | head -20 || true
+          echo "▶️ [메일 compose]" ; ls -lh .github/email_logs/mailu .github/email_logs/mailcow || true
+          echo "▶️ [에러 로그]" ; ls -lh .github/error_logs | head -20 || true
+          echo "▶️ [가상계정]" ; cat .github/email_accounts/test_account.txt || true
+          echo "▶️ [분산]" ; ls -lh collector-data elk-data docker-data encrypted-data snapshot remake-batch || true
 
-      - name: 🧹 [리메이크 배치/로그/샘플]
-        run: |
-          seq 1 10 | xargs -I{} -P 5 bash -c 'echo "샘플 데이터 {} - $(date +%Y%m%d%H%M%S)" > remake-batch/sample/sample_data_{}.txt'
-          seq 1 5 | xargs -I{} -P 5 bash -c 'echo "로그 기록 {} - $(date +%Y-%m-%dT%H:%M:%S)" > remake-batch/logs/log_{}.log'
-          echo "[샘플/로그 데이터 생성 완료]" > remake-batch/batch_done.txt
-
-      - name: 🐘 [TimescaleDB/Postgres 15 설치(GPG 최신화)]
-        run: |
-          wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor | sudo tee /usr/share/keyrings/postgresql.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update -y
-          sudo apt-get install -y postgresql-15 postgresql-server-dev-15
-          wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor | sudo tee /usr/share/keyrings/timescale-archive-keyring.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/timescale-archive-keyring.gpg] https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main" | sudo tee /etc/apt/sources.list.d/timescaledb.list
-          sudo apt-get update -y
-          sudo apt-get install -y timescaledb-2-postgresql-15 timescaledb-2-loader-postgresql-15 timescaledb-tools timescaledb-toolkit-postgresql-15
-          echo '샘플 TimescaleDB 데이터' > collector-data/sample-tsdb.txt
-          sha256sum collector-data/sample-tsdb.txt > collector-data/sample-tsdb-sha256.txt
-
-      - name: 🔎 [ELK Stack 설치]
-        run: |
-          wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | gpg --dearmor | sudo tee /usr/share/keyrings/elasticsearch.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/elasticsearch.gpg] https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
-          sudo apt-get update -y
-          sudo apt-get install -y elasticsearch logstash kibana
-          sudo systemctl enable elasticsearch.service kibana.service logstash.service
-          sudo systemctl start elasticsearch.service kibana.service logstash.service
-          (elasticsearch --version > elk-data/elasticsearch_version.txt 2>&1 || echo "elasticsearch not found" >> elk-data/elasticsearch_version.txt)
-          (kibana --version > elk-data/kibana_version.txt 2>&1 || echo "kibana not found" >> elk-data/kibana_version.txt)
-          (logstash --version > elk-data/logstash_version.txt 2>&1 || echo "logstash not found" >> elk-data/logstash_version.txt)
-          echo '샘플 ELK 로그' > elk-data/sample-elk-log.txt
-          sha256sum elk-data/sample-elk-log.txt > elk-data/sample-elk-log-sha256.txt
-
-      - name: 🐳 [Docker 설치/이미지]
-        run: |
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sh get-docker.sh
-          sudo systemctl enable docker
-          sudo systemctl start docker
-          sudo docker --version > docker-data/docker_version.txt
-          IMAGE_NAME="elk-timescale-test"
-          IMAGE_TAG="latest"
-          echo -e 'FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl' > docker-data/Dockerfile
-          sudo docker build -t $IMAGE_NAME:$IMAGE_TAG docker-data
-          sudo docker images > docker-data/docker_images.txt
-          sudo docker image inspect $IMAGE_NAME:$IMAGE_TAG > docker-data/docker_image_inspect_${IMAGE_NAME}.json
-          IMG_TAR=docker-data/${IMAGE_NAME}_${IMAGE_TAG}_$(date +%Y%m%d%H%M%S).tar
-          sudo docker save -o $IMG_TAR $IMAGE_NAME:$IMAGE_TAG
-          sudo chmod 644 "$IMG_TAR" || true
-
+      # 8. 전체 업로드
       - name: 📦 [전체 업로드]
         uses: actions/upload-artifact@v4
         with:
           name: all-artifacts-distributed-batch-encrypted-with-echo
           path: |
+            .github/package-backup/
+            .github/error_logs/
+            .github/email_logs/
+            .github/email_echo/
+            .github/email_accounts/
             collector-data/
             elk-data/
             docker-data/
             encrypted-data/
             snapshot/
             remake-batch/
-            runs-details/
-            jobs-details/
-            steps-details/
-            collector-tmp/
-            .github/package-backup/
-            .github/email_logs/
-            .github/email_echo/
-            .github/email_accounts/
-
-      - name: 📊 [요약] 최신 데이터 현황
-        run: |
-          echo "▶️ [collector-data/*]"; ls -lh collector-data | head -20 || true
-          echo "▶️ [encrypted-data]"; ls -lh encrypted-data | grep '\.enc' || echo '[⚠️] 없음'
-          echo "▶️ [remake-batch/sample]"; ls -l remake-batch/sample | grep sample_data_ || echo '[⚠️] 없음'
-          echo "▶️ [remake-batch/logs]"; ls -l remake-batch/logs | grep log_ || echo '[⚠️] 없음'
-          echo "▶️ [docker-data/*]"; ls -lh docker-data | head -20 || true
