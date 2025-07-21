@@ -1,4 +1,4 @@
-name: 🐬 MySQL+Oracle FullOps (echo/복제/정책/트랜잭션/컨테이너 상태, 실패/성공 모두 echo)
+name: 🐬 MySQL+Oracle FullOps (echo/복제/정책/트랜잭션/경고/계정/모든 상태, 실패/성공 모두 echo, robust)
 
 on:
   workflow_dispatch:
@@ -29,12 +29,14 @@ jobs:
       TXN_ROWS: 25
 
     steps:
-      # 1. 대량 echo 디렉토리 생성 + 패키지 설치 (Ubuntu 24.04 완전 대응)
-      - name: 🔄 [echo] Robust 패키지 설치 및 대량 echo 디렉토리 생성
+      ########################################################################
+      # 1. Robust 패키지 설치/에러 방지/대량 echo 디렉토리/에코 계정 디렉토리 생성
+      ########################################################################
+      - name: 🔄 [echo] Robust 패키지 설치 및 대량 echo 디렉토리/계정/로그 생성
         run: |
           for d in \
             .github/logs .github/error_logs .github/echo .github/echo/tmp .github/echo/logs \
-            .github/echo/mysql .github/echo/mysql/ddl .github/echo/mysql/txn .github/echo/mysql/replica .github/echo/mysql/user .github/echo/mysql/policy .github/echo/mysql/crossdb .github/echo/mysql/backup \
+            .github/echo/mysql .github/echo/mysql/ddl .github/echo/mysql/txn .github/echo/mysql/replica .github/echo/mysql/user .github/echo/mysql/policy .github/echo/mysql/crossdb .github/echo/mysql/backup .github/echo/mysql/warnings .github/echo/mysql/accounts \
             .github/echo/oracle .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/ddl .github/echo/oracle/txn .github/echo/oracle/replica .github/echo/oracle/user .github/echo/oracle/policy .github/echo/oracle/crossdb .github/echo/oracle/client .github/echo/oracle/backup \
             .github/echo/priv .github/echo/query .github/echo/client .github/echo/data .github/echo/artifact .github/echo/policy .github/echo/sec \
             .github/echo/crossdb .github/echo/ora2my .github/echo/my2ora .github/echo/backup .github/echo/monitor .github/echo/audit .github/echo/scheduler .github/echo/etl .github/echo/readonly .github/echo/sysdba .github/echo/job .github/echo/pipe .github/echo/bulk \
@@ -59,7 +61,47 @@ jobs:
           cat /etc/apt/sources.list > .github/logs/apt_sources_main.log || true
           cat /etc/apt/sources.list.d/* > .github/logs/apt_sources_etc.log || true
 
-      # 2. Oracle XE 컨테이너 상태/로그/실패 echo 및 정상 run 체크
+      ########################################################################
+      # 2. MySQL 컨테이너의 경고/로그/계정 정보 echo 파일화 및 경고 자동완화
+      ########################################################################
+      - name: 🐬 [echo] MySQL 컨테이너 경고/로그/계정 정보 echo 파일 생성 및 자동 완화
+        run: |
+          echo "echo '[🐬] MySQL 컨테이너 로그 및 경고 검사 ...'"
+          CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
+          if [ -z "$CID" ]; then
+            echo "echo '[❌] MySQL 컨테이너 미실행, 종료.'"
+            exit 97
+          fi
+
+          docker logs $CID > .github/echo/mysql/logs/container.log 2>&1
+          echo "echo '[🐬] MySQL container.log 저장 완료'"
+          grep -i "warning" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/all_warnings.txt || true
+          grep -i "^Warning:" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/warnings_only.txt || true
+          grep -i "error" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/all_errors.txt || true
+
+          # 주요 경고별 echo 파일화
+          grep -i "skip-host-cache" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_skip_host_cache.txt || true
+          grep -i "empty password" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_empty_password.txt || true
+          grep -i "zoneinfo" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_zoneinfo.txt || true
+
+          # 자동 완화: skip-host-cache
+          if grep -q "skip-host-cache" .github/echo/mysql/warnings/warn_skip_host_cache.txt; then
+            echo "echo '[⚠️] --skip-host-cache 경고 감지, SET GLOBAL host_cache_size=0 실행'" | tee -a .github/echo/mysql/warnings/auto_fix.log
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SET GLOBAL host_cache_size=0;" || true
+          fi
+          # 자동 완화: 빈 패스워드
+          if grep -q "empty password" .github/echo/mysql/warnings/warn_empty_password.txt; then
+            echo "echo '[⚠️] 빈 패스워드 경고 감지, root 패스워드 재설정'" | tee -a .github/echo/mysql/warnings/auto_fix.log
+            MYSQL_PWD='' mysql -h 127.0.0.1 -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';" || true
+          fi
+
+          # 계정 정보 echo 생성 (실제 root 외의 계정 정보도 echo화, 예시)
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SELECT user,host,plugin,authentication_string FROM mysql.user;" > .github/echo/mysql/accounts/mysql_user_table.txt || true
+          echo "echo 'MySQL 계정 목록 및 권한 테이블 저장'" >> .github/echo/mysql/accounts/mysql_user_table.txt
+
+      ########################################################################
+      # 3. Oracle XE 컨테이너/Instant Client/상태/로그/실패 echo 및 정상 run 체크
+      ########################################################################
       - name: 🍊 [echo] Oracle XE 컨테이너 실행/상태/로그
         run: |
           for d in .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/client; do
@@ -88,7 +130,6 @@ jobs:
             sleep 4
           done
 
-      # 3. Oracle Instant Client 설치/환경변수/echo/실행여부 체크/에러 echo
       - name: 🍊 [echo] Oracle Instant Client 설치 및 상태/실행 echo
         run: |
           for d in .github/echo/oracle/client .github/echo/oracle/logs; do
@@ -111,17 +152,9 @@ jobs:
           $HOME/instantclient_21_13/sqlplus -v | tee .github/echo/oracle/client/sqlplus_version.txt || \
           echo "[ERROR: sqlplus 실행 실패]" | tee -a .github/echo/oracle/client/sqlplus_version.txt
 
-      # 4. Oracle/Instant Client 컨테이너 상태 최종 저장 (실패/성공 모두 echo)
-      - name: 🍊 [echo] Oracle XE 컨테이너 상태/로그 echo (최종)
-        run: |
-          docker inspect oracle-xe > .github/echo/oracle/container/docker_inspect_final.json || true
-          docker logs oracle-xe > .github/echo/oracle/logs/container_last.log 2>&1 || true
-          docker ps -a > .github/echo/oracle/container/docker_ps_final.txt || true
-
-      # 5. (선택) 대량 echo/권한/DDL/트랜잭션/복제/정책/교차 echo 등 기존 예시 붙여 사용 (동일 패턴)
-      # ... 아래에 echo 자동화 샘플 블록 붙이기(대량 생성/트랜잭션/권한/DDL/복제/정책 모두 동일하게 echo 저장/실행)
-
-      # 6. 모든 상태/로그/쿼리/정책 echo 업로드
+      ########################################################################
+      # 4. 모든 echo/경고/로그/계정/상태/정책 아티팩트 업로드
+      ########################################################################
       - name: 🚀 [echo] Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
