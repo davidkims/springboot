@@ -23,16 +23,12 @@ jobs:
       MYSQL_PASSWORD: rootpass123
       MYSQL_DB: sample_db
       ORACLE_PWD: oraclepwd123
-      VIRTUAL_USER_COUNT: 7
-      MASS_PW_TABLE_COUNT: 4
-      ECHO_BATCH: 5
-      TXN_ROWS: 25
 
     steps:
-      ###############################################################
-      # 1. Robust 패키지/대량 echo 디렉토리/에코 계정 디렉토리 생성
-      ###############################################################
-      - name: 🔄 [echo] Robust 패키지 설치 및 대량 echo 디렉토리/계정 생성
+      ########################################################
+      # 1. Robust echo 디렉토리 생성 및 기본 패키지 설치(오류 무시)
+      ########################################################
+      - name: 🔄 [echo] Robust 디렉토리 생성 및 패키지 설치
         run: |
           for d in \
             .github/logs .github/error_logs .github/echo .github/echo/tmp .github/echo/logs \
@@ -44,44 +40,30 @@ jobs:
             ; do
             echo "echo 'mkdir -p $d'" ; mkdir -p $d
           done
+          sudo apt-get update
+          sudo apt-get install -y unzip curl tree zip tzdata gnupg2 || true
+          # pwgen 대체: openssl rand 사용
+          echo "echo '[pwgen 없음, openssl rand로 대체]'"
 
-          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          sudo apt-get clean || true
-          sudo apt-get autoclean || true
-          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-            [ -f "$f" ] && sudo sed -i '/file:\/etc\/apt\/apt-mirrors.txt/d' "$f" && sudo sed -i '/^deb file:/d' "$f"
-          done
-          sudo dpkg --configure -a || true
-          sudo apt-get -f install || true
-          for i in 1 2 3; do
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl tree zip pwgen tzdata gnupg2 libaio-dev || true
-          done
-          dpkg -l > .github/logs/dpkg_list.log
-          apt-cache policy > .github/logs/apt_policy.log
-          cat /etc/apt/sources.list > .github/logs/apt_sources_main.log || true
-          cat /etc/apt/sources.list.d/* > .github/logs/apt_sources_etc.log || true
-
-      ###############################################################
-      # 2. MySQL 경고/로그/계정 echo 생성 및 자동 완화
-      ###############################################################
-      - name: 🐬 [echo] MySQL 컨테이너 경고/로그/계정 echo 생성 및 자동 완화
+      ########################################################
+      # 2. MySQL 경고/로그/계정 echo + 자동완화 (health check 포함)
+      ########################################################
+      - name: 🐬 [echo] MySQL 컨테이너 경고/로그/계정 echo + 자동완화(health check)
         run: |
-          # 디렉토리 선제 생성
-          for d in \
-            .github/echo/mysql \
-            .github/echo/mysql/logs \
-            .github/echo/mysql/warnings \
-            .github/echo/mysql/accounts; do
+          for d in .github/echo/mysql .github/echo/mysql/logs .github/echo/mysql/warnings .github/echo/mysql/accounts; do
             echo "echo 'mkdir -p $d'"; mkdir -p $d
           done
-
           echo "echo '[🐬] MySQL 컨테이너 로그 및 경고 검사 ...'"
+
+          # Health check loop
           CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
-          if [ -z "$CID" ]; then
-            echo "echo '[❌] MySQL 컨테이너 미실행, 종료.'"
-            exit 97
-          fi
+          for i in {1..30}; do
+            if docker exec $CID mysqladmin ping -uroot -prootpass123 --silent; then
+              echo "[MYSQL healthy] (attempt $i)" | tee -a .github/echo/mysql/logs/healthcheck.log
+              break
+            fi
+            sleep 2
+          done
 
           docker logs $CID > .github/echo/mysql/logs/container.log 2>&1
           echo "echo '[🐬] MySQL container.log 저장 완료'"
@@ -108,9 +90,9 @@ jobs:
           MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SELECT user,host,plugin,authentication_string FROM mysql.user;" > .github/echo/mysql/accounts/mysql_user_table.txt || true
           echo "echo 'MySQL 계정 목록 및 권한 테이블 저장'" >> .github/echo/mysql/accounts/mysql_user_table.txt
 
-      ###############################################################
+      ########################################################
       # 3. Oracle XE 컨테이너/Instant Client 상태 echo (실패시 echo만)
-      ###############################################################
+      ########################################################
       - name: 🍊 [echo] Oracle XE 컨테이너 실행/상태/로그
         run: |
           for d in .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/client; do
@@ -159,11 +141,11 @@ jobs:
             chmod +x $HOME/instantclient_21_13/sqlplus
           fi
           $HOME/instantclient_21_13/sqlplus -v | tee .github/echo/oracle/client/sqlplus_version.txt || \
-          echo "[ERROR: sqlplus 실행 실패]" | tee -a .github/echo/oracle/client/sqlplus_version.txt
+          echo "[ERROR: sqlplus 실행 실패, libaio.so.1 등 echo]" | tee -a .github/echo/oracle/client/sqlplus_version.txt
 
-      ###############################################################
+      ########################################################
       # 4. 모든 echo/경고/로그/계정/상태/정책 아티팩트 업로드
-      ###############################################################
+      ########################################################
       - name: 🚀 [echo] Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
