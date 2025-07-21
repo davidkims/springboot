@@ -1,9 +1,9 @@
-name: 🐬 MySQL+Oracle Robust FullOps Echo (에코/경고/권한/정책/컨테이너/계정/아티팩트)
+name: 🏆 Echo-Driven MySQL+Oracle FullOps (대량 컨테이너/계정/DDL/교차DB)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '0 3 * * *'
 
 jobs:
   fullops:
@@ -23,127 +23,97 @@ jobs:
       MYSQL_PASSWORD: rootpass123
       MYSQL_DB: sample_db
       ORACLE_PWD: oraclepwd123
+      ECHO_BATCH: 10
+      MASS_USER: 8
+      MASS_TABLE: 6
+      MASS_TXN: 20
 
     steps:
-      #####################################################################
-      # 1. 대량 echo 디렉토리 생성 + 패키지 업그레이드/설치 (에코 기록)
-      #####################################################################
-      - name: 🔄 [echo] 디렉토리 일괄 생성 & 패키지 업그레이드/설치 (echo)
+      - name: 📦 [echo] Checkout
+        uses: actions/checkout@v4
+
+      - name: 🏗️ 대량 echo 디렉토리+에코 컨테이너 파일 선제 생성
         run: |
-          # echo로 모든 디렉토리 자동 생성 (에코까지 남김)
+          # echo 디렉토리(컨테이너/DB별/시나리오별)
           for d in \
             .github/logs .github/error_logs .github/echo .github/echo/tmp .github/echo/logs \
-            .github/echo/mysql .github/echo/mysql/logs .github/echo/mysql/warnings .github/echo/mysql/accounts .github/echo/mysql/ddl .github/echo/mysql/txn .github/echo/mysql/replica .github/echo/mysql/user .github/echo/mysql/policy .github/echo/mysql/crossdb .github/echo/mysql/backup \
-            .github/echo/oracle .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/ddl .github/echo/oracle/txn .github/echo/oracle/replica .github/echo/oracle/user .github/echo/oracle/policy .github/echo/oracle/crossdb .github/echo/oracle/client .github/echo/oracle/backup \
-            .github/echo/priv .github/echo/query .github/echo/client .github/echo/data .github/echo/artifact .github/echo/policy .github/echo/sec \
-            .github/echo/crossdb .github/echo/ora2my .github/echo/my2ora .github/echo/backup .github/echo/monitor .github/echo/audit .github/echo/scheduler .github/echo/etl .github/echo/readonly .github/echo/sysdba .github/echo/job .github/echo/pipe .github/echo/bulk \
-            ; do
+            .github/echo/mysql .github/echo/mysql/logs .github/echo/mysql/ddl .github/echo/mysql/txn \
+            .github/echo/mysql/replica .github/echo/mysql/user .github/echo/mysql/policy \
+            .github/echo/mysql/container .github/echo/mysql/crossdb .github/echo/mysql/backup \
+            .github/echo/oracle .github/echo/oracle/container .github/echo/oracle/logs \
+            .github/echo/oracle/ddl .github/echo/oracle/txn .github/echo/oracle/replica \
+            .github/echo/oracle/user .github/echo/oracle/policy .github/echo/oracle/crossdb \
+            .github/echo/priv .github/echo/query .github/echo/client .github/echo/artifact \
+            .github/echo/policy .github/echo/sec .github/echo/audit .github/echo/job \
+            .github/echo/monitor .github/echo/bulk .github/echo/etl .github/echo/readonly; do
             echo "echo 'mkdir -p $d'"; mkdir -p $d
           done
-          echo "[ECHO] 디렉토리 일괄 생성 완료" | tee .github/echo/logs/mkdir_done.txt
 
-          # 패키지 업그레이드/설치 (에코 기록)
-          sudo apt-get update | tee .github/echo/logs/apt_update.log
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade | tee .github/echo/logs/apt_upgrade.log
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade | tee .github/echo/logs/apt_dist_upgrade.log
-          sudo apt-get -y autoremove | tee .github/echo/logs/apt_autoremove.log
-          sudo apt-get install -y unzip curl tree zip tzdata gnupg2 | tee .github/echo/logs/apt_install.log
-          echo "[pwgen 없음, openssl rand로 대체]" | tee -a .github/echo/logs/apt_install.log
-          dpkg -l > .github/echo/logs/dpkg_list.txt
-          apt-cache policy > .github/echo/logs/apt_policy.txt
+          # 대량 컨테이너 echo 파일 생성
+          for i in {1..${ECHO_BATCH}}; do
+            echo "docker run --name echo-mysql-$i ... " > .github/echo/mysql/container/mysql_container_$i.sh
+            echo "docker run --name echo-oracle-$i ... " > .github/echo/oracle/container/oracle_container_$i.sh
+          done
 
-      #####################################################################
-      # 2. MySQL 경고/로그 echo + 자동완화/계정 echo + 에러 echo화 robust
-      #####################################################################
-      - name: 🐬 [echo] MySQL 경고/로그 자동완화 + 계정/권한 echo
+      - name: 🏦 MySQL/Oracle 대량 DDL/계정/트랜잭션/교차DB 에코/실행
         run: |
-          for d in .github/echo/mysql .github/echo/mysql/logs .github/echo/mysql/warnings .github/echo/mysql/accounts; do
-            echo "echo 'mkdir -p $d'"; mkdir -p $d
-          done
-          echo "echo '[🐬] MySQL 컨테이너 로그 및 경고 검사 ...'"
-
-          # MySQL 컨테이너 health check robust
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
-          if [ -z "$CID" ]; then
-            echo "[❌] MySQL 컨테이너 미실행, 종료." | tee .github/echo/mysql/logs/mysql_health_fail.txt
-            exit 97
-          fi
-
-          for i in {1..30}; do
-            if docker exec $CID mysqladmin ping -uroot -prootpass123 --silent; then
-              echo "[MYSQL healthy] (attempt $i)" | tee .github/echo/mysql/logs/mysql_health.txt
-              break
-            fi
-            sleep 2
+          # MySQL 대량 테이블/DDL/계정/트랜잭션 echo 생성+실행
+          for i in $(seq 1 $MASS_TABLE); do
+            TBL="demo_table_$i"
+            echo "CREATE TABLE IF NOT EXISTS $TBL (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/$TBL.sql
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D$MYSQL_DB < .github/echo/mysql/ddl/$TBL.sql 2>&1 | tee -a .github/echo/mysql/logs/ddl_exec.log || true
           done
 
-          docker logs $CID > .github/echo/mysql/logs/container.log 2>&1 || true
-          echo "[🐬] MySQL container.log 저장 완료" | tee -a .github/echo/mysql/logs/container.log
+          for i in $(seq 1 $MASS_USER); do
+            U="user_$i"
+            PW="pw_$i"
+            echo "CREATE USER IF NOT EXISTS '$U'@'%' IDENTIFIED BY '$PW'; GRANT ALL ON $MYSQL_DB.* TO '$U'@'%';" > .github/echo/mysql/user/$U.sql
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER < .github/echo/mysql/user/$U.sql 2>&1 | tee -a .github/echo/mysql/logs/user_exec.log || true
+          done
 
-          # 경고/에러 에코화
-          grep -i "warning" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/all_warnings.txt || true
-          grep -i "^Warning:" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/warnings_only.txt || true
-          grep -i "error" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/all_errors.txt || true
+          for i in $(seq 1 $MASS_TXN); do
+            TBL="demo_table_$((i % $MASS_TABLE + 1))"
+            echo "INSERT INTO $TBL (value) VALUES ('value_$i');" >> .github/echo/mysql/txn/txn_batch.sql
+          done
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D$MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql 2>&1 | tee -a .github/echo/mysql/logs/txn_exec.log || true
 
-          grep -i "skip-host-cache" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_skip_host_cache.txt || true
-          grep -i "empty password" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_empty_password.txt || true
-          grep -i "zoneinfo" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_zoneinfo.txt || true
+          # Oracle 대량 echo DDL/계정/트랜잭션(DDL 파일 생성 위주, 실행은 실제 인스턴스에서)
+          for i in $(seq 1 $MASS_TABLE); do
+            echo "CREATE TABLE DEMO_TABLE_$i (ID NUMBER PRIMARY KEY, VALUE VARCHAR2(100));" > .github/echo/oracle/ddl/demo_table_$i.sql
+          done
+          for i in $(seq 1 $MASS_USER); do
+            echo "CREATE USER USER_$i IDENTIFIED BY pw_$i; GRANT CONNECT, RESOURCE TO USER_$i;" > .github/echo/oracle/user/user_$i.sql
+          done
+          for i in $(seq 1 $MASS_TXN); do
+            echo "INSERT INTO DEMO_TABLE_$((i % MASS_TABLE + 1)) (ID, VALUE) VALUES ($i, 'val_$i');" >> .github/echo/oracle/txn/txn_batch.sql
+          done
 
-          # 자동 완화
-          if grep -q "skip-host-cache" .github/echo/mysql/warnings/warn_skip_host_cache.txt; then
-            echo "[⚠️] --skip-host-cache 경고 감지, SET GLOBAL host_cache_size=0 실행" | tee -a .github/echo/mysql/warnings/auto_fix.log
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SET GLOBAL host_cache_size=0;" || true
-          fi
+          # 교차DB(에코): MySQL→Oracle, Oracle→MySQL 쿼리 예시
+          echo "SELECT COUNT(*) FROM demo_table_1;" > .github/echo/mysql/crossdb/select_count_from_oracle.sql
+          echo "SELECT COUNT(*) FROM DEMO_TABLE_1;" > .github/echo/oracle/crossdb/select_count_from_mysql.sql
 
-          if grep -q "empty password" .github/echo/mysql/warnings/warn_empty_password.txt; then
-            echo "[⚠️] 빈 패스워드 경고 감지, root 패스워드 재설정" | tee -a .github/echo/mysql/warnings/auto_fix.log
-            MYSQL_PWD='' mysql -h 127.0.0.1 -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';" || \
-            echo "[⚠️] root 패스워드 재설정 실패! (Access denied)" | tee -a .github/echo/mysql/warnings/auto_fix.log
-          fi
+          # 복제 정책, 동기화, 샘플 정책 echo (로직 예시)
+          echo "-- MySQL→Oracle 복제(논리): mysqldump | SQL*Loader" > .github/echo/policy/mysql_to_oracle_replication_policy.txt
+          echo "-- Oracle→MySQL 복제(논리): expdp/impdp | csv→LOAD DATA" > .github/echo/policy/oracle_to_mysql_replication_policy.txt
+          echo "-- 교차DB 트랜잭션 정책 예: SAGA/2PC/동기화" > .github/echo/policy/crossdb_txn_policy.txt
 
-          # 계정 정보 echo (에러 무시 robust)
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SELECT user,host,plugin,authentication_string FROM mysql.user;" > .github/echo/mysql/accounts/mysql_user_table.txt 2>>.github/echo/mysql/accounts/mysql_user_table.txt || echo "[❌] 계정 테이블 조회 실패" >> .github/echo/mysql/accounts/mysql_user_table.txt
+          # 시나리오 에코 예시
+          echo "시나리오: 대량 계정 생성/삭제, 대량 트랜잭션, DDL, 교차 쿼리, DB 복제, 정책 자동화 등" > .github/echo/scenario.txt
 
-      #####################################################################
-      # 3. Oracle XE robust 컨테이너 상태 및 echo (상태 실패시 echo로만 기록)
-      #####################################################################
-      - name: 🍊 [echo] Oracle XE robust 컨테이너 실행/상태 기록 (echo만)
+      - name: 🗄️ DB 상태/정책/감사/모니터 echo
         run: |
-          for d in .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/client; do
-            echo "echo 'mkdir -p $d'"; mkdir -p $d
-          done
-          docker pull gvenzl/oracle-xe:21-slim | tee .github/echo/oracle/container/docker_pull.log
-          docker run -d --name oracle-xe \
-            -e ORACLE_PWD=${ORACLE_PWD} \
-            -e ORACLE_ALLOW_REMOTE=true \
-            -p 1521:1521 \
-            gvenzl/oracle-xe:21-slim | tee .github/echo/oracle/container/docker_run.log
+          # MySQL 현재 계정/권한 에코
+          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SELECT user,host,plugin FROM mysql.user;" > .github/echo/mysql/user/mysql_accounts_current.txt || true
+          # 정책/감사/모니터
+          echo "[정책] 비밀번호 복잡도, 만료 정책, 접속제한, 이중화 등" > .github/echo/policy/policy_examples.txt
+          echo "[감사] 모든 DDL/DML 로그 추출, Access/Grant 변경 감사" > .github/echo/audit/audit_log_policy.txt
+          echo "[모니터] 컨테이너 상태/쿼리 실행시간/접속수 모니터링 정책" > .github/echo/monitor/monitor_policy.txt
 
-          docker ps -a > .github/echo/oracle/container/docker_ps_a.txt
-          docker inspect oracle-xe > .github/echo/oracle/container/docker_inspect.json
-          docker logs oracle-xe > .github/echo/oracle/logs/container_startup.log 2>&1 || true
-          for i in {1..30}; do
-            state=$(docker inspect -f '{{.State.Status}}' oracle-xe || echo "notfound")
-            echo "[OracleXE: state=$state, attempt=$i]" | tee -a .github/echo/oracle/container/state_check.log
-            if [ "$state" = "running" ]; then
-              echo "[OracleXE is running]" | tee -a .github/echo/oracle/container/state_check.log
-              break
-            elif [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
-              echo "[OracleXE not running, exit early]" | tee -a .github/echo/oracle/container/state_check.log
-              docker logs oracle-xe >> .github/echo/oracle/logs/container_startup.log 2>&1 || true
-              exit 0
-            fi
-            sleep 4
-          done
-
-      #####################################################################
-      # 4. 모든 echo/경고/계정/컨테이너/로그 artifacts 업로드
-      #####################################################################
-      - name: 🚀 [echo] Upload All Artifacts
+      - name: ⬆️ 결과 아티팩트 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: fullops-artifacts-${{ github.run_id }}
+          name: echo-db-fullops-${{ github.run_id }}
           path: |
+            .github/echo/**/*
             .github/logs/*
             .github/error_logs/*
-            .github/echo/**/*
