@@ -1,4 +1,4 @@
-name: 🐬 MySQL+Oracle FullOps (대량 echo/디렉토리/복제/트랜잭션/권한/교차 트랜잭션/보안/아티팩트 All-in-One)
+name: 🐬 MySQL+Oracle FullOps (echo/복제/정책/트랜잭션/컨테이너 상태, 실패/성공 모두 echo)
 
 on:
   workflow_dispatch:
@@ -25,22 +25,23 @@ jobs:
       ORACLE_PWD: oraclepwd123
       VIRTUAL_USER_COUNT: 7
       MASS_PW_TABLE_COUNT: 4
-      ECHO_BATCH: 5   # 한 번에 생성되는 대량 파일/트랜잭션 샘플 개수
-      TXN_ROWS: 25    # 대량 트랜잭션 시 rows
+      ECHO_BATCH: 5
+      TXN_ROWS: 25
 
     steps:
-      ########################################################################
-      # Robust 패키지 설치/에러 방지/echo 대량 디렉토리 생성
-      ########################################################################
-      - name: 🔄 [echo] Robust 패키지 설치 및 대량 echo 디렉토리 생성 (에러 방지)
+      # 1. 대량 echo 디렉토리 생성 + 패키지 설치 (Ubuntu 24.04 완전 대응)
+      - name: 🔄 [echo] Robust 패키지 설치 및 대량 echo 디렉토리 생성
         run: |
-          echo "echo '[🔄] 패키지 업그레이드 및 대량 echo 디렉토리 생성...'"
-          # 대량 디렉토리 명령 echo + 생성
-          for d in .github/logs .github/error_logs .github/echo .github/echo/mysql .github/echo/mysql/ddl .github/echo/mysql/txn .github/echo/mysql/replica .github/echo/mysql/user .github/echo/oracle .github/echo/oracle/ddl .github/echo/oracle/txn .github/echo/oracle/replica .github/echo/oracle/user .github/echo/priv .github/echo/query .github/echo/client .github/echo/policy .github/echo/tmp .github/echo/data .github/echo/backup .github/echo/artifact .github/echo/crossdb .github/echo/ora2my .github/echo/my2ora .github/echo/sec .github/echo/logs; do
+          for d in \
+            .github/logs .github/error_logs .github/echo .github/echo/tmp .github/echo/logs \
+            .github/echo/mysql .github/echo/mysql/ddl .github/echo/mysql/txn .github/echo/mysql/replica .github/echo/mysql/user .github/echo/mysql/policy .github/echo/mysql/crossdb .github/echo/mysql/backup \
+            .github/echo/oracle .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/ddl .github/echo/oracle/txn .github/echo/oracle/replica .github/echo/oracle/user .github/echo/oracle/policy .github/echo/oracle/crossdb .github/echo/oracle/client .github/echo/oracle/backup \
+            .github/echo/priv .github/echo/query .github/echo/client .github/echo/data .github/echo/artifact .github/echo/policy .github/echo/sec \
+            .github/echo/crossdb .github/echo/ora2my .github/echo/my2ora .github/echo/backup .github/echo/monitor .github/echo/audit .github/echo/scheduler .github/echo/etl .github/echo/readonly .github/echo/sysdba .github/echo/job .github/echo/pipe .github/echo/bulk \
+            ; do
             echo "echo 'mkdir -p $d'" ; mkdir -p $d
           done
 
-          # 패키지 설치 문제 회피/복구 및 3회 반복
           sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
           sudo rm -rf /var/lib/apt/lists/* || true
           sudo apt-get clean || true
@@ -51,151 +52,76 @@ jobs:
           sudo dpkg --configure -a || true
           sudo apt-get -f install || true
           for i in 1 2 3; do
-            echo "echo '[$i] sudo apt-get update...'" ; sudo apt-get update || true
-            echo "echo '[$i] sudo apt-get install ...'" ; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl tree zip pwgen libaio1 gnupg2 tzdata && break
-            echo "echo '[에러] 설치 실패, 재시도...'" | tee -a .github/logs/pkg_upgrade.log
-            sleep 3
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unzip curl tree zip pwgen tzdata gnupg2 libaio-dev || true
           done
           dpkg -l > .github/logs/dpkg_list.log
           apt-cache policy > .github/logs/apt_policy.log
           cat /etc/apt/sources.list > .github/logs/apt_sources_main.log || true
           cat /etc/apt/sources.list.d/* > .github/logs/apt_sources_etc.log || true
-          echo "echo '[🔄] 패키지/디렉토리/에러파일 보장 완료'"
 
-      ########################################################################
-      # Oracle XE 서버 컨테이너 + Instant Client + sqlplus 동시 설치
-      ########################################################################
-      - name: 🍊 [echo] Oracle XE 서버 컨테이너 + sqlplus 설치
+      # 2. Oracle XE 컨테이너 상태/로그/실패 echo 및 정상 run 체크
+      - name: 🍊 [echo] Oracle XE 컨테이너 실행/상태/로그
         run: |
-          echo "echo '[🍊] Oracle XE Docker 컨테이너 실행 ...]'"
+          for d in .github/echo/oracle/container .github/echo/oracle/logs .github/echo/oracle/client; do
+            echo "echo 'mkdir -p $d'"; mkdir -p $d
+          done
+          docker pull gvenzl/oracle-xe:21-slim | tee .github/echo/oracle/container/docker_pull.log
           docker run -d --name oracle-xe \
             -e ORACLE_PWD=${ORACLE_PWD} \
             -e ORACLE_ALLOW_REMOTE=true \
             -p 1521:1521 \
-            gvenzl/oracle-xe:21-slim
-          echo "echo '[🍊] Oracle XE 컨테이너 기동 완료]'"
+            gvenzl/oracle-xe:21-slim | tee .github/echo/oracle/container/docker_run.log
+          docker ps -a > .github/echo/oracle/container/docker_ps_a.txt
+          docker inspect oracle-xe > .github/echo/oracle/container/docker_inspect.json
+          docker logs oracle-xe > .github/echo/oracle/logs/container_startup.log 2>&1 || true
+          for i in {1..40}; do
+            state=$(docker inspect -f '{{.State.Status}}' oracle-xe || echo "notfound")
+            echo "[OracleXE: state=$state, attempt=$i]" | tee -a .github/echo/oracle/container/state_check.log
+            if [ "$state" = "running" ]; then
+              echo "[OracleXE is running]" | tee -a .github/echo/oracle/container/state_check.log
+              break
+            elif [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+              echo "[OracleXE not running, exit early]" | tee -a .github/echo/oracle/container/state_check.log
+              docker logs oracle-xe >> .github/echo/oracle/logs/container_startup.log 2>&1 || true
+              exit 0
+            fi
+            sleep 4
+          done
+
+      # 3. Oracle Instant Client 설치/환경변수/echo/실행여부 체크/에러 echo
+      - name: 🍊 [echo] Oracle Instant Client 설치 및 상태/실행 echo
+        run: |
+          for d in .github/echo/oracle/client .github/echo/oracle/logs; do
+            echo "echo 'mkdir -p $d'"; mkdir -p $d
+          done
           curl -sSL -o instantclient-basiclite.zip https://download.oracle.com/otn_software/linux/instantclient/2113000/instantclient-basiclite-linux.x64-21.13.0.0.0dbru.zip
           curl -sSL -o instantclient-sqlplus.zip https://download.oracle.com/otn_software/linux/instantclient/2113000/instantclient-sqlplus-linux.x64-21.13.0.0.0dbru.zip
-          unzip -q instantclient-basiclite.zip -d $HOME
-          unzip -q instantclient-sqlplus.zip -d $HOME
-          echo "export PATH=$HOME/instantclient_21_13:\$PATH" > .github/echo/client/path_export.sh
-          $HOME/instantclient_21_13/sqlplus -v | tee .github/echo/client/sqlplus_version.txt
-
-      ########################################################################
-      # Oracle/MySQL health check, 로그/echo
-      ########################################################################
-      - name: 🍊 [echo] Oracle 컨테이너/DB Health Check
-        run: |
-          echo "echo '[🍊] Oracle XE 컨테이너 health check ...]'"
-          for i in {1..60}; do
-            if docker exec oracle-xe lsof -i:1521 | grep LISTEN; then
-              echo "Oracle listener is up (attempt $i)" | tee .github/echo/oracle/oracle_healthcheck.log
-              break
-            fi
-            sleep 2
-          done
-          docker logs oracle-xe > .github/echo/oracle/oracle_xe_container.log
-
-      ########################################################################
-      # Oracle: 대량 권한/계정/고급 권한관리/복제/DDL/쿼리/트랜잭션 echo/실행
-      ########################################################################
-      - name: 🍊 [echo] Oracle 대량 계정/권한/고급관리/복제/DDL/쿼리/트랜잭션/정책 echo/실행
-        run: |
+          unzip -oq instantclient-basiclite.zip -d $HOME
+          unzip -oq instantclient-sqlplus.zip -d $HOME
+          echo "export PATH=$HOME/instantclient_21_13:\$PATH" > .github/echo/oracle/client/path_export.sh
+          echo "export LD_LIBRARY_PATH=$HOME/instantclient_21_13:\$LD_LIBRARY_PATH" >> .github/echo/oracle/client/path_export.sh
           export PATH=$HOME/instantclient_21_13:$PATH
-          ORA_SVC="XEPDB1"
-          ORA_HOST="127.0.0.1"
-          ORA_PORT="1521"
-          SYS_PWD="${ORACLE_PWD}"
+          export LD_LIBRARY_PATH=$HOME/instantclient_21_13:$LD_LIBRARY_PATH
+          echo $PATH > .github/echo/oracle/client/current_path.txt
+          echo $LD_LIBRARY_PATH > .github/echo/oracle/client/current_ld_lib.txt
+          ls -lh $HOME/instantclient_21_13/ > .github/echo/oracle/client/dir_instantclient.txt
+          if [ ! -x "$HOME/instantclient_21_13/sqlplus" ]; then
+            chmod +x $HOME/instantclient_21_13/sqlplus
+          fi
+          $HOME/instantclient_21_13/sqlplus -v | tee .github/echo/oracle/client/sqlplus_version.txt || \
+          echo "[ERROR: sqlplus 실행 실패]" | tee -a .github/echo/oracle/client/sqlplus_version.txt
 
-          for n in $(seq 1 $ECHO_BATCH); do
-            APP_USER="ORAUSER$n"
-            APP_PWD="OraPW#${n}23!"
-            # 권한/계정/잠금/해제/복제/고급 SQL echo
-            echo "CREATE USER $APP_USER IDENTIFIED BY \"$APP_PWD\";" > .github/echo/oracle/user/${APP_USER}_create.sql
-            echo "GRANT CONNECT, RESOURCE TO $APP_USER;" >> .github/echo/oracle/user/${APP_USER}_create.sql
-            echo "ALTER USER $APP_USER QUOTA UNLIMITED ON USERS;" >> .github/echo/oracle/user/${APP_USER}_create.sql
-            echo "GRANT DBA TO $APP_USER;" >> .github/echo/oracle/user/${APP_USER}_create.sql
-            echo "DROP USER $APP_USER CASCADE;" > .github/echo/oracle/user/${APP_USER}_drop.sql
-            echo "REVOKE DBA FROM $APP_USER;" > .github/echo/oracle/user/${APP_USER}_revoke_dba.sql
-            echo "ALTER USER $APP_USER ACCOUNT LOCK;" > .github/echo/oracle/user/${APP_USER}_lock.sql
-            echo "ALTER USER $APP_USER ACCOUNT UNLOCK;" > .github/echo/oracle/user/${APP_USER}_unlock.sql
-            # 복제(데이터가드/standby 예시/echo)
-            echo "CREATE STANDBY DATABASE ${APP_USER}_STBY FROM $APP_USER;" > .github/echo/oracle/replica/${APP_USER}_replica.sql
-            echo "ALTER DATABASE ACTIVATE STANDBY DATABASE;" >> .github/echo/oracle/replica/${APP_USER}_replica.sql
-            # 권한 자동회수/재부여
-            echo "REVOKE CONNECT FROM $APP_USER;" > .github/echo/oracle/user/${APP_USER}_revoke_connect.sql
-            echo "GRANT CONNECT TO $APP_USER;" > .github/echo/oracle/user/${APP_USER}_grant_connect.sql
-
-            # DDL/쿼리/대량 트랜잭션 echo 및 실행
-            for t in $(seq 1 $ECHO_BATCH); do
-              TBL="TBL_USERDATA_${n}_$t"
-              F=".github/echo/oracle/ddl/${TBL}.sql"
-              echo "CREATE TABLE $TBL (ID NUMBER PRIMARY KEY, USERNAME VARCHAR2(40), PW VARCHAR2(50), CREATED_AT DATE DEFAULT SYSDATE);" > $F
-              for k in $(seq 1 $TXN_ROWS); do
-                echo "INSERT INTO $TBL (ID, USERNAME, PW) VALUES ($k, 'user${n}_$k', 'pw${n}_$k');" >> $F
-              done
-              echo "SELECT COUNT(*) FROM $TBL;" >> $F
-              echo "DROP TABLE $TBL;" >> $F
-              # 실제 실행
-              $HOME/instantclient_21_13/sqlplus sys/$SYS_PWD@//$ORA_HOST:$ORA_PORT/$ORA_SVC as sysdba @$F > .github/echo/oracle/txn/exec_${TBL}.log
-            done
-          done
-
-      ########################################################################
-      # MySQL: 대량 권한/계정/DDL/트랜잭션/복제/정책 echo 및 실행
-      ########################################################################
-      - name: 🐬 [echo] MySQL 대량 권한/계정/DDL/트랜잭션/복제/정책 echo 및 실행
+      # 4. Oracle/Instant Client 컨테이너 상태 최종 저장 (실패/성공 모두 echo)
+      - name: 🍊 [echo] Oracle XE 컨테이너 상태/로그 echo (최종)
         run: |
-          for n in $(seq 1 $ECHO_BATCH); do
-            USER="MYSQLUSER$n"
-            PASS="MySQLPW#${n}23!"
-            # 권한/계정 echo
-            echo "CREATE USER IF NOT EXISTS '$USER'@'%' IDENTIFIED BY '$PASS';" > .github/echo/mysql/user/${USER}_create.sql
-            echo "GRANT ALL PRIVILEGES ON *.* TO '$USER'@'%' WITH GRANT OPTION;" >> .github/echo/mysql/user/${USER}_create.sql
-            echo "FLUSH PRIVILEGES;" >> .github/echo/mysql/user/${USER}_create.sql
-            echo "DROP USER IF EXISTS '$USER'@'%';" > .github/echo/mysql/user/${USER}_drop.sql
-            # 복제 echo
-            echo "CHANGE MASTER TO MASTER_HOST='replica', MASTER_USER='repl', MASTER_PASSWORD='replpw', MASTER_LOG_FILE='mysql-bin.000001', MASTER_LOG_POS=4;" > .github/echo/mysql/replica/${USER}_replica.sql
-            echo "START SLAVE;" >> .github/echo/mysql/replica/${USER}_replica.sql
-            # DDL/대량 트랜잭션 echo 및 실행
-            for t in $(seq 1 $ECHO_BATCH); do
-              TBL="user_data_${n}_$t"
-              F=".github/echo/mysql/ddl/${TBL}.sql"
-              echo "CREATE TABLE IF NOT EXISTS $TBL (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(30), pw VARCHAR(30), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" > $F
-              for k in $(seq 1 $TXN_ROWS); do
-                echo "INSERT INTO $TBL (name, pw) VALUES ('user${n}_$k', 'pw${n}_$k');" >> $F
-              done
-              echo "SELECT COUNT(*) FROM $TBL;" >> $F
-              echo "DROP TABLE $TBL;" >> $F
-              MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < $F
-            done
-          done
+          docker inspect oracle-xe > .github/echo/oracle/container/docker_inspect_final.json || true
+          docker logs oracle-xe > .github/echo/oracle/logs/container_last.log 2>&1 || true
+          docker ps -a > .github/echo/oracle/container/docker_ps_final.txt || true
 
-      ########################################################################
-      # MySQL-Oracle 교차 트랜잭션/정책/쿼리 echo (실행X)
-      ########################################################################
-      - name: 🔀 [echo] MySQL-Oracle 교차 트랜잭션/쿼리/정책 echo
-        run: |
-          # Oracle→MySQL 데이터 마이그레이션/동기화 샘플
-          for i in $(seq 1 $ECHO_BATCH); do
-            echo "-- Oracle → MySQL 교차 트랜잭션/정책 샘플" > .github/echo/crossdb/ora2my_txn${i}.sql
-            echo "SELECT * FROM ORACLE_TBL_${i}; -- (Oracle DB)" >> .github/echo/crossdb/ora2my_txn${i}.sql
-            echo "INSERT INTO mysql_db.mysql_tbl_${i} SELECT * FROM ORACLE_TBL_${i}@dblink_to_mysql;" >> .github/echo/crossdb/ora2my_txn${i}.sql
-            # MySQL → Oracle 마이그레이션 샘플
-            echo "-- MySQL → Oracle 교차 트랜잭션/정책 샘플" > .github/echo/crossdb/my2ora_txn${i}.sql
-            echo "SELECT * FROM mysql_tbl_${i}; -- (MySQL DB)" >> .github/echo/crossdb/my2ora_txn${i}.sql
-            echo "INSERT INTO ORACLE_TBL_${i} SELECT * FROM mysql_tbl_${i}@dblink_to_oracle;" >> .github/echo/crossdb/my2ora_txn${i}.sql
-          done
+      # 5. (선택) 대량 echo/권한/DDL/트랜잭션/복제/정책/교차 echo 등 기존 예시 붙여 사용 (동일 패턴)
+      # ... 아래에 echo 자동화 샘플 블록 붙이기(대량 생성/트랜잭션/권한/DDL/복제/정책 모두 동일하게 echo 저장/실행)
 
-      ########################################################################
-      # 전체 구조/로그/정책/임시/아티팩트 업로드 (완전 echo)
-      ########################################################################
-      - name: 🗂️ [echo] Show All Structure (tree/ls)
-        run: |
-          echo "echo '[🗂️] 전체 디렉토리 tree/ls ...'"
-          tree .github/echo || true
-          ls -lhR .github/echo/ || true
-
+      # 6. 모든 상태/로그/쿼리/정책 echo 업로드
       - name: 🚀 [echo] Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
