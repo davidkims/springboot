@@ -1,12 +1,12 @@
-name: 🐬 MySQL FullOps (대량 패스워드, 쿼리/Oracle/보안/복제/echo/아티팩트 All-in-One)
+name: 🐬 MySQL+Oracle FullOps (동시 설치/관리, 대량 패스워드, 쿼리/권한/복제/echo/아티팩트 All-in-One)
 
 on:
   schedule:
-    - cron: '*/1 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
-  mysql-job:
+  fullops-job:
     runs-on: ubuntu-latest
 
     services:
@@ -22,264 +22,124 @@ jobs:
       MYSQL_USER: root
       MYSQL_PASSWORD: rootpass123
       MYSQL_DB: sample_db
+      ORACLE_PWD: oraclepwd123
       VIRTUAL_USER_COUNT: 7
-      MASS_PW_TABLE_COUNT: 10
+      MASS_PW_TABLE_COUNT: 3
 
     steps:
+      # 1. 기본 체크아웃 및 패키지/echo 디렉토리 준비
       - name: 📦 [echo] Checkout Repository
         uses: actions/checkout@v4
-        continue-on-error: true
 
-      - name: 🔄 [echo] System Full Package Upgrade (+zoneinfo, tzdata, pwgen)
+      - name: 🔄 [echo] 필수 패키지 업그레이드 및 echo
         run: |
-          echo "echo '[🔄] 패키지 업그레이드 ...'"
-          mkdir -p .github/logs
-          {
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
-            sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
-            sudo apt-get -y autoremove
-            sudo apt-get install -y tree zip gnupg grep tzdata pwgen
-            sudo apt-get install -y --reinstall tzdata
-          } > .github/logs/sys_upgrade.log 2>&1
-          echo "echo '[🔄] 패키지 업그레이드 및 유틸 설치 완료'"
+          echo "echo '[🔄] 패키지 업그레이드 및 echo 디렉토리 준비...'"
+          mkdir -p .github/logs .github/echo .github/echo/mysql .github/echo/oracle .github/echo/ddl .github/echo/priv .github/echo/query .github/echo/client .github/echo/data .github/echo/artifact
+          sudo apt-get update
+          sudo apt-get install -y unzip curl tree zip pwgen libaio1 gnupg2 tzdata > .github/logs/pkg_upgrade.log 2>&1
 
-      - name: 📁 [echo] Prepare Directories (All Log/Echo)
+      # 2. Oracle XE Docker 서버 설치 및 sqlplus client 설치 (동시에)
+      - name: 🍊 [echo] Oracle XE 서버 Docker 컨테이너 실행 + sqlplus 설치
         run: |
-          echo "echo '[📁] mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings .github/echo/oracle_ddl .github/echo_data_backup .github/echo/mysql_masspw'"
-          mkdir -p sql export backup .github/queries .github/echo .github/logs .github/mysql_logs .github/mysql_logs/warnings .github/echo/oracle_ddl .github/echo_data_backup .github/echo/mysql_masspw
-          for f in .github/logs/mysql_workflow.log .github/mysql_logs/mysql_echo.txt .github/mysql_logs/warnings/mysql_warnings.txt .github/mysql_logs/warnings/mysql_warnings_only.txt .github/echo/virtual_account.txt .github/echo/virtual_password.txt .github/echo/firewall_rules.txt .github/echo/vpn_rules.txt; do
-            echo "echo '[📁] touch $f'"
-            touch $f
-          done
+          echo "echo '[🍊] Oracle XE Docker 컨테이너 실행 ...]'"
+          docker run -d --name oracle-xe \
+            -e ORACLE_PWD=${ORACLE_PWD} \
+            -e ORACLE_ALLOW_REMOTE=true \
+            -p 1521:1521 \
+            gvenzl/oracle-xe:21-slim
+          echo "echo '[🍊] Oracle XE 컨테이너 기동 완료]'"
 
-      - name: 🩺 [echo] Wait for MySQL Health & Save Logs & Check Empty Password & Warnings
+          # sqlplus/InstantClient 설치
+          curl -sSL -o instantclient-basiclite.zip https://download.oracle.com/otn_software/linux/instantclient/2113000/instantclient-basiclite-linux.x64-21.13.0.0.0dbru.zip
+          curl -sSL -o instantclient-sqlplus.zip https://download.oracle.com/otn_software/linux/instantclient/2113000/instantclient-sqlplus-linux.x64-21.13.0.0.0dbru.zip
+          unzip -q instantclient-basiclite.zip -d $HOME
+          unzip -q instantclient-sqlplus.zip -d $HOME
+          echo "export PATH=$HOME/instantclient_21_13:\$PATH" > .github/echo/client/path_export.sh
+          $HOME/instantclient_21_13/sqlplus -v | tee .github/echo/client/sqlplus_version.txt
+
+      # 3. Oracle DB 기동 대기 (최대 120초)
+      - name: 🍊 [echo] Oracle DB 기동/헬스 체크 & 로그 echo
         run: |
-          echo "echo '[🩺] MySQL Health Check ...'"
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
-          if [ -z "$CID" ]; then
-            echo "echo '[❌] MySQL 컨테이너가 실행 중이 아닙니다.'"
-            exit 98
-          fi
-          for i in {1..30}; do
-            STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' $CID 2>/dev/null || echo none)
-            echo "Health status: $STATUS (attempt $i)"
-            if [ "$STATUS" = "healthy" ] || [ "$STATUS" = "none" ]; then
-              echo "[✔] MySQL health check 통과 (상태: $STATUS)"
+          echo "echo '[🍊] Oracle XE 컨테이너 health check ...]'"
+          for i in {1..60}; do
+            if docker exec oracle-xe lsof -i:1521 | grep LISTEN; then
+              echo "Oracle listener is up (attempt $i)" | tee .github/echo/oracle/oracle_healthcheck.log
               break
             fi
             sleep 2
           done
-          docker logs $CID > .github/mysql_logs/container.log 2>&1
-          echo "echo '[🩺] MySQL container logs 저장: .github/mysql_logs/container.log'"
-          grep -i "warning" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings.txt || true
-          grep -i "^Warning:" .github/mysql_logs/container.log > .github/mysql_logs/warnings/mysql_warnings_only.txt || true
-          if grep -q "root@localhost is created with an empty password" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
-            echo "echo '[⚠️] 빈 패스워드 경고 감지! 즉시 root 패스워드 재설정...'"
-            MYSQL_PWD='' mysql -h 127.0.0.1 -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';" || true
-            echo "[⚠️] 빈 루트 패스워드 강제 재설정 (보안 보완)" >> .github/mysql_logs/mysql_echo.txt
-          fi
-          if grep -q "The syntax '--skip-host-cache' is deprecated" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
-            echo "echo '[⚠️] --skip-host-cache 경고 감지! SET GLOBAL host_cache_size=0 실행'"
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SET GLOBAL host_cache_size=0;" || true
-            echo "[⚠️] --skip-host-cache 완화 SQL 실행" >> .github/mysql_logs/mysql_echo.txt
-          fi
-          if grep -E "root@localhost is created with an empty password|--skip-host-cache" .github/mysql_logs/warnings/mysql_warnings_only.txt; then
-            echo "echo '[❌] 보안 경고 발생. 로그 확인 필요'"
-            exit 99
-          fi
-          echo "echo '[🩺] MySQL 경고/보안 점검 완료'"
+          docker logs oracle-xe > .github/echo/oracle/oracle_xe_container.log
 
-      - name: 👤 [echo] Generate Virtual Accounts (패턴+부서+직책+국제전화)
+      # 4. Oracle DB 계정/권한 에코 SQL 생성 및 실제 실행
+      - name: 🍊 [echo] Oracle 계정/권한/DDL/샘플 쿼리 에코/실행
         run: |
-          echo "echo '[👤] 가상계정 N개(부서, 직책, 국제전화 포함) 생성'"
-          N=${VIRTUAL_USER_COUNT:-7}
-          DOMAINS=(corp1.kr corp2.jp corp3.us)
-          DEPTS=("영업" "개발" "보안" "관리" "인사" "재무")
-          TITLES=("사원" "주임" "대리" "과장" "팀장" "실장" "임원")
-          PHONES=("+82-10" "+81-90" "+1-212" "+49-170" "+44-790" "+33-660" "+86-139")
-          for i in $(seq 1 $N); do
-            DEPTIDX=$(( (i-1) % ${#DEPTS[@]} ))
-            DOMAINIDX=$(( (i-1) % ${#DOMAINS[@]} ))
-            TITLEIDX=$(( (i-1) % ${#TITLES[@]} ))
-            PHONEIDX=$(( (i-1) % ${#PHONES[@]} ))
-            VUSER="$(tr '[:upper:]' '[:lower:]' <<< ${DEPTS[$DEPTIDX]})_${TITLEIDX}_$(printf '%02d' $i)"
-            VMAIL="${VUSER}@${DOMAINS[$DOMAINIDX]}"
-            VPHONE="${PHONES[$PHONEIDX]}-$(printf '%04d-%04d' $((RANDOM%9000+1000)) $((RANDOM%9000+1000)))"
-            TITLE="${TITLES[$TITLEIDX]}"
-            DEPT="${DEPTS[$DEPTIDX]}"
-            echo "Account: $VUSER, Email: $VMAIL, Phone: $VPHONE, Dept: $DEPT, Title: $TITLE" | tee -a .github/echo/virtual_account.txt
-            echo "echo 'Account: $VUSER, Email: $VMAIL, Phone: $VPHONE, Dept: $DEPT, Title: $TITLE'" >> .github/echo/virtual_account.txt
+          # 환경 변수 및 sqlplus alias
+          export PATH=$HOME/instantclient_21_13:$PATH
+          ORA_SVC="XEPDB1"
+          ORA_HOST="127.0.0.1"
+          ORA_PORT="1521"
+          SYS_PWD="${ORACLE_PWD}"
+          APP_USER="APPUSER1"
+          APP_PWD="AppUser#2024!"
+
+          echo "CREATE USER $APP_USER IDENTIFIED BY \"$APP_PWD\";" > .github/echo/oracle/create_user.sql
+          echo "GRANT CONNECT, RESOURCE TO $APP_USER;" >> .github/echo/oracle/create_user.sql
+          echo "ALTER USER $APP_USER QUOTA UNLIMITED ON USERS;" >> .github/echo/oracle/create_user.sql
+          echo "GRANT DBA TO $APP_USER;" >> .github/echo/oracle/create_user.sql
+          echo "DROP USER $APP_USER CASCADE;" > .github/echo/oracle/drop_user.sql
+          echo "REVOKE DBA FROM $APP_USER;" > .github/echo/oracle/revoke_dba.sql
+          echo "ALTER USER $APP_USER ACCOUNT LOCK;" > .github/echo/oracle/lock_user.sql
+          echo "ALTER USER $APP_USER ACCOUNT UNLOCK;" > .github/echo/oracle/unlock_user.sql
+
+          # 실제 실행 (계정/권한)
+          echo "echo '[🍊] Oracle 계정/권한 SQL 실행 ...'"
+          $HOME/instantclient_21_13/sqlplus sys/$SYS_PWD@//$ORA_HOST:$ORA_PORT/$ORA_SVC as sysdba @.github/echo/oracle/create_user.sql > .github/echo/oracle/appuser_create.log
+
+          # DDL/샘플 데이터 쿼리 에코 및 실행
+          for i in $(seq 1 2); do
+            TBL="USERS_EXAMPLE_$i"
+            {
+              echo "CREATE TABLE $TBL (ID NUMBER PRIMARY KEY, USERNAME VARCHAR2(30), PASSWORD VARCHAR2(40), CREATED_AT DATE DEFAULT SYSDATE);"
+              echo "INSERT INTO $TBL (ID, USERNAME, PASSWORD) VALUES (1, 'oracle_user$i', 'oracle_pw$i');"
+              echo "SELECT * FROM $TBL;"
+              echo "DROP TABLE $TBL;"
+            } > .github/echo/oracle/ddl_$TBL.sql
+            # 계정으로 쿼리 실행
+            echo "echo '[🍊] DDL/INSERT/SELECT/DROP SQL 실행 ($TBL)'"
+            $HOME/instantclient_21_13/sqlplus $APP_USER/$APP_PWD@//$ORA_HOST:$ORA_PORT/$ORA_SVC @.github/echo/oracle/ddl_$TBL.sql > .github/echo/oracle/ddl_exec_$TBL.log
           done
 
-      - name: 🔑 [echo] Generate Virtual Passwords (강력정책, 12~20자, 특수/숫자/영문)
+      # 5. MySQL 대량 패스워드/쿼리/DDL echo 및 실행 (간략)
+      - name: 🐬 [echo] MySQL 대량 패스워드 Table/쿼리 echo/실행
         run: |
-          echo "echo '[🔑] 가상 패스워드 N개(강력정책, 12~20자, 특수/숫자/영문) 생성'"
-          N=${VIRTUAL_USER_COUNT:-7}
-          for i in $(seq 1 $N); do
-            LEN=$(( (RANDOM % 9) + 12 ))
-            while true; do
-              PW1=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9!@#$%^&*_=+' | head -c$LEN)
-              HAS_UPPER=$(echo "$PW1" | grep -q '[A-Z]' && echo yes || echo no)
-              HAS_LOWER=$(echo "$PW1" | grep -q '[a-z]' && echo yes || echo no)
-              HAS_NUM=$(echo "$PW1" | grep -q '[0-9]' && echo yes || echo no)
-              HAS_SPEC=$(echo "$PW1" | grep -q '[!@#$%^&*_=+]' && echo yes || echo no)
-              if [ "$HAS_UPPER" = "yes" ] && [ "$HAS_LOWER" = "yes" ] && [ "$HAS_NUM" = "yes" ] && [ "$HAS_SPEC" = "yes" ]; then
-                break
-              fi
-            done
-            echo "Password for vuser${i}: $PW1" | tee -a .github/echo/virtual_password.txt
-            echo "echo 'Password for vuser${i}: $PW1'" >> .github/echo/virtual_password.txt
-          done
-
-      - name: 💽 [echo] MySQL 대량 패스워드 Table + 쿼리파일 echo 생성/실행
-        run: |
-          echo "echo '[💽] MySQL 대량 패스워드 테이블/쿼리 echo 생성 및 실행 ...'"
-          N=${MASS_PW_TABLE_COUNT:-10}
+          echo "echo '[🐬] MySQL 대량 Table/쿼리/DDL echo 자동생성 및 실행...'"
+          N=${MASS_PW_TABLE_COUNT:-3}
           USERS=(alice bob charlie dave erin frank grace heidi ivan judy)
           for i in $(seq 1 $N); do
             TBL="user_passwords_$i"
             DDL="CREATE TABLE IF NOT EXISTS $TBL (user_id INT PRIMARY KEY AUTO_INCREMENT, username VARCHAR(30), password VARCHAR(40), reg_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);"
-            echo "$DDL" > "sql/ddl_${TBL}.sql"
-            echo "echo '$DDL'" >> .github/echo/mysql_masspw/ddl_echo.txt
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < "sql/ddl_${TBL}.sql"
-            echo "USE $MYSQL_DB;" > "sql/ins_${TBL}.sql"
-            for j in $(seq 1 30); do
+            echo "$DDL" > .github/echo/mysql/ddl_${TBL}.sql
+            echo "USE $MYSQL_DB;" > .github/echo/mysql/ins_${TBL}.sql
+            for j in $(seq 1 20); do
               U="${USERS[$(( (i+j-1) % ${#USERS[@]} ))]}"
-              LEN=$(( (RANDOM % 9) + 12 ))
-              while true; do
-                PW1=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9!@#$%^&*_=+' | head -c$LEN)
-                HAS_UPPER=$(echo "$PW1" | grep -q '[A-Z]' && echo yes || echo no)
-                HAS_LOWER=$(echo "$PW1" | grep -q '[a-z]' && echo yes || echo no)
-                HAS_NUM=$(echo "$PW1" | grep -q '[0-9]' && echo yes || echo no)
-                HAS_SPEC=$(echo "$PW1" | grep -q '[!@#$%^&*_=+]' && echo yes || echo no)
-                if [ "$HAS_UPPER" = "yes" ] && [ "$HAS_LOWER" = "yes" ] && [ "$HAS_NUM" = "yes" ] && [ "$HAS_SPEC" = "yes" ]; then
-                  break
-                fi
-              done
-              echo "INSERT INTO $TBL (username, password) VALUES ('$U', '$PW1');" >> "sql/ins_${TBL}.sql"
-              echo "echo 'INSERT INTO $TBL (username, password) VALUES ($U, $PW1)'" >> .github/echo/mysql_masspw/insert_echo.txt
+              PW1=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9!@#$%^&*_=+' | head -c16)
+              echo "INSERT INTO $TBL (username, password) VALUES ('$U', '$PW1');" >> .github/echo/mysql/ins_${TBL}.sql
             done
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < "sql/ins_${TBL}.sql"
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < .github/echo/mysql/ddl_${TBL}.sql
+            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < .github/echo/mysql/ins_${TBL}.sql
           done
 
-      - name: 🟠 [echo] Oracle 대량 DDL/쿼리 echo 생성 (샘플)
+      # 6. 전체 구조 echo, 로그, 아티팩트 업로드
+      - name: 🗂️ [echo] Show All Structure (tree/ls)
         run: |
-          echo "echo '[🟠] Oracle 대량 DDL/쿼리 echo 생성 ...'"
-          mkdir -p .github/echo/oracle_ddl
-          for i in $(seq 1 10); do
-            TBL="ORACLE_USER_PASS_$i"
-            echo "CREATE TABLE $TBL (ID NUMBER PRIMARY KEY, USERNAME VARCHAR2(30), PASSWORD VARCHAR2(40), CREATED_AT DATE DEFAULT SYSDATE);" > .github/echo/oracle_ddl/${TBL}.sql
-            echo "INSERT INTO $TBL (ID, USERNAME, PASSWORD) VALUES (1, 'oracle_user', 'oracle_pass');" >> .github/echo/oracle_ddl/${TBL}.sql
-            echo "echo 'Oracle DDL/INSERT for $TBL'" >> .github/echo/oracle_ddl/ddl_echo.txt
-          done
+          echo "echo '[🗂️] 전체 디렉토리 tree/ls ...'"
+          tree .github/echo || true
+          ls -lhR .github/echo/
 
-      - name: 🌍 [echo] VPN 정책/구성 예시 (국가/부서/OS별)
-        run: |
-          echo "echo '[🌍] VPN 정책/예시(Nation, Dept, OS별)'"
-          mkdir -p .github/echo
-          {
-            echo "######## 한국 - 영업부 VPN ########"
-            echo "openvpn --config korea_sales.ovpn --auth-user-pass"
-            echo "vpncmd /SERVER:kr-vpn.corp1.kr"
-            echo ""
-            echo "######## 미국 - 개발팀 VPN ########"
-            echo "openvpn --config us_dev.ovpn --auth-user-pass"
-            echo "vpncmd /SERVER:us-vpn.corp3.us"
-            echo ""
-            echo "######## 일본 - 보안팀 VPN ########"
-            echo "openvpn --config jp_sec.ovpn --auth-user-pass"
-            echo "vpncmd /SERVER:jp-vpn.corp2.jp"
-            echo ""
-            echo "######## Windows VPN 예시 ########"
-            echo "rasdial 'corp_vpn' user password /DOMAIN:corp"
-            echo ""
-            echo "######## MacOS VPN 예시 ########"
-            echo "scutil --nc start 'Corporate VPN'"
-            echo ""
-            echo "[모든 예시는 echo용, 실제 VPN 인증/접속은 조직 정책/환경별 적용]"
-          } | tee .github/echo/vpn_rules.txt
-
-      - name: 🔥 [echo] Firewall Policy/Rule (Multi-OS, Cloud 포함)
-        run: |
-          echo "echo '[🔥] 방화벽 정책/명령어 echo (Linux/Windows/Mac/Cloud)'"
-          mkdir -p .github/echo
-          {
-            echo "######## Ubuntu/Debian(UFW) ########"
-            echo "sudo ufw allow 3306/tcp    # MySQL 포트 허용"
-            echo "sudo ufw allow 22/tcp      # SSH"
-            echo "sudo ufw deny 23/tcp       # Telnet 차단"
-            echo "sudo ufw enable"
-            echo ""
-            echo "######## CentOS/RHEL/Fedora(Firewalld) ########"
-            echo "sudo firewall-cmd --permanent --add-port=3306/tcp"
-            echo "sudo firewall-cmd --permanent --add-service=ssh"
-            echo "sudo firewall-cmd --permanent --remove-service=telnet"
-            echo "sudo firewall-cmd --reload"
-            echo ""
-            echo "######## Windows ########"
-            echo "netsh advfirewall firewall add rule name=\"MySQL\" dir=in action=allow protocol=TCP localport=3306"
-            echo "netsh advfirewall firewall add rule name=\"SSH\" dir=in action=allow protocol=TCP localport=22"
-            echo "netsh advfirewall firewall add rule name=\"Telnet Block\" dir=in action=block protocol=TCP localport=23"
-            echo ""
-            echo "######## MacOS ########"
-            echo "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/mysql/bin/mysqld"
-            echo "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/mysql/bin/mysqld"
-            echo ""
-            echo "######## AWS Cloud (SG) ########"
-            echo "aws ec2 authorize-security-group-ingress --group-id sg-xxxx --protocol tcp --port 3306 --cidr 0.0.0.0/0"
-            echo ""
-            echo "######## GCP Cloud (FW) ########"
-            echo "gcloud compute firewall-rules create allow-mysql --allow tcp:3306"
-            echo ""
-            echo "[실제 적용 명령 예시, Github Actions에서는 적용X, echo와 정책관리용]"
-          } | tee .github/echo/firewall_rules.txt
-
-      - name: 📄 [echo] MySQL Table/Export/Backup Example
-        run: |
-          echo "echo '[📄] MySQL 테이블/CSV/백업 예시 ...'"
-          echo "USE sample_db;" > sql/init.sql
-          echo "CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);" >> sql/init.sql
-          echo "INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie');" >> sql/init.sql
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB < sql/init.sql
-          echo "id,name" > export/users.csv
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB -B -e "SELECT id, name FROM users;" | tail -n +2 >> export/users.csv
-          MYSQL_PWD=$MYSQL_PASSWORD mysqldump -h 127.0.0.1 -u $MYSQL_USER $MYSQL_DB > backup/backup.sql
-          zip -j backup/backup.zip backup/backup.sql
-
-      - name: 🟣 [echo] export/ backup/ .github/echo_data_backup 으로 복제
-        run: |
-          echo "echo '[🟣] export/ backup/ .github/echo_data_backup 으로 복제 ...'"
-          mkdir -p .github/echo_data_backup
-          cp -a export/. .github/echo_data_backup/ || true
-          cp -a backup/. .github/echo_data_backup/ || true
-          echo "echo '[🟣] echo_data_backup 폴더에 복제 완료'"
-
-      - name: 🚀 [echo] Upload Artifacts (echo, csv, log, warnings, backup)
+      - name: 🚀 [echo] Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mysql-fullops-artifacts-${{ github.run_id }}
+          name: fullops-artifacts-${{ github.run_id }}
           path: |
-            .github/logs/*.log
-            .github/mysql_logs/*
-            .github/echo/*.txt
-            .github/echo/mysql_masspw/*
-            .github/echo/oracle_ddl/*
-            .github/echo_data_backup/*
-            export/*.csv
-            backup/*.zip
-            sql/*.sql
-
-      - name: 🗂️ [echo] Show All Structure
-        run: |
-          echo "echo '[🗂️] 전체 디렉토리 tree ...'"
-          tree sql || true
-          tree export || true
-          tree backup || true
-          tree .github/echo || true
-          tree .github/mysql_logs || true
-          tree .github/logs || true
-          tree .github/echo_data_backup || true
-          tree .github/echo/oracle_ddl || true
-          tree .github/echo/mysql_masspw || true
-          ls -lh sql/ export/ backup/ .github/echo/ .github/mysql_logs/ .github/logs/ .github/echo_data_backup/ .github/echo/oracle_ddl/ .github/echo/mysql_masspw/
+            .github/logs/*
+            .github/echo/**/*
