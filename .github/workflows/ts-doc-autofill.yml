@@ -1,0 +1,112 @@
+name: 📝 TS 문서 자동보완 서버 & 디렉토리/에코 자동화
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  ts-doc-autofill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📁 대량 디렉토리/echo/log/sample 자동 생성
+        run: |
+          for d in .github/ts_doc_autofill .github/ts_doc_autofill/logs .github/ts_doc_autofill/echo .github/ts_doc_autofill/sample_docs; do
+            echo "echo 'mkdir -p $d'" | tee -a .github/ts_doc_autofill/echo/mkdir_${d##*/}.txt
+            mkdir -p $d
+          done
+          echo "echo '서버 실행 준비 완료'" | tee .github/ts_doc_autofill/echo/ready.txt
+
+      - name: ⚙️ tsconfig.json 자동 생성 (echo 포함)
+        run: |
+          cat <<EOF | tee tsconfig.json
+          {
+            "compilerOptions": {
+              "target": "ES6",
+              "module": "commonjs",
+              "outDir": "dist",
+              "esModuleInterop": true
+            }
+          }
+          EOF
+          echo "echo 'tsconfig.json 생성'" | tee .github/ts_doc_autofill/echo/tsconfig.txt
+
+      - name: 📝 TS 자동보완 서버코드 자동생성 (echo 포함)
+        run: |
+          cat <<'EOF' | tee .github/ts_doc_autofill/autofill-server.ts
+          import express, { Request, Response } from 'express';
+          import fs from 'fs';
+          import path from 'path';
+          import bodyParser from 'body-parser';
+
+          const app = express();
+          const PORT = process.env.PORT || 3070;
+
+          app.use(bodyParser.json({ limit: '5mb' }));
+
+          function ensureDirectoriesAndEchoFiles() {
+            const dirs = [
+              '.github/ts_doc_autofill',
+              '.github/ts_doc_autofill/logs',
+              '.github/ts_doc_autofill/echo',
+              '.github/ts_doc_autofill/sample_docs',
+            ];
+            dirs.forEach((d) => {
+              if (!fs.existsSync(d)) {
+                fs.mkdirSync(d, { recursive: true });
+                fs.writeFileSync(path.join('.github/ts_doc_autofill/echo', `mkdir_${path.basename(d)}.txt`), `echo "mkdir -p ${d}"\n`);
+              }
+            });
+            fs.writeFileSync('.github/ts_doc_autofill/echo/server_start.txt', `echo "서버가 시작되었습니다."\n`);
+          }
+          ensureDirectoriesAndEchoFiles();
+
+          function autoCompleteDocument(content: string): string {
+            if (content.length < 20) return content + "\n\n[자동보완 예시] 더 많은 내용을 입력해 주세요.";
+            return content + "\n\n[AI 자동보완]: 내용이 더 풍부해졌습니다. 감사합니다.";
+          }
+
+          app.post('/autofill', (req: Request, res: Response) => {
+            const { docContent } = req.body;
+            if (typeof docContent !== 'string') return res.status(400).json({ error: 'docContent required' });
+            const result = autoCompleteDocument(docContent);
+            fs.writeFileSync('.github/ts_doc_autofill/logs/last_autofill.txt', `입력: ${docContent}\n\n출력: ${result}\n`);
+            return res.json({ autofilled: result });
+          });
+
+          app.get('/health', (_, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
+
+          app.listen(PORT, () => {
+            fs.appendFileSync('.github/ts_doc_autofill/logs/server.log', `[${new Date().toISOString()}] 서버 시작\n`);
+            console.log(`🚀 TS Doc Autofill Server running on http://localhost:${PORT}`);
+          });
+          EOF
+          echo "echo 'autofill-server.ts 생성'" | tee .github/ts_doc_autofill/echo/autofill-server.txt
+
+      - name: ⚡ npm 초기화 및 의존성 설치 (echo 포함)
+        run: |
+          if [ ! -f package.json ]; then
+            echo "echo 'npm init -y'" | tee -a .github/ts_doc_autofill/echo/npm_init.txt
+            npm init -y
+          fi
+          echo "echo 'npm install express body-parser @types/express @types/node ts-node typescript --save'" | tee -a .github/ts_doc_autofill/echo/npm_install.txt
+          npm install express body-parser @types/express @types/node ts-node typescript --save
+
+      - name: 🟢 서버 실행 명령/테스트 curl 에코
+        run: |
+          echo "echo 'npx ts-node .github/ts_doc_autofill/autofill-server.ts'" | tee .github/ts_doc_autofill/echo/run_server.txt
+          echo "echo 'curl -X POST http://localhost:3070/autofill -H \"Content-Type: application/json\" -d \"{\\\"docContent\\\":\\\"예시 입력\\\"}\"'" | tee .github/ts_doc_autofill/echo/curl_test.txt
+
+      - name: 🧪 타입스크립트 자동보완 서버 기동 (백그라운드)
+        run: |
+          nohup npx ts-node .github/ts_doc_autofill/autofill-server.ts > .github/ts_doc_autofill/logs/server_run.log 2>&1 &
+          sleep 4
+
+      - name: 🛠️ 문서 자동보완 API 테스트 (curl)
+        run: |
+          curl -X POST http://localhost:3070/autofill -H "Content-Type: application/json" -d '{"docContent":"이력서 자기소개는"}' | tee .github/ts_doc_autofill/logs/curl_autofill.log
