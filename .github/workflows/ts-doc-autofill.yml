@@ -1,4 +1,4 @@
-name: 🏁 All-in-One Echo/Upload/Policy/Error/Backup/Deploy/Alert CI
+name: 🏁 All-in-One Echo/Upload/Deploy/Safe CI
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🛠️ 디렉토리/에코/실시간 모듈/백업/홈페이지/로그 생성 (2-PASS)
+      - name: 🛠️ Pre-check and create all dirs/echo/logs/backup
         run: |
           set -e
           DIRS=(
@@ -41,37 +41,23 @@ jobs:
             "site/email"
           )
           for d in "${DIRS[@]}"; do mkdir -p "$d"; done
-
-          # 동적 echo.js (JS/TS 모듈 자동 생성) - 실시간 echo/write 사용 예시
-          cat <<'EOF' > .github/ts_doc_autofill/echo/echo.js
-          const fs = require('fs');
-          function echoLog(msg, file = '.github/ts_doc_autofill/logs/dynamic_echo.log') {
-            fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`);
-          }
-          module.exports = { echoLog };
-          EOF
-
-          cat <<'EOF' > .github/ts_doc_autofill/echo/echo.ts
-          import * as fs from 'fs';
-          export function echoLog(msg: string, file: string = '.github/ts_doc_autofill/logs/dynamic_echo.log') {
-            fs.appendFileSync(file, `[${new Date().toISOString()}] ${msg}\n`);
-          }
-          EOF
-
-          # 홈페이지/배너/네비
+          # echo 및 필수 파일
+          for d in "${DIRS[@]}"; do
+            bname=$(basename "$d")
+            echo "echo 'mkdir -p $d'" > ".github/ts_doc_autofill/echo/mkdir_${bname}.txt"
+          done
           cat <<EOF > site/public/index.html
           <html>
           <head><title>All-in-One Portal</title></head>
           <body>
           <div id='header'>
-            <h1>All-in-One Automation Portal</h1>
+            <h1>All-in-One Portal</h1>
             <nav>
               <a href='/public/index.html' id='home_link'>Home</a> |
               <a href='/uploads' id='upload_link'>Upload</a> |
               <a href='/downloads' id='download_link'>Download</a>
             </nav>
           </div>
-          <div id='banner'><h2>🚀 Banner: Automation & Security & Recovery</h2></div>
           <div id='main'>
             <form action='/upload' method='post' enctype='multipart/form-data'>
               <label for='file'>File Upload:</label>
@@ -83,7 +69,6 @@ jobs:
           <div id='footer'><small>Powered by Actions All-in-One</small></div>
           </body></html>
           EOF
-          echo "https://github.com/${{ github.repository }}/tree/gh-pages/public/index.html" > .github/echo_homepage/homepage_url.txt
 
       - name: ⚡ npm & package install (express/multer/types/ts-node/ts)
         run: |
@@ -110,7 +95,7 @@ jobs:
           EOF
           cp tsconfig.json .github/echo_backup/backup_tsconfig_$(date +%Y%m%d_%H%M%S).json
 
-      - name: 📝 Upload/Download/Home/AutoComplete Server (실시간 에코/정책/고급에러)
+      - name: 📝 Upload/Download/Home/Server code
         run: |
           cat <<'EOF' | tee .github/ts_doc_autofill/autofill-server.ts
           import express, { Request, Response } from 'express';
@@ -118,11 +103,8 @@ jobs:
           import path from 'path';
           import bodyParser from 'body-parser';
           import multer from 'multer';
-          import { echoLog } from './echo/echo';
           const app = express();
           const PORT = process.env.PORT || 3070;
-
-          // 확장 업로드 정책: 허용 확장자/최대 크기(10MB), 실시간 로그
           const ALLOWED = ['.txt','.pdf','.png','.jpg','.jpeg','.md','.hwp','.hwpx'];
           const upload = multer({
             dest: 'site/uploads/',
@@ -130,74 +112,36 @@ jobs:
             fileFilter: (req, file, cb) => {
               const ext = path.extname(file.originalname).toLowerCase();
               if (ALLOWED.includes(ext)) cb(null, true);
-              else {
-                echoLog(`UPLOAD BLOCKED EXT=${ext} (${file.originalname})`);
-                return cb(new Error(`Forbidden filetype: ${ext}`));
-              }
+              else cb(new Error(`Forbidden filetype: ${ext}`));
             }
           });
-
           app.use(bodyParser.json({ limit: '5mb' }));
           app.use('/public', express.static('site/public'));
           app.use('/uploads', express.static('site/uploads'));
           app.use('/downloads', express.static('site/downloads'));
-
-          // Autocomplete API
           app.post('/autofill', (req: Request, res: Response) => {
-            try {
-              const { docContent } = req.body;
-              if (typeof docContent !== 'string') throw new Error('docContent required');
-              let result = docContent.length < 20
-                ? docContent + "\n\n[Autocomplete Example] Please enter more content."
-                : docContent + "\n\n[AI Autocomplete]: The content is now richer. Thank you.";
-              fs.writeFileSync('.github/ts_doc_autofill/logs/last_autofill.txt', `Input: ${docContent}\n\nOutput: ${result}\n`);
-              echoLog('Autofill processed');
-              res.json({ autofilled: result });
-            } catch (e) {
-              echoLog('Autofill Error: ' + e);
-              res.status(400).json({ error: '' + e });
-            }
+            const { docContent } = req.body;
+            if (typeof docContent !== 'string') return res.status(400).json({ error: 'docContent required' });
+            let result = docContent.length < 20
+              ? docContent + "\n\n[Autocomplete Example] Please enter more content."
+              : docContent + "\n\n[AI Autocomplete]: The content is now richer. Thank you.";
+            fs.writeFileSync('.github/ts_doc_autofill/logs/last_autofill.txt', `Input: ${docContent}\n\nOutput: ${result}\n`);
+            return res.json({ autofilled: result });
           });
-
-          // File upload (정책/실시간 로그/고급에러)
           app.post('/upload', upload.single('file'), (req: Request & { file?: Express.Multer.File }, res: Response) => {
-            try {
-              if (!req.file) throw new Error('No file uploaded.');
-              fs.appendFileSync('.github/echo_upload/upload.log', `[${new Date().toISOString()}] Uploaded: ${req.file.originalname} => ${req.file.path}\n`);
-              echoLog(`UPLOAD OK: ${req.file.originalname}`);
-              fs.copyFileSync(req.file.path, path.join('site/downloads', req.file.originalname));
-              res.send('Upload complete! <a href="/public/index.html">Back to home</a>');
-            } catch (e) {
-              echoLog('Upload error: ' + e);
-              res.status(500).send('Upload error: ' + e);
-            }
+            if (!req.file) return res.status(400).send('No file uploaded.');
+            fs.appendFileSync('.github/echo_upload/upload.log', `[${new Date().toISOString()}] Uploaded: ${req.file.originalname} => ${req.file.path}\n`);
+            fs.copyFileSync(req.file.path, path.join('site/downloads', req.file.originalname));
+            return res.send('Upload complete! <a href="/public/index.html">Back to home</a>');
           });
-
-          // Download (list)
           app.get('/downloads', (req: Request, res: Response) => {
-            try {
-              const files = fs.readdirSync('site/downloads').map(fn => `<li><a href="/downloads/${fn}">${fn}</a></li>`).join('');
-              res.send(`<h1>Download List</h1><ul>${files}</ul><a href="/public/index.html">Back to home</a>`);
-            } catch (e) {
-              echoLog('Download error: ' + e);
-              res.status(500).send('Download error');
-            }
+            const files = fs.readdirSync('site/downloads').map(fn => `<li><a href="/downloads/${fn}">${fn}</a></li>`).join('');
+            res.send(`<h1>Download List</h1><ul>${files}</ul><a href="/public/index.html">Back to home</a>`);
           });
-
-          // Healthcheck for CI
           app.get('/health', (_, res: Response) => res.json({ status: 'ok', ts: new Date().toISOString() }));
-
-          // 실시간 백업/복구/에러 감지 - 미니 알림(로그에 기록)
-          process.on('uncaughtException', err => {
-            echoLog('UNCAUGHT: ' + err);
-            fs.appendFileSync('.github/ts_doc_autofill/logs/server_error.log', `[${new Date().toISOString()}] ${err}\n`);
-          });
-
           app.listen(PORT, () => {
-            echoLog(`SERVER STARTED on ${PORT}`);
             fs.appendFileSync('.github/ts_doc_autofill/logs/server.log', `[${new Date().toISOString()}] Server started\n`);
-            // mini 실시간 알림
-            fs.appendFileSync('.github/ts_doc_autofill/logs/notify.log', `[ALERT] Server up at ${PORT}!\n`);
+            console.log(`🚀 All-in-One Server: http://localhost:${PORT}/public/index.html`);
           });
           EOF
           cp .github/ts_doc_autofill/autofill-server.ts .github/echo_backup/backup_autofill-server_$(date +%Y%m%d_%H%M%S).ts
@@ -234,6 +178,11 @@ jobs:
           publish_dir: site/public
           publish_branch: gh-pages
           exclude_assets: .github .gitignore .env node_modules
+          allow_empty_commit: false
+          keep_files: false
+          force_orphan: false
+          enable_jekyll: false
+          disable_nojekyll: false
 
       - name: 🕵️‍♂️ Final check (echo/backup/download/upload/home)
         run: |
@@ -249,5 +198,3 @@ jobs:
           ls -l .github/echo_backup || true
           echo "[CHECK] .github/echo_upload"
           ls -l .github/echo_upload || true
-          echo "[CHECK] .github/echo_banner"
-          ls -l .github/echo_banner || true
