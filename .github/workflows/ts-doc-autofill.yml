@@ -40,9 +40,7 @@ jobs:
             "site/logs"
             "site/email"
           )
-          # 1st PASS
           for d in "${DIRS[@]}"; do mkdir -p "$d"; done
-          # 2nd PASS
           ECHODIR=".github/ts_doc_autofill/echo"
           mkdir -p "$ECHODIR"
           for d in "${DIRS[@]}"; do
@@ -50,7 +48,6 @@ jobs:
             ef="$ECHODIR/mkdir_${bname}.txt"
             echo "echo 'mkdir -p $d'" > "$ef"
           done
-          # Banner/menu/button/link echo
           mkdir -p site/public .github/echo_banner .github/echo_homepage
           cat <<EOF > site/public/index.html
           <html>
@@ -82,16 +79,19 @@ jobs:
           echo "echo 'Homepage nav click'" > .github/echo_banner/nav_click.sh
           echo "https://github.com/${{ github.repository }}/tree/gh-pages/public/index.html" > .github/echo_homepage/homepage_url.txt
 
-      - name: 🟢 Server Cluster-wide apt update/upgrade (prod/test/local)
+      - name: ⚡ npm project & package install (express/multer/body-parser)
         run: |
-          set -e
-          SERVERS=("prod" "test" "local")
-          for S in "${SERVERS[@]}"; do
-            E=".github/echo_server"
-            echo "echo '[$S] sudo apt-get update -y && sudo apt-get upgrade -y'" > $E/${S}_apt_upgrade.sh
-            sudo apt-get update -y | tee $E/${S}_apt_update.log
-            sudo apt-get upgrade -y | tee $E/${S}_apt_upgrade.log
-          done
+          if [ ! -f package.json ]; then
+            echo "echo 'npm init -y'" > .github/ts_doc_autofill/echo/npm_init.txt
+            npm init -y
+          else
+            echo "[info] package.json already exists" > .github/ts_doc_autofill/echo/npm_init_info.txt
+          fi
+          echo "echo 'npm install express multer body-parser @types/express @types/node ts-node typescript --save'" > .github/ts_doc_autofill/echo/npm_install.txt
+          npm install express multer body-parser @types/express @types/node @types/multer ts-node typescript --save \
+            2>&1 | tee .github/ts_doc_autofill/echo/npm_install.log || \
+            { echo "[WARN] npm install failed → --force retry" | tee -a .github/ts_doc_autofill/echo/npm_install.log; npm install --force; }
+          cp package.json .github/echo_backup/backup_package_$(date +%Y%m%d_%H%M%S).json
 
       - name: ⚙️ tsconfig.json auto-gen/backup
         run: |
@@ -101,7 +101,8 @@ jobs:
               "target": "ES6",
               "module": "commonjs",
               "outDir": "dist",
-              "esModuleInterop": true
+              "esModuleInterop": true,
+              "strict": true
             }
           }
           EOF
@@ -111,7 +112,7 @@ jobs:
       - name: 📝 Upload/Download/Home/AutoComplete Server code autogen/backup
         run: |
           cat <<'EOF' | tee .github/ts_doc_autofill/autofill-server.ts
-          import express from 'express';
+          import express, { Request, Response } from 'express';
           import fs from 'fs';
           import path from 'path';
           import bodyParser from 'body-parser';
@@ -127,7 +128,7 @@ jobs:
           app.use('/downloads', express.static('site/downloads'));
 
           // Autocomplete API
-          app.post('/autofill', (req, res) => {
+          app.post('/autofill', (req: Request, res: Response) => {
             const { docContent } = req.body;
             if (typeof docContent !== 'string') return res.status(400).json({ error: 'docContent required' });
             let result = docContent;
@@ -138,7 +139,7 @@ jobs:
           });
 
           // File upload
-          app.post('/upload', upload.single('file'), (req, res) => {
+          app.post('/upload', upload.single('file'), (req: Request & { file?: Express.Multer.File }, res: Response) => {
             if (!req.file) return res.status(400).send('No file uploaded.');
             fs.appendFileSync('.github/echo_upload/upload.log', `[${new Date().toISOString()}] Uploaded: ${req.file.originalname} => ${req.file.path}\n`);
             fs.copyFileSync(req.file.path, path.join('site/downloads', req.file.originalname));
@@ -146,10 +147,13 @@ jobs:
           });
 
           // Download (list)
-          app.get('/downloads', (req, res) => {
+          app.get('/downloads', (req: Request, res: Response) => {
             const files = fs.readdirSync('site/downloads').map(fn => `<li><a href="/downloads/${fn}">${fn}</a></li>`).join('');
             res.send(`<h1>Download List</h1><ul>${files}</ul><a href="/public/index.html">Back to home</a>`);
           });
+
+          // Healthcheck for CI
+          app.get('/health', (_, res: Response) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
           app.listen(PORT, () => {
             fs.appendFileSync('.github/ts_doc_autofill/logs/server.log', `[${new Date().toISOString()}] Server started\n`);
@@ -159,24 +163,9 @@ jobs:
           echo "echo 'autofill-server.ts created'" > .github/ts_doc_autofill/echo/autofill-server.txt
           cp .github/ts_doc_autofill/autofill-server.ts .github/echo_backup/backup_autofill-server_$(date +%Y%m%d_%H%M%S).ts
 
-      - name: ⚡ npm project & package install (express/multer/body-parser)
-        run: |
-          if [ ! -f package.json ]; then
-            echo "echo 'npm init -y'" > .github/ts_doc_autofill/echo/npm_init.txt
-            npm init -y
-          else
-            echo "[info] package.json already exists" > .github/ts_doc_autofill/echo/npm_init_info.txt
-          fi
-          echo "echo 'npm install express multer body-parser @types/express @types/node ts-node typescript --save'" > .github/ts_doc_autofill/echo/npm_install.txt
-          npm install express multer body-parser @types/express @types/node ts-node typescript --save \
-            2>&1 | tee .github/ts_doc_autofill/echo/npm_install.log || \
-            { echo "[WARN] npm install failed → --force retry" | tee -a .github/ts_doc_autofill/echo/npm_install.log; npm install --force; }
-          cp package.json .github/echo_backup/backup_package_$(date +%Y%m%d_%H%M%S).json
-
       - name: 🟢 Server run and wait for healthy start
         run: |
           nohup npx ts-node .github/ts_doc_autofill/autofill-server.ts > .github/ts_doc_autofill/logs/server_run.log 2>&1 &
-          # Wait for server to listen on port 3070
           for i in {1..20}; do
             if curl -s http://localhost:3070/health > /dev/null; then
               echo "[info] TS server is ready!"
@@ -185,7 +174,6 @@ jobs:
             echo "[wait] Server not up yet ($i/20)..."
             sleep 2
           done
-          # If not running, fail
           if ! curl -s http://localhost:3070/health > /dev/null; then
             echo "::error ::Server did not start!"
             cat .github/ts_doc_autofill/logs/server_run.log || true
@@ -200,7 +188,7 @@ jobs:
           curl http://localhost:3070/downloads | tee .github/echo_download/downloads_test_result.html
 
       - name: 🚀 GitHub Pages homepage upload/deploy (public/index.html etc)
-        if: github.ref == 'refs/heads/main' # 배포는 main 브랜치에서만
+        if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
