@@ -13,10 +13,9 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🛠️ Massive Dir/Echo/Backup/Recovery/Home/Upload/Download/Server/Log Generation
+      - name: 🛠️ Safe Massive Dir/Echo/Backup/Recovery/Home/Upload/Download/Server/Log Generation
         run: |
           set -e
-          # 1st PASS: All Directories (no fail)
           DIRS=(
             ".github/ts_doc_autofill"
             ".github/ts_doc_autofill/logs"
@@ -41,9 +40,9 @@ jobs:
             "site/logs"
             "site/email"
           )
+          # 1st PASS
           for d in "${DIRS[@]}"; do mkdir -p "$d"; done
-
-          # 2nd PASS: Create echo files for all dirs (guaranteed echo dir exists)
+          # 2nd PASS
           ECHODIR=".github/ts_doc_autofill/echo"
           mkdir -p "$ECHODIR"
           for d in "${DIRS[@]}"; do
@@ -51,8 +50,7 @@ jobs:
             ef="$ECHODIR/mkdir_${bname}.txt"
             echo "echo 'mkdir -p $d'" > "$ef"
           done
-
-          # Massive echo for homepage/banner/nav/buttons
+          # Banner/menu/button/link echo
           mkdir -p site/public .github/echo_banner .github/echo_homepage
           cat <<EOF > site/public/index.html
           <html>
@@ -78,14 +76,10 @@ jobs:
           <div id='footer'><small>Powered by Actions All-in-One</small></div>
           </body></html>
           EOF
-
-          # Banner/menu/button/link echo
           echo "echo 'Home banner shown'" > .github/echo_banner/home_banner.sh
           echo "echo 'Upload button click'" > .github/echo_banner/upload_btn.sh
           echo "echo 'Download button click'" > .github/echo_banner/download_btn.sh
           echo "echo 'Homepage nav click'" > .github/echo_banner/nav_click.sh
-
-          # Homepage URL echo
           echo "https://github.com/${{ github.repository }}/tree/gh-pages/public/index.html" > .github/echo_homepage/homepage_url.txt
 
       - name: 🟢 Server Cluster-wide apt update/upgrade (prod/test/local)
@@ -179,15 +173,24 @@ jobs:
             { echo "[WARN] npm install failed → --force retry" | tee -a .github/ts_doc_autofill/echo/npm_install.log; npm install --force; }
           cp package.json .github/echo_backup/backup_package_$(date +%Y%m%d_%H%M%S).json
 
-      - name: 🟢 Server run/test curl/echo/log
-        run: |
-          echo "echo 'npx ts-node .github/ts_doc_autofill/autofill-server.ts'" > .github/ts_doc_autofill/echo/run_server.txt
-          echo "echo 'curl -X POST http://localhost:3070/autofill -H \"Content-Type: application/json\" -d \"{\\\"docContent\\\":\\\"Example Input\\\"}\"'" > .github/ts_doc_autofill/echo/curl_test.txt
-
-      - name: 🧪 Upload/Download/Home/Autocomplete Server background run
+      - name: 🟢 Server run and wait for healthy start
         run: |
           nohup npx ts-node .github/ts_doc_autofill/autofill-server.ts > .github/ts_doc_autofill/logs/server_run.log 2>&1 &
-          sleep 6
+          # Wait for server to listen on port 3070
+          for i in {1..20}; do
+            if curl -s http://localhost:3070/health > /dev/null; then
+              echo "[info] TS server is ready!"
+              break
+            fi
+            echo "[wait] Server not up yet ($i/20)..."
+            sleep 2
+          done
+          # If not running, fail
+          if ! curl -s http://localhost:3070/health > /dev/null; then
+            echo "::error ::Server did not start!"
+            cat .github/ts_doc_autofill/logs/server_run.log || true
+            exit 1
+          fi
 
       - name: 🛠️ API/Upload/Download Test (curl)
         run: |
@@ -197,9 +200,10 @@ jobs:
           curl http://localhost:3070/downloads | tee .github/echo_download/downloads_test_result.html
 
       - name: 🚀 GitHub Pages homepage upload/deploy (public/index.html etc)
+        if: github.ref == 'refs/heads/main' # 배포는 main 브랜치에서만
         uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
           publish_dir: site/public
           publish_branch: gh-pages
 
