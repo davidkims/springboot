@@ -1,4 +1,4 @@
-name: 📦 _provenance 파일수 자동 제한(1000개 미만) + 최신 zip/백업/에코/로그 통합
+name: 📦 _provenance 강제 파일정리(1,000개 미만 보존) + echo/로그/검증
 
 on:
   workflow_dispatch:
@@ -6,80 +6,51 @@ on:
     - cron: '0 5 * * *'
 
 jobs:
-  limit-provenance-files:
+  clean-provenance:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📂 저장소 체크아웃
         uses: actions/checkout@v4
 
-      - name: 📁 에코/백업/로그/디렉토리 다중 생성 (echo 기록)
+      - name: 📁 echo/로그/디렉토리 생성
         run: |
-          echo "echo 'mkdir -p .github/echo_zip'" | tee .github/echo_dirs_init.sh
-          mkdir -p .github/echo_zip
+          mkdir -p .github/echo_zip .github/echo_logs
+          echo "mkdir -p .github/echo_zip .github/echo_logs" > .github/echo_zip/echo_dirs.sh
 
-          DIRS=".github/echo_zip .github/zip_backup .github/echo_logs .github/echo_zip/extra1 .github/echo_logs/archive"
-          for d in $DIRS; do
-            echo "echo 'mkdir -p $d'" | tee -a .github/echo_zip/echo_dirs.sh
-            mkdir -p "$d"
-          done
-          ECHO_FILES=".github/echo_zip/echo_dirs.sh .github/echo_zip/ls_echo_zip.sh .github/echo_zip/zip_backup_template.sh .github/echo_zip/echo_init.sh"
-          for f in $ECHO_FILES; do
-            echo "echo '에코 파일 생성: $f'" | tee -a .github/echo_zip/echo_files_created.log
-            touch "$f"
-          done
-
-      - name: 🗑️ _provenance 파일 1,000개 미만(변경 가능) 유지, 나머지 자동 삭제
+      - name: 🗑️ _provenance 1,000개 초과 강제 삭제 (공백/특수문자 지원, echo 기록)
         run: |
           PROV_DIR="_provenance"
-          KEEP_COUNT=700  # ★ 원하는 수(예: 700)로 줄이면 됨! 1000→700→500 등 조정 가능
+          KEEP_COUNT=1000
+          LOG_FILE=".github/echo_logs/delete_provenance.log"
+          ECHO_FILE=".github/echo_zip/delete_provenance.sh"
+
           if [ -d "$PROV_DIR" ]; then
-            FILE_TOTAL=$(ls -1 "$PROV_DIR" | wc -l)
-            echo "echo '[INFO] $PROV_DIR 전체 파일 수: $FILE_TOTAL'" | tee -a .github/echo_zip/echo_dirs.sh
+            FILE_TOTAL=$(find "$PROV_DIR" -type f | wc -l)
+            echo "echo '[INFO] $PROV_DIR 전체 파일 수: $FILE_TOTAL'" | tee -a "$ECHO_FILE"
+            echo "[INFO] $PROV_DIR 전체 파일 수: $FILE_TOTAL" | tee -a "$LOG_FILE"
             if [ "$FILE_TOTAL" -gt "$KEEP_COUNT" ]; then
-              FILES_TO_DELETE=$(ls -1t "$PROV_DIR" | tail -n +$((KEEP_COUNT+1)))
-              for f in $FILES_TO_DELETE; do
-                echo "echo '[DELETE] $PROV_DIR/$f'" | tee -a .github/echo_zip/echo_dirs.sh
-                rm -f "$PROV_DIR/$f"
+              # 오래된 순 정렬(접근시간X, 수정시간O), 파일명에 공백/특수문자 안전하게 처리
+              DELETE_LIST=$(find "$PROV_DIR" -type f -printf '%T@ %p\n' | sort -n | head -n -$KEEP_COUNT | cut -d' ' -f2-)
+              echo "$DELETE_LIST" | while IFS= read -r file; do
+                echo "echo '[DELETE] $file'" | tee -a "$ECHO_FILE"
+                echo "[DELETE] $file" | tee -a "$LOG_FILE"
+                rm -f -- "$file"
               done
-              echo "echo '[INFO] $PROV_DIR 삭제 후 남은 파일 수: \$(ls -1 $PROV_DIR | wc -l)'" | tee -a .github/echo_zip/echo_dirs.sh
+              REMAIN=$(find "$PROV_DIR" -type f | wc -l)
+              echo "echo '[INFO] 삭제 후 남은 파일 수: $REMAIN'" | tee -a "$ECHO_FILE"
+              echo "[INFO] 삭제 후 남은 파일 수: $REMAIN" | tee -a "$LOG_FILE"
             else
-              echo "echo '[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요'" | tee -a .github/echo_zip/echo_dirs.sh
+              echo "echo '[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요'" | tee -a "$ECHO_FILE"
+              echo "[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요" | tee -a "$LOG_FILE"
             fi
           else
-            echo "echo '[WARN] $PROV_DIR 디렉토리 없음'" | tee -a .github/echo_zip/echo_dirs.sh
+            echo "echo '[WARN] $PROV_DIR 디렉토리 없음'" | tee -a "$ECHO_FILE"
+            echo "[WARN] $PROV_DIR 디렉토리 없음" | tee -a "$LOG_FILE"
           fi
 
-      - name: 🗂️ 최신 _provenance ZIP 압축 및 .github 업로드 (에코/로그)
+      - name: 📋 정리 결과 검증/출력
         run: |
-          TS=$(date +%Y%m%d_%H%M%S)
-          ZIP_FILE=".github/_provenance_latest_$TS.zip"
-          ECHO_SH=".github/echo_zip/zip_provenance_latest_$TS.sh"
-          LOG_FILE=".github/echo_logs/zip_provenance_latest_$TS.log"
-
-          if [ -d "_provenance" ]; then
-            echo "echo 'zip -r $ZIP_FILE _provenance'" | tee -a "$ECHO_SH"
-            echo "zip -r $ZIP_FILE _provenance" >> "$ECHO_SH"
-            echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE _provenance" | tee -a "$LOG_FILE"
-            zip -r "$ZIP_FILE" _provenance | tee -a "$LOG_FILE"
-            echo "echo '[OK] 최신 _provenance ZIP 생성 → $ZIP_FILE'" | tee -a "$ECHO_SH"
-            echo "[OK] $(date '+%F %T') 최신 _provenance ZIP 완료: $ZIP_FILE" | tee -a "$LOG_FILE"
-            chmod +x "$ECHO_SH"
-          else
-            echo "echo '[WARN] _provenance 디렉토리 없음, zip 스킵'" | tee -a "$ECHO_SH"
-            echo "[WARN] _provenance 디렉토리 없음, zip 스킵" | tee -a "$LOG_FILE"
-          fi
-
-      - name: 📋 전체 결과 확인 (에코/로그)
-        run: |
-          echo "echo 'ls -al .github'" | tee -a .github/echo_zip/ls_github_dir.sh
-          ls -al .github | tee -a .github/echo_logs/ls_github_dir.log
-
-          echo "echo 'ls -al _provenance'" | tee -a .github/echo_zip/ls_provenance.sh
-          if [ -d _provenance ]; then ls -al _provenance | tee -a .github/echo_logs/ls_provenance.log; fi
-
-          echo "echo 'ls -al .github/echo_zip'" | tee -a .github/echo_zip/ls_echo_zip.sh
-          ls -al .github/echo_zip | tee -a .github/echo_logs/ls_echo_zip.log
-
-          echo "echo 'ls -al .github/echo_logs'" | tee -a .github/echo_zip/ls_echo_logs.sh
-          ls -al .github/echo_logs | tee -a .github/echo_logs/ls_echo_logs.log
+          find _provenance -type f | wc -l | tee .github/echo_logs/_provenance_final_count.txt || echo "0"
+          ls -al _provenance | tee -a .github/echo_logs/_provenance_final_ls.txt || echo "_provenance not found"
+          cat .github/echo_logs/delete_provenance.log || true
