@@ -1,9 +1,9 @@
-name: 📦 저장소 + 복제본 zip 압축 + gh repo clone + echo/로그 자동화
+name: 📦 저장소 + 복제본 zip 압축 + gh repo clone (재시도/에러방지) + echo/로그
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'  # 매일 02:00
+    - cron: '0 2 * * *'
 
 jobs:
   zip-and-clone:
@@ -37,14 +37,39 @@ jobs:
           type gh || (sudo apt-get update -y && sudo apt-get install -y gh)
           gh --version | tee .github/echo_logs/gh_cli_version.log
 
-      - name: 🛠️ [3] davidkims/springboot 원격 저장소 복제 (echo/로그)
+      - name: 🛠️ [3] davidkims/springboot 저장소 복제(실패 시 자동재시도, 실패시 전체 실패)
         run: |
           CLONE_DIR="springboot_clone"
           ECHO_CLONE=".github/echo_zip/clone_repo.sh"
           LOG_CLONE=".github/echo_logs/clone_repo.log"
+
+          # 이전에 디렉토리 있으면 삭제(중복 방지)
+          if [ -d "$CLONE_DIR" ]; then
+            echo "기존 $CLONE_DIR 디렉토리 삭제" | tee -a "$LOG_CLONE"
+            rm -rf "$CLONE_DIR"
+          fi
+
           echo "echo 'gh repo clone davidkims/springboot $CLONE_DIR'" | tee -a "$ECHO_CLONE"
           echo "gh repo clone davidkims/springboot $CLONE_DIR" >> "$ECHO_CLONE"
-          gh repo clone davidkims/springboot $CLONE_DIR | tee -a "$LOG_CLONE"
+
+          MAX_RETRY=3
+          COUNT=0
+          SUCCESS=0
+          until [ $COUNT -ge $MAX_RETRY ]; do
+            gh repo clone davidkims/springboot "$CLONE_DIR" 2>&1 | tee -a "$LOG_CLONE"
+            if [ -d "$CLONE_DIR" ] && [ -f "$CLONE_DIR/README.md" ]; then
+              SUCCESS=1
+              break
+            fi
+            COUNT=$((COUNT+1))
+            echo "[RETRY] gh repo clone 시도 $COUNT / $MAX_RETRY" | tee -a "$LOG_CLONE"
+            sleep 2
+          done
+
+          if [ $SUCCESS -eq 0 ]; then
+            echo "[ERROR] springboot_clone 복제 실패! 워크플로우 실패 처리" | tee -a "$LOG_CLONE"
+            exit 1
+          fi
 
       - name: 🗂️ [4] 복제된 저장소 전체 zip 압축 (에코/로그)
         run: |
@@ -53,18 +78,13 @@ jobs:
           ZIP_FILE=".github/zip_backup/clone_repo_all_$TS.zip"
           ECHO_SH=".github/echo_zip/zip_clone_repo_$TS.sh"
           LOG_FILE=".github/echo_logs/zip_clone_repo_$TS.log"
-          if [ -d "$CLONE_DIR" ]; then
-            echo "echo 'zip -r $ZIP_FILE $CLONE_DIR'" | tee -a "$ECHO_SH"
-            echo "zip -r $ZIP_FILE $CLONE_DIR" >> "$ECHO_SH"
-            echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE $CLONE_DIR" | tee -a "$LOG_FILE"
-            zip -r "$ZIP_FILE" "$CLONE_DIR" | tee -a "$LOG_FILE"
-            echo "echo '[OK] 복제된 저장소 전체 ZIP → $ZIP_FILE'" | tee -a "$ECHO_SH"
-            echo "[OK] 복제된 저장소 전체 ZIP → $ZIP_FILE" | tee -a "$LOG_FILE"
-            chmod +x "$ECHO_SH"
-          else
-            echo "echo '[FAIL] $CLONE_DIR 디렉토리 없음, zip 스킵'" | tee -a "$ECHO_SH"
-            echo "[FAIL] $CLONE_DIR 디렉토리 없음, zip 스킵" | tee -a "$LOG_FILE"
-          fi
+          echo "echo 'zip -r $ZIP_FILE $CLONE_DIR'" | tee -a "$ECHO_SH"
+          echo "zip -r $ZIP_FILE $CLONE_DIR" >> "$ECHO_SH"
+          echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE $CLONE_DIR" | tee -a "$LOG_FILE"
+          zip -r "$ZIP_FILE" "$CLONE_DIR" | tee -a "$LOG_FILE"
+          echo "echo '[OK] 복제된 저장소 전체 ZIP → $ZIP_FILE'" | tee -a "$ECHO_SH"
+          echo "[OK] 복제된 저장소 전체 ZIP → $ZIP_FILE" | tee -a "$LOG_FILE"
+          chmod +x "$ECHO_SH"
 
       - name: 📋 결과 확인/검증(에코/로그/ls)
         run: |
