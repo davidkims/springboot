@@ -13,7 +13,7 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 모든 에코/대량/스크립트/쿼리/로그/서비스/관리 디렉토리 생성
+      - name: 📁 모든 에코/대량/원장/계좌/이체/쿼리/로그/서비스/관리 디렉토리 생성
         run: |
           for d in \
             .github/echo_db/dirs \
@@ -41,11 +41,14 @@ jobs:
             .github/echo_db/util \
             .github/echo_db/mass_db \
             .github/echo_db/mass_script \
-            .github/echo_db/mass_query; do
+            .github/echo_db/mass_query \
+            .github/echo_db/ledger \
+            .github/echo_db/vaccount \
+            .github/echo_db/transfer; do
             mkdir -p $d
           done
 
-      - name: 📄 전체 에코/대량/운영/관리/확장/스크립트/쿼리 자동 생성
+      - name: 📄 대량 원장/계좌/이체/에코/쿼리/스크립트 자동 생성 및 기존 운영 기능 전체 통합
         run: |
           set -e
 
@@ -54,20 +57,53 @@ jobs:
             echo "echo 'mkdir -p $d'" >> .github/echo_db/dirs/mkdir_cmds.sh
           done
 
-          # 2. DB/쿼리/유저/테이블/권한/트랜잭션 대량 에코 생성(10개 기준)
+          # 2. 서비스/DB별 대량 원장/계좌/이체/에코/쿼리/스크립트 자동 생성(10개씩)
+          SERVICE_LIST="mysql postgresql sqlite3"
+          for svc in $SERVICE_LIST; do
+            for i in $(seq 1 10); do
+              # 거래 원장
+              ledger_tbl="ledger_${svc}_$i"
+              echo "echo 'CREATE TABLE IF NOT EXISTS $ledger_tbl (id INT PRIMARY KEY, account VARCHAR(50), amount INT, type VARCHAR(20), ts DATETIME);'" > .github/echo_db/ledger/${svc}_${ledger_tbl}_create.sql
+              echo "echo 'INSERT INTO $ledger_tbl (id, account, amount, type, ts) VALUES ($i, \"acc_${svc}_$i\", $((10000+$i)), \"DEPOSIT\", CURRENT_TIMESTAMP);'" >> .github/echo_db/ledger/${svc}_${ledger_tbl}_insert.sql
+
+              # 가상계좌
+              vaccount_tbl="vaccount_${svc}_$i"
+              echo "echo 'CREATE TABLE IF NOT EXISTS $vaccount_tbl (id INT PRIMARY KEY, user_id VARCHAR(50), vaccount_no VARCHAR(50), balance INT);'" > .github/echo_db/vaccount/${svc}_${vaccount_tbl}_create.sql
+              echo "echo 'INSERT INTO $vaccount_tbl (id, user_id, vaccount_no, balance) VALUES ($i, \"user_${svc}_$i\", \"VA${svc}$(printf %04d $i)\", 100000);'" >> .github/echo_db/vaccount/${svc}_${vaccount_tbl}_insert.sql
+
+              # 계좌이체
+              transfer_tbl="transfer_${svc}_$i"
+              echo "echo 'CREATE TABLE IF NOT EXISTS $transfer_tbl (id INT PRIMARY KEY, from_acc VARCHAR(50), to_acc VARCHAR(50), amount INT, ts DATETIME);'" > .github/echo_db/transfer/${svc}_${transfer_tbl}_create.sql
+              echo "echo 'INSERT INTO $transfer_tbl (id, from_acc, to_acc, amount, ts) VALUES ($i, \"acc_from_${svc}_$i\", \"acc_to_${svc}_$i\", 5000, CURRENT_TIMESTAMP);'" >> .github/echo_db/transfer/${svc}_${transfer_tbl}_insert.sql
+            done
+
+            # 대량 실행 스크립트
+            for cat in ledger vaccount transfer; do
+              echo "echo '[에코] $svc $cat 대량 쿼리 실행'" | tee .github/echo_db/mass_script/${svc}_${cat}_mass_run.sh
+              echo "for sql in .github/echo_db/$cat/${svc}_*.sql; do" >> .github/echo_db/mass_script/${svc}_${cat}_mass_run.sh
+              if [ "$svc" = "mysql" ]; then
+                echo "  echo \"[에코][실행] mysql -uroot -prootpass123 test_db < \$sql\"" >> .github/echo_db/mass_script/${svc}_${cat}_mass_run.sh
+              elif [ "$svc" = "postgresql" ]; then
+                echo "  echo \"[에코][실행] psql -U postgres -d test_db -f \$sql\"" >> .github/echo_db/mass_script/${svc}_${cat}_mass_run.sh
+              elif [ "$svc" = "sqlite3" ]; then
+                echo "  echo \"[에코][실행] sqlite3 test.db < \$sql\"" >> .github/echo_db/mass_script/${svc}_${cat}_mass_run.sh
+              fi
+              echo "done" >> .github/echo_db/mass_script/${svc}_${cat}_mass_run.sh
+            done
+          done
+
+          # 3. DB/쿼리/유저/테이블/권한/트랜잭션 대량 에코 생성(10개 기준, legacy)
           for i in $(seq 1 10); do
             db="sampledb_$i"
             echo "echo '[에코] DB 생성: $db'" | tee .github/echo_db/mass_db/${db}_create.sh
             echo "CREATE DATABASE IF NOT EXISTS $db;" > .github/echo_db/mass_db/${db}_create.sql
             echo "echo '[에코] DB 삭제: $db'" | tee .github/echo_db/mass_db/${db}_drop.sh
             echo "DROP DATABASE IF EXISTS $db;" > .github/echo_db/mass_db/${db}_drop.sql
-
             user="user_$i"
             pw="pw_$i"
             echo "echo \"CREATE USER '$user'@'%' IDENTIFIED BY '$pw';\"" > .github/echo_db/mass_db/${user}_create.sql
             echo "echo \"GRANT ALL ON *.* TO '$user'@'%';\"" >> .github/echo_db/mass_db/${user}_create.sql
             echo "echo '[에코] 사용자 권한: $user'" | tee .github/echo_db/mass_db/${user}_grant.sh
-
             tbl="table_$i"
             echo "echo 'CREATE TABLE $tbl (id INT PRIMARY KEY, value VARCHAR(100));'" > .github/echo_db/mass_query/${tbl}_create.sql
             echo "echo 'INSERT INTO $tbl (id, value) VALUES ($i, \"Value_$i\");'" >> .github/echo_db/mass_query/${tbl}_insert.sql
@@ -77,26 +113,7 @@ jobs:
             done
           done
 
-          # 3. 서비스/DB별 대량 실행 에코스크립트 자동 생성
-          for svc in mysql postgresql sqlite3 mongodb redis; do
-            echo "echo '[에코] $svc 대량 DB/쿼리 자동 실행'" | tee .github/echo_db/mass_script/${svc}_mass_run.sh
-            if [ "$svc" = "mysql" ]; then
-              echo "for sql in .github/echo_db/mass_db/*.sql .github/echo_db/mass_query/*.sql; do" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-              echo "  echo \"[에코][실행] mysql -uroot -prootpass123 < \$sql\"" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-              echo "done" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-            elif [ "$svc" = "postgresql" ]; then
-              echo "for sql in .github/echo_db/mass_db/*.sql .github/echo_db/mass_query/*.sql; do" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-              echo "  echo \"[에코][실행] psql -U postgres -f \$sql\"" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-              echo "done" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-            elif [ "$svc" = "sqlite3" ]; then
-              echo "for sql in .github/echo_db/mass_db/*.sql .github/echo_db/mass_query/*.sql; do" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-              echo "  echo \"[에코][실행] sqlite3 massdb.sqlite < \$sql\"" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-              echo "done" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-            fi
-            echo "echo '[에코] $svc 대량 실행 종료'" >> .github/echo_db/mass_script/${svc}_mass_run.sh
-          done
-
-          # 4. 기존 워크플로우(설치/권한/운영/Compose/Marketplace/로그/유틸/초기화/테스트 등) 자동화
+          # 4. 서비스/Compose/Marketplace/권한/로그 등 기존 통합 기능 모두 자동 생성
           DB_LIST="mysql-server mariadb-server postgresql sqlite3 mongodb redis-server"
           for db in $DB_LIST; do
             DB_NAME=${db%%-*}
@@ -113,14 +130,14 @@ jobs:
             echo "choco install $db" >> .github/echo_db/choco/$db-choco-install.sh
             echo "echo '[에코] snap install $db'" | tee .github/echo_db/snap/$db-snap-install.sh
             echo "sudo snap install $db" >> .github/echo_db/snap/$db-snap-install.sh
-            # 주요 기능 자동화
+            # 주요 기능(초기화/백업/테스트/마이그레이션/입출력/서버정보/에러로그/유틸)
             for feat in init backup test migration import export serverinfo errorlog util; do
               F=.github/echo_db/$feat/$db-$feat.sh
               echo "echo '[에코] $db $feat 스크립트'" | tee $F
             done
           done
 
-          # 5. 서비스/Compose/Marketplace/권한/로그 자동화 (기존 구조와 동일)
+          # 5. Compose/Marketplace/서비스/권한 자동화(간략화)
           for db in mysql postgresql mongodb redis; do
             yml=".github/echo_db/services/$db-service.yml"
             echo "echo '[에코] $db 컨테이너 yaml'" | tee $yml
