@@ -1,56 +1,135 @@
-name: 📦 _provenance 강제 파일정리(1,000개 미만 보존) + echo/로그/검증
+name: 📦 저장소 전체 ZIP 백업 + _provenance 대량 삭제 + 에코/로그 통합
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 5 * * *'
+    - cron: '0 3 * * *'  # 매일 03:00 자동 실행
 
 jobs:
-  clean-provenance:
+  zip-and-clean:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📂 저장소 체크아웃
         uses: actions/checkout@v4
 
-      - name: 📁 echo/로그/디렉토리 생성
+      - name: 📁 에코/백업/로그 디렉토리 생성 (echo)
         run: |
-          mkdir -p .github/echo_zip .github/echo_logs
-          echo "mkdir -p .github/echo_zip .github/echo_logs" > .github/echo_zip/echo_dirs.sh
+          mkdir -p .github/echo_zip .github/zip_backup .github/echo_logs
+          echo "mkdir -p .github/echo_zip .github/zip_backup .github/echo_logs" > .github/echo_zip/echo_dirs.sh
 
-      - name: 🗑️ _provenance 1,000개 초과 강제 삭제 (공백/특수문자 지원, echo 기록)
+      - name: 🗑️ _provenance 디렉토리 대량 삭제 (전체 삭제/부분 삭제, echo/로그)
         run: |
           PROV_DIR="_provenance"
-          KEEP_COUNT=1000
           LOG_FILE=".github/echo_logs/delete_provenance.log"
           ECHO_FILE=".github/echo_zip/delete_provenance.sh"
+          DELETE_MODE="all"   # all : 전체 삭제, limit : 일부만(KEEP_COUNT 이하로), none : 미삭제
 
           if [ -d "$PROV_DIR" ]; then
-            FILE_TOTAL=$(find "$PROV_DIR" -type f | wc -l)
-            echo "echo '[INFO] $PROV_DIR 전체 파일 수: $FILE_TOTAL'" | tee -a "$ECHO_FILE"
-            echo "[INFO] $PROV_DIR 전체 파일 수: $FILE_TOTAL" | tee -a "$LOG_FILE"
-            if [ "$FILE_TOTAL" -gt "$KEEP_COUNT" ]; then
-              # 오래된 순 정렬(접근시간X, 수정시간O), 파일명에 공백/특수문자 안전하게 처리
-              DELETE_LIST=$(find "$PROV_DIR" -type f -printf '%T@ %p\n' | sort -n | head -n -$KEEP_COUNT | cut -d' ' -f2-)
-              echo "$DELETE_LIST" | while IFS= read -r file; do
+            if [ "$DELETE_MODE" = "all" ]; then
+              # 전체 파일 강제 삭제(공백/특수문자 안전)
+              find "$PROV_DIR" -type f | while IFS= read -r file; do
                 echo "echo '[DELETE] $file'" | tee -a "$ECHO_FILE"
                 echo "[DELETE] $file" | tee -a "$LOG_FILE"
                 rm -f -- "$file"
               done
-              REMAIN=$(find "$PROV_DIR" -type f | wc -l)
-              echo "echo '[INFO] 삭제 후 남은 파일 수: $REMAIN'" | tee -a "$ECHO_FILE"
-              echo "[INFO] 삭제 후 남은 파일 수: $REMAIN" | tee -a "$LOG_FILE"
+              echo "echo '[INFO] $PROV_DIR 전체 파일 삭제 완료'" | tee -a "$ECHO_FILE"
+              echo "[INFO] $PROV_DIR 전체 파일 삭제 완료" | tee -a "$LOG_FILE"
+            elif [ "$DELETE_MODE" = "limit" ]; then
+              KEEP_COUNT=1000
+              FILE_TOTAL=$(find "$PROV_DIR" -type f | wc -l)
+              if [ "$FILE_TOTAL" -gt "$KEEP_COUNT" ]; then
+                DELETE_LIST=$(find "$PROV_DIR" -type f -printf '%T@ %p\n' | sort -n | head -n -$KEEP_COUNT | cut -d' ' -f2-)
+                echo "$DELETE_LIST" | while IFS= read -r file; do
+                  echo "echo '[DELETE] $file'" | tee -a "$ECHO_FILE"
+                  echo "[DELETE] $file" | tee -a "$LOG_FILE"
+                  rm -f -- "$file"
+                done
+                REMAIN=$(find "$PROV_DIR" -type f | wc -l)
+                echo "echo '[INFO] 삭제 후 남은 파일 수: $REMAIN'" | tee -a "$ECHO_FILE"
+                echo "[INFO] 삭제 후 남은 파일 수: $REMAIN" | tee -a "$LOG_FILE"
+              else
+                echo "echo '[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요'" | tee -a "$ECHO_FILE"
+                echo "[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요" | tee -a "$LOG_FILE"
+              fi
             else
-              echo "echo '[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요'" | tee -a "$ECHO_FILE"
-              echo "[SKIP] $PROV_DIR 파일 수 $FILE_TOTAL (KEEP_COUNT=$KEEP_COUNT) → 삭제 불필요" | tee -a "$LOG_FILE"
+              echo "echo '[INFO] $PROV_DIR 삭제 미실행(DELETE_MODE=none)'" | tee -a "$ECHO_FILE"
+              echo "[INFO] $PROV_DIR 삭제 미실행(DELETE_MODE=none)" | tee -a "$LOG_FILE"
             fi
           else
             echo "echo '[WARN] $PROV_DIR 디렉토리 없음'" | tee -a "$ECHO_FILE"
             echo "[WARN] $PROV_DIR 디렉토리 없음" | tee -a "$LOG_FILE"
           fi
 
-      - name: 📋 정리 결과 검증/출력
+      - name: 🗂️ 저장소 전체/폴더/워크플로우 zip 압축 (에코/로그)
         run: |
-          find _provenance -type f | wc -l | tee .github/echo_logs/_provenance_final_count.txt || echo "0"
-          ls -al _provenance | tee -a .github/echo_logs/_provenance_final_ls.txt || echo "_provenance not found"
-          cat .github/echo_logs/delete_provenance.log || true
+          TS=$(date +%Y%m%d_%H%M%S)
+
+          # [1] 저장소 전체 zip
+          ZIP_FILE=".github/zip_backup/repo_root_all_$TS.zip"
+          ECHO_SH=".github/echo_zip/zip_repo_root_all_$TS.sh"
+          LOG_FILE=".github/echo_logs/zip_repo_root_all_$TS.log"
+          echo "echo 'zip -r $ZIP_FILE .'" | tee -a "$ECHO_SH"
+          echo "zip -r $ZIP_FILE ." >> "$ECHO_SH"
+          echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE ." | tee -a "$LOG_FILE"
+          zip -r "$ZIP_FILE" . | tee -a "$LOG_FILE"
+          echo "echo '[OK] 저장소 루트 전체 ZIP → $ZIP_FILE'" | tee -a "$ECHO_SH"
+          echo "[OK] 저장소 루트 전체 ZIP → $ZIP_FILE" | tee -a "$LOG_FILE"
+          chmod +x "$ECHO_SH"
+
+          # [2] .github 폴더 zip
+          ZIP_FILE2=".github/zip_backup/dotgithub_$TS.zip"
+          ECHO_SH2=".github/echo_zip/zip_dotgithub_$TS.sh"
+          LOG_FILE2=".github/echo_logs/zip_dotgithub_$TS.log"
+          echo "echo 'zip -r $ZIP_FILE2 .github'" | tee -a "$ECHO_SH2"
+          echo "zip -r $ZIP_FILE2 .github" >> "$ECHO_SH2"
+          echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE2 .github" | tee -a "$LOG_FILE2"
+          zip -r "$ZIP_FILE2" .github | tee -a "$LOG_FILE2"
+          echo "echo '[OK] .github 전체 ZIP → $ZIP_FILE2'" | tee -a "$ECHO_SH2"
+          echo "[OK] .github 전체 ZIP → $ZIP_FILE2" | tee -a "$LOG_FILE2"
+          chmod +x "$ECHO_SH2"
+
+          # [3] .github/workflows 폴더 zip
+          ZIP_FILE3=".github/zip_backup/github_workflows_$TS.zip"
+          ECHO_SH3=".github/echo_zip/zip_github_workflows_$TS.sh"
+          LOG_FILE3=".github/echo_logs/zip_github_workflows_$TS.log"
+          if [ -d ".github/workflows" ]; then
+            echo "echo 'zip -r $ZIP_FILE3 .github/workflows'" | tee -a "$ECHO_SH3"
+            echo "zip -r $ZIP_FILE3 .github/workflows" >> "$ECHO_SH3"
+            echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE3 .github/workflows" | tee -a "$LOG_FILE3"
+            zip -r "$ZIP_FILE3" .github/workflows | tee -a "$LOG_FILE3"
+            echo "echo '[OK] .github/workflows ZIP → $ZIP_FILE3'" | tee -a "$ECHO_SH3"
+            echo "[OK] .github/workflows ZIP → $ZIP_FILE3" | tee -a "$LOG_FILE3"
+            chmod +x "$ECHO_SH3"
+          else
+            echo "echo '[SKIP] .github/workflows 폴더 없음'" | tee -a "$ECHO_SH3"
+            echo "[SKIP] .github/workflows 폴더 없음" | tee -a "$LOG_FILE3"
+          fi
+
+          # [4] 주요 폴더별 개별 zip
+          for dir in src config app scripts docs public backend frontend server client; do
+            if [ -d "$dir" ]; then
+              ZIP_FILE4=".github/zip_backup/${dir}_$TS.zip"
+              ECHO_SH4=".github/echo_zip/zip_${dir}_$TS.sh"
+              LOG_FILE4=".github/echo_logs/zip_${dir}_$TS.log"
+
+              echo "echo 'zip -r $ZIP_FILE4 $dir'" | tee -a "$ECHO_SH4"
+              echo "zip -r $ZIP_FILE4 $dir" >> "$ECHO_SH4"
+              echo "[INFO] $(date '+%F %T') zip -r $ZIP_FILE4 $dir" | tee -a "$LOG_FILE4"
+              zip -r "$ZIP_FILE4" "$dir" | tee -a "$LOG_FILE4"
+              echo "echo '[OK] $dir ZIP → $ZIP_FILE4'" | tee -a "$ECHO_SH4"
+              echo "[OK] $dir ZIP → $ZIP_FILE4" | tee -a "$LOG_FILE4"
+              chmod +x "$ECHO_SH4"
+            fi
+          done
+
+      - name: 📋 결과 확인/검증(에코/로그/ls)
+        run: |
+          echo "echo 'ls -al .github/zip_backup'" | tee -a .github/echo_zip/ls_zip_backup.sh
+          ls -al .github/zip_backup | tee -a .github/echo_logs/ls_zip_backup.log
+          echo "echo 'ls -al .github/echo_zip'" | tee -a .github/echo_zip/ls_echo_zip.sh
+          ls -al .github/echo_zip | tee -a .github/echo_logs/ls_echo_zip.log
+          echo "echo 'ls -al .github/echo_logs'" | tee -a .github/echo_zip/ls_echo_logs.sh
+          ls -al .github/echo_logs | tee -a .github/echo_logs/ls_echo_logs.log
+          echo "echo 'ls -al _provenance'" | tee -a .github/echo_zip/ls_provenance.sh
+          if [ -d _provenance ]; then ls -al _provenance | tee -a .github/echo_logs/ls_provenance.log; fi
