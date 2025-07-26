@@ -20,7 +20,7 @@ jobs:
           mkdir -p .github/echo_db
           echo "#!/bin/bash" > .github/echo_db/echo_dir_create.sh
           for d in \
-            .github/echo_db/{dirs,files,logs,scripts,services,compose,homebrew,choco,snap,marketplace,backup,init,test,migration,import,export,serverinfo,errorlog,util,mass_db,mass_script,mass_query,ledger,vaccount,transfer,user,sim,teradata,dwh,ddl,output,image,dockerfile,installer,analytics,parallel,summary,workflow,api,sql_exec,echo_log,result,report,history,metrics,accounting,dispatch,task}; do
+            .github/echo_db/{dirs,files,logs,scripts,services,compose,homebrew,choco,snap,marketplace,backup,init,test,migration,import,export,serverinfo,errorlog,util,mass_db,mass_script,mass_query,ledger,vaccount,transfer,user,sim,teradata,dwh,ddl,output,image,dockerfile,installer,analytics,parallel,summary,workflow,api,sql_exec,echo_log,result,report,history,metrics,accounting,dispatch,task,upgrade,transfer_exec,select}; do
             echo "echo 'mkdir -p $d'" | tee -a .github/echo_db/echo_dir_create.sh
             mkdir -p "$d"
           done
@@ -39,10 +39,44 @@ jobs:
           echo "bash .github/echo_db/scripts/gen_dockerfiles.sh" >> .github/echo_db/scripts/full_init_run.sh
           chmod +x .github/echo_db/scripts/full_init_run.sh
 
-      - name: 🧾 에코 기반 실행 로그 출력
+      - name: 📝 DB, 전송, 원장, 에코(대규모)에 대한 모든 SQL/스크립트 생성
         run: |
+          set -e
+          SERVICES="mysql postgresql sqlite3"
+          MASS_CNT=130000
+          for svc in $SERVICES; do
+            echo "-- $svc 업그레이드" > .github/echo_db/upgrade/${svc}_upgrade.sql
+            echo "ALTER SYSTEM SET maintenance_work_mem = '64MB';" >> .github/echo_db/upgrade/${svc}_upgrade.sql
+            for i in $(seq 1 $MASS_CNT); do
+              acct="account_${svc}_$i"
+              ledger_tbl="ledger_${svc}_$i"
+              transfer_tbl="transfer_${svc}_$i"
+
+              echo "INSERT INTO $ledger_tbl (tx_id, account_no, tx_type, amount, balance, note, ts) VALUES ($i, 'ACC${svc}$(printf %06d $i)', 'TRANSFER', 5000, 95000, 'Transfer Tx $i', CURRENT_TIMESTAMP);" >> .github/echo_db/ledger/${svc}_${ledger_tbl}_insert.sql
+
+              echo "INSERT INTO $transfer_tbl (tx_id, from_acc, to_acc, amount, tx_type, ts) VALUES ($i, 'ACC${svc}$(printf %06d $i)', 'ACC${svc}$(printf %06d $((i+1)))', 5000, 'TRANSFER', CURRENT_TIMESTAMP);" >> .github/echo_db/transfer/${svc}_${transfer_tbl}_insert.sql
+            done
+
+            echo "#!/bin/bash" > .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            echo "echo '[TRANSFER EXEC] $svc 실행을 전송합니다'" >> .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            echo "for sql in .github/echo_db/transfer/${svc}_*transfer_*.sql; do" >> .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            if [ "$svc" = "mysql" ]; then
+              echo "  mysql -uroot -prootpass123 test_db < \$sql | tee -a .github/echo_db/output/${svc}_transfers.csv" >> .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            elif [ "$svc" = "postgresql" ]; then
+              echo "  psql -U postgres -d test_db -f \$sql | tee -a .github/echo_db/output/${svc}_transfers.csv" >> .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            elif [ "$svc" = "sqlite3" ]; then
+              echo "  sqlite3 test.db < \$sql | tee -a .github/echo_db/output/${svc}_transfers.csv" >> .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            fi
+            echo "done" >> .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+            chmod +x .github/echo_db/transfer_exec/${svc}_transfer_exec.sh
+          done
+
+      - name: 🏷️ 모든 에코 출력 표시
+        run: |
+          echo "[ECHO] 모든 에코 출력을 덤프합니다"
           find .github/echo_db -type f | sort | while read f; do
-            echo "[📄 파일] $f"
+            echo "-----"
+            echo "[파일] $f"
             cat "$f"
-            echo "---"
+            echo
           done
