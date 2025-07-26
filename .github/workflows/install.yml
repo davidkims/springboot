@@ -1,6 +1,6 @@
-# 🗂️ MEGA-DB/거래/계좌/이체/유저/시뮬/설치/권한/대량/운영/유틸/Compose-통합 워크플로우
+# 🗂️ MEGA-DB/거래/계좌/이체/유저/시뮬/설치/권한/에코/이미지/DWH/Teradata 통합 자동화
 
-name: 🗂️ MEGA-DB/거래/계좌/이체/유저/시뮬/설치/권한/대량/운영/유틸/Compose-통합
+name: \U0001F5C2️ MEGA-DB FullOps with Echo, Docker, Teradata, Image, DWH
 
 on:
   workflow_dispatch:
@@ -12,54 +12,84 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📂 Checkout
+      - name: 📂 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 Echo 디렉토리 대량 생성 (50개 이상 포함)
+      - name: 📁 에코 디렉토리/파일/스크립트 대량 생성 (50+ 디렉토리)
         run: |
+          set -e
           for d in \
-            .github/echo_db/{dirs,files,installs,upgrade,permissions,scripts,logs,services,compose,homebrew,choco,snap,marketplace,backup,init,test,migration,import,export,serverinfo,errorlog,util,mass_db,mass_script,mass_query,ledger,vaccount,transfer,user,sim,teradata,dwh,cli,api,runtime,bin,output,verify,auth,containers,batch_insert,index,parallel_exec,select,aggregate,image,echo_img}; do
+            .github/echo_db/{dirs,files,logs,installs,upgrade,permissions,scripts,services,compose,homebrew,choco,snap,marketplace,backup,init,test,migration,import,export,serverinfo,errorlog,util,mass_db,mass_script,mass_query,ledger,vaccount,transfer,user,sim,teradata,dwh,output,images,image_build,ddl,echo_total}; do
             echo "echo 'mkdir -p $d'" | tee -a .github/echo_db/echo_dir_create.sh
             mkdir -p $d
           done
 
-      - name: 🧾 계좌/유저/이체 90,000건 대량 SQL 생성 및 병렬 실행 스크립트 생성
+      - name: 📝 대량 계좌/유저/거래/이체/시뮬/DDL/쿼리 자동 생성 (90,000건)
         run: |
+          set -e
+          SERVICES="mysql postgresql sqlite3"
           MASS_CNT=90000
-          BATCH=5000
-          SERVICE="mysql"
-          for i in $(seq 0 $((MASS_CNT/BATCH - 1))); do
-            START=$((i * BATCH + 1))
-            END=$(((i + 1) * BATCH))
-            OUT=.github/echo_db/vaccount/${SERVICE}_batch_${i}.sql
-            for j in $(seq $START $END); do
-              echo "INSERT INTO account_${SERVICE} (account_no, user_id, type, balance, open_dt) VALUES ('ACC${SERVICE}${j}', 'user_${SERVICE}_${j}', 'CHECKING', 100000, CURRENT_TIMESTAMP);" >> $OUT
+          TX_TYPES="DEPOSIT WITHDRAWAL TRANSFER PAYMENT FEE"
+
+          for svc in $SERVICES; do
+            for i in $(seq 1 $MASS_CNT); do
+              echo "CREATE TABLE IF NOT EXISTS user_${svc} (user_id VARCHAR(50) PRIMARY KEY, name VARCHAR(50), email VARCHAR(100), reg_ts DATETIME);" > .github/echo_db/user/${svc}_user_create.sql
+              echo "INSERT INTO user_${svc} VALUES ('user_${svc}_$i', 'User $i', 'user$i@${svc}.com', CURRENT_TIMESTAMP);" >> .github/echo_db/user/${svc}_user_insert.sql
+
+              acct="account_${svc}_$i"
+              echo "CREATE TABLE IF NOT EXISTS $acct (account_no VARCHAR(50) PRIMARY KEY, user_id VARCHAR(50), type VARCHAR(10), balance INT, open_dt DATETIME);" > .github/echo_db/vaccount/${svc}_${acct}_create.sql
+              echo "INSERT INTO $acct VALUES ('ACC${svc}$i', 'user_${svc}_$i', 'CHECKING', 100000, CURRENT_TIMESTAMP);" >> .github/echo_db/vaccount/${svc}_${acct}_insert.sql
+
+              ledger_tbl="ledger_${svc}_$i"
+              echo "CREATE TABLE IF NOT EXISTS $ledger_tbl(tx_id INT PRIMARY KEY, account_no VARCHAR(50), tx_type VARCHAR(20), amount INT, balance INT, note VARCHAR(100), ts DATETIME);" > .github/echo_db/ledger/${svc}_${ledger_tbl}_create.sql
+              for tt in $TX_TYPES; do
+                echo "INSERT INTO $ledger_tbl VALUES ($i, 'ACC${svc}$i', '$tt', $((10000+i)), $((100000+i)), '$tt Tx $i', CURRENT_TIMESTAMP);" >> .github/echo_db/ledger/${svc}_${ledger_tbl}_insert.sql
+              done
+
+              transfer_tbl="transfer_${svc}_$i"
+              echo "CREATE TABLE IF NOT EXISTS $transfer_tbl(tx_id INT PRIMARY KEY, from_acc VARCHAR(50), to_acc VARCHAR(50), amount INT, tx_type VARCHAR(20), ts DATETIME);" > .github/echo_db/transfer/${svc}_${transfer_tbl}_create.sql
+              echo "INSERT INTO $transfer_tbl VALUES ($i, 'ACC${svc}$i', 'ACC${svc}$((i+1))', 5000, 'TRANSFER', CURRENT_TIMESTAMP);" >> .github/echo_db/transfer/${svc}_${transfer_tbl}_insert.sql
             done
           done
-          echo "find .github/echo_db/vaccount/${SERVICE}_batch_*.sql | xargs -P 8 -I{} sh -c 'mysql -uroot -prootpass123 test_db < "{}"'" > .github/echo_db/parallel_exec/${SERVICE}_vaccount_insert_parallel.sh
 
-      - name: 🧮 계좌별/유저별 집계 SELECT 쿼리 생성
+      - name: 🔎 SELECT 합계 쿼리 및 bteq/psql/mysql 실행 (.csv/.json 저장)
         run: |
-          echo "SELECT account_no, SUM(balance) as total_balance FROM account_mysql GROUP BY account_no;" > .github/echo_db/select/mysql_balance_sum.sql
-          echo "SELECT user_id, SUM(amount) as total_tx FROM ledger_mysql GROUP BY user_id;" > .github/echo_db/select/mysql_tx_sum.sql
+          set -e
+          for svc in mysql postgresql sqlite3; do
+            echo "SELECT account_no, SUM(balance) FROM vaccount_${svc}_* GROUP BY account_no;" > .github/echo_db/output/${svc}_account_balance.sql
+            echo "SELECT user_id, SUM(amount) FROM ledger_${svc}_* GROUP BY user_id;" > .github/echo_db/output/${svc}_user_tx_sum.sql
+          done
+          # 실제 실행 (예시)
+          echo "bteq < output/teradata_tx_query.sql > output/teradata_output.csv"
+          echo "psql -U postgres -f output/postgresql_user_tx_sum.sql > output/pg_output.csv"
+          echo "mysql -u root -proot < output/mysql_account_balance.sql > output/mysql_output.csv"
 
-      - name: 🏦 Teradata 및 DWH 쿼리 자동 생성
+      - name: 🐳 docker-compose + Teradata 컨테이너 실행 자동화
         run: |
-          echo "DATABASE dwh_db;" > .github/echo_db/teradata/dwh_schema_create.sql
-          echo "CREATE TABLE dwh_account (account_id VARCHAR(50), user_id VARCHAR(50), amount INT);" >> .github/echo_db/teradata/dwh_schema_create.sql
-          echo "SELECT user_id, SUM(amount) FROM dwh_account GROUP BY user_id;" > .github/echo_db/aggregate/dwh_tx_summary.sql
+          echo "version: '3'" > .github/echo_db/compose/all-db-compose.yml
+          echo "services:" >> .github/echo_db/compose/all-db-compose.yml
+          for svc in mysql postgres mongodb redis teradata; do
+            echo "  $svc:" >> .github/echo_db/compose/all-db-compose.yml
+            echo "    image: $svc:latest" >> .github/echo_db/compose/all-db-compose.yml
+          done
+          echo "docker-compose -f .github/echo_db/compose/all-db-compose.yml up -d" > .github/echo_db/scripts/docker_up.sh
 
-      - name: 🧰 Docker Compose 실행 + Teradata 실행 + GitHub Pages 시각화 스크립트 생성
+      - name: 🖼️ 이미지 에코 및 빌드 파일 생성 (대량)
         run: |
-          echo "docker-compose -f .github/echo_db/compose/all-db-compose.yml up -d" > .github/echo_db/compose/compose_echo.sh
-          echo "/opt/teradata/client/bin/bteq < .github/echo_db/teradata/dwh_schema_create.sql" > .github/echo_db/teradata/run_teradata.sh
-          echo "gh-pages-publish site/public" > .github/echo_db/scripts/publish_github_pages.sh
+          for i in $(seq 1 10); do
+            IMG_DIR=.github/echo_db/images/mysql_img_$i
+            mkdir -p $IMG_DIR
+            echo "FROM alpine" > $IMG_DIR/Dockerfile
+            echo "LABEL svc=mysql image_id=$i" >> $IMG_DIR/Dockerfile
+            echo "CMD echo 'Hello from mysql_img_$i'" >> $IMG_DIR/Dockerfile
+            echo "docker build -t mysql_img_$i $IMG_DIR" > .github/echo_db/image_build/mysql_build_$i.sh
+          done
 
-      - name: 🏷️ 전체 Echo 및 생성 결과 출력
+      - name: 🧾 전체 에코 결과 출력
         run: |
+          echo "[에코] 전체 에코 파일 출력"
           find .github/echo_db -type f | sort | while read f; do
-            echo "------------------"
-            echo "[파일] $f"
-            cat "$f"
+            echo "[에코][파일] $f"
+            cat $f
             echo
           done
