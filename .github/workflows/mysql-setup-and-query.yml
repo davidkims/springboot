@@ -1,12 +1,12 @@
-name: 🏆 MySQL+Oracle FullOps Robust Echo 워크플로우
+name: 🧩 MySQL+Oracle+CrossDB+Security+Pages 대통합 FullOps 워크플로우
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '30 3 * * *'
 
 jobs:
-  db-fullops:
+  fullops-unified:
     runs-on: ubuntu-latest
     env:
       MYSQL_USER: root
@@ -15,168 +15,97 @@ jobs:
       MASS_TABLE: 6
       MASS_USER: 8
       MASS_TXN: 20
-
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: rootpass123
-          MYSQL_DATABASE: sample_db
-        ports:
-          - 3306:3306
-        options: --health-cmd="mysqladmin ping -prootpass123" --health-interval=10s --health-timeout=5s --health-retries=10
-
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔄 필수 패키지 설치 및 대량 echo 디렉토리 robust 생성
+      - name: 🔄 디렉토리 생성 + 기본 패키지
         run: |
           set -e
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl tree zip gnupg2 tzdata || echo "[❌] 패키지 일부 설치 실패"
+          sudo apt-get update -y && sudo apt-get install -y unzip curl tree zip gnupg2 default-jdk || true
           for d in \
-            .github/logs \
-            .github/error_logs \
-            .github/echo \
-            .github/echo/tmp \
-            .github/echo/logs \
-            .github/echo/mysql \
-            .github/echo/mysql/logs \
-            .github/echo/mysql/warnings \
-            .github/echo/mysql/accounts \
-            .github/echo/mysql/ddl \
-            .github/echo/mysql/txn \
-            .github/echo/mysql/replica \
-            .github/echo/mysql/user \
-            .github/echo/mysql/policy \
-            .github/echo/mysql/crossdb \
-            .github/echo/mysql/backup \
-            .github/echo/oracle \
-            .github/echo/oracle/container \
-            .github/echo/oracle/logs \
-            .github/echo/oracle/ddl \
-            .github/echo/oracle/txn \
-            .github/echo/oracle/replica \
-            .github/echo/oracle/user \
-            .github/echo/oracle/policy \
-            .github/echo/oracle/crossdb \
-            .github/echo/oracle/client \
-            .github/echo/oracle/backup \
-            .github/echo/priv \
-            .github/echo/query \
-            .github/echo/client \
-            .github/echo/data \
-            .github/echo/artifact \
-            .github/echo/policy \
-            .github/echo/sec \
-            .github/echo/crossdb \
-            .github/echo/ora2my \
-            .github/echo/my2ora \
-            .github/echo/backup \
-            .github/echo/monitor \
-            .github/echo/audit \
-            .github/echo/scheduler \
-            .github/echo/etl \
-            .github/echo/readonly \
-            .github/echo/sysdba \
-            .github/echo/job \
-            .github/echo/pipe \
-            .github/echo/bulk \
-          ; do
-            echo "echo 'mkdir -p $d'"
+            .github/logs .github/echo/mysql/ddl .github/echo/mysql/user .github/echo/mysql/txn \
+            .github/echo/oracle/ddl .github/echo/oracle/user .github/echo/oracle/txn \
+            .github/echo/crossdb .github/echo/policy .github/echo/sec .github/echo/pages \
+            .github/echo/monitor .github/echo/saga .github/echo/artifact .github/echo/backup
+          do
             mkdir -p "$d"
           done
-          if ! command -v pwgen >/dev/null 2>&1; then
-            echo '[pwgen 없음, openssl rand로 대체]'
-          fi
 
-      - name: 🐬 MySQL 컨테이너 robust health check
+      - name: 🐬 MySQL 컨테이너 기동
+        uses: mirromutth/mysql-action@v1.1
+        with:
+          mysql root password: rootpass123
+          mysql database: sample_db
+
+      - name: ✅ MySQL Health Check
         run: |
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
-          if [ -z "$CID" ]; then
-            echo "[❌] MySQL 컨테이너 미실행, 종료." | tee .github/echo/mysql/logs/mysql_health_fail.txt
-            exit 97
-          fi
-          MYSQL_READY=0
           for i in {1..30}; do
-            if docker exec $CID mysqladmin ping -uroot -prootpass123 --silent 2>/dev/null; then
-              echo "[MYSQL healthy] (attempt $i)" | tee .github/echo/mysql/logs/mysql_health.txt
-              MYSQL_READY=1
+            if mysqladmin ping -h 127.0.0.1 -uroot -prootpass123 --silent; then
+              echo "[OK] MySQL Ready"
               break
             fi
             sleep 2
           done
-          if [ "$MYSQL_READY" -eq 0 ]; then
-            echo "[❌] MySQL 컨테이너 60초 이내 미응답, 종료." | tee .github/echo/mysql/logs/mysql_health_timeout.txt
-            exit 98
-          fi
 
-      - name: 🐬 MySQL 대량 DDL/계정/트랜잭션 robust echo+실행
+      - name: 🛠️ MySQL DDL/계정/Txn
         run: |
           for i in $(seq 1 $MASS_TABLE); do
-            TBL="demo_table_$i"
-            echo "CREATE TABLE IF NOT EXISTS $TBL (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/$TBL.sql
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D$MYSQL_DB < .github/echo/mysql/ddl/$TBL.sql 2>&1 | tee -a .github/echo/mysql/logs/ddl_exec.log || echo "[❌] DDL 실패 $TBL" | tee -a .github/echo/mysql/logs/ddl_exec.log
+            echo "CREATE TABLE IF NOT EXISTS demo_table_$i (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/demo_table_$i.sql
+            mysql -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/ddl/demo_table_$i.sql
           done
           for i in $(seq 1 $MASS_USER); do
-            U="user_$i"
-            PW="pw_$i"
-            echo "CREATE USER IF NOT EXISTS '$U'@'%' IDENTIFIED BY '$PW'; GRANT ALL ON $MYSQL_DB.* TO '$U'@'%';" > .github/echo/mysql/user/$U.sql
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER < .github/echo/mysql/user/$U.sql 2>&1 | tee -a .github/echo/mysql/logs/user_exec.log || echo "[❌] 계정 생성 실패 $U" | tee -a .github/echo/mysql/logs/user_exec.log
+            echo "CREATE USER IF NOT EXISTS 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT ALL ON $MYSQL_DB.* TO 'user_$i'@'%';" > .github/echo/mysql/user/user_$i.sql
+            mysql -uroot -prootpass123 < .github/echo/mysql/user/user_$i.sql
           done
           > .github/echo/mysql/txn/txn_batch.sql
           for i in $(seq 1 $MASS_TXN); do
-            TBL="demo_table_$((i % $MASS_TABLE + 1))"
-            echo "INSERT INTO $TBL (value) VALUES ('value_$i');" >> .github/echo/mysql/txn/txn_batch.sql
+            echo "INSERT INTO demo_table_$((i % $MASS_TABLE + 1)) (value) VALUES ('val_$i');" >> .github/echo/mysql/txn/txn_batch.sql
           done
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -D$MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql 2>&1 | tee -a .github/echo/mysql/logs/txn_exec.log || echo "[❌] 대량 Insert 실패" | tee -a .github/echo/mysql/logs/txn_exec.log
+          mysql -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql
 
-      - name: 🍊 Oracle 대량 DDL/계정/트랜잭션 robust echo (DDL 파일 생성 위주)
+      - name: 🍊 Oracle XE 기동 및 SQL 실행
         run: |
+          docker run -d --name oracle-xe -e ORACLE_PASSWORD=oraclepwd -p 1521:1521 gvenzl/oracle-xe
+          sleep 60
+          curl -L -o sqlcl.zip https://download.oracle.com/sqlcl/latest/sqlcl-latest.zip
+          unzip sqlcl.zip -d sqlcl
+          export PATH=$PWD/sqlcl/bin:$PATH
           for i in $(seq 1 $MASS_TABLE); do
             echo "CREATE TABLE DEMO_TABLE_$i (ID NUMBER PRIMARY KEY, VALUE VARCHAR2(100));" > .github/echo/oracle/ddl/demo_table_$i.sql
-          done
-          for i in $(seq 1 $MASS_USER); do
-            echo "CREATE USER USER_$i IDENTIFIED BY pw_$i; GRANT CONNECT, RESOURCE TO USER_$i;" > .github/echo/oracle/user/user_$i.sql
-          done
-          > .github/echo/oracle/txn/txn_batch.sql
-          for i in $(seq 1 $MASS_TXN); do
-            echo "INSERT INTO DEMO_TABLE_$((i % MASS_TABLE + 1)) (ID, VALUE) VALUES ($i, 'val_$i');" >> .github/echo/oracle/txn/txn_batch.sql
+            ./sqlcl/bin/sql -nologo system/oraclepwd@//localhost:1521/XEPDB1 @.github/echo/oracle/ddl/demo_table_$i.sql
           done
 
-      - name: 🔀 교차DB 쿼리/복제/정책/시나리오 robust echo
+      - name: 🔁 교차 트랜잭션 정책 (SAGA, 2PC)
         run: |
-          echo "SELECT COUNT(*) FROM demo_table_1;" > .github/echo/mysql/crossdb/select_count_from_oracle.sql
-          echo "SELECT COUNT(*) FROM DEMO_TABLE_1;" > .github/echo/oracle/crossdb/select_count_from_mysql.sql
-          echo "-- MySQL→Oracle 복제(논리): mysqldump | SQL*Loader" > .github/echo/policy/mysql_to_oracle_replication_policy.txt
-          echo "-- Oracle→MySQL 복제(논리): expdp/impdp | csv→LOAD DATA" > .github/echo/policy/oracle_to_mysql_replication_policy.txt
-          echo "-- 교차DB 트랜잭션 정책 예: SAGA/2PC/동기화" > .github/echo/policy/crossdb_txn_policy.txt
-          echo "시나리오: 대량 계정 생성/삭제, 대량 트랜잭션, DDL, 교차 쿼리, DB 복제, 정책 자동화 등" > .github/echo/scenario.txt
+          echo "-- SAGA example" > .github/echo/saga/saga_txn.sql
+          echo "-- 2PC example" > .github/echo/saga/2pc_txn.sql
 
-      - name: 📝 계정/권한 robust echo 및 로그/경고 echo화
+      - name: 🛡️ Scorecard + CodeQL 보안 스캔
         run: |
-          MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SELECT user,host,plugin FROM mysql.user;" > .github/echo/mysql/user/mysql_accounts_current.txt 2>&1 || echo "[❌] 계정 테이블 조회 실패" >> .github/echo/mysql/user/mysql_accounts_current.txt
-          CID=$(docker ps -q --filter "ancestor=mysql:8.0" | head -n1)
-          docker logs $CID > .github/echo/mysql/logs/container.log 2>&1 || echo "[❌] 컨테이너 로그 실패" | tee -a .github/echo/mysql/logs/container.log
-          grep -i "warning" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/all_warnings.txt || true
-          grep -i "^Warning:" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/warnings_only.txt || true
-          grep -i "error" .github/echo/mysql/logs/container.log > .github/echo/mysql/warnings/all_errors.txt || true
-          grep -i "skip-host-cache" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_skip_host_cache.txt || true
-          grep -i "empty password" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_empty_password.txt || true
-          grep -i "zoneinfo" .github/echo/mysql/warnings/all_warnings.txt > .github/echo/mysql/warnings/warn_zoneinfo.txt || true
-          # 자동 완화 예시
-          if grep -q "skip-host-cache" .github/echo/mysql/warnings/warn_skip_host_cache.txt; then
-            echo "[⚠️] --skip-host-cache 경고 감지, SET GLOBAL host_cache_size=0 실행" | tee -a .github/echo/mysql/warnings/auto_fix.log
-            MYSQL_PWD=$MYSQL_PASSWORD mysql -h 127.0.0.1 -u $MYSQL_USER -e "SET GLOBAL host_cache_size=0;" || true
-          fi
-          if grep -q "empty password" .github/echo/mysql/warnings/warn_empty_password.txt; then
-            echo "[⚠️] 빈 패스워드 경고 감지, root 패스워드 재설정" | tee -a .github/echo/mysql/warnings/auto_fix.log
-            MYSQL_PWD='' mysql -h 127.0.0.1 -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';" || echo "[⚠️] root 패스워드 재설정 실패! (Access denied)" | tee -a .github/echo/mysql/warnings/auto_fix.log
-          fi
+          curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
+          chmod +x scorecard-linux-amd64
+          ./scorecard-linux-amd64 --repo=https://github.com/${{ github.repository }} --format=json > .github/echo/sec/scorecard.json
 
-      - name: 📦 모든 에코/로그 아티팩트 업로드
+      - name: 🔍 CodeQL Init/Analyze
+        uses: github/codeql-action/init@v2
+        with:
+          languages: java
+      - uses: github/codeql-action/analyze@v2
+
+      - name: 🌐 GitHub Pages용 echo 복사
+        run: |
+          mkdir -p site/echo
+          cp -r .github/echo/* site/echo/
+
+      - name: 🚀 GitHub Pages 배포
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+
+      - name: 📦 아티팩트 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: fullops-echo-artifacts
+          name: all-fullops-echo-artifacts
           path: .github/echo
