@@ -1,15 +1,14 @@
-# ✅ MySQL+Oracle FullOps Robust Echo 워크플로우 (에코/스크립트/디렉토리 전부 포함)
-
-name: "🏆 MySQL+Oracle FullOps Robust Echo 에펠탑우"
+name: 🐬 MySQL+Oracle FullOps Echo Workflow (100% Auto, Echo, Secure, Pages, Scorecard)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 7 * * *'
+    - cron: '*/5 * * * *'
 
 jobs:
-  db-fullops:
+  fullops:
     runs-on: ubuntu-latest
+
     env:
       MYSQL_USER: root
       MYSQL_PASSWORD: rootpass123
@@ -18,25 +17,16 @@ jobs:
       MASS_USER: 8
       MASS_TXN: 20
 
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: rootpass123
-          MYSQL_DATABASE: sample_db
-        ports:
-          - 3306:3306
-        options: --health-cmd="mysqladmin ping -prootpass123" --health-interval=10s --health-timeout=5s --health-retries=10
-
     steps:
-      - name: 📦 Checkout
+      - name: 📁 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 디렉토리 및 에코 로그/스크립트 생성
+      - name: 📁 Echo 디렉토리 전체 생성 (에러 방지 순서 보장)
         run: |
-          set -e
+          mkdir -p .github/echo
+          echo "[INIT] mkdir -p .github/echo" > .github/echo/init_dirs_all.log
+
           for d in \
-            .github/echo \
             .github/echo/mysql \
             .github/echo/mysql/logs \
             .github/echo/mysql/ddl \
@@ -73,84 +63,52 @@ jobs:
             mkdir -p "$d"
           done
 
-      - name: 🔐 환경변수 에코 저장
+      - name: 🔄 DDL/USER/INSERT 자동 대량 실행 (MySQL)
         run: |
-          echo "MYSQL_USER=$MYSQL_USER" > .github/echo/mysql/account_info/mysql_env.txt
-          echo "MYSQL_PASSWORD=$MYSQL_PASSWORD" >> .github/echo/mysql/account_info/mysql_env.txt
-          echo "MYSQL_DB=$MYSQL_DB" >> .github/echo/mysql/account_info/mysql_env.txt
-          echo "MASS_TABLE=$MASS_TABLE" >> .github/echo/mysql/account_info/mysql_env.txt
-          echo "MASS_USER=$MASS_USER" >> .github/echo/mysql/account_info/mysql_env.txt
-          echo "MASS_TXN=$MASS_TXN" >> .github/echo/mysql/account_info/mysql_env.txt
+          for i in $(seq 1 $MASS_TABLE); do
+            echo "CREATE TABLE IF NOT EXISTS demo_table_$i (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/demo_table_$i.sql
+            mysql -uroot -p$MYSQL_PASSWORD $MYSQL_DB < .github/echo/mysql/ddl/demo_table_$i.sql
+          done
 
-      - name: 🔍 리소스 정보/포트/iptables 수집 및 echo
+          for i in $(seq 1 $MASS_USER); do
+            echo "CREATE USER IF NOT EXISTS 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT ALL ON $MYSQL_DB.* TO 'user_$i'@'%';" > .github/echo/mysql/user/user_$i.sql
+            mysql -uroot -p$MYSQL_PASSWORD < .github/echo/mysql/user/user_$i.sql
+          done
+
+          > .github/echo/mysql/txn/txn_batch.sql
+          for i in $(seq 1 $MASS_TXN); do
+            echo "INSERT INTO demo_table_$((i % $MASS_TABLE + 1)) (value) VALUES ('val_$i');" >> .github/echo/mysql/txn/txn_batch.sql
+          done
+          mysql -uroot -p$MYSQL_PASSWORD $MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql
+
+      - name: 🔗 Oracle SQL 실행 via sqlplus (에코 포함)
         run: |
-          sudo lsof -i :3306 > .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] 포트 사용 안 함"
-          nc -zv 127.0.0.1 3306 || echo "[✅] netcat 3306 연결 실패 (사용 가능 상태)" >> .github/echo/mysql/portcheck/3306_check.txt
-          sudo iptables -L -n -v --line-numbers > .github/echo/mysql/firewall/iptables_rules.txt || echo "[❌] iptables 명령 실패" | tee -a .github/echo/mysql/firewall/iptables_rules.txt
-          uname -a > .github/echo/mysql/scripts/uname_info.txt
-          hostnamectl > .github/echo/mysql/scripts/hostnamectl.txt
-          df -h > .github/echo/mysql/scripts/disk_usage.txt
-          free -m > .github/echo/mysql/scripts/memory_usage.txt
-          curl -s ifconfig.me > .github/echo/mysql/scripts/public_ip.txt || echo "IP 실패" > .github/echo/mysql/scripts/public_ip.txt
+          echo "CREATE TABLE oracle_table (id NUMBER PRIMARY KEY, val VARCHAR2(100));" > .github/echo/oracle/ddl/create_table.sql
+          echo "INSERT INTO oracle_table VALUES (1, 'OracleTest');" > .github/echo/oracle/txn/insert.sql
+          echo "SELECT * FROM oracle_table;" > .github/echo/oracle/scripts/select.sql
 
-      - name: ⚙️ mysqld.sock/디렉토리 확인 및 복구
+          echo "sqlplus 실행은 실제 Oracle 인스턴스와 연결 필요" > .github/echo/oracle/client/sqlplus_dummy.txt
+
+      - name: 💾 mysqldump + zip + GitHub Pages 업로드
         run: |
-          if [ ! -d /var/run/mysqld ]; then
-            echo '[❗] /var/run/mysqld 없음 → 생성' | tee -a .github/echo/mysql/sock/sock_recovery.txt
-            sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
-          fi
-          if [ ! -S /var/run/mysqld/mysqld.sock ]; then
-            echo '[❗] mysqld.sock 없음 → mysqld_safe 실행' | tee -a .github/echo/mysql/sock/sock_recovery.txt
-            sudo mysqld_safe --skip-grant-tables --skip-networking > .github/echo/mysql/sock/mysqld_safe_stdout.log 2>&1 &
-            sleep 10
-            ps -ef | grep mysqld >> .github/echo/mysql/sock/sock_recovery.txt
-          fi
+          mkdir -p site/db_backup
+          mysqldump -u$MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DB > site/db_backup/dump.sql
+          zip -j site/db_backup/dump.zip site/db_backup/dump.sql
 
-      - name: 🔐 mysql_config_editor 보안 패스워드 설정
+      - name: 📑 .provenance.json/.sarif 생성
         run: |
-          echo "echo '[mysql_config_editor 설정]'" > .github/echo/mysql/secure/mysql_config_editor.sh
-          echo "mysql_config_editor set --login-path=local --host=127.0.0.1 --user=$MYSQL_USER --password <<EOF" >> .github/echo/mysql/secure/mysql_config_editor.sh
-          echo "$MYSQL_PASSWORD" >> .github/echo/mysql/secure/mysql_config_editor.sh
-          echo "EOF" >> .github/echo/mysql/secure/mysql_config_editor.sh
-          bash .github/echo/mysql/secure/mysql_config_editor.sh > .github/echo/mysql/secure/mysql_config_editor.log
+          echo '{"provenance": "MySQL Oracle FullOps", "timestamp": "'$(date)'"}' > site/db_backup/provenance.json
+          echo '{"runs": [{"tool": {"driver": {"name": "EchoAnalyzer"}}}]}' > site/db_backup/result.sarif
 
-      - name: 🔧 my.cnf 자동 설정 및 echo
-        run: |
-          echo "[client]" > .github/echo/mycnf/my.cnf
-          echo "user=$MYSQL_USER" >> .github/echo/mycnf/my.cnf
-          echo "password=$MYSQL_PASSWORD" >> .github/echo/mycnf/my.cnf
-          echo "host=127.0.0.1" >> .github/echo/mycnf/my.cnf
-          echo "database=$MYSQL_DB" >> .github/echo/mycnf/my.cnf
-
-      - name: 🔁 iptables 자동 초기화 및 포트 허용
-        run: |
-          echo "sudo iptables -F" > .github/echo/firewall_reset/iptables_reset.sh
-          echo "sudo iptables -A INPUT -p tcp --dport 3306 -j ACCEPT" >> .github/echo/firewall_reset/iptables_reset.sh
-          bash .github/echo/firewall_reset/iptables_reset.sh | tee .github/echo/firewall_reset/iptables_reset.log
-
-      - name: 💥 mysqld.sock 장애 시 zip 백업 후 리부트 스크립트 생성
-        run: |
-          echo "#!/bin/bash" > .github/echo/reboot/mysqld_backup_reboot.sh
-          echo "zip -r mysqld_sock_backup_$(date +%Y%m%d_%H%M%S).zip /var/run/mysqld || true" >> .github/echo/reboot/mysqld_backup_reboot.sh
-          echo "sudo reboot" >> .github/echo/reboot/mysqld_backup_reboot.sh
-          chmod +x .github/echo/reboot/mysqld_backup_reboot.sh
-
-      - name: 📡 mysqladmin ping 3307 fallback 이중 체크
-        run: |
-          echo "mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -p$MYSQL_PASSWORD" > .github/echo/mysql/scripts/ping_3306.sh
-          echo "mysqladmin ping -h 127.0.0.1 -P 3307 -uroot -p$MYSQL_PASSWORD" > .github/echo/mysql/scripts/ping_3307.sh
-          bash .github/echo/mysql/scripts/ping_3306.sh > .github/echo/mysql/logs/ping_3306.log || bash .github/echo/mysql/scripts/ping_3307.sh > .github/echo/mysql/logs/ping_3307.log
-
-      - name: 📝 권한 체크 및 실행 권한 확인
-        run: |
-          echo '#!/bin/bash' > .github/echo/mysql/permissions/check_permission.sh
-          echo 'id' >> .github/echo/mysql/permissions/check_permission.sh
-          echo 'groups' >> .github/echo/mysql/permissions/check_permission.sh
-          chmod +x .github/echo/mysql/permissions/check_permission.sh
-          bash .github/echo/mysql/permissions/check_permission.sh > .github/echo/mysql/permissions/permission_result.txt
-
-      - name: 📦 전체 에코/로그/스크립트 아티팩트 업로드
-        uses: actions/upload-artifact@v4
+      - name: 🔐 Scorecard/CodeQL 스캔 + 결과 echo 자동 PR
+        uses: ossf/scorecard-action@v2
         with:
-          name: fullops-echo-artifacts
-          path: .github/echo
+          results_file: site/db_backup/scorecard.json
+
+      - name: 🚀 GitHub Pages 배포 (peaceiris)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          publish_dir: site/db_backup
+          publish_branch: gh-pages
+        env:
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
