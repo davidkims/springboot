@@ -1,14 +1,13 @@
-name: 🐬 MySQL+Oracle FullOps Echo Workflow (100% Auto, Echo, Secure, Pages, Scorecard)
+name: 🏆 MySQL+Oracle FullOps Robust Echo Eiffel Tower
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 7 * * *'
 
 jobs:
   fullops:
     runs-on: ubuntu-latest
-
     env:
       MYSQL_USER: root
       MYSQL_PASSWORD: rootpass123
@@ -18,16 +17,14 @@ jobs:
       MASS_TXN: 20
 
     steps:
-      - name: 📁 Checkout
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Echo 디렉토리 전체 생성 (에러 방지 순서 보장)
+      - name: 🔄 Init Directories & Echo Logs
         run: |
-          mkdir -p .github/echo
-          echo "[INIT] mkdir -p .github/echo" > .github/echo/init_dirs_all.log
-
+          set -e
           for d in \
-            .github/echo/mysql \
+            .github/echo \
             .github/echo/mysql/logs \
             .github/echo/mysql/ddl \
             .github/echo/mysql/user \
@@ -39,7 +36,6 @@ jobs:
             .github/echo/mysql/secure \
             .github/echo/mysql/scripts \
             .github/echo/mysql/permissions \
-            .github/echo/oracle \
             .github/echo/oracle/logs \
             .github/echo/oracle/ddl \
             .github/echo/oracle/txn \
@@ -60,62 +56,39 @@ jobs:
             .github/echo/zip \
             .github/echo/scorecard
           do
-            echo "echo 'mkdir -p $d'" | tee -a .github/echo/init_dirs_all.log
             mkdir -p "$d"
+            echo "echo 'mkdir -p $d'" | tee -a .github/echo/init_dirs_all.log
           done
 
-      - name: 🔄 DDL/USER/INSERT 자동 대량 실행 (MySQL)
+      - name: ⚡ Install Tools & Scorecard
         run: |
-          for i in $(seq 1 $MASS_TABLE); do
-            echo "CREATE TABLE IF NOT EXISTS demo_table_$i (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/demo_table_$i.sql
-            mysql -uroot -p$MYSQL_PASSWORD $MYSQL_DB < .github/echo/mysql/ddl/demo_table_$i.sql
-          done
+          sudo apt-get update -y && sudo apt-get install -y curl unzip zip gnupg2 net-tools netcat iptables || true
+          VERSION="4.10.3"
+          curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
+          tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
+          chmod +x scorecard && sudo mv scorecard /usr/local/bin/
+          scorecard --version | tee .github/echo/scorecard/version.txt
 
-          for i in $(seq 1 $MASS_USER); do
-            echo "CREATE USER IF NOT EXISTS 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT ALL ON $MYSQL_DB.* TO 'user_$i'@'%';" > .github/echo/mysql/user/user_$i.sql
-            mysql -uroot -p$MYSQL_PASSWORD < .github/echo/mysql/user/user_$i.sql
-          done
-
-          > .github/echo/mysql/txn/txn_batch.sql
-          for i in $(seq 1 $MASS_TXN); do
-            echo "INSERT INTO demo_table_$((i % $MASS_TABLE + 1)) (value) VALUES ('val_$i');" >> .github/echo/mysql/txn/txn_batch.sql
-          done
-          mysql -uroot -p$MYSQL_PASSWORD $MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql
-
-      - name: 🔗 Oracle SQL 실행 via sqlplus (에코 포함)
+      - name: 📃 Run Scorecard
         run: |
-          echo "CREATE TABLE oracle_table (id NUMBER PRIMARY KEY, val VARCHAR2(100));" > .github/echo/oracle/ddl/create_table.sql
-          echo "INSERT INTO oracle_table VALUES (1, 'OracleTest');" > .github/echo/oracle/txn/insert.sql
-          echo "SELECT * FROM oracle_table;" > .github/echo/oracle/scripts/select.sql
-          echo "sqlplus 실행은 실제 Oracle 인스턴스와 연결 필요" > .github/echo/oracle/client/sqlplus_dummy.txt
+          scorecard --repo=https://github.com/${{ github.repository }} --format=json > .github/echo/scorecard/scorecard.json
+          cp .github/echo/scorecard/scorecard.json .github/echo/scorecard/scorecard.sarif || true
+          echo "{
+            \"_type\": \"provenance\",
+            \"tool\": \"ossf/scorecard\",
+            \"version\": \"${VERSION}\",
+            \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+          }" > .github/echo/scorecard/.provenance.json
 
-      - name: 💾 mysqldump + zip + GitHub Pages 업로드
-        run: |
-          mkdir -p site/db_backup
-          mysqldump -u$MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DB > site/db_backup/dump.sql
-          zip -j site/db_backup/dump.zip site/db_backup/dump.sql
-
-      - name: 📑 .provenance.json/.sarif 생성
-        run: |
-          echo '{"provenance": "MySQL Oracle FullOps", "timestamp": "'$(date)'"}' > site/db_backup/provenance.json
-          echo '{"runs": [{"tool": {"driver": {"name": "EchoAnalyzer"}}}]}' > site/db_backup/result.sarif
-
-      - name: 🔐 Scorecard 분석 및 echo 결과 저장
-        uses: ossf/scorecard-action@v1
-        with:
-          results_file: .github/echo/scorecard/scorecard.json
-
-      - name: 🐚 Echo 스크립트 및 로그 저장
-        run: |
-          echo '#!/bin/bash' > .github/echo/scorecard/scorecard_echo.sh
-          echo 'scorecard --repo=https://github.com/${{ github.repository }} --show-details' >> .github/echo/scorecard/scorecard_echo.sh
-          chmod +x .github/echo/scorecard/scorecard_echo.sh
-          bash .github/echo/scorecard/scorecard_echo.sh > .github/echo/scorecard/scorecard.log
-
-      - name: 🚀 GitHub Pages 배포 (peaceiris)
+      - name: 📄 Upload Artifacts to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
+        if: ${{ secrets.GH_PAT != '' }}
         with:
-          publish_dir: site/db_backup
+          personal_token: ${{ secrets.GH_PAT }}
           publish_branch: gh-pages
-        env:
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          publish_dir: .github/echo
+          commit_message: "📡 Auto-publish FullOps Echo Logs"
+
+      - name: ✅ Final Echo Summary
+        run: |
+          echo "echo '[FullOps 워크플로우 완료]'" | tee -a .github/echo/final.txt
