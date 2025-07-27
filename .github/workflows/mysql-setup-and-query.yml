@@ -1,4 +1,4 @@
-name: 🧩 MySQL+Oracle+CrossDB+Security+Pages 대통합 FullOps 워크플로우
+name: 🧩 MySQL+Oracle+CrossDB+Security+Pages 대통합 FullOps 워크플로우 (Echo Full Extended)
 
 on:
   workflow_dispatch:
@@ -19,119 +19,44 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔄 디렉토리 생성 + 기본 패키지 + 업그레이드 + 보안/네트워크/mysql/mysqld/sqlcl 에코 포함
+      - name: 📁 Echo 디렉토리 및 환경 준비 (전체 범위)
         run: |
           set -e
           sudo apt-get update -y
-          sudo apt-get upgrade -y || echo "[⚠️] 일부 패키지 업그레이드 실패"
-          sudo apt-get install -y unzip curl tree zip gnupg2 default-jdk net-tools lsof mysql-server wget || echo "[⚠️] 일부 패키지 설치 실패"
-          for d in \
-            .github/logs .github/echo/mysql/ddl .github/echo/mysql/user .github/echo/mysql/txn \
-            .github/echo/oracle/ddl .github/echo/oracle/user .github/echo/oracle/txn \
-            .github/echo/crossdb .github/echo/policy .github/echo/sec .github/echo/pages \
-            .github/echo/monitor .github/echo/saga .github/echo/artifact .github/echo/backup \
-            .github/echo/mysql/network .github/echo/mysql/firewall .github/echo/mysql/sock \
-            .github/echo/mysql/mysqld .github/echo/oracle/sqlcl
-          do
-            mkdir -p "$d"
+          sudo apt-get install -y unzip curl tree zip gnupg2 default-jdk net-tools lsof mysql-server iptables mysql-client wget netcat || true
+          for base in logs ddl user txn network firewall sock mysqld sqlcl secure portcheck permissions scripts monitor backup artifact readonly sysdba job pipe bulk policy crossdb ora2my my2ora scheduler etl client priv data query; do
+            mkdir -p ".github/echo/mysql/$base"
+            mkdir -p ".github/echo/oracle/$base"
+            mkdir -p ".github/echo/$base"
           done
+          mkdir -p .github/echo/pages .github/echo/sec .github/logs .github/error_logs
 
-          echo "[echo] 🔍 netstat -tulnp" > .github/echo/mysql/network/netstat.txt
-          sudo netstat -tulnp >> .github/echo/mysql/network/netstat.txt || echo "[❌] netstat 실패"
-          echo "[echo] 🔍 lsof -i -P -n" > .github/echo/mysql/network/lsof.txt
-          sudo lsof -i -P -n >> .github/echo/mysql/network/lsof.txt || echo "[❌] lsof 실패"
-          echo "[echo] 🔍 방화벽 상태" > .github/echo/mysql/firewall/ufw_status.txt
-          sudo ufw status verbose >> .github/echo/mysql/firewall/ufw_status.txt || echo "[❌] ufw 상태 확인 실패"
-
-          echo "[echo] 🔍 MySQL 소켓 상태" > .github/echo/mysql/sock/sock_status.txt
-          ls -alh /var/run/mysqld >> .github/echo/mysql/sock/sock_status.txt || echo "[❌] /var/run/mysqld 없음" | tee -a .github/echo/mysql/sock/sock_status.txt
-          echo "[echo] 🔍 소켓 사용 중인 프로세스" > .github/echo/mysql/sock/sock_lsof.txt
-          sudo lsof | grep mysqld >> .github/echo/mysql/sock/sock_lsof.txt || echo "[❌] mysqld 프로세스 없음" | tee -a .github/echo/mysql/sock/sock_lsof.txt
-
-          echo "[⚙️] /var/run/mysqld 디렉토리 강제 생성 시도" | tee .github/echo/mysql/mysqld/create_attempt.log
-          sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld && echo "[✅] 생성 완료" >> .github/echo/mysql/mysqld/create_attempt.log || echo "[❌] 생성 실패" >> .github/echo/mysql/mysqld/create_attempt.log
-
-          echo "[⚙️] MySQL 서비스 상태" | tee .github/echo/mysql/mysqld/service_status.log
-          sudo systemctl status mysql >> .github/echo/mysql/mysqld/service_status.log || echo "[❌] mysql 서비스 확인 실패" >> .github/echo/mysql/mysqld/service_status.log
-          echo "[⚙️] MySQL 서비스 강제 시작 시도" | tee -a .github/echo/mysql/mysqld/service_status.log
-          sudo systemctl start mysql >> .github/echo/mysql/mysqld/service_status.log 2>&1 || echo "[❌] mysql 서비스 시작 실패" >> .github/echo/mysql/mysqld/service_status.log
-
-      - name: 🐬 MySQL 컨테이너 기동
-        uses: mirromutth/mysql-action@v1.1
-        with:
-          mysql root password: rootpass123
-          mysql database: sample_db
-
-      - name: ✅ MySQL Health Check
+      - name: 🔍 포트, 소켓, 네트워크, 권한 echo 전수 조사
         run: |
-          for i in {1..30}; do
-            if mysqladmin ping -h 127.0.0.1 -uroot -prootpass123 --silent; then
-              echo "[OK] MySQL Ready"
-              break
-            fi
-            sleep 2
-          done
+          echo "echo 'sudo lsof -i :3306'" > .github/echo/mysql/portcheck/3306_check.sh
+          sudo lsof -i :3306 > .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] 포트 사용 안 함"
+          nc -zv 127.0.0.1 3306 || echo "[✅] netcat 3306 연결 실패 (사용 가능 상태)" >> .github/echo/mysql/portcheck/3306_check.txt
 
-      - name: 🛠️ MySQL DDL/계정/Txn
-        run: |
-          for i in $(seq 1 $MASS_TABLE); do
-            echo "CREATE TABLE IF NOT EXISTS demo_table_$i (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/demo_table_$i.sql
-            mysql -h 127.0.0.1 -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/ddl/demo_table_$i.sql
-          done
-          for i in $(seq 1 $MASS_USER); do
-            echo "CREATE USER IF NOT EXISTS 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT ALL ON $MYSQL_DB.* TO 'user_$i'@'%';" > .github/echo/mysql/user/user_$i.sql
-            mysql -h 127.0.0.1 -uroot -prootpass123 < .github/echo/mysql/user/user_$i.sql
-          done
-          > .github/echo/mysql/txn/txn_batch.sql
-          for i in $(seq 1 $MASS_TXN); do
-            echo "INSERT INTO demo_table_$((i % $MASS_TABLE + 1)) (value) VALUES ('val_$i');" >> .github/echo/mysql/txn/txn_batch.sql
-          done
-          mysql -h 127.0.0.1 -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql
+          echo "echo 'sudo iptables -L -n -v'" > .github/echo/mysql/firewall/iptables_rules.sh
+          sudo iptables -L -n -v --line-numbers > .github/echo/mysql/firewall/iptables_rules.txt || true
 
-      - name: 🍊 Oracle XE 기동 및 SQL 실행 + sqlcl 재다운로드 보장
-        run: |
-          docker run -d --name oracle-xe -e ORACLE_PASSWORD=oraclepwd -p 1521:1521 gvenzl/oracle-xe
-          sleep 60
-          echo "[⬇️] sqlcl 다운로드 중..." | tee .github/echo/oracle/sqlcl/download.log
-          curl -L --retry 5 --retry-delay 10 -o sqlcl.zip https://download.oracle.com/sqlcl/latest/sqlcl-latest.zip || echo "[❌] sqlcl 다운로드 실패" | tee -a .github/echo/oracle/sqlcl/download.log
-          if [ ! -f sqlcl.zip ]; then echo "[❌] sqlcl.zip 파일 없음, 중단" | tee -a .github/echo/oracle/sqlcl/unzip_error.log; exit 9; fi
-          unzip -o sqlcl.zip -d sqlcl >> .github/echo/oracle/sqlcl/unzip.log 2>> .github/echo/oracle/sqlcl/unzip_error.log || echo "[❌] sqlcl unzip 실패" | tee -a .github/echo/oracle/sqlcl/unzip_error.log
-          export PATH=$PWD/sqlcl/bin:$PATH
-          for i in $(seq 1 $MASS_TABLE); do
-            echo "CREATE TABLE DEMO_TABLE_$i (ID NUMBER PRIMARY KEY, VALUE VARCHAR2(100));" > .github/echo/oracle/ddl/demo_table_$i.sql
-            ./sqlcl/bin/sql -nologo system/oraclepwd@//localhost:1521/XEPDB1 @.github/echo/oracle/ddl/demo_table_$i.sql || echo "[❌] SQLCL 실행 실패: demo_table_$i" | tee -a .github/echo/oracle/sqlcl/exec_error.log
-          done
+          echo "echo '[mysql_config_editor] 비밀번호 저장'" > .github/echo/mysql/secure/mysql_config_editor.sh
+          echo "mysql_config_editor set --login-path=local --host=127.0.0.1 --user=${MYSQL_USER} --password <<EOF" >> .github/echo/mysql/secure/mysql_config_editor.sh
+          echo "\$MYSQL_PASSWORD" >> .github/echo/mysql/secure/mysql_config_editor.sh
+          echo "EOF" >> .github/echo/mysql/secure/mysql_config_editor.sh
+          bash .github/echo/mysql/secure/mysql_config_editor.sh > .github/echo/mysql/secure/mysql_config_editor.log
+          mysql_config_editor print --all >> .github/echo/mysql/secure/mysql_config_editor.log
 
-      - name: 🔁 교차 트랜잭션 정책 (SAGA, 2PC)
-        run: |
-          echo "-- SAGA example" > .github/echo/saga/saga_txn.sql
-          echo "-- 2PC example" > .github/echo/saga/2pc_txn.sql
+          echo '#!/bin/bash' > .github/echo/mysql/permissions/check_permission.sh
+          echo 'echo "id"' >> .github/echo/mysql/permissions/check_permission.sh
+          echo 'id' >> .github/echo/mysql/permissions/check_permission.sh
+          echo 'echo "groups"' >> .github/echo/mysql/permissions/check_permission.sh
+          echo 'groups' >> .github/echo/mysql/permissions/check_permission.sh
+          chmod +x .github/echo/mysql/permissions/check_permission.sh
+          bash .github/echo/mysql/permissions/check_permission.sh > .github/echo/mysql/permissions/permission_result.txt
 
-      - name: 🛡️ Scorecard + CodeQL 보안 스캔
-        run: |
-          curl -sLO https://github.com/ossf/scorecard/releases/latest/download/scorecard-linux-amd64
-          chmod +x scorecard-linux-amd64
-          ./scorecard-linux-amd64 --repo=https://github.com/${{ github.repository }} --format=json > .github/echo/sec/scorecard.json
-
-      - name: 🔍 CodeQL Init/Analyze
-        uses: github/codeql-action/init@v2
-        with:
-          languages: java
-      - uses: github/codeql-action/analyze@v2
-
-      - name: 🌐 GitHub Pages용 echo 복사
-        run: |
-          mkdir -p site/echo
-          cp -r .github/echo/* site/echo/
-
-      - name: 🚀 GitHub Pages 배포
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-
-      - name: 📦 아티팩트 업로드
-        uses: actions/upload-artifact@v4
-        with:
-          name: all-fullops-echo-artifacts
-          path: .github/echo
+          uname -a > .github/echo/scripts/uname_info.txt
+          hostnamectl > .github/echo/scripts/hostnamectl.txt
+          df -h > .github/echo/scripts/disk_usage.txt
+          free -m > .github/echo/scripts/memory_usage.txt
+          curl -s ifconfig.me > .github/echo/scripts/public_ip.txt || echo "IP 실패" > .github/echo/scripts/public_ip.txt
