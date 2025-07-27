@@ -1,4 +1,4 @@
-name: 🏆 MySQL+Oracle FullOps Robust Echo Eiffel Tower
+name: 🏆 MySQL+Oracle FullOps Robust Echo EiffelTowerOps
 
 on:
   workflow_dispatch:
@@ -16,44 +16,28 @@ jobs:
       MASS_USER: 8
       MASS_TXN: 20
 
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: rootpass123
-          MYSQL_DATABASE: sample_db
-        ports:
-          - 3306:3306
-        options: >
-          --health-cmd="mysqladmin ping -prootpass123"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
-
     steps:
-      - name: 📦 Checkout
+      - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🔄 필수 디렉토리 및 에코 파일 생성
+      - name: 🔄 Required Directories and Echo Setup
         run: |
           set -e
+          sudo apt-get update -y && sudo apt-get install -y unzip curl zip netcat gnupg2 iptables
           for d in \
-            .github/logs \
-            .github/error_logs \
+            .github/echo/mysql/account_info \
             .github/echo/mysql/firewall \
             .github/echo/mysql/portcheck \
             .github/echo/mysql/scripts \
             .github/echo/mysql/sock \
             .github/echo/mysql/secure \
             .github/echo/mysql/permissions \
-            .github/echo/mysql/account_info \
-            .github/echo/mysql/backup 
-          do
-            echo "echo 'mkdir -p $d'"
+            .github/echo/mysql/backup; do
+            echo "echo 'mkdir -p $d'" | tee -a .github/echo/mysql/logs/init_dirs.log
             mkdir -p "$d"
           done
 
-      - name: 🔐 환경 정보, 포트, 방화벽, 시스템 상태 수집 및 mysqld.sock 복구
+      - name: 🔐 MySQL Config and Recovery + Firewall Setup
         run: |
           echo "MYSQL_USER=$MYSQL_USER" > .github/echo/mysql/account_info/mysql_env.txt
           echo "MYSQL_PASSWORD=$MYSQL_PASSWORD" >> .github/echo/mysql/account_info/mysql_env.txt
@@ -62,12 +46,15 @@ jobs:
           echo "MASS_USER=$MASS_USER" >> .github/echo/mysql/account_info/mysql_env.txt
           echo "MASS_TXN=$MASS_TXN" >> .github/echo/mysql/account_info/mysql_env.txt
 
-          sudo lsof -i :3306 > .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] 포트 사용 안 함"
-          nc -zv 127.0.0.1 3306 >> .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] netcat 3306 연결 실패 (사용 가능 상태)"
+          sudo lsof -i :3306 > .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] Port 3306 unused"
+          nc -zv 127.0.0.1 3306 || echo "[✅] netcat failed to connect 3306" >> .github/echo/mysql/portcheck/3306_check.txt
 
-          sudo iptables -L -n -v --line-numbers > .github/echo/mysql/firewall/iptables_rules.txt || echo "[❌] iptables 명령 실패" | tee -a .github/echo/mysql/firewall/iptables_rules.txt
+          echo "[🔁] iptables reset and allow port 3306" | tee -a .github/echo/mysql/firewall/iptables_rules.txt
+          sudo iptables -F && sudo iptables -A INPUT -p tcp --dport 3306 -j ACCEPT
+          sudo iptables -L -n -v --line-numbers >> .github/echo/mysql/firewall/iptables_rules.txt
 
-          uname -a > .github/echo/mysql/scripts/uname_info.txt
+          echo "[🧠] System Info" > .github/echo/mysql/scripts/uname_info.txt
+          uname -a >> .github/echo/mysql/scripts/uname_info.txt
           hostnamectl > .github/echo/mysql/scripts/hostnamectl.txt
           df -h > .github/echo/mysql/scripts/disk_usage.txt
           free -m > .github/echo/mysql/scripts/memory_usage.txt
@@ -77,35 +64,12 @@ jobs:
             echo '[❗] /var/run/mysqld 없음 → 생성' | tee -a .github/echo/mysql/sock/sock_recovery.txt
             sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
           fi
-
           if [ ! -S /var/run/mysqld/mysqld.sock ]; then
             echo '[❗] mysqld.sock 없음 → mysqld_safe 실행' | tee -a .github/echo/mysql/sock/sock_recovery.txt
-            sudo zip -r .github/echo/mysql/backup/mysqld_recovery_$(date +%Y%m%d_%H%M).zip /var/run/mysqld || true
             sudo mysqld_safe --skip-grant-tables --skip-networking > .github/echo/mysql/sock/mysqld_safe_stdout.log 2>&1 &
             sleep 10
             ps -ef | grep mysqld >> .github/echo/mysql/sock/sock_recovery.txt
-          fi
-
-      - name: 🔁 iptables 강제 허용 설정 (3306)
-        run: |
-          sudo iptables -I INPUT -p tcp --dport 3306 -j ACCEPT
-          sudo iptables-save > .github/echo/mysql/firewall/iptables_post_accept.txt
-
-      - name: 🚀 mysqladmin ping 이중 확인 + 3307 fallback
-        run: |
-          if mysqladmin ping -h 127.0.0.1 -P 3306 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent; then
-            echo '[✅] 3306 mysqladmin ping 성공' > .github/echo/mysql/portcheck/3306_ping.txt
-          else
-            echo '[⚠️] 3306 ping 실패, 3307 fallback 시도' > .github/echo/mysql/portcheck/3306_ping.txt
-            mysqladmin ping -h 127.0.0.1 -P 3307 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent > .github/echo/mysql/portcheck/3307_ping.txt || echo '[❌] 3307 ping도 실패' >> .github/echo/mysql/portcheck/3307_ping.txt
-          fi
-
-      - name: 🔒 my.cnf 설정 echo 및 로그 저장
-        run: |
-          if [ -f /etc/mysql/my.cnf ]; then
-            cat /etc/mysql/my.cnf > .github/echo/mysql/secure/my_cnf_config.txt
-          else
-            echo '[❌] my.cnf 없음' > .github/echo/mysql/secure/my_cnf_config.txt
+            zip .github/echo/mysql/backup/mysqld_recovery_$(date +%Y%m%d_%H%M%S).zip .github/echo/mysql/sock/* || true
           fi
 
           echo "echo '[mysql_config_editor 설정]'" > .github/echo/mysql/secure/mysql_config_editor.sh
@@ -114,16 +78,25 @@ jobs:
           echo "EOF" >> .github/echo/mysql/secure/mysql_config_editor.sh
           bash .github/echo/mysql/secure/mysql_config_editor.sh > .github/echo/mysql/secure/mysql_config_editor.log
 
-      - name: 📜 사용자 권한 확인 echo
-        run: |
           echo '#!/bin/bash' > .github/echo/mysql/permissions/check_permission.sh
           echo 'id' >> .github/echo/mysql/permissions/check_permission.sh
           echo 'groups' >> .github/echo/mysql/permissions/check_permission.sh
           chmod +x .github/echo/mysql/permissions/check_permission.sh
           bash .github/echo/mysql/permissions/check_permission.sh > .github/echo/mysql/permissions/permission_result.txt
 
-      - name: 📦 All Echo/log Artifact Upload
+      - name: 🧪 MySQL Service Health Check 3306/3307
+        run: |
+          if mysqladmin ping -h 127.0.0.1 -P 3306 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent; then
+            echo "[✅] mysqladmin ping 성공 on 3306" | tee -a .github/echo/mysql/logs/ping_result.txt
+          elif mysqladmin ping -h 127.0.0.1 -P 3307 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent; then
+            echo "[⚠️] 3306 실패, 3307 ping 성공" | tee -a .github/echo/mysql/logs/ping_result.txt
+          else
+            echo "[❌] mysqladmin ping 실패" | tee -a .github/echo/mysql/logs/ping_result.txt
+            exit 99
+          fi
+
+      - name: 📦 Upload All Echo
         uses: actions/upload-artifact@v4
         with:
-          name: fullops-echo-artifacts
+          name: mysql-robust-echo-artifacts
           path: .github/echo
