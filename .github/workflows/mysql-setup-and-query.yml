@@ -19,18 +19,31 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔄 디렉토리 생성 + 기본 패키지
+      - name: 🔄 디렉토리 생성 + 기본 패키지 + 업그레이드 + 보안/네트워크 echo
         run: |
           set -e
-          sudo apt-get update -y && sudo apt-get install -y unzip curl tree zip gnupg2 default-jdk || true
+          sudo apt-get update -y
+          sudo apt-get upgrade -y || echo "[⚠️] 일부 패키지 업그레이드 실패"
+          sudo apt-get install -y unzip curl tree zip gnupg2 default-jdk net-tools lsof || echo "[⚠️] 일부 패키지 설치 실패"
           for d in \
             .github/logs .github/echo/mysql/ddl .github/echo/mysql/user .github/echo/mysql/txn \
             .github/echo/oracle/ddl .github/echo/oracle/user .github/echo/oracle/txn \
             .github/echo/crossdb .github/echo/policy .github/echo/sec .github/echo/pages \
-            .github/echo/monitor .github/echo/saga .github/echo/artifact .github/echo/backup
+            .github/echo/monitor .github/echo/saga .github/echo/artifact .github/echo/backup \
+            .github/echo/mysql/network .github/echo/mysql/firewall .github/echo/mysql/sock
           do
             mkdir -p "$d"
           done
+          echo "[echo] 🔍 netstat -tulnp" > .github/echo/mysql/network/netstat.txt
+          sudo netstat -tulnp >> .github/echo/mysql/network/netstat.txt || echo "[❌] netstat 실패"
+          echo "[echo] 🔍 lsof -i -P -n" > .github/echo/mysql/network/lsof.txt
+          sudo lsof -i -P -n >> .github/echo/mysql/network/lsof.txt || echo "[❌] lsof 실패"
+          echo "[echo] 🔍 방화벽 상태" > .github/echo/mysql/firewall/ufw_status.txt
+          sudo ufw status verbose >> .github/echo/mysql/firewall/ufw_status.txt || echo "[❌] ufw 상태 확인 실패"
+          echo "[echo] 🔍 MySQL 소켓 상태" > .github/echo/mysql/sock/sock_status.txt
+          ls -alh /var/run/mysqld >> .github/echo/mysql/sock/sock_status.txt || echo "[❌] /var/run/mysqld 없음"
+          echo "[echo] 🔍 소켓 사용 중인 프로세스" > .github/echo/mysql/sock/sock_lsof.txt
+          sudo lsof | grep mysqld >> .github/echo/mysql/sock/sock_lsof.txt || echo "[❌] mysqld 프로세스 없음"
 
       - name: 🐬 MySQL 컨테이너 기동
         uses: mirromutth/mysql-action@v1.1
@@ -52,17 +65,17 @@ jobs:
         run: |
           for i in $(seq 1 $MASS_TABLE); do
             echo "CREATE TABLE IF NOT EXISTS demo_table_$i (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(100));" > .github/echo/mysql/ddl/demo_table_$i.sql
-            mysql -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/ddl/demo_table_$i.sql
+            mysql -h 127.0.0.1 -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/ddl/demo_table_$i.sql
           done
           for i in $(seq 1 $MASS_USER); do
             echo "CREATE USER IF NOT EXISTS 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT ALL ON $MYSQL_DB.* TO 'user_$i'@'%';" > .github/echo/mysql/user/user_$i.sql
-            mysql -uroot -prootpass123 < .github/echo/mysql/user/user_$i.sql
+            mysql -h 127.0.0.1 -uroot -prootpass123 < .github/echo/mysql/user/user_$i.sql
           done
           > .github/echo/mysql/txn/txn_batch.sql
           for i in $(seq 1 $MASS_TXN); do
             echo "INSERT INTO demo_table_$((i % $MASS_TABLE + 1)) (value) VALUES ('val_$i');" >> .github/echo/mysql/txn/txn_batch.sql
           done
-          mysql -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql
+          mysql -h 127.0.0.1 -uroot -prootpass123 $MYSQL_DB < .github/echo/mysql/txn/txn_batch.sql
 
       - name: 🍊 Oracle XE 기동 및 SQL 실행
         run: |
