@@ -1,98 +1,87 @@
-name: ✨ OSSF Scorecard + Echo Template + PR Auto-Fix
+name: ✨ OSSF Scorecard + Echo 통합 자동화 워크플로우
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-  schedule:
-    - cron: '0 3 * * 5'  # 매주 금요일 03:00
   workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 6'  # 매주 토요일 새벽
 
 jobs:
-  ossf-security-full:
+  scorecard-security-job:
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
       pull-requests: write
-      security-events: write
-      actions: read
-      packages: read
 
     steps:
-      - name: ✅ Checkout Repository
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📂 Init Echo Directories & Templates
+      - name: ✨ Init Echo 디렉토리 및 템플릿 생성
         run: |
-          echo "echo '[❄ Init] Echo directory structure'" | tee -a /tmp/echo_init.log
-
           mkdir -p .github/echo/init
-          mkdir -p .github/echo_template
-          mkdir -p .github/echo_placeholder
-          mkdir -p .github/echo_fix/scripts
-
+          echo "echo '[❄ Init] Echo directory structure'" | tee -a .github/echo/init/init_dirs.sh
           for base in scorecard template placeholder fix cli; do
             for sub in logs scripts test init converted; do
-              mkdir -p ".github/echo_${base}/${sub}"
+              mkdir -p .github/echo_${base}/${sub}
             done
           done
-
-          echo "echo '[❄ Init] Echo directory structure'" | tee .github/echo/init/init_dirs.sh
-
           echo 'API_KEY=PLACEHOLDER' > .github/echo_template/sample.env
           echo 'TOKEN=PLACEHOLDER' > .github/echo_template/sample.cfg
           echo '{ "secret": "PLACEHOLDER" }' > .github/echo_template/sample.json
 
-      - name: ✨ Install OSSF Scorecard CLI (Correct Path)
+      - name: ✨ OSSF Scorecard 설치 (tar.gz, 정확한 경로)
         run: |
+          set -e
           VERSION="4.10.3"
           curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
           tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-          BIN=$(find . -type f -name scorecard | head -1)
+          BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -1 || true)
+          if [ -z "$BIN" ]; then
+            echo "::error ::[ERR] Scorecard binary not found after extract."
+            exit 1
+          fi
           chmod +x "$BIN"
           sudo mv "$BIN" /usr/local/bin/scorecard
           scorecard --version | tee .github/echo_scorecard/logs/version.txt
           echo "echo 'scorecard CLI 설치 완료'" | tee -a .github/echo_cli/logs/install.log
 
-      - name: 🔍 Run OSSF Scorecard
+      - name: ⚡️ Scorecard 실행 및 결과 저장
         run: |
           scorecard --repo=. --format=json --show-details > scorecard.json
-          mv scorecard.json .github/echo_scorecard/logs/scorecard.json
+          cp scorecard.json .github/echo_scorecard/test/scorecard.json
 
-      - name: ✏️ Generate Fix Script Based on PLACEHOLDER
+      - name: 🌟 PLACEHOLDER 자동 치환
         run: |
-          echo '#!/bin/bash' > .github/echo_fix/scripts/apply_fixes.sh
-          echo "echo '[🔧 FIX] Replacing PLACEHOLDER values in templates'" >> .github/echo_fix/scripts/apply_fixes.sh
-
-          for f in .github/echo_template/*.{env,cfg,json}; do
-            sed 's/PLACEHOLDER/REPLACED_VALUE/g' "$f" > ".github/echo_placeholder/$(basename $f)"
-            echo "echo '[🚀] Applied fix to $(basename $f)'" >> .github/echo_fix/scripts/apply_fixes.sh
+          for f in .github/echo_template/*; do
+            fname=$(basename "$f")
+            sed 's/PLACEHOLDER/REDACTED/g' "$f" > ".github/echo_placeholder/converted/$fname"
           done
 
+      - name: ✏️ 위험 항목 기반 자동 PR용 스크립트 생성
+        run: |
+          echo "#!/bin/bash" > .github/echo_fix/scripts/apply_fixes.sh
+          echo "echo '[✨ Fix] 분석된 scorecard.json 기반 자동 수정 실행'" >> .github/echo_fix/scripts/apply_fixes.sh
+          echo "# TODO: 자동 수정 로직 작성" >> .github/echo_fix/scripts/apply_fixes.sh
           chmod +x .github/echo_fix/scripts/apply_fixes.sh
-          .github/echo_fix/scripts/apply_fixes.sh
+          bash .github/echo_fix/scripts/apply_fixes.sh
 
-      - name: 🔧 Analyze scorecard.json and create PR if needed
+      - name: 🚀 gh pr create (자동 PR)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          HIGH_RISK=$(jq '.checks[] | select(.score < 5) | .name' .github/echo_scorecard/logs/scorecard.json | wc -l)
-          if [ "$HIGH_RISK" -gt 0 ]; then
-            git config --global user.email "action@github.com"
-            git config --global user.name "GitHub Action"
-            git checkout -b security-auto-fix
-            git add .github/echo_placeholder/*.env .github/echo_placeholder/*.cfg .github/echo_placeholder/*.json
-            git commit -m "🚀 Auto-fix: Replace PLACEHOLDER in templates (via Scorecard risk check)"
-            git push origin security-auto-fix
-            gh pr create --title "🔧 Security Auto-Fix: PLACEHOLDER replacement" --body "Automatically generated PR to apply template fixes based on Scorecard risks." || true
-          else
-            echo "[SAFE] No high-risk items found in scorecard.json."
-          fi
+          git config --global user.email "action@github.com"
+          git config --global user.name "github-actions"
+          git checkout -b security/scorecard-autofix || true
+          git add .
+          git commit -m "✨ scorecard 위험 항목 자동 수정 및 에코 템플릿 적용" || true
+          git push --set-upstream origin security/scorecard-autofix || true
+          gh pr create --fill --base main --title "✨ scorecard 자동 보안 개선" || true
 
-      - name: 📄 Upload Echo Artifacts
+      - name: 📄 아티팩트 업로드
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: echo-artifacts
-          path: .github/echo_*/**
+          name: echo-security-all
+          path: |
+            .github/echo_*
