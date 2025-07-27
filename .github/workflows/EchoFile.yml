@@ -1,113 +1,89 @@
-name: "CodeQL Advanced + Echo + Service Setup + Permission Snapshot"
+name: "🛡️ Echo 기반 보안 자동화 + 템플릿 + Placeholder 생성"
 
 on:
+  workflow_dispatch:
   push:
     branches: ["main"]
-  pull_request:
-    branches: ["main"]
   schedule:
-    - cron: '19 13 * * 4'
-  workflow_dispatch:
+    - cron: '0 2 * * 5'
 
 jobs:
-  codeql-analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+  full-echo-secure:
+    runs-on: ubuntu-latest
     permissions:
-      security-events: write
-      packages: read
-      actions: read
       contents: read
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - language: actions
-            build-mode: none
-          - language: python
-            build-mode: none
-          - language: rust
-            build-mode: none
+      packages: read
+      security-events: write
 
     steps:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🧰 Install System Services & CLI Tools
+      - name: 🧰 필수 서비스 설치 (gh, jq, yq, scorecard, etc)
         run: |
-          echo "echo '[Install] 필수 패키지 설치'" | tee -a /tmp/echo_codeql_install.log
-          sudo apt-get update -y
-          sudo apt-get install -y git curl jq tree build-essential python3-pip lsof sudo ssh
+          echo "[Install] 설치 시작..."
+          sudo apt update -y
+          sudo apt install -y curl jq yq tree lsof sudo ssh python3-pip
+          npm install -g @githubnext/scorecard-cli
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /usr/share/keyrings/githubcli-archive-keyring.gpg >/dev/null
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list
+          sudo apt update && sudo apt install gh -y
+          pip install codeql
 
-          echo "echo '[Install] Rust 설치'" | tee -a /tmp/echo_codeql_install.log
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-      - name: 📁 Create Echo Directories, Permission Snapshots, and Files
+      - name: 📁 Echo 디렉토리 및 권한 Snapshot 생성
         run: |
-          # 에코 디렉토리 생성
-          for d in .github/echo_codeql/{init,logs,results,queries,python,rust,actions,db/{mysql,postgresql,oracle,mongodb,tibero},permission}; do
-            mkdir -p "$d"
-          done
-          touch .github/echo_codeql/init/init_dirs.sh
-          touch .github/echo_codeql/logs/init.log
+          for d in .github/echo_{template,security,codeql,dependabot,permission,placeholder}; do mkdir -p "$d"; done
 
-          # 권한 스냅샷 저장
-          echo "echo '[Permission] Snapshot'" | tee -a .github/echo_codeql/init/init_dirs.sh
-          cat /etc/passwd > .github/echo_codeql/permission/passwd.txt
-          sudo cat /etc/sudoers > .github/echo_codeql/permission/sudoers.txt
-          sudo ls -l /etc/ssh/sshd_config > .github/echo_codeql/permission/sshd_config.txt
-          getent group sudo > .github/echo_codeql/permission/sudo_group.txt
-          sudo -l > .github/echo_codeql/permission/sudo_l.txt
+          whoami > .github/echo_permission/whoami.txt
+          id > .github/echo_permission/id.txt
+          cat /etc/passwd > .github/echo_permission/passwd.txt
+          sudo cat /etc/sudoers > .github/echo_permission/sudoers.txt
+          getent group sudo > .github/echo_permission/sudo_group.txt
+          sudo -l > .github/echo_permission/sudo_l.txt
 
-          # 샘플 echo 파일 생성
-          echo "print('Hello from Python')" > .github/echo_codeql/python/sample.py
-          echo "echo 'print(\"Hello from Python\")'" > .github/echo_codeql/python/echo_python.sh
-
-          echo 'fn main() { println!("Hello from Rust"); }' > .github/echo_codeql/rust/sample.rs
-          echo "echo 'fn main() { println!(\"Hello from Rust\"); }'" > .github/echo_codeql/rust/echo_rust.sh
-
-          echo 'name: HelloAction' > .github/echo_codeql/actions/action.yml
-          echo "echo 'name: HelloAction'" > .github/echo_codeql/actions/echo_action.sh
-
-          echo "-- Sample SQL for MySQL" > .github/echo_codeql/db/mysql/sample.sql
-          echo "echo '-- Sample SQL for MySQL'" > .github/echo_codeql/db/mysql/echo_mysql.sh
-
-          echo "-- Sample SQL for PostgreSQL" > .github/echo_codeql/db/postgresql/sample.sql
-          echo "echo '-- Sample SQL for PostgreSQL'" > .github/echo_codeql/db/postgresql/echo_postgresql.sh
-
-          echo "-- Sample SQL for Oracle" > .github/echo_codeql/db/oracle/sample.sql
-          echo "echo '-- Sample SQL for Oracle'" > .github/echo_codeql/db/oracle/echo_oracle.sh
-
-          echo "-- Sample SQL for MongoDB" > .github/echo_codeql/db/mongodb/sample.js
-          echo "echo '-- Sample SQL for MongoDB'" > .github/echo_codeql/db/mongodb/echo_mongodb.sh
-
-          echo "-- Sample SQL for Tibero" > .github/echo_codeql/db/tibero/sample.sql
-          echo "echo '-- Sample SQL for Tibero'" > .github/echo_codeql/db/tibero/echo_tibero.sh
-
-          echo "echo '[✅ SUCCESS] All echo, SQL, permission files created.'" | tee -a .github/echo_codeql/logs/init.log
-
-      - name: 🛠️ Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-
-      - name: ⚙️ Manual Build Placeholder
-        if: matrix.build-mode == 'manual'
-        shell: bash
+      - name: 🧾 .env/.yml/.cfg 템플릿 자동 생성
         run: |
-          echo '[Manual Build] Please add custom build logic here.'
-          exit 1
+          echo "DB_HOST=PLACEHOLDER_HOST" > .github/echo_template/sample.env
+          echo "version: '3'\nservices:\n  web:\n    image: PLACEHOLDER_IMAGE" > .github/echo_template/sample.yml
+          echo "[config]\nname=PLACEHOLDER_NAME" > .github/echo_template/sample.cfg
 
-      - name: 🔍 Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:${{ matrix.language }}"
+          echo "echo 'DB_HOST=PLACEHOLDER_HOST'" > .github/echo_template/echo_env.sh
+          echo "echo 'version: ... PLACEHOLDER_IMAGE'" > .github/echo_template/echo_yml.sh
+          echo "echo '[config] ... PLACEHOLDER_NAME'" > .github/echo_template/echo_cfg.sh
 
-      - name: 📤 Upload Echo Directories and Snapshots
-        if: always()
+      - name: 🛡️ 보안 템플릿 자동 생성 (CodeQL/Dependabot/Scorecard)
+        run: |
+          echo -e "name: CodeQL\non:\n  push:\n    branches: [\"main\"]\njobs:\n  analyze:\n    runs-on: ubuntu-latest\n    steps:\n    - uses: actions/checkout@v4\n    - uses: github/codeql-action/init@v3\n      with:\n        languages: javascript\n    - uses: github/codeql-action/analyze@v3" > .github/codeql.yml
+          echo -e "version: 2\nupdates:\n  - package-ecosystem: \"npm\"\n    directory: \"/\"\n    schedule:\n      interval: \"daily\"" > .github/dependabot.yml
+          echo "# Security Policy\nPlease report vulnerabilities to: security@PLACEHOLDER_DOMAIN" > .github/SECURITY.md
+
+          echo "echo '[Scorecard] 실행: scorecard --repo=https://github.com/${{ github.repository }}'" > .github/echo_security/echo_scorecard.sh
+          echo "scorecard --repo=https://github.com/${{ github.repository }}" >> .github/echo_security/echo_scorecard.sh
+
+      - name: 🧪 자동 Placeholder 파일(.sh/.sql/.md/.json) 생성
+        run: |
+          echo "#!/bin/bash" > .github/echo_placeholder/echo_placeholder.sh
+          echo "echo 'PLACEHOLDER_SCRIPT'" >> .github/echo_placeholder/echo_placeholder.sh
+
+          echo "-- PLACEHOLDER SQL STATEMENT" > .github/echo_placeholder/sample.sql
+          echo "echo '-- PLACEHOLDER SQL'" > .github/echo_placeholder/echo_sql.sh
+
+          echo "# PLACEHOLDER Documentation" > .github/echo_placeholder/sample.md
+          echo "echo '# PLACEHOLDER Documentation'" > .github/echo_placeholder/echo_md.sh
+
+          echo '{ "key": "PLACEHOLDER_VALUE" }' > .github/echo_placeholder/sample.json
+          echo "echo '{ \"key\": \"PLACEHOLDER_VALUE\" }'" > .github/echo_placeholder/echo_json.sh
+
+          echo 'fn main() { println!("PLACEHOLDER"); }' > .github/echo_placeholder/sample.rs
+          echo 'print("PLACEHOLDER")' > .github/echo_placeholder/sample.py
+          echo 'console.log("PLACEHOLDER")' > .github/echo_placeholder/sample.js
+
+      - name: 📤 Upload All Echo Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: echo-codeql-full-${{ matrix.language }}
-          path: .github/echo_codeql/
+          name: full-echo-security-placeholder
+          path: |
+            .github/echo_*
+            .github/codeql.yml
+            .github/dependabot.yml
+            .github/SECURITY.md
