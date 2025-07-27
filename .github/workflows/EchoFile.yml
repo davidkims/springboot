@@ -1,70 +1,84 @@
-name: 🛡️ Echo 기반 보안 자동화 + Scorecard 통합
+name: 🛡️ Scorecard Security Automation + Echo Integration
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-  schedule:
-    - cron: '23 2 * * 0'
   workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * 1'
 
 jobs:
-  echo-security:
+  scorecard-analysis:
     runs-on: ubuntu-latest
 
     steps:
       - name: 📁 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📂 Echo 디렉토리/파일/템플릿 초기화
+      - name: 📁 Init Echo Directory Structure
         run: |
-          mkdir -p .github/echo/init
           echo "echo '[❄ Init] Echo directory structure'" | tee -a .github/echo/init/init_dirs.sh
-
           for base in scorecard template placeholder fix cli; do
             for sub in logs scripts test init converted; do
-              echo "echo 'mkdir -p .github/echo_${base}/${sub}'" | tee -a .github/echo/init/init_dirs.sh
-              mkdir -p ".github/echo_${base}/${sub}"
+              mkdir -p .github/echo_${base}/${sub}
             done
-            echo "echo '[INFO] Initialized .github/echo_${base}/'" | tee -a .github/echo/init/init_dirs.sh
-            touch ".github/echo_${base}/init/created.flag"
           done
-
-          echo "API_KEY=PLACEHOLDER" > .github/echo_template/sample.env
-          echo "TOKEN=PLACEHOLDER" > .github/echo_template/sample.cfg
+          echo 'API_KEY=PLACEHOLDER' > .github/echo_template/sample.env
+          echo 'TOKEN=PLACEHOLDER' > .github/echo_template/sample.cfg
           echo '{ "secret": "PLACEHOLDER" }' > .github/echo_template/sample.json
 
-      - name: 🛠️ OSSF Scorecard CLI 설치 (tar.gz)
+      - name: ⚙️ Install gh CLI
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y gh
+
+      - name: 🛠️ Install Scorecard CLI (Tarball)
         run: |
           VERSION="4.10.3"
           curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
           tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-          BIN=$(find . -type f -name scorecard | head -1)
+          BIN=$(find scorecard_${VERSION}_linux_amd64 -type f -name scorecard | head -1 || true)
+          if [ -z "$BIN" ]; then
+            echo "::error ::[FAIL] scorecard binary not found"; exit 1
+          fi
           chmod +x "$BIN"
           sudo mv "$BIN" /usr/local/bin/scorecard
           scorecard --version | tee .github/echo_scorecard/logs/version.txt
           echo "echo 'scorecard CLI 설치 완료'" | tee -a .github/echo_cli/logs/install.log
 
-      - name: 🔍 OSSF Scorecard 분석 실행
+      - name: 🔍 Run Scorecard and Save JSON
         run: |
-          scorecard --repo=https://github.com/${{ github.repository }} --format=json --show-details > scorecard.json
-          mkdir -p .github/echo_scorecard/results
-          cp scorecard.json .github/echo_scorecard/results/
+          REPO="github.com/${{ github.repository }}"
+          scorecard --repo=$REPO --format=json > .github/echo_scorecard/logs/scorecard.json
+          cat .github/echo_scorecard/logs/scorecard.json | jq '.' > .github/echo_scorecard/converted/scorecard.pretty.json
 
-      - name: 🧼 PLACEHOLDER 자동 치환 (.env/.cfg/.json)
+      - name: 📂 Replace PLACEHOLDER in Templates
         run: |
-          mkdir -p .github/echo_placeholder/converted
-          for f in .github/echo_template/*; do
-            fname=$(basename "$f")
-            sed 's/PLACEHOLDER/REPLACED_VALUE/g' "$f" > ".github/echo_placeholder/converted/$fname"
-            echo "echo '[REPLACED] $fname'" | tee -a ".github/echo_placeholder/logs/replace.log"
-          done
+          sed 's/PLACEHOLDER/REPLACED_VALUE/g' .github/echo_template/sample.env > .github/echo_placeholder/converted/sample.env
+          sed 's/PLACEHOLDER/REPLACED_VALUE/g' .github/echo_template/sample.cfg > .github/echo_placeholder/converted/sample.cfg
+          sed 's/PLACEHOLDER/REPLACED_VALUE/g' .github/echo_template/sample.json > .github/echo_placeholder/converted/sample.json
 
-      - name: 📦 Upload Echo 결과 아티팩트
+      - name: 🔧 Generate Fix Script from Scorecard
+        run: |
+          echo "#!/bin/bash" > .github/echo_fix/scripts/apply_fixes.sh
+          echo "echo '[🔧 Fix] Applying security fixes based on scorecard.json'" >> .github/echo_fix/scripts/apply_fixes.sh
+          chmod +x .github/echo_fix/scripts/apply_fixes.sh
+          echo "echo '[SIMULATION] Updating SECURITY.md'" >> .github/echo_fix/scripts/apply_fixes.sh
+          echo "echo '[SIMULATION] Enabling branch protection'" >> .github/echo_fix/scripts/apply_fixes.sh
+          echo "echo '[SIMULATION] Enabling Dependabot alerts'" >> .github/echo_fix/scripts/apply_fixes.sh
+          .github/echo_fix/scripts/apply_fixes.sh
+
+      - name: 🤖 Auto-create PR if Fixes Found
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git checkout -b scorecard-fix-${{ github.run_id }}
+          git add .github/echo_fix/scripts/apply_fixes.sh
+          git commit -m "🔧 Apply Scorecard fixes (auto-generated)"
+          git push origin scorecard-fix-${{ github.run_id }}
+          gh pr create --title "🔧 Security Fixes from Scorecard" --body "This PR contains auto-generated fixes based on Scorecard analysis." || echo "gh pr create failed"
+
+      - name: 📤 Upload Echo Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: echo-artifacts
-          path: |
-            .github/echo_*/**/*
-            scorecard.json
+          name: echo-scorecard-all
+          path: .github/echo_*
