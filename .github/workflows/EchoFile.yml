@@ -1,14 +1,14 @@
-name: "🛡️ Full Echo & Scorecard Auto Installer"
+name: "🛡️ Echo & OSSF Scorecard 자동 설치/자동화"
 
 on:
   workflow_dispatch:
   push:
     branches: ["main"]
   schedule:
-    - cron: '11 5 * * 5'
+    - cron: '13 5 * * 3'
 
 jobs:
-  secure-auto:
+  echo-security:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,78 +18,75 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧰 Install CLI Tools (gh, jq, yq, Scorecard, CodeQL)
+      - name: 🔧 Install Tools (curl, jq, gh, yq, unzip)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y curl unzip jq yq gh tree
+          sudo apt-get install -y curl jq gh yq unzip tree
 
-          # 🟢 Scorecard 정확한 경로 설정
-          export SC_VERSION="4.10.3"
-          curl -sLO "https://github.com/ossf/scorecard/releases/download/v${SC_VERSION}/scorecard_${SC_VERSION}_linux_amd64.tar.gz"
-          tar -xzf "scorecard_${SC_VERSION}_linux_amd64.tar.gz"
-
-          # 자동 디렉토리 탐지 및 이동
-          SC_DIR=$(tar -tf "scorecard_${SC_VERSION}_linux_amd64.tar.gz" | head -1 | cut -d/ -f1)
-          chmod +x "$SC_DIR/scorecard"
-          sudo mv "$SC_DIR/scorecard" /usr/local/bin/scorecard
-
-          # 🟢 CodeQL 설치
-          CODEQL_VERSION="2.17.5"
-          curl -L -o codeql.zip "https://github.com/github/codeql-cli-binaries/releases/download/v${CODEQL_VERSION}/codeql-linux64.zip"
-          unzip codeql.zip
-          sudo mv codeql/codeql /usr/local/bin/codeql
-
-      - name: 📁 Create Echo Directories
+      - name: 🧱 Install OSSF Scorecard (fixed tar.gz)
         run: |
-          for prefix in codeql security scorecard dependabot template placeholder permission; do
-            for sub in init log result config policy converted fix custom test scripts output env; do
-              mkdir -p .github/echo_${prefix}/${sub}
+          VERSION="4.10.3"
+          curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
+          tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
+          BIN=$(find . -type f -name scorecard | head -1)
+          chmod +x "$BIN"
+          sudo mv "$BIN" /usr/local/bin/scorecard
+          scorecard --version
+
+      - name: 📁 Create Echo Directories (mass)
+        run: |
+          for base in codeql scorecard dependabot template placeholder permission; do
+            for sub in init log result config policy fix converted scripts test env; do
+              mkdir -p .github/echo_${base}/${sub}
             done
           done
 
-      - name: 📄 Generate Echo Files (10+ types)
+      - name: 📄 Create Echo Sample Files (multi-type)
         run: |
           for ext in env cfg json sql md sh py js rs txt; do
             for i in $(seq 1 10); do
-              echo "echo '[${ext^^}] Echo Sample $i'" > .github/echo_template/sample_$i.$ext
-              for prefix in codeql scorecard dependabot placeholder; do
-                echo "echo '[${prefix^^}] Script $i for $ext'" > .github/echo_${prefix}/scripts/echo_${prefix}_${ext}_$i.sh
+              echo "echo '[${ext^^}] Echo $i'" > .github/echo_template/sample_$i.$ext
+              for base in codeql scorecard dependabot; do
+                echo "echo '[${base^^}] script $i for $ext'" > .github/echo_${base}/scripts/echo_${base}_${ext}_$i.sh
               done
             done
           done
 
-      - name: 🔐 Run OSSF Scorecard & Extract Risks
+      - name: 🔍 Run Scorecard + extract risky items
         run: |
           mkdir -p .github/echo_scorecard/result
           scorecard --repo=https://github.com/${{ github.repository }} --format=json > .github/echo_scorecard/result/scorecard.json
-          jq '.checks[] | select(.score < 5)' .github/echo_scorecard/result/scorecard.json > .github/echo_scorecard/result/scorecard_low.json
+          jq '.checks[] | select(.score < 5)' .github/echo_scorecard/result/scorecard.json > .github/echo_scorecard/result/scorecard_risks.json
 
-      - name: 📄 SECURITY_FIX.md 생성
+      - name: 📄 Generate SECURITY.md
         run: |
-          echo "# 🔐 Scorecard 위험 항목 (자동 생성)" > SECURITY_FIX.md
-          jq -r '. | "- **\(.name)**: \(.reason) (_score: \(.score))"' .github/echo_scorecard/result/scorecard_low.json >> SECURITY_FIX.md
+          echo "# 🔐 Auto-generated Scorecard Risk Summary" > SECURITY.md
+          jq -r '. | "- **\(.name)**: \(.reason) (_score: \(.score))"' .github/echo_scorecard/result/scorecard_risks.json >> SECURITY.md
 
-      - name: 🔁 PLACEHOLDER 자동 치환 (.env/.cfg/.json)
+      - name: 🧬 Replace PLACEHOLDER in Templates
         run: |
-          echo "API_KEY=PLACEHOLDER" > .github/echo_template/sample.env
-          echo "TOKEN=PLACEHOLDER" > .github/echo_template/sample.cfg
+          echo 'API_KEY=PLACEHOLDER' > .github/echo_template/sample.env
+          echo 'TOKEN=PLACEHOLDER' > .github/echo_template/sample.cfg
           echo '{ "secret": "PLACEHOLDER" }' > .github/echo_template/sample.json
 
-          sed 's/PLACEHOLDER/auto_user_env/g' .github/echo_template/sample.env > .github/echo_placeholder/converted/sample.env
-          sed 's/PLACEHOLDER/secure_token/g' .github/echo_template/sample.cfg > .github/echo_placeholder/converted/sample.cfg
-          jq 'walk(if type == "string" and test("PLACEHOLDER") then sub("PLACEHOLDER"; "actual_secret") else . end)' .github/echo_template/sample.json > .github/echo_placeholder/converted/sample.json
+          sed 's/PLACEHOLDER/my_api_key_123/' .github/echo_template/sample.env > .github/echo_placeholder/converted/sample.env
+          sed 's/PLACEHOLDER/super_token!/' .github/echo_template/sample.cfg > .github/echo_placeholder/converted/sample.cfg
+          jq 'walk(if type == "string" and test("PLACEHOLDER") then sub("PLACEHOLDER"; "real_secret_key") else . end)' \
+            .github/echo_template/sample.json > .github/echo_placeholder/converted/sample.json
 
-      - name: 🔀 자동 커밋 및 PR
+      - name: 🔁 Commit + Auto PR (Security/Echo/Fix)
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          BRANCH="auto/scorecard-echo-$(date +%s)"
+
+          BRANCH="auto/echo-scorecard-$(date +%s)"
           git checkout -b $BRANCH
 
-          git add .github/echo_* SECURITY_FIX.md
-          git commit -m "🔧 Echo, Scorecard 위험항목, Placeholder 치환 자동화"
+          git add .github/echo_* SECURITY.md
+          git commit -m "🔐 Auto Scorecard Fix, Echo Files, Placeholder Patch"
           git push origin $BRANCH
 
-          gh pr create --title "🔒 Echo + Scorecard + PLACEHOLDER Auto PR" \
-            --body "자동으로 생성된 echo 파일, 보안 취약점 개선, placeholder 값 치환 내용이 포함됩니다." \
+          gh pr create \
+            --title "🔧 Echo + Scorecard + PLACEHOLDER Fix" \
+            --body "This PR includes:\n- OSSF Scorecard risk items\n- PLACEHOLDER replacement\n- Mass echo file generation." \
             --base main --head $BRANCH
