@@ -1,4 +1,4 @@
-name: 🏆 MySQL+Oracle FullOps Robust Echo 에펠탑우
+name: 🏆 MySQL+Oracle FullOps Robust Echo Eiffel Tower
 
 on:
   workflow_dispatch:
@@ -24,31 +24,36 @@ jobs:
           MYSQL_DATABASE: sample_db
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping -prootpass123" --health-interval=10s --health-timeout=5s --health-retries=10
+        options: >
+          --health-cmd="mysqladmin ping -prootpass123"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔄 필수 패키지 설치 및 echo 디렉토리 robust 생성 + 업그레이드
+      - name: 🔄 필수 디렉토리 및 에코 파일 생성
         run: |
           set -e
-          echo "echo '[APT 업데이트 및 업그레이드]'"
-          sudo apt-get update -y && sudo apt-get upgrade -y || echo "[⚠️] 패키지 업그레이드 실패"
-          sudo apt-get install -y unzip curl tree zip gnupg2 tzdata lsof net-tools iptables netcat mysql-server default-jdk mysql-client wget pwgen || echo "[⚠️] 패키지 일부 설치 실패"
           for d in \
-            logs error_logs tmp logs mysql mysql/logs mysql/warnings mysql/accounts mysql/ddl mysql/txn mysql/replica \
-            mysql/user mysql/policy mysql/crossdb mysql/backup oracle oracle/container oracle/logs oracle/ddl oracle/txn \
-            oracle/replica oracle/user oracle/policy oracle/crossdb oracle/client oracle/backup priv query client data \
-            artifact policy sec crossdb ora2my my2ora backup monitor audit scheduler etl readonly sysdba job pipe bulk \
-            mysql/network mysql/sock mysql/portcheck mysql/permissions mysql/secure mysql/scripts oracle/sqlcl mysql/account_info
+            .github/logs \
+            .github/error_logs \
+            .github/echo/mysql/firewall \
+            .github/echo/mysql/portcheck \
+            .github/echo/mysql/scripts \
+            .github/echo/mysql/sock \
+            .github/echo/mysql/secure \
+            .github/echo/mysql/permissions \
+            .github/echo/mysql/account_info \
+            .github/echo/mysql/backup 
           do
-            mkdir -p ".github/echo/$d"
-            echo "echo 'mkdir -p .github/echo/$d'" >> .github/echo/logs/echo_dirs.sh
+            echo "echo 'mkdir -p $d'"
+            mkdir -p "$d"
           done
-          bash .github/echo/logs/echo_dirs.sh
 
-      - name: 🔍 서버 접속/포트/권한/소켓 echo 및 복구 스크립트 + 계정정보 저장
+      - name: 🔐 환경 정보, 포트, 방화벽, 시스템 상태 수집 및 mysqld.sock 복구
         run: |
           echo "MYSQL_USER=$MYSQL_USER" > .github/echo/mysql/account_info/mysql_env.txt
           echo "MYSQL_PASSWORD=$MYSQL_PASSWORD" >> .github/echo/mysql/account_info/mysql_env.txt
@@ -58,7 +63,8 @@ jobs:
           echo "MASS_TXN=$MASS_TXN" >> .github/echo/mysql/account_info/mysql_env.txt
 
           sudo lsof -i :3306 > .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] 포트 사용 안 함"
-          nc -zv 127.0.0.1 3306 || echo "[✅] netcat 3306 연결 실패 (사용 가능 상태)" >> .github/echo/mysql/portcheck/3306_check.txt
+          nc -zv 127.0.0.1 3306 >> .github/echo/mysql/portcheck/3306_check.txt || echo "[✅] netcat 3306 연결 실패 (사용 가능 상태)"
+
           sudo iptables -L -n -v --line-numbers > .github/echo/mysql/firewall/iptables_rules.txt || echo "[❌] iptables 명령 실패" | tee -a .github/echo/mysql/firewall/iptables_rules.txt
 
           uname -a > .github/echo/mysql/scripts/uname_info.txt
@@ -71,11 +77,35 @@ jobs:
             echo '[❗] /var/run/mysqld 없음 → 생성' | tee -a .github/echo/mysql/sock/sock_recovery.txt
             sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld
           fi
+
           if [ ! -S /var/run/mysqld/mysqld.sock ]; then
             echo '[❗] mysqld.sock 없음 → mysqld_safe 실행' | tee -a .github/echo/mysql/sock/sock_recovery.txt
+            sudo zip -r .github/echo/mysql/backup/mysqld_recovery_$(date +%Y%m%d_%H%M).zip /var/run/mysqld || true
             sudo mysqld_safe --skip-grant-tables --skip-networking > .github/echo/mysql/sock/mysqld_safe_stdout.log 2>&1 &
             sleep 10
             ps -ef | grep mysqld >> .github/echo/mysql/sock/sock_recovery.txt
+          fi
+
+      - name: 🔁 iptables 강제 허용 설정 (3306)
+        run: |
+          sudo iptables -I INPUT -p tcp --dport 3306 -j ACCEPT
+          sudo iptables-save > .github/echo/mysql/firewall/iptables_post_accept.txt
+
+      - name: 🚀 mysqladmin ping 이중 확인 + 3307 fallback
+        run: |
+          if mysqladmin ping -h 127.0.0.1 -P 3306 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent; then
+            echo '[✅] 3306 mysqladmin ping 성공' > .github/echo/mysql/portcheck/3306_ping.txt
+          else
+            echo '[⚠️] 3306 ping 실패, 3307 fallback 시도' > .github/echo/mysql/portcheck/3306_ping.txt
+            mysqladmin ping -h 127.0.0.1 -P 3307 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent > .github/echo/mysql/portcheck/3307_ping.txt || echo '[❌] 3307 ping도 실패' >> .github/echo/mysql/portcheck/3307_ping.txt
+          fi
+
+      - name: 🔒 my.cnf 설정 echo 및 로그 저장
+        run: |
+          if [ -f /etc/mysql/my.cnf ]; then
+            cat /etc/mysql/my.cnf > .github/echo/mysql/secure/my_cnf_config.txt
+          else
+            echo '[❌] my.cnf 없음' > .github/echo/mysql/secure/my_cnf_config.txt
           fi
 
           echo "echo '[mysql_config_editor 설정]'" > .github/echo/mysql/secure/mysql_config_editor.sh
@@ -84,8 +114,16 @@ jobs:
           echo "EOF" >> .github/echo/mysql/secure/mysql_config_editor.sh
           bash .github/echo/mysql/secure/mysql_config_editor.sh > .github/echo/mysql/secure/mysql_config_editor.log
 
+      - name: 📜 사용자 권한 확인 echo
+        run: |
           echo '#!/bin/bash' > .github/echo/mysql/permissions/check_permission.sh
           echo 'id' >> .github/echo/mysql/permissions/check_permission.sh
           echo 'groups' >> .github/echo/mysql/permissions/check_permission.sh
           chmod +x .github/echo/mysql/permissions/check_permission.sh
           bash .github/echo/mysql/permissions/check_permission.sh > .github/echo/mysql/permissions/permission_result.txt
+
+      - name: 📦 All Echo/log Artifact Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullops-echo-artifacts
+          path: .github/echo
