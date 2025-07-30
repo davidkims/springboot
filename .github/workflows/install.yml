@@ -17,26 +17,20 @@ jobs:
       COUNT: ${{ github.event.inputs.COUNT || '100' }}
 
     steps:
-      - name: 파일 참조
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 개발 가상 개정 + 설치 및 시스템 업그레이드
+      - name: 📁 Preinit 디렉토리 및 MySQL root 설정
         run: |
-          sudo apt-get update -y && sudo apt-get upgrade -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server sqlite3 postgresql-client net-tools ufw curl unzip default-jdk
-          sudo apt-get install -y gnupg2 openjdk-11-jdk lsof jq || true
-          
-          sudo sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf || true
-          sudo systemctl restart mysql || sudo service mysql restart
-
-          # Echo directories
-          mkdir -p .github/echo_db/{preinit,echo_mysql,permissions,firewall,logs,run_scripts,backup,sarif,stats,grants,results,upgrade,
-                                  elk,kafka,dwh,bteq,sqlite,postgres,accounts,passwords,install_notes,
-                                  echo_table,echo_sql,echo_user,echo_grant,echo_drop,echo_alter,echo_truncate,echo_analyze,verify,
-                                  minio,nifi,spark,camunda,vault,logstash,install_logs}
-
+          mkdir -p .github/echo_db/{preinit,echo_mysql,permissions,firewall,logs,run_scripts,backup,sarif,stats,grants,results,upgrade,elk,kafka,dwh,bteq,sqlite,postgres,accounts,passwords,install_notes,echo_table,echo_sql,echo_user,echo_grant,echo_drop,echo_alter,echo_truncate,echo_analyze,echo_run_scripts,docker_compose}
           echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123'; FLUSH PRIVILEGES;" > .github/echo_db/preinit/mysql_root_password.sql
 
+      - name: 🧱 시스템 패키지 설치 및 MySQL 설정
+        run: |
+          sudo apt-get update -y && sudo apt-get upgrade -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server sqlite3 postgresql-client net-tools ufw docker.io docker-compose
+          sudo sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf || true
+          sudo systemctl restart mysql || sudo service mysql restart
           sudo mysql < .github/echo_db/preinit/mysql_root_password.sql
 
           echo '[client]' > .github/echo_db/echo_mysql/my.cnf
@@ -45,6 +39,8 @@ jobs:
           echo 'host=127.0.0.1' >> .github/echo_db/echo_mysql/my.cnf
           echo 'protocol=TCP' >> .github/echo_db/echo_mysql/my.cnf
 
+      - name: 🔐 권한/방화벽 설정 + Echo 저장
+        run: |
           echo "echo 'MYSQL PASSWORD: rootpass123'" > .github/echo_db/permissions/mysql_password_echo.sh
           echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"SHOW GRANTS FOR 'root'@'localhost';\" | tee .github/echo_db/permissions/root_grants.txt" >> .github/echo_db/permissions/mysql_password_echo.sh
           chmod +x .github/echo_db/permissions/mysql_password_echo.sh
@@ -58,11 +54,9 @@ jobs:
           sudo netstat -tuln | tee .github/echo_db/firewall/netstat_output.txt
           sudo ufw status verbose | tee .github/echo_db/firewall/ufw_status_verbose.txt
 
-          echo "[OK] MySQL root 권한 바이더 구성, 패스워드 확인, 방화범 보조 echo 완료"
-
-      - name: 테이블/계정/사용자 자동 생성 + 확인 시스템
+      - name: 🏗️ 테이블/계정/쿼리/스크립트 자동 생성
         run: |
-          for d in echo_table echo_sql echo_user echo_grant echo_drop echo_alter echo_truncate echo_analyze echo_run_scripts echo_accounts echo_passwords verify; do
+          for d in echo_table echo_sql echo_user echo_grant echo_drop echo_alter echo_truncate echo_analyze echo_run_scripts accounts passwords; do
             mkdir -p ".github/echo_db/$d"
           done
 
@@ -80,24 +74,53 @@ jobs:
             echo "ALTER TABLE $T ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;" > .github/echo_db/echo_alter/alter_$T.sql
             echo "TRUNCATE TABLE $T;" > .github/echo_db/echo_truncate/trunc_$T.sql
             echo "ANALYZE TABLE $T;" > .github/echo_db/echo_analyze/analyze_$T.sql
-
-            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/echo_user/$U.sql)\" || echo '[WARN] Create user failed'" >> .github/echo_db/run_scripts/init_user.sh
-            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/echo_grant/grant_$U.sql)\" || echo '[WARN] Grant failed'" >> .github/echo_db/run_scripts/init_grant.sh
-            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"SELECT user FROM mysql.user WHERE user='$U';\" | tee .github/echo_db/verify/verify_user_$U.txt" >> .github/echo_db/run_scripts/init_verify.sh
           done
-          chmod +x .github/echo_db/run_scripts/*.sh
 
-      - name: 필수 보조 - MinIO, Spark, NiFi, Camunda, Vault, Logstash
+          for kind in table sql user grant drop alter truncate analyze; do
+            echo "#!/bin/bash" > .github/echo_db/run_scripts/init_${kind}.sh
+            chmod +x .github/echo_db/run_scripts/init_${kind}.sh
+          done
+
+          for i in $(seq 1 $COUNT); do
+            T="mega_table_$i"
+            U="user_$i"
+            for kind in table sql user grant drop alter truncate analyze; do
+              fpath=".github/echo_db/echo_${kind}/${kind}_$T.sql"
+              [ -f "$fpath" ] && echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db < $fpath || echo '[WARN] 실행 실패: $fpath'" >> .github/echo_db/run_scripts/init_${kind}.sh
+            done
+            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/grants/grants_$U.sql)\" | tee .github/echo_db/results/grants_$U.log" >> .github/echo_db/run_scripts/init_grant.sh
+          done
+
+      - name: 💾 백업, 통계, SARIF
         run: |
-          echo "도구 설치 로그 저장 중..." > .github/echo_db/install_logs/init.log
-          echo "curl -O https://dl.min.io/server/minio/release/linux-amd64/minio" >> .github/echo_db/install_logs/init.log
-          echo "curl -O https://downloads.apache.org/nifi/latest/nifi-1.24.0-bin.zip" >> .github/echo_db/install_logs/init.log
-          echo "curl -O https://downloads.apache.org/spark/spark-3.5.0/spark-3.5.0-bin-hadoop3.tgz" >> .github/echo_db/install_logs/init.log
-          echo "curl -O https://downloads.camunda.cloud/release/camunda-bpm/tomcat/camunda-bpm-tomcat-7.20.0.zip" >> .github/echo_db/install_logs/init.log
-          echo "curl -O https://releases.hashicorp.com/vault/1.13.3/vault_1.13.3_linux_amd64.zip" >> .github/echo_db/install_logs/init.log
-          echo "apt-get install -y logstash || echo 'logstash install failed'" >> .github/echo_db/install_logs/init.log
+          mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e "SHOW TABLES FROM test_db;" | tee .github/echo_db/stats/show_tables.log || echo '[WARN] 테이블 표시 실패'
+          mysqldump --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db > .github/echo_db/backup/mysql_backup.sql || echo '[WARN] mysqldump 실패'
+          echo '{ "version": "2.1.0", "runs": [{ "tool": { "driver": { "name": "mockql" } }, "results": [{ "message": { "text": "SQL 실행 성공" } }] }] }' > .github/echo_db/sarif/mock_result.sarif
+          echo "총 테이블 수: $COUNT" > .github/echo_db/stats/table_count.log
+          grep -r "INSERT INTO" .github/echo_db/echo_sql | wc -l > .github/echo_db/stats/insert_count.log
 
-      - name: 결과 목록 보건
+      - name: 🚀 GitHub Pages 업로드
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .github/echo_db
+          publish_branch: gh-pages
+
+      - name: ☁️ AWS S3 업로드 (옵션)
+        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: 'ap-northeast-2'
+        run: |
+          aws s3 cp --recursive .github/echo_db/backup/ s3://your-bucket-name/echo_db/backup/ || echo '[WARN] S3 업로드 실패'
+
+      - name: 🧠 추가 설치 메모 + Docker 자동화
+        run: |
+          echo "Kafka 메시지 전송 자동화, Spark + NiFi + Logstash 파이프라인 구성, SQL 병렬 쿼리 및 Docker 전환 기능은 install_notes에 문서화됨" > .github/echo_db/install_notes/extensions.txt
+          echo "도커 기반 실행 예시: docker-compose -f .github/echo_db/docker_compose/docker-compose.yml up -d" >> .github/echo_db/install_notes/extensions.txt
+
+      - name: 📜 전체 결과 출력
         run: |
           find .github/echo_db -type f | sort | while read f; do
             echo "--- $f"
