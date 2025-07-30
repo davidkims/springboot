@@ -1,4 +1,4 @@
-name: 🏢 MEGA DB Echo FullOps + 설치 + 에코 + 실행 통합
+name: 🏢 MEGA DB Echo FullOps + 설치 + Eco + 실행 통합
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
   mega-echo:
     runs-on: ubuntu-latest
     env:
-      COUNT: ${{ inputs.COUNT || 100 }}
+      COUNT: ${{ github.event.inputs.COUNT || '100' }}
 
     steps:
       - name: 파일 채팅
@@ -26,7 +26,7 @@ jobs:
           sudo sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf || true
           sudo systemctl restart mysql || sudo service mysql restart
           sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123'; FLUSH PRIVILEGES;"
-          mkdir -p .github/echo_db/{echo_mysql,echo_dirs,logs,run_scripts,backup,sarif,stats}
+          mkdir -p .github/echo_db/{echo_mysql,echo_dirs,logs,run_scripts,backup,sarif,stats,grants,results}
           echo '[client]' > .github/echo_db/echo_mysql/my.cnf
           echo 'user=root' >> .github/echo_db/echo_mysql/my.cnf
           echo 'password=rootpass123' >> .github/echo_db/echo_mysql/my.cnf
@@ -36,13 +36,13 @@ jobs:
       - name: 대량 echo SQL/사용자 생성
         run: |
           COUNT=${COUNT:-100}
-          for d in echo_table echo_sql echo_user echo_grant echo_drop echo_alter echo_truncate echo_analyze echo_run_scripts results grants stats; do
+          for d in echo_table echo_sql echo_user echo_grant echo_drop echo_alter echo_truncate echo_analyze echo_run_scripts results stats grants; do
             mkdir -p ".github/echo_db/$d"
           done
           for i in $(seq 1 $COUNT); do
             T="mega_table_$i"
             echo "CREATE TABLE IF NOT EXISTS $T (id INT AUTO_INCREMENT PRIMARY KEY, data VARCHAR(255));" > .github/echo_db/echo_table/$T.sql
-            echo "INSERT INTO $T (data) VALUES ('샘플데이터_$i');" > .github/echo_db/echo_sql/insert_$T.sql
+            echo "INSERT INTO $T (data) VALUES ('sample_data_$i');" > .github/echo_db/echo_sql/insert_$T.sql
             echo "SELECT * FROM $T;" > .github/echo_db/echo_sql/select_$T.sql
             echo "CREATE USER 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT SELECT, INSERT ON test_db.$T TO 'user_$i'@'%';" > .github/echo_db/echo_user/user_$i.sql
             echo "REVOKE ALL ON $T FROM 'user_$i'@'%';" > .github/echo_db/echo_grant/revoke_$T.sql
@@ -72,32 +72,32 @@ jobs:
 
       - name: 바크업 (MySQL/PSQL/SQLite) + SARIF + 통계
         run: |
-          mysqldump --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db > .github/echo_db/backup/mysql_backup.sql || echo '[오류] mysqldump'
+          mysqldump --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db > .github/echo_db/backup/mysql_backup.sql || echo '[ERROR] mysqldump failed'
           echo '-- mock PSQL' > .github/echo_db/backup/psql_backup.sql
           echo '.dump test_db' | sqlite3 /tmp/test.db > .github/echo_db/backup/sqlite_backup.sql || true
-          echo '{ "version": "2.1.0", "runs": [{ "tool": { "driver": { "name": "mockql" }, "results": [{ "message": { "text": "SQL Injection 가능성" } }] } }] }' > .github/echo_db/sarif/mock_result.sarif
-          echo "전체 테이블 수: $COUNT" > .github/echo_db/stats/table_count.log
+          echo '{ "version": "2.1.0", "runs": [{ "tool": { "driver": { "name": "mockql" }, "results": [{ "message": { "text": "SQL Injection risk" } }] } }] }' > .github/echo_db/sarif/mock_result.sarif
+          echo "Total tables: $COUNT" > .github/echo_db/stats/table_count.log
           grep -r "INSERT INTO" .github/echo_db/echo_sql | wc -l > .github/echo_db/stats/insert_count.log
 
-      - name: GitHub Pages 업로드
+      - name: GitHub Pages Upload
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .github/echo_db
           publish_branch: gh-pages
 
-      - name: AWS S3 업로드 (옵션)
-        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+      - name: AWS S3 Upload (optional)
+        if: ${{ env.AWS_ACCESS_KEY_ID != '' }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: 'ap-northeast-2'
+          AWS_REGION: ap-northeast-2
         run: |
-          aws s3 cp --recursive .github/echo_db/backup/ s3://your-bucket-name/echo_db/backup/ || echo '[건지보호] S3 업로드 실패'
+          aws s3 cp --recursive .github/echo_db/backup/ s3://your-bucket-name/echo_db/backup/ || echo '[WARNING] S3 upload failed'
 
-      - name: 에코 결과 출력
+      - name: 결과 출력
         run: |
           find .github/echo_db -type f | sort | while read f; do
             echo "--- $f"
-            cat "$f" || echo "(읽기 실패)"
+            cat "$f" || echo "(read failed)"
           done
