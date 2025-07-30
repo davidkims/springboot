@@ -20,61 +20,59 @@ jobs:
       - name: 파일 채팅
         uses: actions/checkout@v4
 
-      - name: MySQL + System 업그레이드 + 설치 + 초기화 + 에코 + 패스워드 보조 + 권한 설정
+      - name: 필수 여론 + 설치 + 데이터 출력 단계 모두 생성
         run: |
           sudo apt-get update -y && sudo apt-get upgrade -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server sqlite3 postgresql-client net-tools ufw
           sudo sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf || true
           sudo systemctl restart mysql || sudo service mysql restart
 
-          # root 패스워드 초기화
-          sudo mysql -uroot -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123'; FLUSH PRIVILEGES;"
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123'; FLUSH PRIVILEGES;"
 
-          # 에코 디렉토리 생성
-          for d in echo_mysql echo_dirs logs run_scripts backup sarif stats grants results upgrade permissions firewall echo_passwords echo_accounts; do
-            mkdir -p ".github/echo_db/$d"
-          done
+          mkdir -p .github/echo_db/{echo_mysql,echo_dirs,logs,run_scripts,backup,sarif,stats,grants,results,upgrade,permissions,firewall,echo_accounts,echo_passwords,echo_account_tables,echo_password_sql}
 
-          # .my.cnf 설정
           echo '[client]' > .github/echo_db/echo_mysql/my.cnf
           echo 'user=root' >> .github/echo_db/echo_mysql/my.cnf
           echo 'password=rootpass123' >> .github/echo_db/echo_mysql/my.cnf
           echo 'host=127.0.0.1' >> .github/echo_db/echo_mysql/my.cnf
           echo 'protocol=TCP' >> .github/echo_db/echo_mysql/my.cnf
 
-          # root 권한 echo
           echo "echo 'MYSQL PASSWORD: rootpass123'" > .github/echo_db/permissions/mysql_password_echo.sh
           echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"SHOW GRANTS FOR 'root'@'localhost';\" | tee .github/echo_db/permissions/root_grants.txt" >> .github/echo_db/permissions/mysql_password_echo.sh
           chmod +x .github/echo_db/permissions/mysql_password_echo.sh
           bash .github/echo_db/permissions/mysql_password_echo.sh
 
-          # firewall echo
           echo "ufw status" > .github/echo_db/firewall/firewall_check.sh
           echo "netstat -tuln | grep 3306" >> .github/echo_db/firewall/firewall_check.sh
           chmod +x .github/echo_db/firewall/firewall_check.sh
           bash .github/echo_db/firewall/firewall_check.sh | tee .github/echo_db/firewall/firewall_status.log
+
           sudo netstat -tuln | tee .github/echo_db/firewall/netstat_output.txt
           sudo ufw status verbose | tee .github/echo_db/firewall/ufw_status_verbose.txt
 
-      - name: 대량 계정/패스워드 echo 파일/스크립트 생성
+      - name: 계정/Password/Table 대량 생성 + 실행 전 모든 Echo 준비
         run: |
           COUNT=${COUNT:-100}
           for i in $(seq 1 $COUNT); do
-            echo "user_$i" > .github/echo_db/echo_accounts/account_$i.txt
-            echo "pw_$i" > .github/echo_db/echo_passwords/password_$i.txt
+            echo "CREATE USER 'user_$i'@'%' IDENTIFIED BY 'pw_$i'; GRANT SELECT, INSERT ON test_db.* TO 'user_$i'@'%';" > .github/echo_db/echo_accounts/user_$i.sql
+            echo "SET PASSWORD FOR 'user_$i'@'%' = PASSWORD('pw_$i');" > .github/echo_db/echo_password_sql/pw_user_$i.sql
+            echo "user_$i | pw_$i" >> .github/echo_db/echo_passwords/user_list.txt
+            echo "CREATE TABLE IF NOT EXISTS user_table_$i (id INT PRIMARY KEY AUTO_INCREMENT, username VARCHAR(50), password VARCHAR(50));" > .github/echo_db/echo_account_tables/user_table_$i.sql
+          done
 
-            echo "CREATE USER IF NOT EXISTS 'user_$i'@'%' IDENTIFIED BY 'pw_$i';" > .github/echo_db/echo_accounts/create_user_$i.sql
-            echo "SET PASSWORD FOR 'user_$i'@'%' = PASSWORD('pw_$i');" >> .github/echo_db/echo_accounts/create_user_$i.sql
-            echo "GRANT ALL ON *.* TO 'user_$i'@'%' WITH GRANT OPTION;" >> .github/echo_db/echo_accounts/create_user_$i.sql
-
-            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/echo_accounts/create_user_$i.sql)\"" >> .github/echo_db/run_scripts/create_user_all.sh
+          echo "#!/bin/bash" > .github/echo_db/run_scripts/create_user_all.sh
+          for i in $(seq 1 $COUNT); do
+            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/echo_accounts/user_$i.sql)\"" >> .github/echo_db/run_scripts/create_user_all.sh
+            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/echo_password_sql/pw_user_$i.sql)\"" >> .github/echo_db/run_scripts/create_user_all.sh
           done
           chmod +x .github/echo_db/run_scripts/create_user_all.sh
           bash .github/echo_db/run_scripts/create_user_all.sh
 
-      - name: 결과 출력
-        run: |
-          find .github/echo_db -type f | sort | while read f; do
-            echo "--- $f"
-            cat "$f" || echo "(read failed)"
+          echo "#!/bin/bash" > .github/echo_db/run_scripts/create_user_tables.sh
+          for i in $(seq 1 $COUNT); do
+            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db < .github/echo_db/echo_account_tables/user_table_$i.sql" >> .github/echo_db/run_scripts/create_user_tables.sh
           done
+          chmod +x .github/echo_db/run_scripts/create_user_tables.sh
+          bash .github/echo_db/run_scripts/create_user_tables.sh
+
+          echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"USE test_db; SHOW TABLES;\" | tee .github/echo_db/stats/verify_tables.log"
