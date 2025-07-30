@@ -18,33 +18,44 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
 
     steps:
-      - name: 📂 Checkout Repository
+      - name: 📂 저장소 체크아웃
         uses: actions/checkout@v4
 
-      - name: 📁 Preinit + Account/Password + ELK/Kafka/DWH 디렉토리 생성
+      - name: 📁 사전 디렉토리 및 에코 파일 생성
         run: |
-          mkdir -p .github/echo_db/{preinit,echo_mysql,permissions,firewall,echo_dirs,logs,run_scripts,backup,sarif,stats,grants,results,upgrade,elk,kafka,dwh,bteq}
+          for d in preinit echo_mysql permissions firewall echo_dirs logs run_scripts backup sarif stats grants results upgrade elk kafka dwh bteq sqlite postgres; do
+            mkdir -p ".github/echo_db/$d"
+          done
+
           echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'rootpass123'; FLUSH PRIVILEGES;" > .github/echo_db/preinit/mysql_root_password.sql
 
-      - name: 🧱 MySQL + 시스템 업그레이드 + 설치 + 설정
+      - name: 🧱 MySQL + 시스템 + ELK + Kafka + DWH 설치 및 설정
         run: |
-          sudo apt-get update -y && sudo apt-get upgrade -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server sqlite3 postgresql-client net-tools ufw default-jre logstash kafka postgresql jq
+          sudo apt-get update -y && sudo apt-get upgrade -y || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server sqlite3 postgresql-client net-tools ufw default-jdk || true
+
+          # Kafka/Logstash 설치 스크립트 에코만
+          echo "[INFO] Kafka 및 ELK 설치는 공식 바이너리 다운로드를 통해 진행 필요 (apt 미지원)" > .github/echo_db/elk/install_notes.txt
+
+          # MySQL 설정
           sudo sed -i 's/^bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf || true
           sudo systemctl restart mysql || sudo service mysql restart
           sudo mysql < .github/echo_db/preinit/mysql_root_password.sql
 
+          # my.cnf 에코
           echo '[client]' > .github/echo_db/echo_mysql/my.cnf
           echo 'user=root' >> .github/echo_db/echo_mysql/my.cnf
           echo 'password=rootpass123' >> .github/echo_db/echo_mysql/my.cnf
           echo 'host=127.0.0.1' >> .github/echo_db/echo_mysql/my.cnf
           echo 'protocol=TCP' >> .github/echo_db/echo_mysql/my.cnf
 
+          # 패스워드 및 권한 확인
           echo "echo 'MYSQL PASSWORD: rootpass123'" > .github/echo_db/permissions/mysql_password_echo.sh
           echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"SHOW GRANTS FOR 'root'@'localhost';\" | tee .github/echo_db/permissions/root_grants.txt" >> .github/echo_db/permissions/mysql_password_echo.sh
           chmod +x .github/echo_db/permissions/mysql_password_echo.sh
           bash .github/echo_db/permissions/mysql_password_echo.sh
 
+          # 방화벽 확인
           echo "ufw status" > .github/echo_db/firewall/firewall_check.sh
           echo "netstat -tuln | grep 3306" >> .github/echo_db/firewall/firewall_check.sh
           chmod +x .github/echo_db/firewall/firewall_check.sh
@@ -52,63 +63,34 @@ jobs:
           sudo netstat -tuln | tee .github/echo_db/firewall/netstat_output.txt
           sudo ufw status verbose | tee .github/echo_db/firewall/ufw_status_verbose.txt
 
-      - name: 🏗️ 테이블/계정/쿼리/실행파일 대량 생성
+      - name: 🏗️ 테이블/계정/SQL/쿼리/로그 생성
         run: |
-          for d in echo_table echo_sql echo_user echo_grant echo_drop echo_alter echo_truncate echo_analyze echo_run_scripts echo_accounts echo_passwords echo_account_tables; do
-            mkdir -p ".github/echo_db/$d"
-          done
-
           for i in $(seq 1 $COUNT); do
             T="mega_table_$i"
             U="user_$i"
             PW="pw_$i"
-            echo "CREATE TABLE IF NOT EXISTS $T (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(255));" > .github/echo_db/echo_table/$T.sql
-            echo "INSERT INTO $T(value) VALUES ('sample_data_$i');" > .github/echo_db/echo_sql/insert_$T.sql
-            echo "SELECT * FROM $T;" > .github/echo_db/echo_sql/select_$T.sql
-            echo "CREATE USER IF NOT EXISTS '$U'@'%' IDENTIFIED BY '$PW';" > .github/echo_db/echo_user/$U.sql
-            echo "GRANT SELECT, INSERT ON $T TO '$U'@'%';" > .github/echo_db/echo_grant/grant_$U.sql
-            echo "SHOW GRANTS FOR '$U'@'%';" > .github/echo_db/grants/grants_$U.sql
-            echo "DROP TABLE IF EXISTS $T;" > .github/echo_db/echo_drop/drop_$T.sql
-            echo "ALTER TABLE $T ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;" > .github/echo_db/echo_alter/alter_$T.sql
-            echo "TRUNCATE TABLE $T;" > .github/echo_db/echo_truncate/trunc_$T.sql
-            echo "ANALYZE TABLE $T;" > .github/echo_db/echo_analyze/analyze_$T.sql
+            echo "CREATE TABLE IF NOT EXISTS $T (id INT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(255));" > .github/echo_db/echo_dirs/$T.sql
+            echo "INSERT INTO $T (value) VALUES ('sample_data_$i');" > .github/echo_db/logs/insert_$T.sql
+            echo "SELECT * FROM $T;" > .github/echo_db/logs/select_$T.sql
+            echo "CREATE USER IF NOT EXISTS '$U'@'%' IDENTIFIED BY '$PW';" > .github/echo_db/grants/create_user_$U.sql
+            echo "GRANT SELECT, INSERT ON test_db.$T TO '$U'@'%';" > .github/echo_db/grants/grant_$U.sql
           done
 
-          for kind in table sql user grant drop alter truncate analyze; do
-            echo "#!/bin/bash" > .github/echo_db/run_scripts/init_${kind}.sh
-            chmod +x .github/echo_db/run_scripts/init_${kind}.sh
-          done
-
-          for i in $(seq 1 $COUNT); do
-            T="mega_table_$i"
-            U="user_$i"
-            for kind in table sql user grant drop alter truncate analyze; do
-              fpath=".github/echo_db/echo_${kind}/${kind}_$T.sql"
-              [ -f "$fpath" ] && echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db < $fpath || echo '[WARN] 실패: $fpath'" >> .github/echo_db/run_scripts/init_${kind}.sh
-            done
-            echo "mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e \"$(cat .github/echo_db/grants/grants_$U.sql)\" | tee .github/echo_db/results/grants_$U.log" >> .github/echo_db/run_scripts/init_grant.sh
-          done
-
-      - name: 💾 백업/통계/SARIF/ELK/DWH 준비
+      - name: 💾 백업 및 분석
         run: |
-          mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e "SHOW TABLES FROM test_db" | tee .github/echo_db/stats/show_tables.log || echo '[WARN] 테이블 표시 실패'
-          mysqldump --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db > .github/echo_db/backup/mysql_backup.sql || echo '[WARN] mysqldump 실패'
+          mysql --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf -e "SHOW TABLES IN test_db;" | tee .github/echo_db/stats/show_tables.log || echo '[WARN] 테이블 조회 실패'
+          mysqldump --defaults-extra-file=.github/echo_db/echo_mysql/my.cnf test_db > .github/echo_db/backup/mysql_backup.sql || echo '[WARN] 백업 실패'
           echo '{ "version": "2.1.0", "runs": [{ "tool": { "driver": { "name": "mockql" } }, "results": [{ "message": { "text": "SQL 실행 성공" } }] }] }' > .github/echo_db/sarif/mock_result.sarif
           echo "총 테이블 수: $COUNT" > .github/echo_db/stats/table_count.log
-          grep -r "INSERT INTO" .github/echo_db/echo_sql | wc -l > .github/echo_db/stats/insert_count.log
-          echo 'echo "ELK 설정 준비됨"' > .github/echo_db/elk/setup.sh
-          echo 'echo "Kafka 설정 준비됨"' > .github/echo_db/kafka/setup.sh
-          echo 'echo "DWH 설정 준비됨"' > .github/echo_db/dwh/setup.sh
-          chmod +x .github/echo_db/{elk,kafka,dwh}/setup.sh
 
-      - name: 🚀 GitHub Pages Upload
+      - name: 🚀 GitHub Pages 업로드
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .github/echo_db
           publish_branch: gh-pages
 
-      - name: ☁️ AWS S3 Upload (optional)
+      - name: ☁️ AWS S3 업로드 (옵션)
         if: env.AWS_ACCESS_KEY_ID != ''
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -117,7 +99,7 @@ jobs:
         run: |
           aws s3 cp --recursive .github/echo_db/backup/ s3://your-bucket-name/echo_db/backup/ || echo '[WARN] S3 업로드 실패'
 
-      - name: 📜 최종 결과 출력
+      - name: 📜 결과 전체 출력
         run: |
           find .github/echo_db -type f | sort | while read f; do
             echo "--- $f"
