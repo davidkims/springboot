@@ -1,99 +1,72 @@
-name: 🏢 MEGA DB EchoOps + All-in-One 설치/에코/권한/컨테이너/복원/보안/미들웨어/금융/대량 SQL 통합
+name: 🏢 MEGA DB EchoOps + 전체 컨테이너 설치/구본/재배포/검증 확장
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '5,20,35,50 * * * *'
+    - cron: '0,15,30,45 * * * *'
 
 jobs:
-  mega-echo:
+  container-fix:
     runs-on: ubuntu-latest
     steps:
-    - name: 📂 Checkout
+    - name: 파일 검색
       uses: actions/checkout@v4
 
-    - name: 📁 디렉토리 및 에코 생성
+    - name: 가상 보호 파일 및 설치 전 결정
       run: |
-        set -e
-        for d in echo_{dirs,logs,containers/install,restart}; do
-          mkdir -p ".github/${d}"
-          echo "echo '[ECHO] 생성된 디렉토리: .github/${d}'" >> .github/echo_dirs/create_dirs.sh
-        done
-        chmod +x .github/echo_dirs/create_dirs.sh
-        .github/echo_dirs/create_dirs.sh
+        mkdir -p .github/echo_logs .github/echo_containers/create .github/echo_containers/install
+        echo "[INFO] 가상 보호값 설정 OK"
 
-    - name: 🚀 컨테이너 생성 스크립트 및 echo 설치 스크립트 생성
+    - name: 컨테이너 생성 + 보호 값 설정
       run: |
+        cat <<EOF > .github/echo_containers/create/create_all.sh
+        #!/bin/bash
         set -e
-        declare -a CONTAINERS=(
-          "mysql:8.0" "postgres:15" "mongo" "redis" "gvenzl/oracle-xe"
-          "mcr.microsoft.com/mssql/server:2022-latest" "nouchka/sqlite3" "cassandra"
-          "clickhouse/clickhouse-server" "bitnami/kafka:latest" "rabbitmq:3-management"
-          "minio/minio" "prom/prometheus" "vault"
-        )
-        declare -a NAMES=(
-          "mysql_test" "pg_test" "mongo_test" "redis_test" "oracle_xe"
-          "mssql_test" "sqlite_test" "cassandra_test"
-          "clickhouse_test" "kafka_test" "rabbitmq_test"
-          "minio_test" "prometheus_test" "vault_test"
-        )
-        echo "#!/bin/bash" > .github/echo_containers/create_all.sh
-        for i in "${!CONTAINERS[@]}"; do
-          name="${NAMES[$i]}"
-          image="${CONTAINERS[$i]}"
-          echo "echo '[CREATE] $name ($image) 생성 중...'" >> .github/echo_containers/create_all.sh
 
-          if [[ "$name" == "oracle_xe" ]]; then
-            echo "docker run -d --name $name -e ORACLE_PASSWORD=oracle gvenzl/oracle-xe" >> .github/echo_containers/create_all.sh
-          elif [[ "$name" == "mssql_test" ]]; then
-            echo "docker run -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=Strong!Passw0rd' -p 1433:1433 -d --name $name $image" >> .github/echo_containers/create_all.sh
-          elif [[ "$name" == "vault_test" ]]; then
-            echo "docker run -d --name $name -p 8200:8200 $image server -dev" >> .github/echo_containers/create_all.sh
-          elif [[ "$name" == "minio_test" ]]; then
-            echo "docker run -d --name $name -p 9000:9000 -e MINIO_ROOT_USER=minio -e MINIO_ROOT_PASSWORD=minio123 $image server /data" >> .github/echo_containers/create_all.sh
-          else
-            echo "docker run -d --name $name $image" >> .github/echo_containers/create_all.sh
-          fi
+        docker run -d --name mysql_test -e MYSQL_ROOT_PASSWORD=rootpass123 mysql:8.0
+        docker run -d --name pg_test -e POSTGRES_PASSWORD=pgpass123 postgres:15
+        docker run -d --name mongo_test mongo
+        docker run -d --name redis_test redis
+        docker run -d --name oracle_xe -e ORACLE_PASSWORD=oracle gvenzl/oracle-xe
+        docker run -d --name mssql_test -e "ACCEPT_EULA=Y" -e "SA_PASSWORD=Strong!Passw0rd" -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
+        docker run -d --name sqlite_test nouchka/sqlite3
+        docker run -d --name cassandra_test cassandra
+        docker run -d --name clickhouse_test clickhouse/clickhouse-server
+        docker run -d --name kafka_test \
+          -e KAFKA_CFG_PROCESS_ROLES=broker \
+          -e KAFKA_CFG_NODE_ID=0 \
+          -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092 \
+          -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+          -e KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@localhost:9093 \
+          -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+          -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT \
+          -e KAFKA_KRAFT_CLUSTER_ID=ABCDEFG123456789 \
+          -p 9092:9092 \
+          bitnami/kafka:latest
+        docker run -d --name rabbitmq_test rabbitmq:3-management
+        docker run -d --name minio_test -p 9000:9000 -e MINIO_ROOT_USER=minio -e MINIO_ROOT_PASSWORD=minio123 minio/minio server /data
+        docker run -d --name prometheus_test prom/prometheus
+        docker run -d --name vault_test -p 8200:8200 vault server -dev
 
-          # echo 설치 스크립트 생성
+        EOF
+
+        chmod +x .github/echo_containers/create/create_all.sh
+        bash .github/echo_containers/create/create_all.sh | tee .github/echo_logs/container_create.log
+
+    - name: 설치 스크립트 echo 생성 및 실행
+      run: |
+        for name in mysql_test pg_test mongo_test redis_test oracle_xe mssql_test sqlite_test cassandra_test clickhouse_test kafka_test rabbitmq_test minio_test prometheus_test vault_test; do
           echo "#!/bin/bash" > .github/echo_containers/install/install_${name}.sh
           echo "echo '[INSTALL] $name 설치 중...'" >> .github/echo_containers/install/install_${name}.sh
-          echo "docker exec $name echo '[OK] 내부 명령 실행 (샘플)'" >> .github/echo_containers/install/install_${name}.sh
-          echo "if [ \$? -ne 0 ]; then docker logs $name; echo '[ERR] $name 컨테이너 명령 실패'; fi" >> .github/echo_containers/install/install_${name}.sh
+          echo "docker exec \$name echo '[OK] 인터넷 명령 실행 시도 가상 체크'" >> .github/echo_containers/install/install_${name}.sh
+          echo "if [ \$? -ne 0 ]; then echo '[ERR] \$name 명령 실행 실패'; docker logs \$name; fi" >> .github/echo_containers/install/install_${name}.sh
           chmod +x .github/echo_containers/install/install_${name}.sh
-        done
-        chmod +x .github/echo_containers/create_all.sh
-
-    - name: ⚙️ 컨테이너 전체 실행
-      run: |
-        bash .github/echo_containers/create_all.sh | tee .github/echo_logs/container_create.log
-        docker ps -a | tee .github/echo_logs/container_ps.log
-
-    - name: ⚙️ 설치 에코 스크립트 실행
-      run: |
-        for f in .github/echo_containers/install/*.sh; do
-          echo "[RUNNING] $f"
-          bash "$f" | tee -a .github/echo_logs/install_outputs.log
+          bash .github/echo_containers/install/install_${name}.sh | tee -a .github/echo_logs/install_${name}.log
         done
 
-    - name: 🔁 재시작 스크립트 생성 및 실행
+    - name: 모든 컨테이너 상태 검증
       run: |
-        echo "#!/bin/bash" > .github/echo_restart/restart_all.sh
-        for name in mysql_test pg_test mongo_test redis_test oracle_xe mssql_test sqlite_test cassandra_test clickhouse_test kafka_test rabbitmq_test minio_test prometheus_test vault_test; do
-          echo "echo '[RESTART] $name 컨테이너 재시작'" >> .github/echo_restart/restart_all.sh
-          echo "docker restart $name || echo '[WARN] $name 재시작 실패 또는 실행 중 아님'" >> .github/echo_restart/restart_all.sh
-        done
-        chmod +x .github/echo_restart/restart_all.sh
-        bash .github/echo_restart/restart_all.sh | tee .github/echo_logs/restart_output.log
+        docker ps -a | tee .github/echo_logs/container_status_final.txt
 
-    - name: 🔎 실행 결과 검증
-      run: |
-        echo "[CHECK] docker ps 상태 확인" > .github/echo_logs/final_check.log
-        docker ps | tee -a .github/echo_logs/final_check.log
-        echo "[DONE] 컨테이너 상태 검증 완료 ✅" >> .github/echo_logs/final_check.log
-
-    - name: 📜 최종 로그 출력
-      run: |
-        echo "echo '[LOG] ✅ 전체 작업 완료: 생성 + 설치 + 재시작 + 검증 + 로그 ✅]'" > .github/echo_logs/final_summary.sh
-        chmod +x .github/echo_logs/final_summary.sh
-        .github/echo_logs/final_summary.sh
+    - name: 한글 로그 파일 종료 확인
+      run: echo "[DONE] 포함 완료: 컨테이너 생성 + 가상 보호 설치 + 검증 + 로그"
