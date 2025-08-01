@@ -1,4 +1,4 @@
-name: 🏦 MEGA DB EchoOps + Container + Upgrade + Bank AutoOps + Extended 설치 통합
+name: 🏦 MEGA DB EchoOps + Container + Upgrade + Bank AutoOps + Infinite Echo
 
 on:
   workflow_dispatch:
@@ -6,90 +6,106 @@ on:
     - cron: '5,20,35,50 * * * *'
 
 jobs:
-  mega-fullops:
+  mega-echoops:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
+    - name: 📂 Checkout
+      uses: actions/checkout@v4
 
-      - name: 📁 디렉토리 및 에코 스크립트 대량 생성
-        run: |
-          set -e
-          for d in echo_{dirs,logs,containers/install,restart,upgrade,compose,exec,images,resources,scan,codeql,trivy,scorecard,banks,packages,tools}; do
-            mkdir -p ".github/${d}"
-            echo "echo '[DIR] 생성됨: .github/${d}'" >> .github/echo_dirs/create_dirs.sh
-          done
-          chmod +x .github/echo_dirs/create_dirs.sh
-          .github/echo_dirs/create_dirs.sh
+    - name: 📁 Create echo directories
+      run: |
+        set -e
+        for d in dirs logs containers/install restart upgrade compose exec images resources scan codeql trivy scorecard banks packages tools services info autoup dockerfile compose_apps healthcheck; do
+          mkdir -p ".github/echo_${d}"
+          echo "echo '[DIR] Created: .github/echo_${d}'" >> .github/echo_dirs/create_dirs.sh
+        done
+        chmod +x .github/echo_dirs/create_dirs.sh
+        .github/echo_dirs/create_dirs.sh
 
-      - name: ⬆️ APT 업그레이드 및 충돌 방지 설정
-        run: |
-          set -e
-          echo "[PRE-UPGRADE] Cleaning and resolving held/conflicting packages..." | tee .github/echo_upgrade/pre_upgrade.log
-          sudo apt-get clean
-          sudo apt-get update -y || true
-          sudo apt-get autoremove -y || true
-          sudo apt-get autoclean -y || true
-          sudo dpkg --configure -a || true
-          sudo apt-mark unhold containerd docker.io || true
-          sudo apt-get purge -y containerd || true
-          sudo apt-get purge -y containerd.io || true
-          sudo apt-get install -f || true
-          echo "[UPGRADE] Start upgrade..." | tee .github/echo_upgrade/upgrade.log
-          sudo apt-get update -y && sudo apt-get upgrade -y | tee -a .github/echo_upgrade/upgrade.log
+    - name: ⬆️ APT Upgrade and Docker Unhold
+      run: |
+        set -e
+        sudo apt-get clean
+        sudo apt-get update -y || true
+        sudo apt-get autoremove -y || true
+        sudo apt-get autoclean -y || true
+        sudo dpkg --configure -a || true
+        sudo apt-mark unhold containerd docker.io || true
+        sudo apt-get purge -y containerd containerd.io || true
+        sudo apt-get install -f || true
+        sudo apt-get update -y && sudo apt-get upgrade -y | tee .github/echo_upgrade/apt_upgrade.log
 
-      - name: 💪 필수 패키지 설치 (충돌 방지 포함)
-        run: |
-          set -e
-          echo "[PACKAGE] Installing essential packages..." | tee .github/echo_packages/install_packages.log
-          sudo apt-get install -y --no-install-recommends \
-            curl wget net-tools git unzip ufw cron jq htop tree nano vim \
-            build-essential software-properties-common lsb-release gnupg2 \
-            ca-certificates apt-transport-https zsh nmap
-          for pkg in curl wget net-tools git unzip ufw cron jq htop tree nano vim build-essential software-properties-common lsb-release gnupg2 ca-certificates apt-transport-https zsh nmap; do
-            echo "echo '[PKG] Installed: $pkg'" >> .github/echo_packages/install_$pkg.sh
-            echo "dpkg -s $pkg | grep Version" >> .github/echo_packages/install_$pkg.sh
-            chmod +x .github/echo_packages/install_$pkg.sh
-          done
+    - name: ✨ Docker Install + Start Daemon
+      run: |
+        set -e
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        sudo usermod -aG docker $USER || true
+        sudo systemctl enable docker
+        sudo systemctl start docker
+        sleep 10
+        docker version | tee .github/echo_tools/docker_version.txt
+        docker info | tee .github/echo_tools/docker_info.txt
 
-      - name: 🚀 컨테이너/이미지 대량 설치 확장
-        run: |
-          set -e
-          declare -a ADD_CONTAINERS=(busybox alpine debian nginx httpd php node golang rust python bitnami/mysql bitnami/mongodb bitnami/redis bitnami/minio bitnami/vault quay.io/prometheus/prometheus influxdb grafana/grafana openzipkin/zipkin rabbitmq eclipse-mosquitto sonatype/nexus3 jenkins/jenkins)
-          echo "#!/bin/bash" > .github/echo_containers/create_extra.sh
-          for img in "${ADD_CONTAINERS[@]}"; do
-            name=$(echo $img | sed 's/[^a-zA-Z0-9]/_/g')
-            echo "echo '[CREATE] $name ($img)'" >> .github/echo_containers/create_extra.sh
-            echo "docker pull $img" >> .github/echo_containers/create_extra.sh
-            echo "docker run -d --rm --name $name $img" >> .github/echo_containers/create_extra.sh
-            echo "docker inspect $name > .github/echo_images/${name}_inspect.json || true" >> .github/echo_containers/create_extra.sh
-            echo "docker images | grep $img | tee .github/echo_images/${name}_image.log" >> .github/echo_containers/create_extra.sh
-          done
-          chmod +x .github/echo_containers/create_extra.sh
-          bash .github/echo_containers/create_extra.sh | tee .github/echo_logs/container_extra.log
+    - name: 🚀 Install required packages
+      run: |
+        set -e
+        PKGS="curl wget git unzip ufw jq htop tree nano vim build-essential software-properties-common lsb-release gnupg2 ca-certificates apt-transport-https zsh nmap"
+        sudo apt-get install -y --no-install-recommends $PKGS
+        for pkg in $PKGS; do
+          echo "echo '[PKG] Installed: $pkg'" >> .github/echo_packages/install_$pkg.sh
+          echo "dpkg -s $pkg | grep Version" >> .github/echo_packages/install_$pkg.sh
+          chmod +x .github/echo_packages/install_$pkg.sh
+        done
 
-      - name: 🚜 컨테이너 네트워크/볼륨/리소스 정보 수집
-        run: |
-          docker network ls | tee .github/echo_resources/docker_networks.log
-          docker volume ls | tee .github/echo_resources/docker_volumes.log
-          docker system df | tee .github/echo_resources/docker_df.log
-          docker info | tee .github/echo_resources/docker_info.log
+    - name: 🛸 Pull and Run Containers
+      run: |
+        set -e
+        echo '#!/bin/bash' > .github/echo_containers/create_extra.sh
+        IMAGES=(busybox alpine debian nginx httpd php node golang rust python \
+          bitnami/mysql bitnami/mongodb bitnami/redis bitnami/minio bitnami/vault \
+          quay.io/prometheus/prometheus influxdb grafana/grafana openzipkin/zipkin \
+          rabbitmq eclipse-mosquitto sonatype/nexus3 jenkins/jenkins)
+        for img in "${IMAGES[@]}"; do
+          name=$(echo $img | sed 's/[^a-zA-Z0-9]/_/g')
+          echo "echo '[CREATE] $name ($img)'" >> .github/echo_containers/create_extra.sh
+          echo "docker pull $img" >> .github/echo_containers/create_extra.sh
+          echo "docker run -d --rm --name $name $img || true" >> .github/echo_containers/create_extra.sh
+          echo "docker inspect $name > .github/echo_images/${name}_inspect.json || true" >> .github/echo_containers/create_extra.sh
+        done
+        chmod +x .github/echo_containers/create_extra.sh
+        bash .github/echo_containers/create_extra.sh | tee .github/echo_logs/container_creation.log
 
-      - name: 🚧 추가 도구 설치 및 echo
-        run: |
-          set -e
-          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-          sudo apt-get install -y nodejs || true
-          curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh || true
-          curl -s "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" > .github/echo_tools/install_ohmyzsh.sh
-          chmod +x .github/echo_tools/install_ohmyzsh.sh
-          echo "[TOOLS] Node, Docker, OhMyZsh 설치 스크립트 생성 완료" | tee .github/echo_tools/summary.log
+    - name: 🚧 docker-compose.yml AutoGen & Up
+      run: |
+        mkdir -p .github/compose_apps
+        cat <<EOF > .github/compose_apps/docker-compose.yml
+        version: '3'
+        services:
+          redis:
+            image: redis
+            ports:
+              - "6379:6379"
+          mysql:
+            image: mysql:8
+            environment:
+              MYSQL_ROOT_PASSWORD: rootpass123
+            ports:
+              - "3306:3306"
+        EOF
+        echo "docker-compose -f .github/compose_apps/docker-compose.yml up -d" >> .github/echo_compose/up_compose.sh
+        chmod +x .github/echo_compose/up_compose.sh
+        docker-compose -f .github/compose_apps/docker-compose.yml up -d | tee .github/echo_logs/compose_up.log
 
-      - name: 📈 최종 요약 및 정리
-        run: |
-          echo "[✅ SUMMARY] 전체 패키지/도구/이미지/컨테이너 설치 확장 + 충돌 방지 완료" | tee .github/echo_logs/final_expanded.log
-          ls -alR .github/echo_packages >> .github/echo_logs/final_expanded.log
-          ls -alR .github/echo_images >> .github/echo_logs/final_expanded.log
-          ls -alR .github/echo_resources >> .github/echo_logs/final_expanded.log
-          ls -alR .github/echo_tools >> .github/echo_logs/final_expanded.log
+    - name: 🔍 Docker Resource Info
+      run: |
+        docker ps -a | tee .github/echo_logs/docker_ps.log
+        docker network ls | tee .github/echo_resources/docker_networks.log
+        docker volume ls | tee .github/echo_resources/docker_volumes.log
+        docker system df | tee .github/echo_resources/docker_df.log
+
+    - name: 📊 Final Summary
+      run: |
+        echo "[SUMMARY] EchoOps + Container Install Complete" | tee .github/echo_logs/final_summary.log
+        find .github/echo_logs -type f >> .github/echo_logs/final_summary.log
+        find .github/echo_images -type f >> .github/echo_logs/final_summary.log
