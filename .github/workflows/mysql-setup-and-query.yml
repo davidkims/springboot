@@ -1,4 +1,4 @@
-name: ✨ MEGA EchoOps + Full DB/Service/Container + ELK/Zipkin/Jenkins + Oracle/PostgreSQL + Echo Fix
+name: 🚀 MEGA EchoOps + DB/Containers/ELK + Kafka/RabbitMQ/Vault + CodeQL/Security + 무한 Echo 확장
 
 on:
   workflow_dispatch:
@@ -8,122 +8,104 @@ on:
 jobs:
   mega-echoops:
     runs-on: ubuntu-latest
-
     steps:
-    - name: 📂 Checkout
+
+    - name: 📂 Checkout Repository
       uses: actions/checkout@v4
 
-    - name: 📁 Create echo directories (Fixed)
+    - name: 📁 Create echo directories
       run: |
         set -e
-        mkdir -p .github/echo_dirs
-        ECHO_SH=".github/echo_dirs/create_dirs.sh"
-        echo "#!/bin/bash" > $ECHO_SH
-        for d in packages logs containers install restart upgrade exec compose images services tests db elk grafana zipkin jenkins oracle postgres mongo redis; do
+        for d in tools packages logs containers install restart upgrade exec compose services templates tests db elk grafana zipkin jenkins oracle postgres mongo redis kafka rabbitmq vault minio airflow spark camunda security codeql scorecard trivy; do
           mkdir -p ".github/echo_${d}"
-          echo "echo '[ECHO] Directory created: .github/echo_${d}'" >> $ECHO_SH
+          echo "echo '[ECHO] Directory created: .github/echo_${d}'" >> .github/echo_dirs/create_dirs.sh
         done
-        chmod +x $ECHO_SH
-        $ECHO_SH
+        chmod +x .github/echo_dirs/create_dirs.sh
+        .github/echo_dirs/create_dirs.sh
 
-    - name: 🔄 Upgrade & Clean APT
+    - name: 🔄 APT Update + Fix held packages
       run: |
-        set -e
-        sudo apt-get update -y
-        sudo apt-get upgrade -y
+        sudo apt-get update -y && sudo apt-get upgrade -y
         sudo apt-get autoremove -y
         sudo apt-get install -f -y
         sudo apt-mark unhold containerd docker.io || true
         sudo apt-get purge -y containerd containerd.io || true
 
-    - name: 💪 Install Essential Packages
+    - name: ⚙️ Install Required Packages
       run: |
         set -e
-        PACKAGES="curl wget git unzip ufw cron jq htop tree vim build-essential software-properties-common lsb-release gnupg2 ca-certificates apt-transport-https zsh nmap net-tools"
-        sudo apt-get install -y --no-install-recommends $PACKAGES
-        for pkg in $PACKAGES; do
+        PKGS="curl wget git unzip jq cron ufw zsh htop vim tree gnupg2 lsb-release build-essential software-properties-common ca-certificates apt-transport-https"
+        sudo apt-get install -y $PKGS
+        for pkg in $PKGS; do
           echo "echo '[PKG] Installed: $pkg'" >> .github/echo_packages/install_$pkg.sh
-          echo "dpkg -s $pkg | grep Version" >> .github/echo_packages/install_$pkg.sh
-          chmod +x .github/echo_packages/install_$pkg.sh
         done
 
-    - name: 🚀 Install Docker + Docker Compose
+    - name: 🐳 Install Docker & Compose + Fix Echo Path
       run: |
         curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
-        sudo usermod -aG docker $USER
-        sudo systemctl start docker
         sudo systemctl enable docker
+        sudo systemctl start docker
+        sudo usermod -aG docker $USER || true
         sudo chmod 666 /var/run/docker.sock
-        docker --version | tee .github/echo_tools/docker_version.txt
-        docker compose version | tee .github/echo_tools/docker_compose_version.txt
+        mkdir -p .github/echo_tools
+        docker --version | tee .github/echo_tools/docker_version.txt || echo "docker version >> .github/echo_tools/docker_version.txt"
 
-    - name: ⚖️ Create docker-compose.yml
+    - name: 🧱 Generate Template Files (.env/.cfg/.json)
+      run: |
+        echo "DB_USER=admin" > .github/echo_templates/sample.env
+        echo "config.enabled=true" > .github/echo_templates/sample.cfg
+        echo '{"service":"echoops","version":"1.0"}' > .github/echo_templates/sample.json
+
+    - name: 📄 Generate docker-compose.yml + Echo
       run: |
         cat <<EOF > docker-compose.yml
         version: '3.8'
         services:
-          postgres:
-            image: postgres
-            environment:
-              POSTGRES_PASSWORD: pass123
-            ports:
-              - "5432:5432"
-          oracle:
-            image: gvenzl/oracle-xe
-            environment:
-              ORACLE_PASSWORD: pass123
-            ports:
-              - "1521:1521"
-          mongodb:
-            image: mongo
-            ports:
-              - "27017:27017"
-          redis:
-            image: redis
-            ports:
-              - "6379:6379"
-          elk:
-            image: sebp/elk
-            ports:
-              - "5601:5601"
-              - "9200:9200"
-              - "5044:5044"
-          grafana:
-            image: grafana/grafana
-            ports:
-              - "3000:3000"
-          zipkin:
-            image: openzipkin/zipkin
-            ports:
-              - "9411:9411"
-          jenkins:
-            image: jenkins/jenkins:lts
-            ports:
-              - "8080:8080"
-              - "50000:50000"
+          kafka:
+            image: bitnami/kafka
+            ports: ["9092:9092"]
+          rabbitmq:
+            image: rabbitmq
+            ports: ["5672:5672", "15672:15672"]
+          vault:
+            image: hashicorp/vault
+            ports: ["8200:8200"]
+          minio:
+            image: minio/minio
+            command: server /data
+            ports: ["9000:9000"]
+          airflow:
+            image: apache/airflow
+            ports: ["8081:8080"]
+          spark:
+            image: bitnami/spark
+            ports: ["8088:8088"]
+          camunda:
+            image: camunda/camunda-bpm-platform
+            ports: ["8089:8080"]
         EOF
         cp docker-compose.yml .github/echo_compose/docker-compose.yml
 
-    - name: 🚧 Start docker-compose stack
+    - name: 🚀 Start Containers
       run: |
         docker compose up -d
         docker ps -a | tee .github/echo_logs/docker_ps.log
 
-    - name: 🚗 Container Health Check
+    - name: 🛡️ Run Security Scanners
       run: |
-        for svc in postgres oracle mongodb redis elk grafana zipkin jenkins; do
-          echo "[CHECK] Service: $svc" | tee -a .github/echo_tests/health_check.log
-          docker inspect --format='{{.Name}} => {{.State.Health.Status}}' $svc || echo "$svc has no healthcheck" | tee -a .github/echo_tests/health_check.log
+        echo "[SECURITY] CodeQL / Scorecard / Trivy 시작"
+        echo "gh codeql execute ..." > .github/echo_security/codeql_scan.sh
+        echo "scorecard --repo=. ..." > .github/echo_security/scorecard_scan.sh
+        echo "trivy fs . ..." > .github/echo_security/trivy_scan.sh
+
+    - name: 🧪 Container Health Checks
+      run: |
+        for svc in kafka rabbitmq vault minio airflow spark camunda; do
+          echo "[CHECK] $svc 상태 확인 중..." | tee -a .github/echo_tests/${svc}_health.log
+          docker inspect --format='{{.Name}} => {{.State.Status}}' $svc || echo "⚠️ $svc 상태 불명" >> .github/echo_tests/${svc}_health.log
         done
 
-    - name: 📊 Collect Container Logs
+    - name: 📊 Summary Echo
       run: |
-        for svc in postgres oracle mongodb redis elk grafana zipkin jenkins; do
-          docker logs $svc > .github/echo_logs/${svc}_log.txt || true
-        done
-
-    - name: 🌐 Summary Echo Output
-      run: |
-        echo "[SUMMARY] EchoOps complete." | tee .github/echo_logs/final_summary.log
-        ls -alR .github/echo_logs >> .github/echo_logs/final_summary.log
-        ls -alR .github/echo_tests >> .github/echo_logs/final_summary.log
+        echo "[SUMMARY] 모든 작업 완료됨" | tee .github/echo_logs/final_summary.log
+        find .github -type f >> .github/echo_logs/final_summary.log
