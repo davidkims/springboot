@@ -1,4 +1,4 @@
-name: 🏦 MEGA DB EchoOps + Container + Upgrade + Bank AutoOps + Infinite Echo
+name: ✨ MEGA EchoOps + DB/Services/Containers + ELK/Zipkin/Jenkins + Oracle/PostgreSQL Full Integration
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
 jobs:
   mega-echoops:
     runs-on: ubuntu-latest
+
     steps:
     - name: 📂 Checkout
       uses: actions/checkout@v4
@@ -15,97 +16,111 @@ jobs:
     - name: 📁 Create echo directories
       run: |
         set -e
-        for d in dirs logs containers/install restart upgrade compose exec images resources scan codeql trivy scorecard banks packages tools services info autoup dockerfile compose_apps healthcheck; do
+        for d in packages logs containers install restart upgrade exec compose images services tests db elk grafana zipkin jenkins oracle postgres mongo redis; do
           mkdir -p ".github/echo_${d}"
-          echo "echo '[DIR] Created: .github/echo_${d}'" >> .github/echo_dirs/create_dirs.sh
+          echo "echo '[ECHO] Directory created: .github/echo_${d}'" >> .github/echo_dirs/create_dirs.sh
         done
         chmod +x .github/echo_dirs/create_dirs.sh
         .github/echo_dirs/create_dirs.sh
 
-    - name: ⬆️ APT Upgrade and Docker Unhold
+    - name: 🔄 Upgrade & Clean APT
       run: |
         set -e
-        sudo apt-get clean
-        sudo apt-get update -y || true
-        sudo apt-get autoremove -y || true
-        sudo apt-get autoclean -y || true
-        sudo dpkg --configure -a || true
+        sudo apt-get update -y
+        sudo apt-get upgrade -y
+        sudo apt-get autoremove -y
+        sudo apt-get install -f -y
         sudo apt-mark unhold containerd docker.io || true
         sudo apt-get purge -y containerd containerd.io || true
-        sudo apt-get install -f || true
-        sudo apt-get update -y && sudo apt-get upgrade -y | tee .github/echo_upgrade/apt_upgrade.log
 
-    - name: ✨ Docker Install + Start Daemon
+    - name: 💪 Install Essential Packages
       run: |
         set -e
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh
-        sudo usermod -aG docker $USER || true
-        sudo systemctl enable docker
-        sudo systemctl start docker
-        sleep 10
-        docker version | tee .github/echo_tools/docker_version.txt
-        docker info | tee .github/echo_tools/docker_info.txt
-
-    - name: 🚀 Install required packages
-      run: |
-        set -e
-        PKGS="curl wget git unzip ufw jq htop tree nano vim build-essential software-properties-common lsb-release gnupg2 ca-certificates apt-transport-https zsh nmap"
-        sudo apt-get install -y --no-install-recommends $PKGS
-        for pkg in $PKGS; do
+        PACKAGES="curl wget git unzip ufw cron jq htop tree vim build-essential software-properties-common lsb-release gnupg2 ca-certificates apt-transport-https zsh nmap"
+        sudo apt-get install -y --no-install-recommends $PACKAGES
+        for pkg in $PACKAGES; do
           echo "echo '[PKG] Installed: $pkg'" >> .github/echo_packages/install_$pkg.sh
           echo "dpkg -s $pkg | grep Version" >> .github/echo_packages/install_$pkg.sh
           chmod +x .github/echo_packages/install_$pkg.sh
         done
 
-    - name: 🛸 Pull and Run Containers
+    - name: 🚀 Install Docker + Docker Compose
       run: |
-        set -e
-        echo '#!/bin/bash' > .github/echo_containers/create_extra.sh
-        IMAGES=(busybox alpine debian nginx httpd php node golang rust python \
-          bitnami/mysql bitnami/mongodb bitnami/redis bitnami/minio bitnami/vault \
-          quay.io/prometheus/prometheus influxdb grafana/grafana openzipkin/zipkin \
-          rabbitmq eclipse-mosquitto sonatype/nexus3 jenkins/jenkins)
-        for img in "${IMAGES[@]}"; do
-          name=$(echo $img | sed 's/[^a-zA-Z0-9]/_/g')
-          echo "echo '[CREATE] $name ($img)'" >> .github/echo_containers/create_extra.sh
-          echo "docker pull $img" >> .github/echo_containers/create_extra.sh
-          echo "docker run -d --rm --name $name $img || true" >> .github/echo_containers/create_extra.sh
-          echo "docker inspect $name > .github/echo_images/${name}_inspect.json || true" >> .github/echo_containers/create_extra.sh
-        done
-        chmod +x .github/echo_containers/create_extra.sh
-        bash .github/echo_containers/create_extra.sh | tee .github/echo_logs/container_creation.log
+        curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
+        sudo usermod -aG docker $USER
+        sudo systemctl start docker
+        sudo systemctl enable docker
+        sudo chmod 666 /var/run/docker.sock
+        docker --version | tee .github/echo_tools/docker_version.txt
+        docker compose version | tee .github/echo_tools/docker_compose_version.txt
 
-    - name: 🚧 docker-compose.yml AutoGen & Up
+    - name: 🔧 Create docker-compose.yml
       run: |
-        mkdir -p .github/compose_apps
-        cat <<EOF > .github/compose_apps/docker-compose.yml
-        version: '3'
+        cat <<EOF > docker-compose.yml
+        version: '3.8'
         services:
+          postgres:
+            image: postgres
+            environment:
+              POSTGRES_PASSWORD: pass123
+            ports:
+              - "5432:5432"
+          oracle:
+            image: gvenzl/oracle-xe
+            environment:
+              ORACLE_PASSWORD: pass123
+            ports:
+              - "1521:1521"
+          mongodb:
+            image: mongo
+            ports:
+              - "27017:27017"
           redis:
             image: redis
             ports:
               - "6379:6379"
-          mysql:
-            image: mysql:8
-            environment:
-              MYSQL_ROOT_PASSWORD: rootpass123
+          elk:
+            image: sebp/elk
             ports:
-              - "3306:3306"
+              - "5601:5601"
+              - "9200:9200"
+              - "5044:5044"
+          grafana:
+            image: grafana/grafana
+            ports:
+              - "3000:3000"
+          zipkin:
+            image: openzipkin/zipkin
+            ports:
+              - "9411:9411"
+          jenkins:
+            image: jenkins/jenkins:lts
+            ports:
+              - "8080:8080"
+              - "50000:50000"
         EOF
-        echo "docker-compose -f .github/compose_apps/docker-compose.yml up -d" >> .github/echo_compose/up_compose.sh
-        chmod +x .github/echo_compose/up_compose.sh
-        docker-compose -f .github/compose_apps/docker-compose.yml up -d | tee .github/echo_logs/compose_up.log
+        cp docker-compose.yml .github/echo_compose/docker-compose.yml
 
-    - name: 🔍 Docker Resource Info
+    - name: 🚧 Start docker-compose stack
       run: |
+        docker compose up -d
         docker ps -a | tee .github/echo_logs/docker_ps.log
-        docker network ls | tee .github/echo_resources/docker_networks.log
-        docker volume ls | tee .github/echo_resources/docker_volumes.log
-        docker system df | tee .github/echo_resources/docker_df.log
 
-    - name: 📊 Final Summary
+    - name: 🚗 Container Health Check
       run: |
-        echo "[SUMMARY] EchoOps + Container Install Complete" | tee .github/echo_logs/final_summary.log
-        find .github/echo_logs -type f >> .github/echo_logs/final_summary.log
-        find .github/echo_images -type f >> .github/echo_logs/final_summary.log
+        for svc in postgres oracle mongodb redis elk grafana zipkin jenkins; do
+          echo "[CHECK] Service: $svc" | tee -a .github/echo_tests/health_check.log
+          docker inspect --format='{{.Name}} => {{.State.Health.Status}}' $svc || echo "$svc has no healthcheck" | tee -a .github/echo_tests/health_check.log
+        done
+
+    - name: 📊 Collect Container Logs
+      run: |
+        for svc in postgres oracle mongodb redis elk grafana zipkin jenkins; do
+          docker logs $svc > .github/echo_logs/${svc}_log.txt || true
+        done
+
+    - name: 🌐 Summary Echo Output
+      run: |
+        echo "[SUMMARY] EchoOps complete." | tee .github/echo_logs/final_summary.log
+        ls -alR .github/echo_logs >> .github/echo_logs/final_summary.log
+        ls -alR .github/echo_tests >> .github/echo_logs/final_summary.log
