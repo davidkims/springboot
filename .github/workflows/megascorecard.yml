@@ -1,11 +1,11 @@
-name: 🛡️ MEGA Scorecard + EchoOps (Split Validated)
+name: 🛡️ MEGA Scorecard + EchoOps + SARIF Upload + Pages Copy
 
 on:
   push:
     branches: [ "main" ]
   schedule:
-    - cron: '16 11 * * 2'
-    - cron: '*/3 * * * *'
+    - cron: '16 11 * * 2'  # 매주 화요일 Scorecard 실행
+    - cron: '*/3 * * * *'  # 3분마다 EchoOps 실행
   workflow_dispatch:
   branch_protection_rule:
 
@@ -13,7 +13,7 @@ permissions: read-all
 
 jobs:
   scorecard-analysis:
-    name: ✅ Validated Scorecard Upload
+    name: ✅ Scorecard 분석 및 업로드
     runs-on: ubuntu-latest
     if: github.event.repository.default_branch == github.ref_name
     permissions:
@@ -21,53 +21,63 @@ jobs:
       id-token: write
 
     steps:
-      - name: 📂 Checkout repository
+      - name: 📂 코드 체크아웃
         uses: actions/checkout@v4
 
-      - name: 🔍 Run Scorecard analysis (validated)
+      - name: 🔍 Scorecard 분석 실행
         uses: ossf/scorecard-action@v2.4.1
         with:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
 
-      - name: ☁️ Upload SARIF to GitHub Code Scanning
+      - name: ☁️ GitHub Code Scanning에 SARIF 업로드
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
 
-  post-analysis-echo:
-    name: 🔧 EchoOps, File Size, Artifact
-    runs-on: ubuntu-latest
-    if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
-
-    steps:
-      - name: 📂 Checkout repository
-        uses: actions/checkout@v4
-
-      - name: 📁 Create echo directories
-        run: |
-          for d in echo_dirs echo_scorecard echo_monitoring echo_pages; do
-            mkdir -p ".github/${d}"
-            echo "echo '[ECHO] Created directory: .github/${d}'" >> .github/${d}/create_dirs.sh
-          done
-
-      - name: 🌐 Copy SARIF to Pages directory
-        run: |
-          mkdir -p site/scorecard
-          cp results.sarif site/scorecard/scorecard-results.sarif
-          echo "echo '[ECHO] Copied SARIF to site/scorecard'" >> .github/echo_pages/copy_scorecard_sarif.sh
-
-      - name: 📦 Check Largest Files and Total Size
-        run: |
-          mkdir -p .github/echo_monitoring
-          du -ah . | sort -hr | head -n 30 > .github/echo_monitoring/top_file_sizes.txt || true
-          du -sh . > .github/echo_monitoring/total_size.txt || true
-          echo "echo '[ECHO] File size check complete'" >> .github/echo_monitoring/file_size_check.sh
-
-      - name: 📄 Upload SARIF as artifact
+      - name: 📄 SARIF 파일 아티팩트로 업로드
         uses: actions/upload-artifact@v4
         with:
           name: Scorecard-SARIF
           path: results.sarif
           retention-days: 5
+
+  post-analysis-echo:
+    name: 🔧 EchoOps + SARIF 복사 + 파일 용량 체크
+    runs-on: ubuntu-latest
+    needs: scorecard-analysis
+    if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
+
+    steps:
+      - name: 📂 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 📥 이전 job에서 SARIF 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: Scorecard-SARIF
+
+      - name: 📁 echo 디렉토리 생성
+        run: |
+          for d in echo_dirs echo_scorecard echo_monitoring echo_pages; do
+            mkdir -p ".github/${d}"
+            echo "echo '[ECHO] 디렉토리 생성: .github/${d}'" >> .github/${d}/create_dirs.sh
+          done
+
+      - name: 🌐 SARIF 파일 Pages 디렉토리로 복사
+        run: |
+          mkdir -p site/scorecard
+          cp results.sarif site/scorecard/scorecard-results.sarif
+          echo "echo '[ECHO] SARIF 복사 완료 → site/scorecard'" >> .github/echo_pages/copy_scorecard_sarif.sh
+
+      - name: 📦 대용량 파일 및 전체 크기 체크
+        run: |
+          mkdir -p .github/echo_monitoring
+          du -ah . | sort -hr | head -n 30 > .github/echo_monitoring/top_file_sizes.txt || true
+          du -sh . > .github/echo_monitoring/total_size.txt || true
+          echo "echo '[ECHO] 파일 용량 분석 완료'" >> .github/echo_monitoring/file_size_check.sh
+
+      - name: 🧪 SARIF 파일 미리보기
+        run: |
+          head -n 50 results.sarif || echo "SARIF 파일이 없습니다"
