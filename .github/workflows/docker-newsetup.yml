@@ -1,76 +1,130 @@
-name: 🏦 전체 금융기관 ALL-IN-ONE + AutoUP + SQL Echo
+name: 🏦 MEGA DB + BANKS EchoOps + Container + Upgrade + AutoUP 통합
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/3 * * * *'
+    - cron: '5,20,35,50 * * * *'
 
 jobs:
-  fintech-autoup-fullops:
+  mega-db-banks:
     runs-on: ubuntu-latest
+
     steps:
-      - name: 📂 Checkout Repository
-        uses: actions/checkout@v4
+    - name: 📂 Checkout
+      uses: actions/checkout@v4
 
-      - name: 📁 은행별 디렉토리 및 autoup/log/sql 디렉토리 생성
-        run: |
-          set -e
-          BANKS="국민 우리 신한 하나 농협 기업 수협 씨티 SC제일 케이카카오토스새마을금고 우체국 ..."
-          for B in $BANKS; do
-            for d in \
-              .github/echo/bank/$B/autoup/log \
-              .github/echo/bank/$B/autoup/targets \
-              .github/echo/bank/$B/db/sql \
-              .github/echo/bank/$B/db/query \
-              .github/echo/bank/$B/db/exec \
-              .github/echo/bank/$B/db/log; do
-              mkdir -p "$d"
-              echo "echo '[DIR] 생성됨: $d'" >> .github/echo/autoup/log/dir_create.log
-            done
+    - name: 📁 공통 디렉토리 및 에코 초기 생성
+      run: |
+        set -e
+        for d in echo_{dirs,logs,containers/install,restart,upgrade,autoup}; do
+          mkdir -p ".github/${d}"
+          echo "echo '[DIR] 생성됨: .github/${d}'" >> .github/echo_dirs/create_dirs.sh
+        done
+        chmod +x .github/echo_dirs/create_dirs.sh
+        .github/echo_dirs/create_dirs.sh
+
+    - name: ⬆️ APT 전체 업그레이드
+      run: |
+        set -e
+        echo "[UPGRADE] APT 업그레이드 시작" | tee .github/echo_upgrade/upgrade.log
+        sudo apt-get update -y && sudo apt-get upgrade -y | tee -a .github/echo_upgrade/upgrade.log
+
+    - name: 🐳 컨테이너 대량 생성 및 설치 에코 생성
+      run: |
+        set -e
+        declare -a CONTAINERS=(mysql:8.0 postgres:15 mongo redis gvenzl/oracle-xe mcr.microsoft.com/mssql/server:2022-latest)
+        declare -a NAMES=(mysql_test pg_test mongo_test redis_test oracle_xe mssql_test)
+
+        echo "#!/bin/bash" > .github/echo_containers/create_all.sh
+        for i in "${!CONTAINERS[@]}"; do
+          name="${NAMES[$i]}"
+          image="${CONTAINERS[$i]}"
+          echo "echo '[CREATE] $name ($image)'" >> .github/echo_containers/create_all.sh
+          if [[ "$name" == "oracle_xe" ]]; then
+            echo "docker run -d --name $name -e ORACLE_PASSWORD=oracle $image" >> .github/echo_containers/create_all.sh
+          elif [[ "$name" == "mssql_test" ]]; then
+            echo "docker run -d -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=Strong!Passw0rd' -p 1433:1433 --name $name $image" >> .github/echo_containers/create_all.sh
+          else
+            echo "docker run -d --name $name $image" >> .github/echo_containers/create_all.sh
+          fi
+          echo "#!/bin/bash" > .github/echo_containers/install/install_${name}.sh
+          echo "docker exec $name echo '[OK] 설치 테스트'" >> .github/echo_containers/install/install_${name}.sh
+          chmod +x .github/echo_containers/install/install_${name}.sh
+        done
+        chmod +x .github/echo_containers/create_all.sh
+
+    - name: ▶️ 컨테이너 실행
+      run: |
+        bash .github/echo_containers/create_all.sh | tee .github/echo_logs/container_create.log
+        docker ps -a | tee .github/echo_logs/container_status.log
+
+    - name: 🧪 설치 테스트 실행
+      run: |
+        for f in .github/echo_containers/install/*.sh; do
+          bash "$f" | tee -a .github/echo_logs/install_results.log
+        done
+
+    - name: 🔁 컨테이너 재시작
+      run: |
+        echo "#!/bin/bash" > .github/echo_restart/restart_all.sh
+        for name in $(docker ps -a --format '{{.Names}}'); do
+          echo "docker restart $name || echo '[WARN] $name 재시작 실패'" >> .github/echo_restart/restart_all.sh
+        done
+        chmod +x .github/echo_restart/restart_all.sh
+        bash .github/echo_restart/restart_all.sh | tee .github/echo_logs/restart.log
+
+    - name: 🏦 금융기관 디렉토리 및 자동화 생성
+      run: |
+        set -e
+        mkdir -p .github/echo/autoup/log
+
+        BANKS="국민 우리 신한 하나 농협 기업 수협 씨티 SC제일 케이카카오토스새마을금고 우체국 부산 대구 광주 전북 제주 산림조합 신협 한국씨티 JP모건 BOA HSBC UBS 도이치 한국스탠다드차타드 신용카드 롯데 삼성 현대 비씨 NH채움 하나카드 신한카드 우리카드 국민카드 기업카드 현대증권 미래에셋 NH투자 한국투자 신한투자 KB증권 삼성증권 키움 대신 신영"
+
+        for B in $BANKS; do
+          for d in \
+            .github/echo/bank/$B/autoup/log \
+            .github/echo/bank/$B/autoup/targets \
+            .github/echo/bank/$B/db/sql \
+            .github/echo/bank/$B/db/query \
+            .github/echo/bank/$B/db/exec \
+            .github/echo/bank/$B/db/log; do
+            mkdir -p "$d"
+            echo "echo '[DIR] 생성됨: $d'" >> .github/echo/autoup/log/dir_create.log
           done
 
-      - name: 🛠️ autoup 설치 및 대상 분석
-        run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y unattended-upgrades cron
-          sudo systemctl enable --now unattended-upgrades
-          sudo systemctl enable --now cron
-          echo "echo '[AUTOUP] apt list 분석 시작'" > .github/echo/autoup/log/autoup_analyze.log
-          apt list --upgradable 2>/dev/null | tee .github/echo/autoup/install/autoup_targets_all.txt
-          echo "echo '[AUTOUP] 분석 완료 및 저장됨'" >> .github/echo/autoup/log/autoup_analyze.log
+          echo "#!/bin/bash" > .github/echo/bank/$B/autoup/autoup.sh
+          echo "echo '[AUTOUP] $B 자동 업그레이드 실행'" >> .github/echo/bank/$B/autoup/autoup.sh
+          echo "sudo apt-get update && sudo apt-get upgrade -y" >> .github/echo/bank/$B/autoup/autoup.sh
+          chmod +x .github/echo/bank/$B/autoup/autoup.sh
 
-          BANKS="국민 우리 신한 하나 농협 기업 수협 씨티 SC제일 케이카카오토스새마을금고 우체국 ..."
-          for B in $BANKS; do
-            mkdir -p .github/echo/bank/$B/autoup/log .github/echo/bank/$B/autoup/targets
-            cp .github/echo/autoup/install/autoup_targets_all.txt .github/echo/bank/$B/autoup/targets/autoup_targets.txt
-            echo "echo '[AUTOUP] $B 대상 저장 완료'" >> .github/echo/bank/$B/autoup/log/target_copy.log
-          done
+          echo "#!/bin/bash" > .github/echo/bank/$B/backup/backup.sh
+          echo "echo '[BACKUP] $B 백업 실행'" >> .github/echo/bank/$B/backup/backup.sh
+          echo "tar czf /tmp/${B}_backup_\$(date +%Y%m%d_%H%M).tar.gz /etc /var/lib /home" >> .github/echo/bank/$B/backup/backup.sh
+          chmod +x .github/echo/bank/$B/backup/backup.sh
+        done
 
-      - name: 📅 SQL 자동 테이블/쿼리/실행 echo 생성
-        run: |
-          set -e
-          BANKS="국민 우리 신한 하나 농협 기업 수협 씨티 SC제일 케이카카오토스새마을금고 우체국 ..."
-          for B in $BANKS; do
-            BASE=".github/echo/bank/$B/db"
-            mkdir -p "$BASE/sql" "$BASE/query" "$BASE/exec" "$BASE/log"
+        chmod +x .github/echo/autoup/log/dir_create.log
+        bash .github/echo/autoup/log/dir_create.log || echo "[WARN] dir_create.log 실행 실패 무시"
 
-            echo "CREATE TABLE IF NOT EXISTS ledger (\n  id INT PRIMARY KEY AUTO_INCREMENT,\n  bank_name VARCHAR(50),\n  account_no VARCHAR(20),\n  tx_type VARCHAR(10),\n  amount DECIMAL(15,2),\n  tx_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n);" > "$BASE/sql/create_ledger.sql"
+    - name: ⚙️ 오토업그레이드/오토리부트/백업 cron 설정
+      run: |
+        set -e
+        sudo apt-get install -y unattended-upgrades cron
+        sudo systemctl enable unattended-upgrades && sudo systemctl start unattended-upgrades
+        sudo systemctl enable cron && sudo systemctl start cron
 
-            echo "INSERT INTO ledger (bank_name, account_no, tx_type, amount) VALUES\n('$B', 'ACC12345678', 'DEPOSIT', 100000.00),\n('$B', 'ACC12345678', 'WITHDRAW', 50000.00);" > "$BASE/query/insert_ledger.sql"
+        echo 'APT::Periodic::Update-Package-Lists "1";' | sudo tee /etc/apt/apt.conf.d/10periodic
+        echo 'APT::Periodic::Unattended-Upgrade "1";' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades
+        echo 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' | sudo tee /etc/apt/apt.conf.d/30remove-unused
+        echo 'Unattended-Upgrade::Automatic-Reboot "true";' | sudo tee /etc/apt/apt.conf.d/40auto-reboot
+        echo 'Unattended-Upgrade::Automatic-Reboot-Time "03:30";' | sudo tee /etc/apt/apt.conf.d/50auto-reboot-time
+        echo 'APT::Periodic::AutocleanInterval "7";' | sudo tee /etc/apt/apt.conf.d/60autoclean
 
-            echo "SELECT * FROM ledger WHERE bank_name = '$B';" > "$BASE/query/select_ledger.sql"
+        echo '0 3 * * * root /sbin/reboot' | sudo tee /etc/cron.d/reboot
+        echo '0 2 * * * root tar czf /tmp/system_backup_$(date +\%Y\%m\%d).tar.gz /etc /var/lib /home' | sudo tee /etc/cron.d/backup
+        echo '*/3 * * * * root /usr/bin/unattended-upgrade -d >> /var/log/unattended-upgrades/autoup.log 2>&1' | sudo tee /etc/cron.d/autoup
 
-            echo "#!/bin/bash" > "$BASE/exec/run_queries.sh"
-            echo "mysql -uroot -prootpass123 test_db < $BASE/sql/create_ledger.sql | tee $BASE/log/create.log" >> "$BASE/exec/run_queries.sh"
-            echo "mysql -uroot -prootpass123 test_db < $BASE/query/insert_ledger.sql | tee $BASE/log/insert.log" >> "$BASE/exec/run_queries.sh"
-            echo "mysql -uroot -prootpass123 test_db < $BASE/query/select_ledger.sql | tee $BASE/log/select.log" >> "$BASE/exec/run_queries.sh"
-            chmod +x "$BASE/exec/run_queries.sh"
-          done
-
-      - name: 🔁 reboot/backup/autoup 크론 echo
-        run: |
-          mkdir -p .github/echo/autoup/cron
-          echo '0 3 * * * root /sbin/reboot' > .github/echo/autoup/cron/reboot_cron.txt
-          echo '0 2 * * * root tar czf /tmp/backup_$(date +%Y%m%d_%H%M).tar.gz /etc /var/lib /home' > .github/echo/autoup/cron/backup_cron.txt
-          echo '*/3 * * * * root /usr/bin/unattended-upgrade -d >> /var/log/unattended-upgrades/autoup.log 2>&1' > .github/echo/autoup/cron/autoup_cron.txt
+    - name: 📜 최종 요약 출력
+      run: |
+        echo "[SUMMARY] 전체 통합 완료 ✅"
+        ls -alR .github/echo | tee .github/echo_logs/final_summary.log
