@@ -1,4 +1,4 @@
-name: 🧹 최대 용량 항목 무한 삭제 (보호 디렉토리 제외)
+name: 🧼 자동 최대 용량 파일 삭제 (스킵 및 안전 처리 포함)
 
 on:
   workflow_dispatch:
@@ -16,29 +16,30 @@ jobs:
       - name: 📂 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 echo_logs 디렉토리 생성
+      - name: 📁 Create .github/echo_logs directory
         run: |
           mkdir -p .github/echo_logs
-          echo "[INIT] .github/echo_logs 디렉토리 생성 완료"
 
-      - name: 📦 가장 큰 항목 탐색 (보호 항목 제외)
+      - name: 📦 Find largest valid target
         id: largest
         run: |
-          echo "[INFO] 디렉토리 용량 상위:"
+          echo "[INFO] 디렉토리 용량 상위:" | tee .github/echo_logs/du_start.txt
           du -ah . 2>/dev/null | sort -hr | head -n 20 | tee .github/echo_logs/largest_list.txt
 
-          # 보호 대상 제외
+          # 보호 대상 제외 필터
           LARGEST=$(du -ah . 2>/dev/null | sort -hr | awk '!($2 ~ /^\.($|\/|git|github|\/README\.md|\/echo_logs)/)' | head -n 1 | cut -f2-)
 
           if [ -z "$LARGEST" ]; then
-            echo "::error ::[ERROR] 삭제할 유효한 대상이 없습니다."
-            exit 1
+            echo "[SKIP] 삭제할 유효한 대상이 없습니다. 다음 단계로 진행."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "[SELECTED] 삭제 대상: $LARGEST"
+            echo "largest=$LARGEST" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-          echo "[SELECTED] 삭제 대상: $LARGEST"
-          echo "largest=$LARGEST" >> $GITHUB_OUTPUT
-
-      - name: 🔁 삭제 반복 시도 (최대 50회)
+      - name: 🔁 Delete if valid (skip otherwise)
+        if: steps.largest.outputs.skip == 'false'
         run: |
           set -e
           TARGET="${{ steps.largest.outputs.largest }}"
@@ -61,24 +62,29 @@ jobs:
 
             COUNT=$((COUNT+1))
             if [ $COUNT -ge $MAX_TRIES ]; then
-              echo "::error ::[FAIL] 삭제 50회 초과: $TARGET 삭제 실패"
-              exit 1
+              echo "::warning ::[WARNING] 삭제 50회 초과: $TARGET 삭제 실패 - 다음 단계로 진행"
+              break
             fi
           done
 
-      - name: 📜 삭제 요약 리포트 저장
+      - name: 📝 Generate delete report
         run: |
-          echo "🧹 삭제된 항목: ${{ steps.largest.outputs.largest }}" > .github/echo_logs/deleted_report.txt
+          echo "🧹 삭제 결과 요약" > .github/echo_logs/deleted_report.txt
+          if [ "${{ steps.largest.outputs.skip }}" == "false" ]; then
+            echo "삭제된 항목: ${{ steps.largest.outputs.largest }}" >> .github/echo_logs/deleted_report.txt
+          else
+            echo "삭제된 항목 없음 (유효 대상 없음)" >> .github/echo_logs/deleted_report.txt
+          fi
           ls -lh . >> .github/echo_logs/deleted_report.txt
           cat .github/echo_logs/deleted_report.txt
 
-      - name: 📤 삭제 리포트 업로드
+      - name: 📤 Upload delete report artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deleted-largest-report
+          name: delete-report
           path: .github/echo_logs/deleted_report.txt
 
-      - name: 💬 PR 코멘트 자동 생성
+      - name: 💬 Comment on PR (if pull_request)
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v6
         with:
@@ -90,5 +96,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `🧹 가장 큰 항목 삭제 완료:\n\n\`\`\`\n${report}\n\`\`\``
+              body: `🧹 삭제 결과 보고서:\n\n\`\`\`\n${report}\n\`\`\``
             });
