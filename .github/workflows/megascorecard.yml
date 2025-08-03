@@ -1,4 +1,4 @@
-name: 🛡️ MEGA Scorecard + EchoOps + SARIF + Monitoring
+name: 🛡️ MEGA Scorecard + EchoOps + SARIF + Markdown + Pages
 
 on:
   push:
@@ -36,15 +36,16 @@ jobs:
         with:
           sarif_file: results.sarif
 
-      - name: 📄 SARIF 파일 아티팩트로 저장
+      - name: 📄 결과 아티팩트 저장
         uses: actions/upload-artifact@v4
         with:
-          name: Scorecard-SARIF
-          path: results.sarif
-          retention-days: 5
+          name: Scorecard-Results
+          path: |
+            results.sarif
+            results.json
 
   post-analysis-echo:
-    name: 🔧 EchoOps + SARIF 복사 + 파일 용량 분석
+    name: 🔧 EchoOps + Markdown 변환 + SARIF 분석 + Pages
     runs-on: ubuntu-latest
     needs: scorecard-analysis
     if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
@@ -53,10 +54,10 @@ jobs:
       - name: 📂 코드 체크아웃
         uses: actions/checkout@v4
 
-      - name: 📥 이전 Scorecard SARIF 다운로드
+      - name: 📥 이전 결과 다운로드
         uses: actions/download-artifact@v4
         with:
-          name: Scorecard-SARIF
+          name: Scorecard-Results
 
       - name: 📁 echo 디렉토리 자동 생성
         run: |
@@ -65,11 +66,44 @@ jobs:
             echo "echo '[ECHO] 디렉토리 생성: .github/${d}'" >> .github/${d}/create_dirs.sh
           done
 
-      - name: 🌐 SARIF → GitHub Pages 준비 디렉토리 복사
+      - name: 🌐 SARIF 파일 복사 → GitHub Pages 대상
         run: |
           mkdir -p site/scorecard
           cp results.sarif site/scorecard/scorecard-results.sarif
+          cp results.json site/scorecard/results.json
           echo "echo '[ECHO] SARIF 복사 완료 → site/scorecard'" >> .github/echo_pages/copy_scorecard_sarif.sh
+
+      - name: 📝 Scorecard JSON → Markdown 요약 변환
+        run: |
+          set -e
+          mkdir -p site/scorecard
+          echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
+          echo "" >> site/scorecard/scorecard-summary.md
+          jq -r '
+            "### 프로젝트: \(.repo.name)\n\n" +
+            "신뢰도 점수: \(.score) / 10\n\n" +
+            "| Check | Pass | Score | Reason |\n|-------|------|--------|--------|\n" +
+            (.checks[] | 
+              "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
+            ) | join("\n")
+          ' results.json >> site/scorecard/scorecard-summary.md
+
+      - name: 📄 SARIF → Markdown 이슈 요약
+        run: |
+          echo "# 🚨 SARIF 보안 이슈 요약" > site/scorecard/sarif-summary.md
+          jq -r '.runs[].results[] | 
+            "- **[\(.level)]**: \(.message.text)\n  위치: \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine // "-")"
+          ' results.sarif >> site/scorecard/sarif-summary.md
+
+      - name: 📊 SARIF 평가 요약 (에코 로그 저장)
+        run: |
+          set -e
+          mkdir -p .github/echo_scorecard
+          TOTAL=$(jq '.runs[].results | length' results.sarif)
+          SEVERITIES=$(jq -r '.runs[].results[].level' results.sarif | sort | uniq -c)
+          echo "[SARIF] 총 이슈 수: $TOTAL" | tee .github/echo_scorecard/sarif_summary.txt
+          echo "[SARIF] 심각도 분포:" | tee -a .github/echo_scorecard/sarif_summary.txt
+          echo "$SEVERITIES" | tee -a .github/echo_scorecard/sarif_summary.txt
 
       - name: 📦 대용량 파일 및 총 디렉토리 용량 분석
         run: |
@@ -78,7 +112,8 @@ jobs:
           du -sh . > .github/echo_monitoring/total_size.txt || true
           echo "echo '[ECHO] 파일 용량 분석 완료'" >> .github/echo_monitoring/file_size_check.sh
 
-      - name: 🧪 SARIF 프리뷰 (선택 로그)
-        run: |
-          echo "SARIF 파일 상위 50줄 출력:"
-          head -n 50 results.sarif || echo "SARIF 파일 없음"
+      - name: 🚀 GitHub Pages 배포 (site 디렉토리)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
