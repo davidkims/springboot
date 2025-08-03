@@ -1,80 +1,64 @@
-name: 🛡 CodeQL + Scorecard CLI 설치 및 에코 자동화 (손실 방지 및 복사 포함)
+name: 🛡 CodeQL + Scorecard CLI 완전 설치 및 에코 자동화
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 5 * * *'  # 매일 05:00 실행
+    - cron: '0 5 * * *'
 
 jobs:
-  install-and-analyze:
+  cli-setup-and-analyze:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📂 Checkout Repository
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 에코 디렉토리 + 로그 디렉토리 최우선 생성 및 로그스크립트 생성
+      - name: 📁 에코 디렉토리 및 로그 디렉토리 생성
         run: |
           set -e
-          # 로그 디렉토리 우선 생성
-          mkdir -p .github/echo_logs
-
-          # 로그 스크립트 안전하게 초기화
+          mkdir -p .github/echo_codeql .github/echo_scorecard .github/echo_logs
           echo "#!/bin/bash" > .github/echo_logs/dir_create.sh
-          chmod +x .github/echo_logs/dir_create.sh
-
-          # 에코 디렉토리 목록 생성 및 로그에 echo 기록 추가
-          for d in echo_codeql echo_scorecard echo_cli echo_logs; do
-            mkdir -p ".github/$d"
-            echo "echo '[ECHO] 디렉토리 생성됨: .github/$d'" >> .github/echo_logs/dir_create.sh
+          for d in echo_codeql echo_scorecard echo_logs; do
+            echo "echo '[ECHO] 생성됨: .github/$d'" >> .github/echo_logs/dir_create.sh
           done
-
-          # 실행 및 복사 백업
+          chmod +x .github/echo_logs/dir_create.sh
           bash .github/echo_logs/dir_create.sh
-          cp .github/echo_logs/dir_create.sh .github/echo_logs/dir_create_backup_$(date +%Y%m%d_%H%M%S).sh
 
       - name: 🧪 CodeQL CLI 설치
         run: |
           set -e
-          mkdir -p codeql_bin
-          curl -sLO https://github.com/github/codeql-cli-binaries/releases/download/v2.16.2/codeql-linux64.zip
-          unzip -q codeql-linux64.zip -d codeql_bin
-          chmod +x codeql_bin/codeql/codeql
-          sudo mv codeql_bin/codeql/codeql /usr/local/bin/codeql
-          codeql version | tee .github/echo_codeql/codeql_version.txt
+          CODEQL_VERSION=2.16.2
+          curl -sLO https://github.com/github/codeql-cli-binaries/releases/download/v${CODEQL_VERSION}/codeql-linux64.zip
+          unzip -q codeql-linux64.zip -d /opt/codeql
+          echo "export PATH=/opt/codeql:$PATH" >> $GITHUB_ENV
+          /opt/codeql/codeql version | tee .github/echo_codeql/codeql_version.txt
 
       - name: 📊 Scorecard CLI 설치
         run: |
           set -e
-          mkdir -p scorecard_bin
-          curl -sLO https://github.com/ossf/scorecard/releases/download/v4.10.3/scorecard_4.10.3_linux_amd64.tar.gz
-          tar -xzf scorecard_4.10.3_linux_amd64.tar.gz
-          BIN=$(find scorecard_4.10.3_linux_amd64* -type f -name scorecard | head -1)
-          if [ -f "$BIN" ]; then
-            chmod +x $BIN && sudo mv $BIN /usr/local/bin/scorecard
-            scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
-          else
-            echo "::error ::[ERR] Scorecard 설치 실패: 바이너리 없음"
-            exit 1
-          fi
+          SCORECARD_VERSION=4.10.3
+          curl -sLO https://github.com/ossf/scorecard/releases/download/v${SCORECARD_VERSION}/scorecard_${SCORECARD_VERSION}_linux_amd64
+          chmod +x scorecard_${SCORECARD_VERSION}_linux_amd64
+          sudo mv scorecard_${SCORECARD_VERSION}_linux_amd64 /usr/local/bin/scorecard
+          scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
 
       - name: 🧪 CodeQL 분석 실행
         run: |
           set -e
           mkdir -p codeql-db
-          codeql database create codeql-db --language=javascript --source-root=. | tee .github/echo_codeql/create_db.log
-          codeql database analyze codeql-db github/codeql-javascript-queries --format=sarifv2.1.0 --output=.github/echo_codeql/result-codeql.sarif | tee .github/echo_codeql/analyze.log
+          /opt/codeql/codeql database create codeql-db --language=javascript --source-root=. | tee .github/echo_codeql/create_db.log
+          /opt/codeql/codeql database analyze codeql-db github/codeql-javascript-queries --format=sarifv2.1.0 --output=.github/echo_codeql/result-codeql.sarif | tee .github/echo_codeql/analyze.log
 
-      - name: 📊 Scorecard 분석 실행
+      - name: 📊 Scorecard 실행
         run: |
           set -e
           scorecard --repo=https://github.com/${{ github.repository }} --format=json --show-details > .github/echo_scorecard/results.json
           scorecard --repo=https://github.com/${{ github.repository }} --format=sarif --show-details > .github/echo_scorecard/results.sarif
 
-      - name: 📤 모든 결과 업로드
+      - name: 📤 결과 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: codeql-scorecard-echo-results
+          name: codeql-scorecard-results
           path: |
             .github/echo_codeql/
             .github/echo_scorecard/
