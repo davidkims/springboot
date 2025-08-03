@@ -1,4 +1,4 @@
-name: 🛡️ MEGA Scorecard + EchoOps + SARIF + Markdown + Pages
+name: 🛡️ MEGA Scorecard + EchoOps + SARIF + Markdown + Pages 확장판
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
     - cron: '16 11 * * 2'  # 매주 화요일 Scorecard 실행
     - cron: '*/3 * * * *'  # 3분마다 EchoOps 실행
   workflow_dispatch:
-  branch_protection_rule:
 
 permissions: read-all
 
@@ -30,6 +29,7 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
+          results_file_json: results.json  # ✅ JSON 결과 포함
 
       - name: ☁️ GitHub Code Scanning 업로드
         uses: github/codeql-action/upload-sarif@v3
@@ -45,7 +45,7 @@ jobs:
             results.json
 
   post-analysis-echo:
-    name: 🔧 EchoOps + Markdown 변환 + SARIF 분석 + Pages
+    name: 🔧 EchoOps + Markdown 변환 + SARIF 분석 + Pages 배포
     runs-on: ubuntu-latest
     needs: scorecard-analysis
     if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
@@ -54,7 +54,7 @@ jobs:
       - name: 📂 코드 체크아웃
         uses: actions/checkout@v4
 
-      - name: 📥 이전 결과 다운로드
+      - name: 📥 Scorecard 결과 다운로드
         uses: actions/download-artifact@v4
         with:
           name: Scorecard-Results
@@ -66,27 +66,33 @@ jobs:
             echo "echo '[ECHO] 디렉토리 생성: .github/${d}'" >> .github/${d}/create_dirs.sh
           done
 
-      - name: 🌐 SARIF 파일 복사 → GitHub Pages 대상
+      - name: 🔍 JSON 유효성 검사
         run: |
-          mkdir -p site/scorecard
-          cp results.sarif site/scorecard/scorecard-results.sarif
-          cp results.json site/scorecard/results.json
-          echo "echo '[ECHO] SARIF 복사 완료 → site/scorecard'" >> .github/echo_pages/copy_scorecard_sarif.sh
+          if ! jq empty results.json; then
+            echo "::error ::results.json이 유효한 JSON이 아닙니다. Markdown 변환 중단."
+            cat results.json || true
+            exit 1
+          fi
 
-      - name: 📝 Scorecard JSON → Markdown 요약 변환
+      - name: 📝 Scorecard JSON → Markdown 요약 변환 (안정화 버전)
         run: |
           set -e
           mkdir -p site/scorecard
           echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
           echo "" >> site/scorecard/scorecard-summary.md
-          jq -r '
-            "### 프로젝트: \(.repo.name)\n\n" +
-            "신뢰도 점수: \(.score) / 10\n\n" +
-            "| Check | Pass | Score | Reason |\n|-------|------|--------|--------|\n" +
-            (.checks[] | 
-              "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
-            ) | join("\n")
-          ' results.json >> site/scorecard/scorecard-summary.md
+
+          if jq -e '.repo.name and .score and .checks' results.json > /dev/null; then
+            jq -r '
+              "### 프로젝트: \(.repo.name)\n\n" +
+              "신뢰도 점수: \(.score) / 10\n\n" +
+              "| Check | Pass | Score | Reason |\n|-------|------|--------|--------|\n" +
+              (.checks[] | 
+                "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
+              ) | join("\n")
+            ' results.json >> site/scorecard/scorecard-summary.md
+          else
+            echo "_⚠️ results.json 구조가 맞지 않아 Markdown 변환 불가._" >> site/scorecard/scorecard-summary.md
+          fi
 
       - name: 📄 SARIF → Markdown 이슈 요약
         run: |
@@ -97,7 +103,6 @@ jobs:
 
       - name: 📊 SARIF 평가 요약 (에코 로그 저장)
         run: |
-          set -e
           mkdir -p .github/echo_scorecard
           TOTAL=$(jq '.runs[].results | length' results.sarif)
           SEVERITIES=$(jq -r '.runs[].results[].level' results.sarif | sort | uniq -c)
@@ -105,14 +110,21 @@ jobs:
           echo "[SARIF] 심각도 분포:" | tee -a .github/echo_scorecard/sarif_summary.txt
           echo "$SEVERITIES" | tee -a .github/echo_scorecard/sarif_summary.txt
 
-      - name: 📦 대용량 파일 및 총 디렉토리 용량 분석
+      - name: 📦 대용량 파일 및 디렉토리 용량 분석
         run: |
           mkdir -p .github/echo_monitoring
           (du -ah . | sort -hr | head -n 30) > .github/echo_monitoring/top_file_sizes.txt || true
           du -sh . > .github/echo_monitoring/total_size.txt || true
           echo "echo '[ECHO] 파일 용량 분석 완료'" >> .github/echo_monitoring/file_size_check.sh
 
-      - name: 🚀 GitHub Pages 배포 (site 디렉토리)
+      - name: 🌐 Pages용 디렉토리 구성
+        run: |
+          mkdir -p site/scorecard
+          cp results.sarif site/scorecard/scorecard-results.sarif
+          cp results.json site/scorecard/results.json
+          echo "echo '[ECHO] SARIF + JSON 복사 완료 → site/scorecard'" >> .github/echo_pages/copy_scorecard_sarif.sh
+
+      - name: 🚀 GitHub Pages 배포
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
