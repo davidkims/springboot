@@ -1,11 +1,11 @@
-name: 🛡️ MEGA Scorecard FULLOPS + SARIF + Markdown + Pages + Upgrade
+name: 🛡️ MEGA Scorecard FULL WORKFLOW
 
 on:
   push:
     branches: [ "main" ]
   schedule:
-    - cron: '16 11 * * 2'
-    - cron: '*/3 * * * *'
+    - cron: '16 11 * * 2'   # 매주 화요일 Scorecard 분석
+    - cron: '*/3 * * * *'   # 3분마다 EchoOps
   workflow_dispatch:
 
 permissions: read-all
@@ -45,7 +45,7 @@ jobs:
             results.json
 
   post-analysis-fullops:
-    name: 🔧 EchoOps + Markdown 변환 + SARIF 평가 + Pages 배포 + Upgrade
+    name: 🔧 EchoOps + Markdown 변환 + SARIF 평가 + 업그레이드 + Pages 배포
     runs-on: ubuntu-latest
     needs: scorecard-analysis
     if: always()
@@ -68,20 +68,18 @@ jobs:
 
       - name: 🧪 results.json 검사 및 백업
         run: |
-          set -e
-          echo "[CHECK] 파일 타입:" $(file results.json)
-          cat results.json | head -n 10 || true
+          mkdir -p .github/echo_scorecard
+          echo "[INFO] 파일 타입:" $(file results.json) | tee .github/echo_scorecard/filetype.txt
+          head -n 10 results.json > .github/echo_scorecard/results_head.txt || true
           cp results.json .github/echo_scorecard/results_raw_$(date +%Y%m%d_%H%M).json || true
 
-          # JSON 유효성 검사
-          if ! jq type results.json > /dev/null 2>&1; then
-            echo "::error ::results.json이 유효한 JSON이 아닙니다."
-            mv results.json results.bak.markdown
-            touch results.json
-            echo '{}' > results.json  # 빈 JSON으로 대체
+          if ! jq empty results.json > /dev/null 2>&1; then
+            echo "::error ::results.json is NOT valid JSON. 백업 후 대체"
+            mv results.json .github/echo_scorecard/results_invalid_$(date +%Y%m%d_%H%M).bak || true
+            echo '{}' > results.json
           fi
 
-      - name: 🧼 SARIF 경로 정제 (경고 방지용)
+      - name: 🧼 SARIF 경고 제거 (artifactLocation.uri 정제)
         run: |
           jq '
             .runs[].results[].locations[].physicalLocation.artifactLocation.uri |=
@@ -91,51 +89,51 @@ jobs:
           ' results.sarif > results.cleaned.sarif
           mv results.cleaned.sarif results.sarif
 
-      - name: 📝 Markdown 변환 (JSON → MD 요약)
+      - name: 📝 Scorecard JSON → Markdown 변환
         run: |
           mkdir -p site/scorecard
-          echo "# 🛡️ Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
-
+          echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
           if jq -e '.repo.name and .score and .checks' results.json > /dev/null 2>&1; then
             jq -r '
               "### 프로젝트: \(.repo.name)\n\n" +
               "신뢰도 점수: \(.score) / 10\n\n" +
               "| Check | Pass | Score | Reason |\n|-------|------|--------|--------|\n" +
-              (.checks[] | 
+              (.checks[] |
                 "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
               ) | join("\n")
             ' results.json >> site/scorecard/scorecard-summary.md
           else
-            echo "_⚠️ results.json 구조 이상으로 Markdown 변환 불가_" >> site/scorecard/scorecard-summary.md
+            echo "_⚠️ results.json 구조가 잘못되어 Markdown 변환 생략됨._" >> site/scorecard/scorecard-summary.md
           fi
 
-      - name: 📄 SARIF → Markdown 변환
+      - name: 📄 SARIF → Markdown 이슈 요약
         run: |
           echo "# 🚨 SARIF 보안 이슈 요약" > site/scorecard/sarif-summary.md
           jq -r '
             .runs[].results[] |
-            "- [\(.level)] \(.message.text)\n  파일: \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine // "-")"
+            "- [\(.level)] \(.message.text)\n  위치: \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine // "-")"
           ' results.sarif >> site/scorecard/sarif-summary.md
 
-      - name: 📊 SARIF 통계 평가
+      - name: 📊 SARIF 통계 요약 저장
         run: |
           mkdir -p .github/echo_scorecard
-          echo "[INFO] SARIF 통계 요약:" > .github/echo_scorecard/sarif_summary.txt
-          echo "- 총 이슈 수:" $(jq '.runs[].results | length' results.sarif) >> .github/echo_scorecard/sarif_summary.txt
-          jq -r '.runs[].results[].level' results.sarif | sort | uniq -c >> .github/echo_scorecard/sarif_summary.txt
+          TOTAL=$(jq '.runs[].results | length' results.sarif)
+          SEVERITY=$(jq -r '.runs[].results[].level' results.sarif | sort | uniq -c)
+          echo "[SARIF] 총 이슈 수: $TOTAL" > .github/echo_scorecard/sarif_summary.txt
+          echo "$SEVERITY" >> .github/echo_scorecard/sarif_summary.txt
 
-      - name: 📦 파일 용량 분석
+      - name: 📦 대용량 파일 및 디렉토리 분석
         run: |
           mkdir -p .github/echo_monitoring
           du -ah . | sort -hr | head -n 30 > .github/echo_monitoring/top_file_sizes.txt || true
           du -sh . > .github/echo_monitoring/total_size.txt || true
 
-      - name: 🌐 Pages 업로드 디렉토리 구성
+      - name: 🌐 Pages 업로드 파일 정리
         run: |
           mkdir -p site/scorecard
           cp results.sarif site/scorecard/scorecard-results.sarif
           cp results.json site/scorecard/results.json
-          echo "echo '[ECHO] SARIF/JSON 복사 완료'" >> .github/echo_pages/copy.sh
+          echo "echo '[ECHO] Pages용 결과 파일 복사 완료'" >> .github/echo_pages/copy_results.sh
 
       - name: 🚀 GitHub Pages 배포
         uses: peaceiris/actions-gh-pages@v4
@@ -143,12 +141,12 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: site
 
-      - name: ⬆️ 시스템 업그레이드 (apt + pip + npm)
+      - name: ⬆️ 시스템 업그레이드 로그 저장
         run: |
           mkdir -p .github/echo_upgrade
-          echo "[UPGRADE] apt-get upgrade 시작" | tee .github/echo_upgrade/apt.log
+          echo "[UPGRADE] apt upgrade" | tee .github/echo_upgrade/apt.log
           sudo apt-get update && sudo apt-get upgrade -y >> .github/echo_upgrade/apt.log 2>&1
-          echo "[UPGRADE] pip upgrade 시작" | tee .github/echo_upgrade/pip.log
+          echo "[UPGRADE] pip list --outdated" | tee .github/echo_upgrade/pip.log
           pip list --outdated >> .github/echo_upgrade/pip.log || true
-          echo "[UPGRADE] npm upgrade 시작" | tee .github/echo_upgrade/npm.log
+          echo "[UPGRADE] npm update" | tee .github/echo_upgrade/npm.log
           npm update >> .github/echo_upgrade/npm.log || true
