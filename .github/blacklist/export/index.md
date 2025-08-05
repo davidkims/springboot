@@ -1,0 +1,15 @@
+# Export
+- Files:
+  - .github/blacklist/export/index.md
+  - .github/blacklist/export/txt/ip_blacklist_all.txt
+  - .github/blacklist/export/txt/ip_blacklist_spamhaus.txt
+  - .github/blacklist/export/txt/ip_blacklist_et.txt
+  - .github/blacklist/export/txt/summary.txt
+  - .github/blacklist/export/.gitkeep
+  - .github/blacklist/export/html/dc_report.html
+  - .github/blacklist/export/csv/ip_counts.csv
+  - .github/blacklist/export/json/pip_audit.json
+  - .github/blacklist/export/json/semgrep.json
+  - .github/blacklist/export/json/safety.json
+  - .github/blacklist/export/json/npm_audit.json
+  - .github/blacklist/export/json/dc_report.json
