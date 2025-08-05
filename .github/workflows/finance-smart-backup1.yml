@@ -1,4 +1,4 @@
-name: 🔒 Integrated Blacklist Generator (Every 1 min · Mandatory DC · Fail-safe · Echo · Mass Dirs)
+name: 🔒 Integrated Blacklist Generator (Every 1 min · Mandatory DC · Fail-safe · Echo · Mass Dirs · No setup-* actions)
 
 on:
   schedule:
@@ -15,29 +15,23 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 루트/결과 디렉터리
   BLACKLIST_DIR: .github/blacklist
   REPORT_DIR: .github/blacklist/report
   EXPORT_DIR: .github/blacklist/export
   SNAPSHOT_DIR: .github/blacklist/snapshots
   ARCHIVE_DIR: .github/blacklist/archive
   LATEST_DIR: .github/blacklist/latest
-  # 서브(대량 생성 대상)
   NET_DIR: .github/blacklist/networks
   PKG_DIR: .github/blacklist/packages
   CODE_DIR: .github/blacklist/code
   SUMMARY_DIR: .github/blacklist/summary
 
-  # 공개 피드만 사용
   ENABLE_SPAMHAUS: "true"
   ENABLE_EMERGING_THREATS: "true"
-
-  # 로컬/무료 도구
   ENABLE_PY_AUDIT: "auto"
   ENABLE_NPM_AUDIT: "auto"
   ENABLE_SEMGREP: "true"
 
-  # OWASP Dependency-Check (필수 실행)
   DC_VERSION: "9.2.0"
   DC_HOME: /opt/dependency-check
   DC_DATA: /opt/dependency-check/data
@@ -90,27 +84,31 @@ jobs:
           done
           echo "[ECHO] 플레이스홀더/매니페스트 생성" | tee -a "$LOGFILE"
 
-      - name: 🧰 Setup Python & Node
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-
-      - name: ⬆️ Install/Upgrade CLI tools
+      # ✅ setup-python/setup-node 액션 제거 → APT로 보장
+      - name: 🧰 Ensure system Python/Node via APT (no GHCR downloads)
         run: |
           set -e
+          echo "[ECHO] APT 패키지 설치 시작" | tee -a "$LOGFILE"
           sudo apt-get update -y
-          sudo apt-get install -y unzip
-          python -m pip install --upgrade pip
-          pip install -U pip-audit safety semgrep jq yq
-          npm i -g npm@latest
-          echo "[ECHO] 도구 설치/업그레이드 완료 (pip-audit, safety, semgrep, jq, yq, unzip, npm)" | tee -a "$LOGFILE"
+          sudo apt-get install -y --no-install-recommends python3 python3-pip python3-venv jq yq unzip curl ca-certificates gnupg nodejs npm
+          python3 --version || true
+          pip3 --version || true
+          node --version || true
+          npm --version || true
+          echo "[ECHO] APT 설치 완료" | tee -a "$LOGFILE"
 
-      # -------------------------------
-      # 0) OWASP Dependency-Check (필수)
-      # -------------------------------
+      - name: ⬆️ Install/Upgrade CLI tools (pip/npm)
+        run: |
+          set -e
+          echo "[ECHO] CLI 도구 설치 시작" | tee -a "$LOGFILE"
+          python3 -m pip install --upgrade pip
+          pip3 install -U pip-audit safety semgrep
+          npm i -g npm@latest || true
+          echo "[ECHO] CLI 도구 설치 완료 (pip-audit, safety, semgrep, npm)" | tee -a "$LOGFILE"
+
+      # -----------------------------
+      # OWASP Dependency-Check (필수)
+      # -----------------------------
       - name: ♻️ Cache OWASP DC Data (NVD DB)
         id: cache-dc
         uses: actions/cache@v4
@@ -120,39 +118,39 @@ jobs:
           restore-keys: |
             dc-data-${{ env.DC_VERSION }}-${{ runner.os }}-
 
-      - name: 🛠 Install OWASP Dependency-Check CLI (robust, echo)
+      - name: 🛠 Install OWASP Dependency-Check CLI (resilient)
         run: |
           set -e
           echo "[ECHO] DC 설치 시작 v${DC_VERSION}" | tee -a "$LOGFILE"
-          echo "DC_READY=false" >> $GITHUB_ENV
           sudo rm -rf "${DC_HOME}"
+          curl -sSL -o dc.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" || {
+            echo "[WARN] DC ZIP 다운로드 실패 → 재시도 3회" | tee -a "$LOGFILE"
+            for i in 1 2 3; do
+              sleep $((i*2))
+              curl -sSL -o dc.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" && break
+            done
+          }
           sudo mkdir -p "${DC_HOME}" "${DC_DATA}"
-          curl -sSL -o /tmp/dc.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" || echo "[WARN] DC ZIP 다운로드 실패" | tee -a "$LOGFILE"
-          if [ -f /tmp/dc.zip ]; then
-            sudo unzip -q /tmp/dc.zip -d /opt || echo "[WARN] DC ZIP 해제 실패" | tee -a "$LOGFILE"
-            FOUND="$(ls -d /opt/dependency-check-* 2>/dev/null | head -n1 || true)"
-            if [ -n "$FOUND" ] && [ -d "$FOUND" ]; then
-              sudo mv "$FOUND" "${DC_HOME}" || true
-              if [ -f "${DC_HOME}/bin/dependency-check.sh" ]; then
-                sudo chmod +x "${DC_HOME}/bin/dependency-check.sh"
-                echo "DC_READY=true" >> $GITHUB_ENV
-                echo "[ECHO] DC 설치 완료 (HOME=${DC_HOME}, DATA=${DC_DATA})" | tee -a "$LOGFILE"
-              else
-                echo "[WARN] DC 실행 파일 없음 → 자리표시자 유지" | tee -a "$LOGFILE"
-              fi
+          if unzip -q dc.zip -d /opt; then
+            # 동적 폴더명 처리
+            CANDIDATE="$(find /opt -maxdepth 1 -type d -name 'dependency-check*' | head -n1 || true)"
+            if [ -n "$CANDIDATE" ]; then
+              sudo rm -rf "${DC_HOME}"
+              sudo mv "$CANDIDATE" "${DC_HOME}"
+              sudo chmod +x "${DC_HOME}/bin/dependency-check.sh" || true
+              echo "DC_READY=true" >> $GITHUB_ENV
+              echo "[ECHO] DC 설치 성공 (HOME=${DC_HOME})" | tee -a "$LOGFILE"
             else
-              echo "[WARN] DC 설치 경로 탐색 실패 → 자리표시자 유지" | tee -a "$LOGFILE"
+              echo "DC_READY=false" >> $GITHUB_ENV
+              echo "[WARN] DC 설치 폴더 탐색 실패 → 자리표시자 모드" | tee -a "$LOGFILE"
             fi
-            rm -f /tmp/dc.zip
           else
-            echo "[WARN] DC ZIP 미존재 → 자리표시자 유지" | tee -a "$LOGFILE"
+            echo "DC_READY=false" >> $GITHUB_ENV
+            echo "[WARN] DC ZIP 해제 실패 → 자리표시자 모드" | tee -a "$LOGFILE"
           fi
-          # 자리표시자 보장
-          mkdir -p "$PKG_DIR/dc"
-          [ -f "$PKG_DIR/dc/dc_report.json" ] || echo "{}" > "$PKG_DIR/dc/dc_report.json"
-          [ -f "$PKG_DIR/dc/dc_report.html" ] || echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
+          rm -f dc.zip
 
-      - name: 🔎 DC 실행 (JSON + HTML, fail-safe, echo/복사 보장)
+      - name: 🔎 DC 실행 (JSON+HTML, 다중 --format, fail-safe, echo/복사 보장)
         run: |
           set -e
           echo "[ECHO] DC 실행 단계 시작" | tee -a "$LOGFILE"
@@ -179,210 +177,180 @@ jobs:
           cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" || true
           echo "[ECHO] DC 실행/표준화/복사 완료" | tee -a "$LOGFILE"
 
-      # ------------------------------------
-      # 1) 네트워크/IP 블랙리스트 (공개 피드, fail-safe)
-      # ------------------------------------
+      # -----------------------------
+      # 공개 블랙리스트 수집 (fail-safe)
+      # -----------------------------
       - name: 🌐 Spamhaus (DROP/EDROP) — fail-safe
         if: env.ENABLE_SPAMHAUS == 'true'
         run: |
           set -u
           echo "[ECHO] Spamhaus 수집 시작" | tee -a "$LOGFILE"
-          mkdir -p "$NET_DIR/spamhaus"
-          if ! curl -fsSL https://www.spamhaus.org/drop/drop.txt | grep -v '^;' > "$NET_DIR/spamhaus/drop.txt" 2>/dev/null; then
-            echo "[WARN] drop.txt 실패 → 빈 파일" | tee -a "$LOGFILE"; > "$NET_DIR/spamhaus/drop.txt"
-          fi
-          if ! curl -fsSL https://www.spamhaus.org/drop/edrop.txt | grep -v '^;' > "$NET_DIR/spamhaus/edrop.txt" 2>/dev/null; then
-            echo "[WARN] edrop.txt 실패 → 빈 파일" | tee -a "$LOGFILE"; > "$NET_DIR/spamhaus/edrop.txt"
-          fi
-          cat "$NET_DIR/spamhaus/"*.txt 2>/dev/null | sort -u > "$NET_DIR/all/ip_blacklist_spamhaus.txt" || true
-          [ -s "$NET_DIR/all/ip_blacklist_spamhaus.txt" ] || echo "" > "$NET_DIR/all/ip_blacklist_spamhaus.txt"
-          wc -l "$NET_DIR/all/ip_blacklist_spamhaus.txt" | awk '{print "[ECHO] Spamhaus IP 수:", $1}' | tee -a "$LOGFILE"
+          mkdir -p "$NET_DIR/spamhaus" "$NET_DIR/all"
+          DROP="$NET_DIR/spamhaus/drop.txt"
+          EDROP="$NET_DIR/spamhaus/edrop.txt"
+          OUT="$NET_DIR/all/ip_blacklist_spamhaus.txt"
+          (curl -fsSL https://www.spamhaus.org/drop/drop.txt  | grep -v '^;' > "$DROP"  ) || { echo "[WARN] drop 실패 → 빈 파일"; > "$DROP"; }
+          (curl -fsSL https://www.spamhaus.org/drop/edrop.txt | grep -v '^;' > "$EDROP" ) || { echo "[WARN] edrop 실패 → 빈 파일"; > "$EDROP"; }
+          cat "$DROP" "$EDROP" 2>/dev/null | sort -u > "$OUT" || true
+          CNT=$( [ -f "$OUT" ] && wc -l < "$OUT" || echo 0 )
+          echo "[ECHO] Spamhaus IP 수: ${CNT}" | tee -a "$LOGFILE"
           echo "[ECHO] Spamhaus 수집 종료" | tee -a "$LOGFILE"
 
-      - name: ⚠️ Emerging Threats (IP) — fail-safe
+      - name: 🌐 Emerging Threats (Compromised IPs) — fail-safe
         if: env.ENABLE_EMERGING_THREATS == 'true'
         run: |
           set -u
           echo "[ECHO] Emerging Threats 수집 시작" | tee -a "$LOGFILE"
-          mkdir -p "$NET_DIR/et"
-          if ! curl -fsSL https://rules.emergingthreats.net/blockrules/compromised-ips.txt > "$NET_DIR/et/ips.txt"; then
-            echo "[WARN] ET ips.txt 실패 → 빈 파일" | tee -a "$LOGFILE"; > "$NET_DIR/et/ips.txt"
-          fi
-          (cat "$NET_DIR/et/ips.txt" 2>/dev/null || true) | grep -E '^[0-9]' | sort -u > "$NET_DIR/all/ip_blacklist_et.txt" || true
-          [ -s "$NET_DIR/all/ip_blacklist_et.txt" ] || echo "" > "$NET_DIR/all/ip_blacklist_et.txt"
-          wc -l "$NET_DIR/all/ip_blacklist_et.txt" | awk '{print "[ECHO] ET IP 수:", $1}' | tee -a "$LOGFILE"
+          mkdir -p "$NET_DIR/et" "$NET_DIR/all"
+          ET="$NET_DIR/et/compromised-ips.txt"
+          OUT="$NET_DIR/all/ip_blacklist_et.txt"
+          (curl -fsSL https://rules.emergingthreats.net/blockrules/compromised-ips.txt > "$ET") || { echo "[WARN] ET 다운로드 실패 → 빈 파일"; > "$ET"; }
+          sort -u "$ET" > "$OUT" || true
+          CNT=$( [ -f "$OUT" ] && wc -l < "$OUT" || echo 0 )
+          echo "[ECHO] ET IP 수: ${CNT}" | tee -a "$LOGFILE"
           echo "[ECHO] Emerging Threats 수집 종료" | tee -a "$LOGFILE"
 
-      # -------------------------
-      # 2) 패키지 블랙리스트
-      # -------------------------
-      - name: 🐍 pip-audit (auto, fail-safe)
+      # -----------------------------
+      # 종속성/코드 점검 (무료만)
+      # -----------------------------
+      - name: 🐍 pip-audit (auto) — fail-safe
         run: |
           set -e
           echo "[ECHO] pip-audit 사전 점검" | tee -a "$LOGFILE"
-          mkdir -p "$PKG_DIR/python"
           if ls requirements*.txt Pipfile.lock poetry.lock 2>/dev/null | grep -q .; then
-            echo "[ECHO] pip-audit 실행" | tee -a "$LOGFILE"
             (pip-audit -f json || true) | tee "$PKG_DIR/python/pip_audit.json" >/dev/null
           else
-            echo "[ECHO] Python 종속성 파일 없음 → 자리표시자 생성" | tee -a "$LOGFILE"
+            echo "[ECHO] Python 종속성 파일이 없어 pip-audit 건너뜀" | tee -a "$LOGFILE"
             echo "{}" > "$PKG_DIR/python/pip_audit.json"
           fi
 
-      - name: 🛡️ safety (json only, fail-safe)
+      - name: 🛡 safety (충돌옵션 제거) — fail-safe
         run: |
           set -e
           echo "[ECHO] safety 실행" | tee -a "$LOGFILE"
-          mkdir -p "$PKG_DIR/python"
-          (safety check --json || true) | tee "$PKG_DIR/python/safety.json" >/dev/null
-          [ -s "$PKG_DIR/python/safety.json" ] || echo "{}" > "$PKG_DIR/python/safety.json"
+          if ls requirements*.txt Pipfile.lock poetry.lock 2>/dev/null | grep -q .; then
+            safety check --json > "$PKG_DIR/python/safety.json" || { echo "{}" > "$PKG_DIR/python/safety.json"; }
+          else
+            echo "{}" > "$PKG_DIR/python/safety.json"
+          fi
 
-      - name: 📦 npm audit (auto, fail-safe)
+      - name: 📦 npm audit (auto) — fail-safe
         run: |
           set -e
           echo "[ECHO] npm audit 사전 점검" | tee -a "$LOGFILE"
-          mkdir -p "$PKG_DIR/npm"
           if ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null | grep -q .; then
-            echo "[ECHO] npm audit 실행" | tee -a "$LOGFILE"
             (npm audit --json || true) | tee "$PKG_DIR/npm/npm_audit.json" >/dev/null
-            [ -s "$PKG_DIR/npm/npm_audit.json" ] || echo "{}" > "$PKG_DIR/npm/npm_audit.json"
           else
-            echo "[ECHO] JS 락파일 없음 → 자리표시자 생성" | tee -a "$LOGFILE"
+            echo "[ECHO] JS 락파일이 없어 npm audit 건너뜀" | tee -a "$LOGFILE"
             echo "{}" > "$PKG_DIR/npm/npm_audit.json"
           fi
 
-      # -------------------------
-      # 3) 코드 정적분석 (Semgrep)
-      # -------------------------
-      - name: 🔎 Semgrep (p/ci, 로컬, fail-safe)
+      - name: 🔍 Semgrep (p/ci, 로컬) — fail-safe
+        if: env.ENABLE_SEMGREP == 'true'
         run: |
           set -e
           echo "[ECHO] Semgrep 실행 (p/ci, 로컬 전용)" | tee -a "$LOGFILE"
-          mkdir -p "$CODE_DIR/semgrep"
-          (semgrep ci --no-suppress-errors --config p/ci --json || true) | tee "$CODE_DIR/semgrep/semgrep.json" >/dev/null
-          [ -s "$CODE_DIR/semgrep/semgrep.json" ] || echo "{}" > "$CODE_DIR/semgrep/semgrep.json"
+          semgrep ci --config p/ci --json --no-rewrite-rule-ids > "$CODE_DIR/semgrep/semgrep.json" || {
+            echo "[WARN] Semgrep 실패 → 빈 결과 생성" | tee -a "$LOGFILE"
+            echo '{"results":[]}' > "$CODE_DIR/semgrep/semgrep.json"
+          }
           echo "[ECHO] Semgrep 결과 생성" | tee -a "$LOGFILE"
 
-      # -------------------------
-      # 4) Export / Latest / Snapshot 동기화
-      # -------------------------
-      - name: 🚚 Copy artifacts to export/latest/snapshot
+      # -----------------------------
+      # 산출물 동기화(SNAPSHOT/LATEST/EXPORT)
+      # -----------------------------
+      - name: 🗃️ Copy artifacts into snapshot & latest/export
         run: |
           set -e
-          echo "[ECHO] 복사/동기화 시작" | tee -a "$LOGFILE"
-          mkdir -p "$EXPORT_DIR/json" "$EXPORT_DIR/txt" "$EXPORT_DIR/html"
-          # networks
-          cp -f "$NET_DIR/all/ip_blacklist_spamhaus.txt" "$EXPORT_DIR/txt/ip_blacklist_spamhaus.txt" || true
-          cp -f "$NET_DIR/all/ip_blacklist_et.txt" "$EXPORT_DIR/txt/ip_blacklist_et.txt" || true
-          # packages
-          cp -f "$PKG_DIR/python/pip_audit.json" "$EXPORT_DIR/json/pip_audit.json" || true
-          cp -f "$PKG_DIR/python/safety.json" "$EXPORT_DIR/json/safety.json" || true
-          cp -f "$PKG_DIR/npm/npm_audit.json" "$EXPORT_DIR/json/npm_audit.json" || true
-          cp -f "$PKG_DIR/dc/dc_report.json" "$EXPORT_DIR/json/dc_report.json" || true
-          cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" || true
-          # code
-          cp -f "$CODE_DIR/semgrep/semgrep.json" "$EXPORT_DIR/json/semgrep.json" || true
+          echo "[ECHO] 산출물 스냅샷/익스포트 복사" | tee -a "$LOGFILE"
+          # 네트워크 리스트
+          cp -f "$NET_DIR/all/"*.txt "$SNAP_DIR/networks/" 2>/dev/null || true
+          cp -f "$NET_DIR/all/"*.txt "$LATEST_DIR/" 2>/dev/null || true
+          cp -f "$NET_DIR/all/ip_blacklist_spamhaus.txt" "$EXPORT_DIR/txt/spamhaus.txt" 2>/dev/null || echo "" > "$EXPORT_DIR/txt/spamhaus.txt"
+          cp -f "$NET_DIR/all/ip_blacklist_et.txt" "$EXPORT_DIR/txt/et.txt" 2>/dev/null || echo "" > "$EXPORT_DIR/txt/et.txt"
+          # 패키지/코드 리포트
+          cp -f "$PKG_DIR/python/"*.json "$SNAP_DIR/packages/" 2>/dev/null || true
+          cp -f "$PKG_DIR/npm/"*.json "$SNAP_DIR/packages/" 2>/dev/null || true
+          cp -f "$PKG_DIR/dc/"*.{json,html} "$SNAP_DIR/packages/" 2>/dev/null || true
+          cp -f "$CODE_DIR/semgrep/semgrep.json" "$SNAP_DIR/code/semgrep.json" 2>/dev/null || true
+          # export 표준
+          cp -f "$PKG_DIR/python/pip_audit.json" "$EXPORT_DIR/json/pip_audit.json" 2>/dev/null || echo "{}" > "$EXPORT_DIR/json/pip_audit.json"
+          cp -f "$PKG_DIR/python/safety.json" "$EXPORT_DIR/json/safety.json" 2>/dev/null || echo "{}" > "$EXPORT_DIR/json/safety.json"
+          cp -f "$PKG_DIR/npm/npm_audit.json" "$EXPORT_DIR/json/npm_audit.json" 2>/dev/null || echo "{}" > "$EXPORT_DIR/json/npm_audit.json"
+          cp -f "$PKG_DIR/dc/dc_report.json" "$EXPORT_DIR/json/dc_report.json" 2>/dev/null || echo "{}" > "$EXPORT_DIR/json/dc_report.json"
+          cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" 2>/dev/null || echo "<html><body>no report</body></html>" > "$EXPORT_DIR/html/dc_report.html"
+          echo "[ECHO] 산출물 복사 완료" | tee -a "$LOGFILE"
 
-          # latest 갱신
-          rsync -a --delete "$EXPORT_DIR/" "$LATEST_DIR/"
-
-          # snapshot 보관
-          rsync -a "$EXPORT_DIR/" "$SNAP_DIR/"
-
-          echo "[ECHO] 복사/동기화 완료" | tee -a "$LOGFILE"
-
-      # -------------------------
-      # 5) 요약 파일 생성(ECHO)
-      # -------------------------
-      - name: 🧾 Generate summaries (JSON/MD via echo)
+      # -----------------------------
+      # 요약 파일(JSON/MD) — 안전 구현
+      # -----------------------------
+      - name: 🧾 요약 파일 생성 (jq 사용 · 안전한 JSON/MD · echo 보장)
         run: |
-          set -e
-          echo "[ECHO] 요약 파일 생성" | tee -a "$LOGFILE"
+          set -euo pipefail
+          shopt -s nullglob
+          echo "[ECHO] 요약 파일 생성 시작" | tee -a "$LOGFILE"
           SUMMARY_JSON="$SUMMARY_DIR/summary_${RUN_DATE_UTC}.json"
           SUMMARY_MD="$SUMMARY_DIR/summary_${RUN_DATE_UTC}.md"
-          # JSON 요약
-          {
-            echo "{"
-            echo "  \"run_at_utc\": \"${RUN_DATE_UTC}\","
-            echo "  \"spamhaus_count\": $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0),"
-            echo "  \"et_count\": $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0),"
-            echo "  \"files\": {"
-            for f in "$EXPORT_DIR"/**/* "$PKG_DIR/dc/dc_report.html" 2>/dev/null; do
-              if [ -f "$f" ]; then
-                sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-                bn=$(echo "$f" | sed 's#^./##')
-                echo "    \"${bn}\": ${sz},"
-              fi
-            done
-            echo "    \"_end\": 0"
-            echo "  }"
-            echo "}"
-          } > "$SUMMARY_JSON"
-
-          # MD 요약
+          SPAM_FILE="$NET_DIR/all/ip_blacklist_spamhaus.txt"
+          ET_FILE="$NET_DIR/all/ip_blacklist_et.txt"
+          if [ -f "$SPAM_FILE" ]; then SPAM_CT="$(wc -l < "$SPAM_FILE" | tr -d '[:space:]')"; else SPAM_CT="0"; fi
+          if [ -f "$ET_FILE" ]; then ET_CT="$(wc -l < "$ET_FILE" | tr -d '[:space:]')"; else ET_CT="0"; fi
+          jq -n --arg run "$RUN_DATE_UTC" --argjson spam "${SPAM_CT:-0}" --argjson et "${ET_CT:-0}" \
+            '{ run_at_utc: $run, spamhaus_count: $spam, et_count: $et, files: {} }' > "$SUMMARY_JSON"
+          mapfile -t FILES < <(find "$EXPORT_DIR" -type f -print 2>/dev/null; [ -f "$PKG_DIR/dc/dc_report.html" ] && echo "$PKG_DIR/dc/dc_report.html" || true)
+          for f in "${FILES[@]}"; do
+            rel="${f#./}"; sz="$(wc -c < "$f" | tr -d '[:space:]' || echo 0)"
+            tmp="${SUMMARY_JSON}.tmp"
+            jq --arg k "$rel" --argjson v "${sz:-0}" '.files[$k] = $v' "$SUMMARY_JSON" > "$tmp" && mv "$tmp" "$SUMMARY_JSON"
+          done
           {
             echo "# Blacklist Summary (${RUN_DATE_UTC})"
-            echo ""
-            echo "- Spamhaus: $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0) IPs"
-            echo "- EmergingThreats: $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0) IPs"
-            echo ""
+            echo
+            echo "- Spamhaus: ${SPAM_CT} IPs"
+            echo "- EmergingThreats: ${ET_CT} IPs"
+            echo
             echo "## Files (bytes)"
-            for f in "$EXPORT_DIR"/**/* "$PKG_DIR/dc/dc_report.html" 2>/dev/null; do
-              if [ -f "$f" ]; then
-                sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-                echo "- $(echo "$f" | sed 's#^./##'): $sz"
-              fi
+            for f in "${FILES[@]}"; do
+              rel="${f#./}"; sz="$(wc -c < "$f" | tr -d '[:space:]' || echo 0)"
+              echo "- ${rel}: ${sz}"
             done
           } > "$SUMMARY_MD"
-
-          # 콘솔 요약
           echo "[ECHO] ===== 결과 요약 ====="
-          for f in "$EXPORT_DIR"/**/* "$PKG_DIR/dc/dc_report.html" 2>/dev/null; do
-            if [ -f "$f" ]; then
-              sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-              echo "[ECHO] 파일: $(echo "$f" | sed 's#^./##'), 크기(bytes): ${sz}"
-            fi
-          done
+          for f in "${FILES[@]}"; do rel="${f#./}"; sz="$(wc -c < "$f" | tr -d '[:space:]' || echo 0)"; echo "[ECHO] 파일: ${rel}, 크기(bytes): ${sz}"; done
           echo "[ECHO] ====================="
+          [ -s "$SUMMARY_JSON" ] || echo '{"run_at_utc":"'${RUN_DATE_UTC}'","spamhaus_count":0,"et_count":0,"files":{}}' > "$SUMMARY_JSON"
+          [ -s "$SUMMARY_MD" ] || { echo "# Blacklist Summary (${RUN_DATE_UTC})"; echo; echo "- Spamhaus: 0 IPs"; echo "- EmergingThreats: 0 IPs"; } > "$SUMMARY_MD"
+          echo "[ECHO] 요약 파일 생성 완료 → $SUMMARY_JSON, $SUMMARY_MD" | tee -a "$LOGFILE"
 
-      # -------------------------
-      # 6) 변경사항 자동 커밋/PR (변경 있을 때만)
-      # -------------------------
-      - name: 🧪 Detect changes
-        id: changes
+      # -----------------------------
+      # 변경 시 커밋/PR
+      # -----------------------------
+      - name: 🧪 변경사항 검사
         run: |
           set -e
           echo "[ECHO] 변경사항 검사 시작" | tee -a "$LOGFILE"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$BLACKLIST_DIR" || true
-          if git diff --cached --quiet; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "[ECHO] 변경 없음" | tee -a "$LOGFILE"
-          else
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "[ECHO] 변경 감지됨" | tee -a "$LOGFILE"
-          fi
+          git status --porcelain
+          echo "[ECHO] 변경사항 검사 종료" | tee -a "$LOGFILE"
 
-      - name: 🪵 Commit changes
-        if: steps.changes.outputs.changed == 'true'
+      - name: 💾 Commit changes
         run: |
           set -e
-          MSG="chore(blacklist): update outputs at ${RUN_DATE_UTC}"
-          git commit -m "$MSG"
-          echo "[ECHO] 커밋 완료: $MSG" | tee -a "$LOGFILE"
+          echo "[ECHO] 커밋 준비" | tee -a "$LOGFILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$BLACKLIST_DIR" "$REPORT_DIR" || true
+          if git diff --cached --quiet; then
+            echo "[ECHO] 커밋할 변경 없음" | tee -a "$LOGFILE"
+          else
+            git commit -m "chore(blacklist): ${RUN_DATE_UTC} auto snapshot/export (echo mass dirs, DC, feeds)"
+            echo "[ECHO] 커밋 완료" | tee -a "$LOGFILE"
+          fi
 
-      - name: 🔀 Create Pull Request
-        if: steps.changes.outputs.changed == 'true'
+      - name: 🔀 Create PR (if needed)
         uses: peter-evans/create-pull-request@v6
         with:
-          branch: chore/blacklist-${{ env.RUN_DATE_UTC }}
-          title: "chore(blacklist): update outputs at ${{ env.RUN_DATE_UTC }}"
-          commit-message: "chore(blacklist): update outputs at ${{ env.RUN_DATE_UTC }}"
-          body: |
-            Automated blacklist & reports update.
-            - Run at (UTC): ${{ env.RUN_DATE_UTC }}
-            - See `${{ env.BLACKLIST_DIR }}` for details.
-          labels: |
-            automated
-            security
+          commit-message: "chore(blacklist): ${RUN_DATE_UTC} auto snapshot/export"
+          title: "Blacklist auto-update ${RUN_DATE_UTC}"
+          body: "자동 생성된 블랙리스트/리포트 업데이트입니다."
+          branch: "chore/blacklist-${{ env.RUN_DATE_UTC }}"
+          delete-branch: true
