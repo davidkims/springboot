@@ -2,7 +2,7 @@ name: 🔒 Integrated Blacklist Generator
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # 매일 00:00 UTC
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       enable_codeql:
@@ -17,21 +17,17 @@ permissions:
   security-events: write
   actions: read
 
-concurrency:
-  group: blacklist-integrated
-  cancel-in-progress: false
-
 env:
   BLACKLIST_DIR: .github/blacklist
   ENABLE_SPAMHAUS: "true"
   ENABLE_EMERGING_THREATS: "true"
-  ENABLE_ABUSEIPDB: "auto"  # auto=키 있으면 실행
-  ENABLE_OTX: "auto"        # auto=키 있으면 실행
-  ENABLE_PY_AUDIT: "auto"   # 파이썬 종속성 파일 있으면 실행
-  ENABLE_NPM_AUDIT: "auto"  # JS 락파일 있으면 실행
-  ENABLE_OWASP_DC: "false"  # 무겁다면 false, 필요시 true
+  ENABLE_ABUSEIPDB: "auto"
+  ENABLE_OTX: "auto"
+  ENABLE_PY_AUDIT: "auto"
+  ENABLE_NPM_AUDIT: "auto"
+  ENABLE_OWASP_DC: "true"   # ← CLI 버전 사용
   ENABLE_SEMGREP: "true"
-  ENABLE_HIBP: "auto"       # emails.txt + 키 있으면 실행
+  ENABLE_HIBP: "auto"
 
 jobs:
   generate:
@@ -41,19 +37,12 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧭 Echo Start
-        run: |
-          set -euo pipefail
-          echo "[ECHO] ▶ 통합 블랙리스트 워크플로우 시작"
-          echo "[ECHO] 현재 브랜치: $(git rev-parse --abbrev-ref HEAD)"
-          echo "[ECHO] 커밋 해시: $(git rev-parse --short HEAD)"
-
-      - name: 📁 Prepare directories
+      - name: 📁 Prepare dirs
         run: |
           set -euo pipefail
           mkdir -p "$BLACKLIST_DIR"/{raw,dist,logs}
           date -u +"version: %Y.%m.%dT%H:%M:%SZ" > "$BLACKLIST_DIR/version.txt"
-          echo "[ECHO] 디렉터리 준비 완료: $BLACKLIST_DIR"
+          echo "[ECHO] 디렉토리 준비 완료"
 
       - name: 🧰 Setup Python & Node
         uses: actions/setup-python@v5
@@ -69,127 +58,89 @@ jobs:
           python -m pip install --upgrade pip
           pip install -U pip-audit safety jq yq
           npm i -g npm@latest
-          echo "[ECHO] pip-audit/safety/jq/yq/npm 최신화 완료"
+          echo "[ECHO] 최신 도구 설치 완료"
 
       # -------------------------
-      # 1) 네트워크/IP/도메인
+      # 1) 네트워크/IP/도메인 블랙리스트
       # -------------------------
-      - name: 🌐 Spamhaus (DROP/EDROP)
+      - name: 🌐 Spamhaus
         if: env.ENABLE_SPAMHAUS == 'true'
         run: |
           set -euo pipefail
-          echo "[ECHO] Spamhaus 수집 시작"
+          echo "[ECHO] Spamhaus 수집"
           curl -fsSL https://www.spamhaus.org/drop/drop.txt  | grep -v '^;' > "$BLACKLIST_DIR/raw/spamhaus_drop.txt"
           curl -fsSL https://www.spamhaus.org/drop/edrop.txt | grep -v '^;' > "$BLACKLIST_DIR/raw/spamhaus_edrop.txt"
           cat "$BLACKLIST_DIR/raw/"spamhaus_*.txt | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt"
-          wc -l "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" | awk '{print "[ECHO] Spamhaus IP 개수:", $1}'
+          wc -l "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" | awk '{print "[ECHO] Spamhaus IP:", $1}'
 
-      - name: ⚠️ Emerging Threats (IP)
+      - name: ⚠️ Emerging Threats
         if: env.ENABLE_EMERGING_THREATS == 'true'
         run: |
           set -euo pipefail
-          echo "[ECHO] Emerging Threats 수집 시작"
+          echo "[ECHO] Emerging Threats 수집"
           curl -fsSL https://rules.emergingthreats.net/blockrules/compromised-ips.txt > "$BLACKLIST_DIR/raw/et_ips.txt" || true
-          (cat "$BLACKLIST_DIR/raw/et_ips.txt" 2>/dev/null || true) | grep -E '^[0-9]+\.[0-9]+' | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" || true
+          (cat "$BLACKLIST_DIR/raw/et_ips.txt" 2>/dev/null || true) | grep -E '^[0-9]+' | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" || true
           if [ -s "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" ]; then
-            wc -l "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" | awk '{print "[ECHO] ET IP 개수:", $1}'
-          else
-            echo "[ECHO] ET 피드 비어있음 또는 실패(무시)"
-          fi
-
-      - name: 🚫 AbuseIPDB (if API key)
-        if: env.ENABLE_ABUSEIPDB == 'true' || (env.ENABLE_ABUSEIPDB == 'auto' && env.ABUSEIPDB_API_KEY != '')
-        env:
-          KEY: ${{ secrets.ABUSEIPDB_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${KEY:-}" ]; then
-            echo "[ECHO] AbuseIPDB 키 없음 → 건너뜀"
-            exit 0
-          fi
-          echo "[ECHO] AbuseIPDB 수집 시작"
-          curl -fsSL -G "https://api.abuseipdb.com/api/v2/blacklist" \
-            --data-urlencode "confidenceMinimum=90" \
-            -H "Key: $KEY" -H "Accept: text/plain" \
-            > "$BLACKLIST_DIR/dist/ip_blacklist_abuseipdb.txt"
-          wc -l "$BLACKLIST_DIR/dist/ip_blacklist_abuseipdb.txt" | awk '{print "[ECHO] AbuseIPDB IP 개수:", $1}'
-
-      - name: 🧩 OTX (if API key)
-        if: env.ENABLE_OTX == 'true' || (env.ENABLE_OTX == 'auto' && env.OTX_API_KEY != '')
-        env:
-          OTX_KEY: ${{ secrets.OTX_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${OTX_KEY:-}" ]; then
-            echo "[ECHO] OTX 키 없음 → 건너뜀"
-            exit 0
-          fi
-          echo "[ECHO] OTX 수집(예시: 일반 Pulses 피드) 시작"
-          # 필요에 맞게 API 엔드포인트 수정 가능
-          curl -fsSL -H "X-OTX-API-KEY: $OTX_KEY" \
-            https://otx.alienvault.com/api/v1/indicators/IPv4/reputation \
-            | jq -r '.results[]?.indicator // empty' \
-            | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_otx.txt" || true
-          if [ -s "$BLACKLIST_DIR/dist/ip_blacklist_otx.txt" ]; then
-            wc -l "$BLACKLIST_DIR/dist/ip_blacklist_otx.txt" | awk '{print "[ECHO] OTX IP 개수:", $1}'
-          else
-            echo "[ECHO] OTX 결과 없음 또는 엔드포인트 조정 필요"
-          fi
-
-      - name: 🔗 Merge IP blacklists
-        run: |
-          set -euo pipefail
-          echo "[ECHO] IP 블랙리스트 병합 시작"
-          cat $(ls "$BLACKLIST_DIR"/dist/ip_blacklist_*.txt 2>/dev/null || true) \
-            | grep -E '^[0-9]+\.[0-9]+' | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_merged.txt" || true
-          if [ -s "$BLACKLIST_DIR/dist/ip_blacklist_merged.txt" ]; then
-            wc -l "$BLACKLIST_DIR/dist/ip_blacklist_merged.txt" | awk '{print "[ECHO] 병합된 IP 총 개수:", $1}'
-          else
-            echo "[ECHO] 병합 대상 없음"
+            wc -l "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" | awk '{print "[ECHO] ET IP:", $1}'
           fi
 
       # -------------------------
-      # 2) 패키지(의존성) 블랙리스트
+      # 2) 패키지 블랙리스트
       # -------------------------
-      - name: 🐍 pip-audit (Python)
+      - name: 🐍 pip-audit
         if: env.ENABLE_PY_AUDIT == 'true' || env.ENABLE_PY_AUDIT == 'auto'
         run: |
           set -euo pipefail
           if ls requirements*.txt Pipfile.lock poetry.lock 2>/dev/null | grep -q .; then
             echo "[ECHO] pip-audit 실행"
-            mkdir -p "$BLACKLIST_DIR/dist"
             pip-audit -f json -o "$BLACKLIST_DIR/dist/pip_audit.json" || true
-            echo "[ECHO] pip-audit 완료 (에러코드는 취약점 발견 시에도 발생할 수 있어 무시)"
           else
-            echo "[ECHO] Python 의존성 파일 없음 → 건너뜀"
+            echo "[ECHO] Python 종속성 없음"
           fi
 
-      - name: 🛡️ safety (Python)  # ← 에러 수정: 출력 형식 + 리다이렉션
+      - name: 🛡️ safety (수정 버전)
         if: env.ENABLE_PY_AUDIT == 'true' || env.ENABLE_PY_AUDIT == 'auto'
         run: |
           set -euo pipefail
           if python -c "import pkgutil; exit(0 if pkgutil.find_loader('safety') else 1)"; then
-            echo "[ECHO] safety 실행 (json 출력 → 파일 저장)"
             safety check --full-report --output json | tee "$BLACKLIST_DIR/dist/package_blacklist_safety.json" >/dev/null
-            echo "[ECHO] 패키지 블랙리스트(safety) 생성 완료"
-          else
-            echo "[ECHO] safety 미설치 → 건너뜀"
+            echo "[ECHO] safety 실행 완료"
           fi
 
-      - name: 📦 npm audit (Node.js)
+      - name: 📦 npm audit
         if: env.ENABLE_NPM_AUDIT == 'true' || env.ENABLE_NPM_AUDIT == 'auto'
         run: |
           set -euo pipefail
           if ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null | grep -q .; then
-            echo "[ECHO] npm audit 실행"
             npm audit --json > "$BLACKLIST_DIR/dist/npm_audit.json" || true
-            echo "[ECHO] npm audit 완료 (에러코드 무시)"
-          else
-            echo "[ECHO] JS 락파일 없음 → 건너뜀"
           fi
 
       # -------------------------
-      # 3) 코드 패턴 블랙리스트
+      # 3) OWASP Dependency-Check (CLI 버전)
+      # -------------------------
+      - name: 🛠 Install OWASP Dependency-Check CLI
+        if: env.ENABLE_OWASP_DC == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="9.2.0"
+          echo "[ECHO] Installing Dependency-Check CLI v$VERSION"
+          curl -sLO https://github.com/jeremylong/DependencyCheck/releases/download/v${VERSION}/dependency-check-${VERSION}-release.zip
+          unzip dependency-check-${VERSION}-release.zip -d /opt/dependency-check
+          chmod +x /opt/dependency-check/bin/dependency-check.sh
+
+      - name: 🧪 Run Dependency-Check CLI
+        if: env.ENABLE_OWASP_DC == 'true'
+        run: |
+          set -euo pipefail
+          /opt/dependency-check/bin/dependency-check.sh \
+            --project "BlacklistScan" \
+            --scan . \
+            --format JSON \
+            --out "$BLACKLIST_DIR/dist"
+          echo "[ECHO] Dependency-Check 실행 완료"
+
+      # -------------------------
+      # 4) 코드 패턴 블랙리스트
       # -------------------------
       - name: 🔎 Semgrep
         if: env.ENABLE_SEMGREP == 'true'
@@ -198,75 +149,15 @@ jobs:
           config: p/ci
           generateSarif: true
           output: ${{ env.BLACKLIST_DIR }}/dist/semgrep.sarif
-      - name: 📄 Semgrep JSON
-        if: env.ENABLE_SEMGREP == 'true'
-        run: |
-          set -euo pipefail
-          echo "[ECHO] Semgrep 결과를 JSON으로 변환"
-          jq '.' "$BLACKLIST_DIR/dist/semgrep.sarif" > "$BLACKLIST_DIR/dist/semgrep.json"
 
       # -------------------------
-      # 4) (옵션) OWASP Dependency-Check
+      # 5) 변경점 / PR
       # -------------------------
-      - name: 🧪 OWASP Dependency-Check (optional)
-        if: env.ENABLE_OWASP_DC == 'true'
-        uses: dependency-check/Dependency-Check_Action@v4
-        with:
-          format: 'JSON'
-          out: ${{ env.BLACKLIST_DIR }}/dist
-      - name: 🧪 DC rename (optional)
-        if: env.ENABLE_OWASP_DC == 'true'
+      - name: 🧾 Build changelog
         run: |
           set -euo pipefail
-          if [ -f "$BLACKLIST_DIR/dist/dependency-check-report.json" ]; then
-            mv "$BLACKLIST_DIR/dist/dependency-check-report.json" "$BLACKLIST_DIR/dist/owasp_dc.json"
-            echo "[ECHO] OWASP DC 결과 저장 완료"
-          fi
-
-      # -------------------------
-      # 5) (옵션) HIBP 이메일 블랙리스트
-      # -------------------------
-      - name: 📧 HIBP (if API key + emails.txt)
-        if: env.ENABLE_HIBP == 'true' || (env.ENABLE_HIBP == 'auto' && env.HIBP_API_KEY != '')
-        env:
-          HIBP_KEY: ${{ secrets.HIBP_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${HIBP_KEY:-}" ]; then
-            echo "[ECHO] HIBP 키 없음 → 건너뜀"
-            exit 0
-          fi
-          if [ ! -f emails.txt ]; then
-            echo "[ECHO] emails.txt 없음 → 건너뜀"
-            exit 0
-          fi
-          echo "[ECHO] HIBP 조회 시작"
-          mkdir -p "$BLACKLIST_DIR/dist"
-          : > "$BLACKLIST_DIR/dist/hibp_emails_compromised.txt"
-          while read -r email; do
-            [ -z "$email" ] && continue
-            # NOTE: 실제 엔드포인트는 구독 플랜/정책에 따라 달라질 수 있음. 필요 시 수정.
-            code=$(curl -s -o /dev/null -w "%{http_code}" \
-              -H "hibp-api-key: $HIBP_KEY" \
-              "https://haveibeenpwned.com/api/v3/breachedaccount/$(python -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$email")?truncateResponse=true")
-            if [ "$code" = "200" ]; then
-              echo "$email" >> "$BLACKLIST_DIR/dist/hibp_emails_compromised.txt"
-              echo "[ECHO] 유출 감지: $email"
-            else
-              echo "[ECHO] 정상 또는 조회불가: $email (HTTP $code)"
-            fi
-          done < emails.txt
-          echo "[ECHO] HIBP 조회 완료"
-
-      # -------------------------
-      # 6) 변경점 diff / PR 생성
-      # -------------------------
-      - name: 🧾 Build changelog (simple)
-        run: |
-          set -euo pipefail
-          echo "### Blacklist Update ($(date -u +"%Y-%m-%d %H:%M:%SZ"))" > "$BLACKLIST_DIR/CHANGELOG.md"
-          git status --porcelain "$BLACKLIST_DIR" | awk '{print "- " $0}' >> "$BLACKLIST_DIR/CHANGELOG.md" || true
-          echo "[ECHO] CHANGELOG 생성"
+          echo "### Blacklist Update $(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$BLACKLIST_DIR/CHANGELOG.md"
+          git status --porcelain "$BLACKLIST_DIR" | awk '{print "- " $0}' >> "$BLACKLIST_DIR/CHANGELOG.md"
 
       - name: 📦 Upload artifact
         uses: actions/upload-artifact@v4
@@ -274,31 +165,15 @@ jobs:
           name: blacklist-files
           path: .github/blacklist/
 
-      - name: 🧪 Git diff check
-        id: diff
-        run: |
-          set -euo pipefail
-          if git status --porcelain "$BLACKLIST_DIR" | grep -q .; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "[ECHO] 변경 사항 존재"
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "[ECHO] 변경 사항 없음"
-          fi
-
-      - name: 🔀 Create Pull Request
-        if: steps.diff.outputs.changed == 'true'
+      - name: 🔀 Create PR if changed
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "chore(security): update blacklists"
           title: "chore(security): update blacklists"
           body: |
             자동 생성된 블랙리스트 업데이트입니다.
-            - 실행 시각(UTC): ${{ github.run_id }}
-            - 자세한 변경: `.github/blacklist/CHANGELOG.md`
+            - 실행: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
           branch: chore/update-blacklists
           delete-branch: true
           add-paths: |
             .github/blacklist/**
-      - name: ✅ Echo End
-        run: echo "[ECHO] ▶ 통합 블랙리스트 워크플로우 종료"
