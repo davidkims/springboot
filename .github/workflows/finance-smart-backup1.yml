@@ -1,110 +1,36 @@
-name: 🧠 MEGA-ECHO FULLOPS + 백업 + 템플릿 + Compose + 보안분석
+name: 🔒 Blacklist Generator
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0,15,30,45 * * * *'
+    - cron: "0 0 * * *"
+  workflow_dispatch:
 
 jobs:
-  full-echo-all:
+  generate-blacklist:
     runs-on: ubuntu-latest
-
     steps:
-    - name: 📂 Checkout
-      uses: actions/checkout@v4
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
 
-    - name: 📁 All Echo Scripts & Templates 생성
-      run: |
-        set -e
+      - name: 📜 Install Tools
+        run: |
+          pip install safety
+          sudo apt-get install -y jq curl
 
-        echo "[ECHO] 디렉토리 생성 중"
-        mkdir -p .github/echo_backup .github/echo_templates .github/echo_compose .github/echo_security .github/echo_logs
+      - name: 📡 Fetch IP Blacklist
+        run: |
+          mkdir -p .github/blacklist
+          curl -s https://www.spamhaus.org/drop/drop.txt \
+            | grep -v '^;' > .github/blacklist/ip_blacklist.txt
+          echo "[ECHO] IP 블랙리스트 생성 완료"
 
-        ## 🔐 .env / .cfg / .json 템플릿 자동 에코화
-        echo "#!/bin/bash" > .github/echo_templates/gen_templates.sh
-        echo "echo '[ECHO] .env 템플릿 생성'" >> .github/echo_templates/gen_templates.sh
-        echo "cat <<EOF > .env
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASS=rootpass123
-EOF" >> .github/echo_templates/gen_templates.sh
-        echo "echo '[ECHO] .cfg 템플릿 생성'" >> .github/echo_templates/gen_templates.sh
-        echo "cat <<EOF > config.cfg
-[database]
-host=localhost
-port=5432
-user=postgres
-password=pgpass
-EOF" >> .github/echo_templates/gen_templates.sh
-        echo "echo '[ECHO] .json 템플릿 생성'" >> .github/echo_templates/gen_templates.sh
-        echo "cat <<EOF > config.json
-{
-  \"db\": {
-    \"host\": \"localhost\",
-    \"port\": 27017,
-    \"user\": \"admin\",
-    \"pass\": \"mongo123\"
-  }
-}
-EOF" >> .github/echo_templates/gen_templates.sh
-        chmod +x .github/echo_templates/gen_templates.sh
-        bash .github/echo_templates/gen_templates.sh | tee .github/echo_templates/templates.log
+      - name: 🐍 Python Package Blacklist
+        run: |
+          safety check --full-report --output .github/blacklist/package_blacklist.json
+          echo "[ECHO] 패키지 블랙리스트 생성 완료"
 
-        ## 🗃️ 백업 자동화 스크립트 (mysqldump, pg_dump, mongoexport)
-        echo "#!/bin/bash" > .github/echo_backup/backup.sh
-        echo "echo '[ECHO] mysqldump 실행'" >> .github/echo_backup/backup.sh
-        echo "mysqldump -u root -prootpass123 test_db > mysql_backup.sql || echo '[WARN] mysqldump 실패'" >> .github/echo_backup/backup.sh
-        echo "echo '[ECHO] pg_dump 실행'" >> .github/echo_backup/backup.sh
-        echo "pg_dump -U postgres -d test_db > pg_backup.sql || echo '[WARN] pg_dump 실패'" >> .github/echo_backup/backup.sh
-        echo "echo '[ECHO] mongoexport 실행'" >> .github/echo_backup/backup.sh
-        echo "mongoexport --db=test_db --collection=test --out=mongo_backup.json || echo '[WARN] mongoexport 실패'" >> .github/echo_backup/backup.sh
-        chmod +x .github/echo_backup/backup.sh
-        bash .github/echo_backup/backup.sh | tee .github/echo_backup/backup.log
-
-        ## 🐳 docker-compose up/down 스크립트 + 로그
-        echo "#!/bin/bash" > .github/echo_compose/docker_up.sh
-        echo "echo '[ECHO] docker-compose up'" >> .github/echo_compose/docker_up.sh
-        echo "docker-compose -f docker-compose.yml up -d || echo '[WARN] up 실패'" >> .github/echo_compose/docker_up.sh
-        echo "#!/bin/bash" > .github/echo_compose/docker_down.sh
-        echo "echo '[ECHO] docker-compose down'" >> .github/echo_compose/docker_down.sh
-        echo "docker-compose -f docker-compose.yml down || echo '[WARN] down 실패'" >> .github/echo_compose/docker_down.sh
-        chmod +x .github/echo_compose/docker_*.sh
-        bash .github/echo_compose/docker_up.sh | tee .github/echo_compose/up.log
-        bash .github/echo_compose/docker_down.sh | tee .github/echo_compose/down.log
-
-        ## 🛡️ Scorecard, CodeQL, Trivy 보안 분석 echo 통합
-        echo "#!/bin/bash" > .github/echo_security/run_security.sh
-        echo "echo '[ECHO] Running OSSF Scorecard'" >> .github/echo_security/run_security.sh
-        echo "scorecard --repo=https://github.com/\${GITHUB_REPOSITORY} --checks=all --format=json > .github/echo_security/scorecard.json || echo '[WARN] Scorecard 실패'" >> .github/echo_security/run_security.sh
-        echo "echo '[ECHO] Running Trivy'" >> .github/echo_security/run_security.sh
-        echo "trivy fs --format json . > .github/echo_security/trivy.json || echo '[WARN] Trivy 실패'" >> .github/echo_security/run_security.sh
-        echo "echo '[ECHO] Running CodeQL Analysis (mock trigger)'" >> .github/echo_security/run_security.sh
-        echo "echo '{ \"status\": \"CodeQL analysis triggered (mock)\" }' > .github/echo_security/codeql.json" >> .github/echo_security/run_security.sh
-        chmod +x .github/echo_security/run_security.sh
-        bash .github/echo_security/run_security.sh | tee .github/echo_security/security.log
-
-        ## 🎯 DAG 자동 트리거 및 상태 확인 에코
-        echo "#!/bin/bash" > .github/echo_logs/dag_status_echo.sh
-        echo "echo '[ECHO] Triggering Airflow DAG'" >> .github/echo_logs/dag_status_echo.sh
-        echo "curl -X POST http://localhost:8080/api/v1/dags/finance_sim/dagRuns -H 'Content-Type: application/json' -d '{\"conf\":{}}' || echo '[WARN] DAG trigger 실패'" >> .github/echo_logs/dag_status_echo.sh
-        echo "echo '[ECHO] Checking DAG Run status'" >> .github/echo_logs/dag_status_echo.sh
-        echo "curl http://localhost:8080/api/v1/dags/finance_sim/dagRuns | tee .github/echo_logs/dag_status.json || echo '[WARN] DAG 상태 확인 실패'" >> .github/echo_logs/dag_status_echo.sh
-        chmod +x .github/echo_logs/dag_status_echo.sh
-        bash .github/echo_logs/dag_status_echo.sh | tee .github/echo_logs/dag_status.log
-
-        ## 🔍 GitHub Pages, S3 업로드, diff.sh echo 자동화
-        echo "#!/bin/bash" > .github/echo_logs/pages_s3_diff.sh
-        echo "echo '[ECHO] GitHub Pages 업로드 모의 실행'" >> .github/echo_logs/pages_s3_diff.sh
-        echo "echo '[MOCK] gh-pages deploy ./site/'" >> .github/echo_logs/pages_s3_diff.sh
-        echo "echo '[ECHO] S3 업로드 모의 실행'" >> .github/echo_logs/pages_s3_diff.sh
-        echo "echo '[MOCK] aws s3 cp site/ s3://my-bucket/'" >> .github/echo_logs/pages_s3_diff.sh
-        echo "echo '[ECHO] 결과 비교 diff 실행'" >> .github/echo_logs/pages_s3_diff.sh
-        echo "diff .github/echo_backup/mysql_backup.sql .github/echo_backup/pg_backup.sql || echo '[INFO] 차이 존재'" >> .github/echo_logs/pages_s3_diff.sh
-        chmod +x .github/echo_logs/pages_s3_diff.sh
-        bash .github/echo_logs/pages_s3_diff.sh | tee .github/echo_logs/pages_s3_diff.log
-
-    - name: ✅ All Echo Summary
-      run: |
-        echo "[SUMMARY] 모든 echo 기반 자동화 작업 완료"
-        find .github/echo_* -type f | tee .github/echo_logs/final_summary.log
+      - name: 📤 Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blacklist-files
+          path: .github/blacklist/
