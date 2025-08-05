@@ -1,15 +1,9 @@
-name: 🔒 Integrated Blacklist Generator (Fail-safe & Echo)
+name: 🔒 Integrated Blacklist Generator (Mandatory DC, Fail-safe & Echo)
 
 on:
   schedule:
     - cron: "0 0 * * *"   # 매일 00:00 UTC
   workflow_dispatch:
-    inputs:
-      enable_owasp_dc:
-        description: "Enable OWASP Dependency-Check CLI (heavy; increases minutes)"
-        type: choice
-        options: [ "false", "true" ]
-        default: "false"
 
 permissions:
   contents: write
@@ -24,8 +18,10 @@ env:
   ENABLE_PY_AUDIT: "auto"     # 파이썬 종속성 파일 있으면 실행
   ENABLE_NPM_AUDIT: "auto"    # JS 락파일 있으면 실행
   ENABLE_SEMGREP: "true"
-  ENABLE_OWASP_DC: "false"    # 입력 값으로 override (무거움)
+  # OWASP DC는 "필수" 실행
   DC_VERSION: "9.2.0"         # 필요 시 최신으로 조정
+  DC_HOME: /opt/dependency-check
+  DC_DATA: /opt/dependency-check/data
 
 jobs:
   generate:
@@ -35,22 +31,11 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧭 Echo start & inputs
+      - name: 🧭 Echo start
         run: |
           echo "[ECHO] ▶ 통합 블랙리스트 워크플로우 시작"
           echo "[ECHO] 브랜치: $(git rev-parse --abbrev-ref HEAD)"
           echo "[ECHO] 커밋: $(git rev-parse --short HEAD)"
-          echo "[ECHO] 입력(enable_owasp_dc): '${{ inputs.enable_owasp_dc }}'"
-
-      - name: 🔧 Normalize env from inputs
-        run: |
-          if [ "${{ inputs.enable_owasp_dc }}" = "true" ]; then
-            echo "ENABLE_OWASP_DC=true" >> $GITHUB_ENV
-            echo "[ECHO] ENABLE_OWASP_DC = true (from inputs)"
-          else
-            echo "ENABLE_OWASP_DC=false" >> $GITHUB_ENV
-            echo "[ECHO] ENABLE_OWASP_DC = false (from inputs)"
-          fi
 
       - name: 📁 Prepare directories
         run: |
@@ -70,12 +55,60 @@ jobs:
       - name: ⬆️ Install/Upgrade CLI tools
         run: |
           set -e
-          python -m pip install --upgrade pip
-          pip install -U pip-audit safety semgrep jq yq
           sudo apt-get update -y
           sudo apt-get install -y unzip
+          python -m pip install --upgrade pip
+          pip install -U pip-audit safety semgrep jq yq
           npm i -g npm@latest
           echo "[ECHO] 도구 설치/업그레이드 완료 (pip-audit, safety, semgrep, jq, yq, unzip, npm)"
+
+      # ------------------------------------
+      # 0) OWASP Dependency-Check (필수 실행, CLI 설치 + 캐시)
+      # ------------------------------------
+      - name: ♻️ Cache OWASP DC Data (NVD DB)
+        id: cache-dc
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DC_DATA }}
+          key: dc-data-${{ env.DC_VERSION }}-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/build.gradle*', '**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml', '**/requirements*.txt', '**/Pipfile.lock', '**/poetry.lock') }}
+          restore-keys: |
+            dc-data-${{ env.DC_VERSION }}-${{ runner.os }}-
+
+      - name: 🛠 Install OWASP Dependency-Check CLI (mandatory)
+        run: |
+          set -e
+          echo "[ECHO] OWASP Dependency-Check CLI 설치 시작 v${DC_VERSION}"
+          sudo rm -rf "${DC_HOME}"
+          curl -sSL -o dc.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip"
+          sudo mkdir -p "${DC_HOME}" "${DC_DATA}"
+          sudo unzip -q dc.zip -d /opt
+          sudo mv "/opt/dependency-check-${DC_VERSION}" "${DC_HOME}"
+          sudo chmod +x "${DC_HOME}/bin/dependency-check.sh"
+          rm -f dc.zip
+          echo "[ECHO] OWASP Dependency-Check CLI 설치 완료 (HOME=${DC_HOME}, DATA=${DC_DATA})"
+
+      - name: 🧪 Run OWASP Dependency-Check (JSON)
+        run: |
+          set -e
+          echo "[ECHO] Dependency-Check 실행 시작"
+          "${DC_HOME}/bin/dependency-check.sh" \
+            --project "BlacklistScan" \
+            --scan . \
+            --format JSON \
+            --out "${BLACKLIST_DIR}/dist" \
+            --data "${DC_DATA}" \
+            --failOnCVSS 0 || { echo "[WARN] Dependency-Check 실행 경고(취약점 발견/일부 오류) - 계속 진행"; true; }
+          # 산출물 표준화
+          if [ -f "${BLACKLIST_DIR}/dist/dependency-check-report.json" ]; then
+            mv -f "${BLACKLIST_DIR}/dist/dependency-check-report.json" "${BLACKLIST_DIR}/dist/owasp_dc.json"
+          fi
+          if [ -s "${BLACKLIST_DIR}/dist/owasp_dc.json" ]; then
+            echo "[ECHO] OWASP DC 결과 파일 크기(bytes): $(wc -c < "${BLACKLIST_DIR}/dist/owasp_dc.json")"
+          else
+            echo "[ECHO] OWASP DC 결과 없음/빈 파일"
+            : > "${BLACKLIST_DIR}/dist/owasp_dc.json"
+          fi
+          echo "[ECHO] Dependency-Check 실행 종료"
 
       # ------------------------------------
       # 1) 네트워크/IP 블랙리스트 (공개 피드, fail-safe)
@@ -121,8 +154,7 @@ jobs:
             > "$BLACKLIST_DIR/raw/et_ips.txt"
           fi
 
-          (cat "$BLACKLIST_DIR/raw/et_ips.txt" 2>/dev/null || true) \
-            | grep -E '^[0-9]+\.[0-9]+' | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" || true
+          (cat "$BLACKLIST_DIR/raw/et_ips.txt" 2>/dev/null || true) | grep -E '^[0-9]+' | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" || true
 
           if [ -s "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" ]; then
             wc -l "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" | awk '{print "[ECHO] ET IP 수:", $1}'
@@ -132,47 +164,38 @@ jobs:
           echo "[ECHO] Emerging Threats 수집 종료"
 
       # ------------------------------------
-      # 2) 패키지 블랙리스트 (로컬, 무료)
+      # 2) 패키지 블랙리스트 (pip-audit / safety / npm audit)
       # ------------------------------------
-      - name: 🐍 pip-audit (optional) — requirements 탐색
+      - name: 🐍 pip-audit (조건 실행)
         if: env.ENABLE_PY_AUDIT == 'true' || env.ENABLE_PY_AUDIT == 'auto'
         run: |
           set -e
           echo "[ECHO] pip-audit 사전 점검"
           if ls requirements*.txt Pipfile.lock poetry.lock 2>/dev/null | grep -q .; then
             echo "[ECHO] pip-audit 실행"
-            (pip-audit -f json -o "$BLACKLIST_DIR/dist/pip_audit.json" || true)
-            if command -v jq >/dev/null 2>&1 && [ -s "$BLACKLIST_DIR/dist/pip_audit.json" ]; then
-              CRIT=$(jq '[.[] | select(.severity=="critical")] | length' "$BLACKLIST_DIR/dist/pip_audit.json" 2>/dev/null || echo 0)
-              HIGH=$(jq  '[.[] | select(.severity=="high")] | length' "$BLACKLIST_DIR/dist/pip_audit.json" 2>/dev/null || echo 0)
-              echo "[ECHO] pip-audit 요약 - critical: ${CRIT}, high: ${HIGH}"
+            pip-audit -f json -o "$BLACKLIST_DIR/dist/pip_audit.json" || { echo "[WARN] pip-audit 경고/오류 - 계속 진행"; true; }
+            if [ -s "$BLACKLIST_DIR/dist/pip_audit.json" ]; then
+              echo "[ECHO] pip-audit 결과 크기(bytes): $(wc -c < "$BLACKLIST_DIR/dist/pip_audit.json")"
+            else
+              echo "[ECHO] pip-audit 결과 없음/빈 파일"
             fi
           else
             echo "[ECHO] Python 종속성 파일이 없어 pip-audit 건너뜀"
           fi
 
-      - name: 🛡️ safety (fixed) — JSON only
+      - name: 🛡️ safety (옵션 충돌 제거, 항상 json)
         if: env.ENABLE_PY_AUDIT == 'true' || env.ENABLE_PY_AUDIT == 'auto'
         run: |
           set -e
           echo "[ECHO] safety 실행"
-          # 충돌 옵션 제거: --full-report 사용 안함, JSON만 출력
-          if ls requirements*.txt 2>/dev/null | grep -q .; then
-            # 가장 일반적인 파일 하나만 대표로 사용 (여러 개면 자유롭게 확장 가능)
-            REQ=$(ls -1 requirements*.txt | head -n1)
-            echo "[ECHO] safety 대상 requirements: $REQ"
-            (safety check -r "$REQ" --json || true) | tee "$BLACKLIST_DIR/dist/package_blacklist_safety.json" >/dev/null
-          else
-            # 종속성 파일이 없으면 현재 환경 검사 (site-packages 기준)
-            (safety check --json || true) | tee "$BLACKLIST_DIR/dist/package_blacklist_safety.json" >/dev/null
-          fi
+          safety check --json | tee "$BLACKLIST_DIR/dist/package_blacklist_safety.json" >/dev/null || { echo "[WARN] safety 경고/오류 - 계속 진행"; true; }
           if [ -s "$BLACKLIST_DIR/dist/package_blacklist_safety.json" ]; then
-            echo "[ECHO] safety 결과 생성"
+            echo "[ECHO] safety 결과 크기(bytes): $(wc -c < "$BLACKLIST_DIR/dist/package_blacklist_safety.json")"
           else
             echo "[ECHO] safety 결과 없음/빈 파일"
           fi
 
-      - name: 📦 npm audit (optional)
+      - name: 📦 npm audit (조건 실행)
         if: env.ENABLE_NPM_AUDIT == 'true' || env.ENABLE_NPM_AUDIT == 'auto'
         run: |
           set -e
@@ -184,94 +207,95 @@ jobs:
               CRIT=$(jq '.metadata.vulnerabilities.critical // 0' "$BLACKLIST_DIR/dist/npm_audit.json" 2>/dev/null || echo 0)
               HIGH=$(jq '.metadata.vulnerabilities.high // 0' "$BLACKLIST_DIR/dist/npm_audit.json" 2>/dev/null || echo 0)
               echo "[ECHO] npm audit 요약 - critical: ${CRIT}, high: ${HIGH}"
+            else
+              echo "[ECHO] npm audit 결과 없음/빈 파일 또는 jq 미설치"
             fi
           else
             echo "[ECHO] JS 락파일이 없어 npm audit 건너뜀"
           fi
 
       # ------------------------------------
-      # 3) 코드 패턴 블랙리스트 (로컬, 무료)
+      # 3) 코드 패턴 블랙리스트 (Semgrep)
       # ------------------------------------
-      - name: 🔎 Semgrep (local only)
+      - name: 🔎 Semgrep (p/ci) — 로컬 전용
         if: env.ENABLE_SEMGREP == 'true'
         run: |
           set -e
           echo "[ECHO] Semgrep 실행 (p/ci, 로컬 전용)"
-          semgrep --config p/ci --error --json --output "$BLACKLIST_DIR/dist/semgrep.json" || true
+          semgrep --config p/ci --json --error --timeout 0 --max-target-bytes 10485760 \
+            > "$BLACKLIST_DIR/dist/semgrep.json" 2> "$BLACKLIST_DIR/logs/semgrep.stderr" || { echo "[WARN] Semgrep 경고/오류 - 계속 진행"; true; }
           if [ -s "$BLACKLIST_DIR/dist/semgrep.json" ]; then
-            echo "[ECHO] Semgrep 결과 생성"
+            echo "[ECHO] Semgrep 결과 크기(bytes): $(wc -c < "$BLACKLIST_DIR/dist/semgrep.json")"
           else
             echo "[ECHO] Semgrep 결과 없음/빈 파일"
           fi
+          echo "[ECHO] Semgrep 실행 종료"
 
       # ------------------------------------
-      # 4) OWASP Dependency-Check (옵션, 무거움)
+      # 4) 결과 요약 및 리포트 인덱스
       # ------------------------------------
-      - name: 🛠 Install OWASP Dependency-Check CLI (optional)
-        if: env.ENABLE_OWASP_DC == 'true'
+      - name: 📊 Build summary (sizes)
         run: |
           set -e
-          echo "[ECHO] Installing OWASP Dependency-Check CLI v${DC_VERSION}"
-          curl -sL -o dc.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip"
-          unzip -q dc.zip -d /opt/dependency-check
-          chmod +x /opt/dependency-check/bin/dependency-check.sh
-          echo "[ECHO] Dependency-Check 설치 완료"
-
-      - name: 🧪 Run Dependency-Check (optional)
-        if: env.ENABLE_OWASP_DC == 'true'
-        run: |
-          set -e
-          echo "[ECHO] Dependency-Check 실행 시작"
-          /opt/dependency-check/bin/dependency-check.sh \
-            --project "BlacklistScan" \
-            --scan . \
-            --format JSON \
-            --out "$BLACKLIST_DIR/dist" || true
-          # 파일명은 dependency-check-report.json 로 생성됨
-          if [ -s "$BLACKLIST_DIR/dist/dependency-check-report.json" ]; then
-            echo "[ECHO] Dependency-Check 결과 생성"
-          else
-            echo "[ECHO] Dependency-Check 결과 없음/빈 파일"
-          fi
-
-      # ------------------------------------
-      # 5) 결과 요약 & 변경사항 PR
-      # ------------------------------------
-      - name: 📊 결과 요약 (ECHO)
-        run: |
           echo "[ECHO] ===== 결과 요약 ====="
           for f in "$BLACKLIST_DIR/dist/"*; do
             [ -e "$f" ] || continue
-            SIZE=$(wc -c < "$f" 2>/dev/null || echo 0)
-            echo "[ECHO] 파일: $(basename "$f"), 크기(bytes): $SIZE"
+            echo "[ECHO] 파일: $(basename "$f"), 크기(bytes): $(wc -c < "$f")"
           done
           echo "[ECHO] ====================="
 
-      - name: 🔍 변경사항 검사
-        id: diffcheck
+          # 간단한 인덱스 JSON 생성
+          jq -n \
+            --arg ver "$(cat "$BLACKLIST_DIR/version.txt" | awk '{print $2}')" \
+            --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --argfile dc "${BLACKLIST_DIR}/dist/owasp_dc.json" \
+            --argfile sg "${BLACKLIST_DIR}/dist/semgrep.json" \
+            '{
+              version: $ver,
+              generated_at: $ts,
+              sources: {
+                spamhaus_ip: "dist/ip_blacklist_spamhaus.txt",
+                emerging_threats_ip: "dist/ip_blacklist_et.txt",
+                owasp_dependency_check: "dist/owasp_dc.json",
+                pip_audit: "dist/pip_audit.json",
+                safety: "dist/package_blacklist_safety.json",
+                semgrep: "dist/semgrep.json",
+                npm_audit: "dist/npm_audit.json"
+              }
+            }' > "$REPORT_DIR/index.json" 2>/dev/null || { echo "[WARN] 요약 인덱스 생성 경고 - 계속 진행"; true; }
+          echo "[ECHO] 요약 인덱스 생성 완료: $REPORT_DIR/index.json"
+
+      # ------------------------------------
+      # 5) 변경 사항이 있을 경우 자동 PR 생성
+      # ------------------------------------
+      - name: 🔍 Check diff
+        id: diff
         run: |
           set -e
           echo "[ECHO] 변경사항 검사 시작"
           git add "$BLACKLIST_DIR" || true
           if git diff --cached --quiet; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "[ECHO] 변경 없음 → PR 생략"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "[ECHO] 변경사항 없음 → PR 생성 생략"
           else
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "[ECHO] 변경 있음 → PR 생성 예정"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "[ECHO] 변경사항 존재 → PR 생성 예정"
           fi
 
-      - name: 🧩 PR 생성 (변경이 있을 때만)
-        if: steps.diffcheck.outputs.changed == 'true'
+      - name: 🌿 Create Pull Request
+        if: steps.diff.outputs.has_changes == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore(blacklist): automated daily update"
-          title: "chore(blacklist): automated daily update"
+          commit-message: "chore(blacklist): update feeds & reports"
+          title: "chore(blacklist): update feeds & reports"
           body: |
-            자동 생성된 블랙리스트 업데이트입니다.
-            - 공개 피드(Spamhaus/ET)
-            - 패키지 취약점(pip-audit, safety, npm audit)
-            - 코드 패턴(Semgrep)
-            - (옵션) OWASP Dependency-Check
-          branch: chore/blacklist-auto-update
+            자동 생성된 블랙리스트/리포트 갱신 PR입니다.
+            - OWASP Dependency-Check (필수)
+            - Spamhaus / Emerging Threats (fail-safe)
+            - pip-audit / safety / npm audit
+            - Semgrep (p/ci)
+            - 요약 인덱스: ${{ env.REPORT_DIR }}/index.json
+          branch: chore/blacklist-update
+          add-paths: |
+            ${{ env.BLACKLIST_DIR }}
           delete-branch: true
