@@ -1,8 +1,8 @@
-name: "🔒 Integrated Blacklist Generator (1-min · mandatory DC · fail-safe · echo · mass dirs · cache-safe)"
+name: "🔒 Integrated Blacklist Generator (1-min · mandatory DC · keyless-safe · echo · mass dirs · cache-safe)"
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # every 1 minute (note: GH may delay/skip)
+    - cron: "*/1 * * * *"   # every minute (GitHub may delay/skip)
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Root/output directories
+  # Root/output dirs
   BLACKLIST_DIR: .github/blacklist
   REPORT_DIR: .github/blacklist/report
   EXPORT_DIR: .github/blacklist/export
@@ -23,13 +23,13 @@ env:
   ARCHIVE_DIR: .github/blacklist/archive
   LATEST_DIR: .github/blacklist/latest
 
-  # Sub trees (mass creation)
+  # Sub trees
   NET_DIR: .github/blacklist/networks
   PKG_DIR: .github/blacklist/packages
   CODE_DIR: .github/blacklist/code
   SUMMARY_DIR: .github/blacklist/summary
 
-  # Free/public feeds only
+  # Free feeds toggles
   ENABLE_SPAMHAUS: "true"
   ENABLE_EMERGING_THREATS: "true"
 
@@ -38,10 +38,11 @@ env:
   ENABLE_NPM_AUDIT: "auto"
   ENABLE_SEMGREP: "true"
 
-  # Dependency-Check (binary in /opt; data cached under runner temp)
+  # Dependency-Check
   DC_VERSION: "9.2.0"
   DC_HOME: /opt/dependency-check
-  # ❗ DC_DATA is set at runtime from $RUNNER_TEMP in the init step
+  # DC_DATA is set at runtime from $RUNNER_TEMP (see init step)
+  # NVD_API_KEY intentionally NOT required
 
 jobs:
   generate:
@@ -51,31 +52,39 @@ jobs:
       - name: "📂 Checkout"
         uses: actions/checkout@v4
 
-      - name: "🧭 Initialize env (RUN_DATE/LOGFILE/DC_DATA from $RUNNER_TEMP)"
+      - name: "🧭 Init (env/time/temp paths)"
         id: init
         shell: bash
         run: |
           set -euo pipefail
-          echo "[ECHO] ▶ Integrated blacklist workflow start"
-          echo "[ECHO] Branch: $(git rev-parse --abbrev-ref HEAD)"
-          echo "[ECHO] Commit: $(git rev-parse --short HEAD)"
-
           RUN_DATE_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
           echo "RUN_DATE_UTC=${RUN_DATE_UTC}" >> "$GITHUB_ENV"
-          echo "LOGFILE=${{ env.BLACKLIST_DIR }}/logs/run_${RUN_DATE_UTC}.log" >> "$GITHUB_ENV"
-          echo "[ECHO] Run time (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          # Derive DC_DATA from $RUNNER_TEMP at runtime (supported by the runner)
+          echo "LOGFILE=.github/blacklist/logs/run_${RUN_DATE_UTC}.log" >> "$GITHUB_ENV"
           echo "DC_DATA=${RUNNER_TEMP}/dc-data" >> "$GITHUB_ENV"
-
-          # also expose as step outputs for actions/cache path/keys
           echo "dc_data=${RUNNER_TEMP}/dc-data" >> "$GITHUB_OUTPUT"
           echo "run_date=${RUN_DATE_UTC}" >> "$GITHUB_OUTPUT"
+          echo "[ECHO] ▶ Workflow start @ ${RUN_DATE_UTC}"
+          echo "[ECHO] Runner temp: ${RUNNER_TEMP}"
+
+      - name: "🧰 Ensure base packages (apt)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[ECHO] Installing base packages"
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends curl unzip jq git python3-pip
+          if ! command -v node >/dev/null 2>&1; then
+            echo "[WARN] node not found, installing nodejs/npm"
+            sudo apt-get install -y --no-install-recommends nodejs npm
+          fi
+          python3 -m pip install --user --upgrade pip pip-audit || true
+          python3 -m pip install --user semgrep || true
+          echo "[ECHO] Base tools ready"
 
       - name: "📁 Create mass directories"
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p \
             "$BLACKLIST_DIR"/{raw,dist,logs} \
             "$REPORT_DIR" \
@@ -93,29 +102,37 @@ jobs:
       - name: "🗂️ Bootstrap placeholders (echo)"
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           echo "# Blacklist Outputs" > "$BLACKLIST_DIR/README.md"
           echo "{ \"generated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"version\": 1 }" > "$BLACKLIST_DIR/manifest.json"
-          for d in "$BLACKLIST_DIR" "$REPORT_DIR" "$EXPORT_DIR" "$SNAPSHOT_DIR" "$ARCHIVE_DIR" "$LATEST_DIR" \
-                   "$NET_DIR/spamhaus" "$NET_DIR/et" "$NET_DIR/all" \
-                   "$PKG_DIR/python" "$PKG_DIR/npm" "$PKG_DIR/dc" \
-                   "$CODE_DIR/semgrep" "$SUMMARY_DIR" \
-                   "$SNAP_DIR" "$SNAP_DIR/networks" "$SNAP_DIR/packages" "$SNAP_DIR/code" "$SNAP_DIR/summary" "$SNAP_DIR/logs"; do
-            touch "$d/.gitkeep"
-          done
-          echo "[ECHO] Placeholders & manifest created" | tee -a "$LOGFILE"
+          # dotfiles to keep dirs
+          while read -r d; do touch "$d/.gitkeep"; done <<'EOF'
+          .github/blacklist
+          .github/blacklist/report
+          .github/blacklist/export
+          .github/blacklist/export/json
+          .github/blacklist/export/txt
+          .github/blacklist/export/csv
+          .github/blacklist/export/html
+          .github/blacklist/snapshots
+          .github/blacklist/archive
+          .github/blacklist/latest
+          .github/blacklist/networks
+          .github/blacklist/networks/spamhaus
+          .github/blacklist/networks/et
+          .github/blacklist/networks/all
+          .github/blacklist/packages
+          .github/blacklist/packages/python
+          .github/blacklist/packages/npm
+          .github/blacklist/packages/dc
+          .github/blacklist/code
+          .github/blacklist/code/semgrep
+          .github/blacklist/summary
+          EOF
+          echo "[ECHO] Placeholders ready" | tee -a "$LOGFILE"
 
-      - name: "🧰 Ensure system deps (jq, unzip, curl, python3-pip, npm)"
-        shell: bash
-        run: |
-          set -e
-          echo "[ECHO] Installing APT packages" | tee -a "$LOGFILE"
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends jq unzip curl python3-pip npm
-          python3 -V && pip3 --version && npm -v | sed 's/^/[ECHO] npm /'
-          echo "[ECHO] System deps ready" | tee -a "$LOGFILE"
-
-      - name: "🧳 Restore DC data cache (NVD, etc.)"
+      - name: "💾 Cache DC data (restore)"
+        id: cache-restore
         uses: actions/cache@v4
         with:
           path: ${{ steps.init.outputs.dc_data }}
@@ -124,249 +141,251 @@ jobs:
             dc-data-${{ env.DC_VERSION }}-
             dc-data-
 
-      - name: "🏗️ Prepare IDC/DC_HOME and DC_DATA"
+      - name: "🏗️ Prepare IDC (DC_HOME/DC_DATA dirs)"
         shell: bash
-        run: |
-          set -e
-          echo "[ECHO] Preparing DC_HOME and DC_DATA" | tee -a "$LOGFILE"
-          sudo mkdir -p "${DC_HOME}" || true
-          sudo chmod -R 755 "${DC_HOME}" || true
-          mkdir -p "${DC_DATA}" || true
-          echo "[ECHO] DC_HOME=${DC_HOME}, DC_DATA=${DC_DATA}" | tee -a "$LOGFILE"
-
-      - name: "⬇️ Install OWASP Dependency-Check (mandatory)"
-        id: dc_install
-        shell: bash
-        run: |
-          set -e
-          echo "[ECHO] DC install start v${DC_VERSION}" | tee -a "$LOGFILE"
-          WORKDIR="$(mktemp -d)"
-          trap 'rm -rf "$WORKDIR"' EXIT
-          ZIP_URL="https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip"
-
-          echo "[ECHO] Downloading: ${ZIP_URL}" | tee -a "$LOGFILE"
-          curl -fsSL -o "$WORKDIR/dc.zip" "$ZIP_URL" || {
-            echo "[WARN] First download failed → retry up to 3" | tee -a "$LOGFILE"
-            for i in 1 2 3; do
-              sleep $((i*2))
-              curl -fsSL -o "$WORKDIR/dc.zip" "$ZIP_URL" && break
-            done
-          }
-
-          echo "[ECHO] Unzipping under runner temp" | tee -a "$LOGFILE"
-          unzip -q "$WORKDIR/dc.zip" -d "$WORKDIR" || {
-            echo "[ERROR] unzip failed" | tee -a "$LOGFILE"; exit 1;
-          }
-
-          CANDIDATE="$(find "$WORKDIR" -maxdepth 1 -type d -name 'dependency-check*' | head -n1 || true)"
-          if [ -z "$CANDIDATE" ]; then
-            echo "[ERROR] DC extracted folder not found" | tee -a "$LOGFILE"
-            exit 1
-          fi
-
-          echo "[ECHO] Moving DC to ${DC_HOME}" | tee -a "$LOGFILE"
-          sudo rm -rf "${DC_HOME}"
-          sudo mv "$CANDIDATE" "${DC_HOME}"
-          sudo chmod +x "${DC_HOME}/bin/dependency-check.sh" || true
-
-          if [ -x "${DC_HOME}/bin/dependency-check.sh" ]; then
-            echo "DC_READY=true" >> "$GITHUB_ENV"
-            echo "[ECHO] DC install success (HOME=${DC_HOME})" | tee -a "$LOGFILE"
-          else
-            echo "DC_READY=false" >> "$GITHUB_ENV"
-            echo "[WARN] DC binary not executable → placeholder mode" | tee -a "$LOGFILE"
-          fi
-
-      - name: "🌐 Collect Spamhaus/ET feeds (fail-safe, echo)"
-        shell: bash
-        env:
-          CURL_OPTS: "-fsSL --max-time 25"
         run: |
           set -euo pipefail
-          echo "[ECHO] Spamhaus collection start" | tee -a "$LOGFILE"
-          mkdir -p "$BLACKLIST_DIR/raw" "$BLACKLIST_DIR/dist" "$NET_DIR/spamhaus" "$NET_DIR/et" "$NET_DIR/all"
+          echo "[ECHO] Prepare IDC dirs"
+          sudo mkdir -p "${DC_HOME}" || true
+          mkdir -p "${DC_DATA}" || true
+          sudo chmod -R 755 "${DC_HOME}" || true
+          echo "[ECHO] DC_HOME=${DC_HOME}, DC_DATA=${DC_DATA}"
 
-          # Spamhaus
-          if curl $CURL_OPTS https://www.spamhaus.org/drop/drop.txt  | grep -v '^;' > "$BLACKLIST_DIR/raw/spamhaus_drop.txt"; then
-            echo "[ECHO] spamhaus_drop ok" | tee -a "$LOGFILE"
-          else
-            echo "[WARN] spamhaus_drop failed → empty" | tee -a "$LOGFILE"
-            : > "$BLACKLIST_DIR/raw/spamhaus_drop.txt"
-          fi
-          if curl $CURL_OPTS https://www.spamhaus.org/drop/edrop.txt | grep -v '^;' > "$BLACKLIST_DIR/raw/spamhaus_edrop.txt"; then
-            echo "[ECHO] spamhaus_edrop ok" | tee -a "$LOGFILE"
-          else
-            echo "[WARN] spamhaus_edrop failed → empty" | tee -a "$LOGFILE"
-            : > "$BLACKLIST_DIR/raw/spamhaus_edrop.txt"
-          fi
-          cat "$BLACKLIST_DIR/raw/"spamhaus_*.txt | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" || : > "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt"
-          wc -l "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" | awk '{print "[ECHO] Spamhaus IP:", $1}'
-
-          # Emerging Threats (IP)
-          echo "[ECHO] Emerging Threats collection start" | tee -a "$LOGFILE"
-          if curl $CURL_OPTS https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt > "$BLACKLIST_DIR/raw/et_ips.txt"; then
-            echo "[ECHO] ET IP list ok" | tee -a "$LOGFILE"
-          else
-            echo "[WARN] ET IP list failed → empty" | tee -a "$LOGFILE"
-            : > "$BLACKLIST_DIR/raw/et_ips.txt"
-          fi
-          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}(/\d{1,2})?' "$BLACKLIST_DIR/raw/et_ips.txt" | sort -u > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" || : > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt"
-          wc -l "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" | awk '{print "[ECHO] ET IP:", $1}'
-
-          # Copy to NET_DIR/all
-          cp -f "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" "$NET_DIR/all/ip_blacklist_spamhaus.txt" || : > "$NET_DIR/all/ip_blacklist_spamhaus.txt"
-          cp -f "$BLACKLIST_DIR/dist/ip_blacklist_et.txt"       "$NET_DIR/all/ip_blacklist_et.txt"       || : > "$NET_DIR/all/ip_blacklist_et.txt"
-
-      - name: "🐍 Python audits (pip-audit & safety) · echo placeholders"
+      - name: "⬇️ Install Dependency-Check (zip → /opt)"
         shell: bash
         run: |
-          set -e
-          echo "[ECHO] pip-audit precheck" | tee -a "$LOGFILE"
-          if ls requirements*.txt pyproject.toml setup.cfg setup.py 2>/dev/null | grep -q .; then
-            pip3 install --no-input --upgrade pip pip-audit safety
-            (pip-audit -r requirements.txt -f json || true) > "$PKG_DIR/python/pip_audit.json" 2>/dev/null || echo "{}" > "$PKG_DIR/python/pip_audit.json"
-            # safety: full report는 --json과 상충됨 → json 단독
-            (safety check -r requirements.txt --json || true) > "$PKG_DIR/python/safety.json" 2>/dev/null || echo "{}" > "$PKG_DIR/python/safety.json"
+          set -euo pipefail
+          echo "[ECHO] Installing DC v${DC_VERSION}"
+          cd "${RUNNER_TEMP}"
+          rm -f dependency-check.zip || true
+          URL="https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip"
+          for i in 1 2 3; do
+            if curl -fsSL -o dependency-check.zip "$URL"; then break; fi
+            echo "[WARN] DC zip download retry $i"
+            sleep $((i*2))
+          done
+          if [ ! -s dependency-check.zip ]; then
+            echo "[WARN] DC zip download failed → placeholder mode"
+            echo "DC_READY=false" >> "$GITHUB_ENV"
           else
-            echo "[ECHO] no Python lockfiles → skip" | tee -a "$LOGFILE"
+            rm -rf "${RUNNER_TEMP}/dependency-check-unzip" && mkdir -p "${RUNNER_TEMP}/dependency-check-unzip"
+            if unzip -q dependency-check.zip -d "${RUNNER_TEMP}/dependency-check-unzip"; then
+              CANDIDATE="$(find "${RUNNER_TEMP}/dependency-check-unzip" -maxdepth 1 -type d -name 'dependency-check*' | head -n1 || true)"
+              if [ -n "$CANDIDATE" ]; then
+                sudo rm -rf "${DC_HOME}"
+                sudo mv "$CANDIDATE" "${DC_HOME}"
+                sudo chmod +x "${DC_HOME}/bin/dependency-check.sh" || true
+                echo "DC_READY=true" >> "$GITHUB_ENV"
+                echo "[ECHO] DC installed to ${DC_HOME}"
+              else
+                echo "DC_READY=false" >> "$GITHUB_ENV"
+                echo "[WARN] DC folder not found → placeholder mode"
+              fi
+            else
+              echo "DC_READY=false" >> "$GITHUB_ENV"
+              echo "[WARN] unzip failed → placeholder mode"
+            fi
+          fi
+
+      - name: "🌐 Spamhaus/ET fetch (fail-safe)"
+        shell: bash
+        env:
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          # Spamhaus
+          echo "[ECHO] Spamhaus fetch start"
+          {
+            curl -fsSL https://www.spamhaus.org/drop/drop.txt  | grep -v '^;' || true
+            echo
+            curl -fsSL https://www.spamhaus.org/drop/edrop.txt | grep -v '^;' || true
+          } > "$BLACKLIST_DIR/raw/spamhaus_all.txt" || true
+          awk '{print $1}' "$BLACKLIST_DIR/raw/spamhaus_all.txt" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' || true > "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt"
+          cp -f "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" "$NET_DIR/all/ip_blacklist_spamhaus.txt" || echo -n > "$NET_DIR/all/ip_blacklist_spamhaus.txt"
+          echo "[ECHO] Spamhaus IP count: $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0)"
+
+          # Emerging Threats
+          echo "[ECHO] Emerging Threats fetch start"
+          curl -fsSL https://rules.emergingthreats.net/blockrules/compromised-ips.txt \
+            -o "$BLACKLIST_DIR/raw/et_compromised.txt" || true
+          sort -u "$BLACKLIST_DIR/raw/et_compromised.txt" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' || true > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt"
+          cp -f "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" "$NET_DIR/all/ip_blacklist_et.txt" || echo -n > "$NET_DIR/all/ip_blacklist_et.txt"
+          echo "[ECHO] ET IP count: $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0)"
+
+      - name: "🐍 pip-audit (auto, safe)"
+        if: env.ENABLE_PY_AUDIT == 'true' || env.ENABLE_PY_AUDIT == 'auto'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[ECHO] pip-audit start"
+          if ls requirements*.txt pyproject.toml setup.cfg setup.py 2>/dev/null | grep -q .; then
+            (python3 -m pip_audit -f json || true) > "$PKG_DIR/python/pip_audit.json" 2>/dev/null || echo "{}" > "$PKG_DIR/python/pip_audit.json"
+          else
             echo "{}" > "$PKG_DIR/python/pip_audit.json"
+            echo "[ECHO] No Python lockfiles → skip"
+          fi
+
+      - name: "🧪 safety (keyless-safe output)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[ECHO] safety start"
+          python3 -m pip install --user safety || true
+          # Always produce a JSON (even if empty)
+          if python3 -m safety check --bare >/dev/null 2>&1; then
+            (python3 -m safety check --json || true) > "$PKG_DIR/python/safety.json" 2>/dev/null || echo "{}" > "$PKG_DIR/python/safety.json"
+          else
             echo "{}" > "$PKG_DIR/python/safety.json"
           fi
 
-      - name: "📦 npm audit (echo placeholders)"
-        shell: bash
-        run: |
-          set -e
-          echo "[ECHO] npm audit precheck" | tee -a "$LOGFILE"
-          if ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null | grep -q .; then
-            (npm audit --json || true) > "$PKG_DIR/npm/npm_audit.json" 2>/dev/null || echo "{}" > "$PKG_DIR/npm/npm_audit.json"
-          else
-            echo "[ECHO] no JS lockfiles → skip" | tee -a "$LOGFILE"
-            echo "{}" > "$PKG_DIR/npm/npm_audit.json"
-          fi
-
-      - name: "🔎 Semgrep (local ruleset, echo)"
-        shell: bash
-        run: |
-          set -e
-          echo "[ECHO] Running Semgrep" | tee -a "$LOGFILE"
-          pip3 install --no-input --upgrade semgrep
-          (semgrep ci --config p/ci --json || true) > "$CODE_DIR/semgrep/semgrep.json" 2>/dev/null || echo "{}" > "$CODE_DIR/semgrep/semgrep.json"
-          echo "[ECHO] Semgrep done" | tee -a "$LOGFILE"
-
-      - name: "🔍 Dependency-Check run (JSON + HTML)"
-        shell: bash
-        env:
-          DC_READY: ${{ env.DC_HOME }}  # just to pass non-empty
-        run: |
-          set -e
-          echo "[ECHO] DC execution start" | tee -a "$LOGFILE"
-          mkdir -p "$PKG_DIR/dc" "$EXPORT_DIR/json" "$EXPORT_DIR/html" "$DC_DATA"
-
-          if [ -x "${DC_HOME}/bin/dependency-check.sh" ]; then
-            if ! "${DC_HOME}/bin/dependency-check.sh" \
-                  --project "BlacklistScan" \
-                  --scan . \
-                  --format JSON \
-                  --format HTML \
-                  --out "$PKG_DIR/dc" \
-                  --data "$DC_DATA" \
-                  --failOnCVSS 0 ; then
-              echo "[WARN] DC run had warnings/errors (continuing)" | tee -a "$LOGFILE"
-            fi
-            # normalize filenames
-            [ -f "$PKG_DIR/dc/dependency-check-report.json" ] && mv -f "$PKG_DIR/dc/dependency-check-report.json" "$PKG_DIR/dc/dc_report.json"
-            [ -f "$PKG_DIR/dc/dependency-check-report.html" ] && mv -f "$PKG_DIR/dc/dependency-check-report.html" "$PKG_DIR/dc/dc_report.html"
-          else
-            echo "[WARN] DC binary missing → placeholder" | tee -a "$LOGFILE"
-          fi
-
-          # placeholders if missing
-          [ -f "$PKG_DIR/dc/dc_report.json" ] || echo "{}" > "$PKG_DIR/dc/dc_report.json"
-          [ -f "$PKG_DIR/dc/dc_report.html" ] || echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
-
-          # export copies
-          cp -f "$PKG_DIR/dc/dc_report.json" "$EXPORT_DIR/json/dc_report.json" || true
-          cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" || true
-          echo "[ECHO] DC execution finished" | tee -a "$LOGFILE"
-
-      - name: "🧾 Summary files (JSON/MD) with jq (safe)"
+      - name: "📦 npm audit (auto, safe)"
+        if: env.ENABLE_NPM_AUDIT == 'true' || env.ENABLE_NPM_AUDIT == 'auto'
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
+          echo "[ECHO] npm audit start"
+          if ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null | grep -q .; then
+            (npm audit --json || true) > "$PKG_DIR/npm/npm_audit.json" 2>/dev/null || echo "{}" > "$PKG_DIR/npm/npm_audit.json"
+          else
+            echo "{}" > "$PKG_DIR/npm/npm_audit.json"
+            echo "[ECHO] No JS lockfiles → skip"
+          fi
 
-          echo "[ECHO] Summary generation" | tee -a "$LOGFILE"
+      - name: "🔎 Semgrep (safe)"
+        if: env.ENABLE_SEMGREP == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[ECHO] Semgrep start"
+          (python3 -m semgrep --config p/ci --json --exclude .git || true) > "$CODE_DIR/semgrep/semgrep.json" 2>/dev/null || echo "{}" > "$CODE_DIR/semgrep/semgrep.json"
+          echo "[ECHO] Semgrep done"
+
+      - name: "💾 Cache DC data (save)"
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.init.outputs.dc_data }}
+          key: dc-data-${{ env.DC_VERSION }}-${{ runner.os }}
+
+      - name: "🛡️ Dependency-Check run (keyless multi-fallback)"
+        shell: bash
+        env:
+          NVD_API_KEY: ""   # intentionally empty (keyless)
+        run: |
+          set -e
+          echo "[ECHO] DC execution start" | tee -a "$LOGFILE"
+          mkdir -p "$PKG_DIR/dc" "$EXPORT_DIR/json" "$EXPORT_DIR/html"
+
+          if [ "${DC_READY:-false}" != "true" ] || [ ! -x "${DC_HOME}/bin/dependency-check.sh" ]; then
+            echo "[WARN] DC not installed → creating placeholders" | tee -a "$LOGFILE"
+            echo "{}" > "$PKG_DIR/dc/dc_report.json"
+            echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
+          else
+            # Common args
+            DC_ARGS=( --project "BlacklistScan"
+                      --scan "."
+                      --format JSON --format HTML
+                      --out "$PKG_DIR/dc"
+                      --data "$DC_DATA"
+                      --failOnCVSS 0
+                      --cveValidForHours 8760 )
+            # If we truly want to respect keyless limits, add a delay to reduce 403
+            DC_ARGS+=("--nvdApiDelay" "6000")
+
+            # Try 1: normal run (may 403 without key)
+            if ! "${DC_HOME}/bin/dependency-check.sh" "${DC_ARGS[@]}"; then
+              echo "[WARN] DC try#1 failed → trying --noupdate" | tee -a "$LOGFILE"
+              # Try 2: no update (works if cache already exists)
+              if ! "${DC_HOME}/bin/dependency-check.sh" "${DC_ARGS[@]}" --noupdate; then
+                echo "[WARN] DC try#2 (--noupdate) failed → placeholders" | tee -a "$LOGFILE"
+                echo "{}" > "$PKG_DIR/dc/dc_report.json"
+                echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
+              fi
+            fi
+
+            # Normalize filenames (if produced)
+            [ -f "$PKG_DIR/dc/dependency-check-report.json" ] && mv -f "$PKG_DIR/dc/dependency-check-report.json" "$PKG_DIR/dc/dc_report.json"
+            [ -f "$PKG_DIR/dc/dependency-check-report.html" ] && mv -f "$PKG_DIR/dc/dependency-check-report.html" "$PKG_DIR/dc/dc_report.html"
+            [ -f "$PKG_DIR/dc/dc_report.json" ] || echo "{}" > "$PKG_DIR/dc/dc_report.json"
+            [ -f "$PKG_DIR/dc/dc_report.html" ] || echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
+          fi
+
+          # Export copies
+          cp -f "$PKG_DIR/dc/dc_report.json" "$EXPORT_DIR/json/dc_report.json" || echo "{}" > "$EXPORT_DIR/json/dc_report.json"
+          cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" || echo "<html><body>no report</body></html>" > "$EXPORT_DIR/html/dc_report.html"
+          echo "[ECHO] DC execution finished" | tee -a "$LOGFILE"
+
+      - name: "🧾 Summary (safe, no glob errors)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[ECHO] Summary generation"
           SUMMARY_JSON="$SUMMARY_DIR/summary_${RUN_DATE_UTC}.json"
           SUMMARY_MD="$SUMMARY_DIR/summary_${RUN_DATE_UTC}.md"
 
-          SPAM_FILE="$NET_DIR/all/ip_blacklist_spamhaus.txt"
-          ET_FILE="$NET_DIR/all/ip_blacklist_et.txt"
+          # JSON summary
+          {
+            echo "{"
+            echo "  \"run_at_utc\": \"${RUN_DATE_UTC}\","
+            echo "  \"spamhaus_count\": $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0),"
+            echo "  \"et_count\": $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0),"
+            echo "  \"files\": {"
+            find "$EXPORT_DIR" "$PKG_DIR/dc" -type f 2>/dev/null | while read -r f; do
+              sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+              bn="${f#./}"
+              echo "    \"${bn}\": ${sz},"
+            done
+            echo "    \"_end\": 0"
+            echo "  }"
+            echo "}"
+          } > "$SUMMARY_JSON"
 
-          SPAM_CT="0"; [ -f "$SPAM_FILE" ] && SPAM_CT="$(wc -l < "$SPAM_FILE" | tr -d '[:space:]' || echo 0)"
-          ET_CT="0";   [ -f "$ET_FILE" ]   && ET_CT="$(wc -l < "$ET_FILE"   | tr -d '[:space:]' || echo 0)"
-
-          jq -n --arg run "$RUN_DATE_UTC" \
-                --argjson spam "${SPAM_CT:-0}" \
-                --argjson et "${ET_CT:-0}" \
-                '{ run_at_utc: $run, spamhaus_count: $spam, et_count: $et, files: {} }' > "$SUMMARY_JSON"
-
-          mapfile -t FILES < <(find "$EXPORT_DIR" -type f -print 2>/dev/null; [ -f "$PKG_DIR/dc/dc_report.html" ] && echo "$PKG_DIR/dc/dc_report.html" || true)
-
-          for f in "${FILES[@]}"; do
-            rel="${f#./}"; sz="$(wc -c < "$f" | tr -d '[:space:]' || echo 0)"
-            tmp="${SUMMARY_JSON}.tmp"
-            jq --arg k "$rel" --argjson v "${sz:-0}" '.files[$k] = $v' "$SUMMARY_JSON" > "$tmp" && mv "$tmp" "$SUMMARY_JSON"
-          done
-
+          # MD summary
           {
             echo "# Blacklist Summary (${RUN_DATE_UTC})"
             echo
-            echo "- Spamhaus: ${SPAM_CT} IPs"
-            echo "- EmergingThreats: ${ET_CT} IPs"
+            echo "- Spamhaus: $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0) IPs"
+            echo "- EmergingThreats: $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0) IPs"
             echo
             echo "## Files (bytes)"
-            for f in "${FILES[@]}"; do
-              rel="${f#./}"; sz="$(wc -c < "$f" | tr -d '[:space:]' || echo 0)"
-              echo "- ${rel}: ${sz}"
+            find "$EXPORT_DIR" "$PKG_DIR/dc" -type f 2>/dev/null | while read -r f; do
+              sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+              echo "- ${f#./}: $sz"
             done
           } > "$SUMMARY_MD"
 
+          # Console preview
           echo "[ECHO] ===== Result files ====="
-          for f in "${FILES[@]}"; do
-            rel="${f#./}"; sz="$(wc -c < "$f" | tr -d '[:space:]' || echo 0)"
-            echo "[ECHO] file: ${rel}, size(bytes): ${sz}"
+          find "$EXPORT_DIR" "$PKG_DIR/dc" -type f 2>/dev/null | while read -r f; do
+            sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+            echo "[ECHO] file: ${f#./}, size(bytes): ${sz}"
           done
           echo "[ECHO] ========================"
 
-          [ -s "$SUMMARY_JSON" ] || echo '{"run_at_utc":"'${RUN_DATE_UTC}'","spamhaus_count":0,"et_count":0,"files":{}}' > "$SUMMARY_JSON"
-          [ -s "$SUMMARY_MD" ] || { echo "# Blacklist Summary (${RUN_DATE_UTC})"; echo; echo "- Spamhaus: 0 IPs"; echo "- EmergingThreats: 0 IPs"; } > "$SUMMARY_MD"
-          echo "[ECHO] Summary created → $SUMMARY_JSON, $SUMMARY_MD" | tee -a "$LOGFILE"
-
-      - name: "📦 Snapshot & latest copy (echo)"
+      - name: "🗃️ Snapshot & latest sync"
         shell: bash
         run: |
           set -e
-          echo "[ECHO] Snapshot & latest sync" | tee -a "$LOGFILE"
-          # snapshot
-          rsync -a "$EXPORT_DIR"/ "$SNAP_DIR/summary/" --exclude '.gitkeep' || true
-          rsync -a "$PKG_DIR/dc/" "$SNAP_DIR/packages/dc/" --exclude '.gitkeep' || true
-          rsync -a "$NET_DIR/all/" "$SNAP_DIR/networks/" --exclude '.gitkeep' || true
-          rsync -a "$CODE_DIR/semgrep/" "$SNAP_DIR/code/semgrep/" --exclude '.gitkeep' || true
-          # latest
-          rsync -a --delete "$EXPORT_DIR"/ "$LATEST_DIR/" --exclude '.gitkeep' || true
+          echo "[ECHO] Snapshot & latest sync"
+          SNAP_DIR="$SNAP_DIR"
+          mkdir -p "$SNAP_DIR"
+          rsync -a "$BLACKLIST_DIR/" "$SNAP_DIR/" --exclude "snapshots/*" --exclude ".git" || true
+          rm -rf "$LATEST_DIR" && mkdir -p "$LATEST_DIR"
+          rsync -a "$EXPORT_DIR/" "$LATEST_DIR/" || true
 
-      - name: "📝 Commit changes (if any)"
+      - name: "📝 Commit changes (if any) with rebase"
         shell: bash
         run: |
           set -e
           echo "[ECHO] Commit & push (if changed)" | tee -a "$LOGFILE"
-          git config user.name "gh-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$BLACKLIST_DIR" || true
           if ! git diff --cached --quiet; then
+            git fetch --unshallow || true
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
             git commit -m "chore(blacklist): update outputs @ ${RUN_DATE_UTC}"
-            git push
+            git push || (git pull --rebase && git push)
             echo "[ECHO] Pushed updates" | tee -a "$LOGFILE"
           else
             echo "[ECHO] No changes to commit" | tee -a "$LOGFILE"
