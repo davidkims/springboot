@@ -1,4 +1,4 @@
-name: email-servers-mass-setup
+name: email-servers-mass-setup-and-send-test-v3
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ on:
         description: "Number of virtual accounts per service"
         required: false
         default: "50"
+      test_count:
+        description: "Number of test emails per server"
+        required: false
+        default: "3"
 
 permissions:
   contents: read
@@ -18,24 +22,27 @@ permissions:
 jobs:
   setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       BASE: /opt/email
       DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
       USER_COUNT: ${{ github.event.inputs.user_count || '50' }}
+      TEST_COUNT: ${{ github.event.inputs.test_count || '3' }}
       SERVICES: "postfix exim4 opensmtpd mailhog mailcatcher smtp-sink maildev"
 
     steps:
-      - name: Prepare massive directory tree per service
+      - name: Prepare massive directory tree per service (incl. policies/firewall)
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo mkdir -p "$BASE"
           sudo chown -R "$USER:$USER" "$BASE"
 
-          # 표준 트리 + 대량 더미 디렉토리(001~100)
+          # 공통 상위 디렉토리(정책/리포트 등)
+          mkdir -p "$BASE"/{policies,reports,artifacts,global,tools}
+          # 서비스별 표준 트리 + 대량 더미 디렉토리(001~100) + firewall/permissions
           for SVC in $SERVICES; do
-            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports; do
+            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts; do
               mkdir -p "$BASE/$SVC/$d"
             done
             for i in $(seq -w 001 100); do
@@ -44,7 +51,7 @@ jobs:
           done
           chmod -R 755 "$BASE"
 
-      - name: Install base prerequisites (no containerd.io)
+      - name: Install base prerequisites (NO containerd.io reinstall)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -54,29 +61,30 @@ jobs:
             ca-certificates apt-transport-https software-properties-common \
             curl wget git build-essential jq \
             ruby-full libsqlite3-dev \
-            apache2-utils openssl
-          # Docker는 재설치 대신 업그레이드만 수행 (containerd.io 충돌 회피)
+            apache2-utils openssl \
+            swaks \
+            clamav clamav-daemon
+          # Docker: upgrade only (avoid containerd.io conflict)
           sudo apt-get install -y --only-upgrade docker.io containerd || true
           docker --version || true
           containerd --version || true
-          # 필요시 Docker 기동
           sudo systemctl is-active --quiet docker || sudo systemctl start docker || true
 
-      - name: Global README & security policy via echo/heredoc
+      - name: Global README & security policy (echo/heredoc)
         shell: bash
         run: |
           set -Eeuo pipefail
           cat <<'EOF' | tee "$BASE/README.txt" >/dev/null
           This CI workspace provisions email servers for testing.
-          MTAs (postfix/exim4/opensmtpd) are installed & configured but NOT started.
+          MTAs (postfix/exim4/opensmtpd) are installed & configured but NOT auto-started.
           Test servers run on high ports for local integration tests.
           EOF
-
           cat <<'EOF' | tee "$BASE/policies/SECURITY.md" >/dev/null
           # Security (Test Only)
           - Ephemeral CI environment. Do not store real credentials.
           - Virtual users are randomly generated per run.
           - Outputs: users.csv, users.htpasswd (bcrypt), users.json per service.
+          - ClamAV v3-style signature DB update & scan reports are generated per service.
           EOF
           chmod 644 "$BASE/README.txt" "$BASE/policies/SECURITY.md"
 
@@ -105,25 +113,33 @@ jobs:
           EOF
           sudo service postfix stop || true
 
+          # 에코 환경/권한/방화벽 파일
           cat <<EOF | tee "$BASE/postfix/env/.env" >/dev/null
           DOMAIN=${DOMAIN}
           USER_COUNT=${USER_COUNT}
           EOF
-          chmod 640 "$BASE/postfix/env/.env"
-
-      - name: Postfix mass policy/ACL files (echo) and perms
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          for i in $(seq -w 001 020); do
-            cat <<EOF | tee "$BASE/postfix/policies/policy_$i.conf" >/dev/null
-            # Postfix policy $i
-            permit_mynetworks
-            reject_unauth_destination
-            EOF
-            echo "rcpt_access_$i OK" | tee "$BASE/postfix/acl/rcpt_access_$i.list" >/dev/null
-          done
-          chmod 644 "$BASE/postfix/policies/"*.conf "$BASE/postfix/acl/"*.list
+          cat <<'EOF' | tee "$BASE/postfix/permissions/ACL.txt" >/dev/null
+          [permissions]
+          dir_mode=755
+          file_mode=640
+          owner=${USER}
+          group=${USER}
+          EOF
+          cat <<'EOF' | tee "$BASE/postfix/firewall/ufw.rules" >/dev/null
+          # UFW policy (not applied; for review)
+          allow 25/tcp comment 'SMTP (disabled in CI)'
+          EOF
+          cat <<'EOF' | tee "$BASE/postfix/firewall/iptables.rules" >/dev/null
+          # iptables policy (not applied; for review)
+          *filter
+          :INPUT ACCEPT [0:0]
+          :FORWARD ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          # -A INPUT -p tcp --dport 25 -j ACCEPT
+          COMMIT
+          EOF
+          chmod -R 755 "$BASE/postfix"
+          find "$BASE/postfix" -type f -name "*.env" -exec chmod 640 {} \;
 
       # ---------------------- Exim4 ----------------------
       - name: Install & configure Exim4 (no auto-start) + upgrade
@@ -139,188 +155,266 @@ jobs:
           dc_eximconfig_configtype='internet'
           dc_local_interfaces='127.0.0.1.25'
           dc_other_hostnames=''
-          dc_minimaldns='false'
-          dc_relay_domains=''
           dc_smarthost=''
-          CFILEMODE='644'
-          dc_use_split_config='true'
           EOF
           sudo update-exim4.conf
           sudo service exim4 stop || true
 
-      - name: Exim4 mass policy/ACL files (echo) and perms
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          for i in $(seq -w 001 020); do
-            cat <<EOF | tee "$BASE/exim4/policies/acl_$i.conf" >/dev/null
-            # Exim4 ACL $i
-            accept hosts = :
-            deny message = relay not permitted
-            EOF
-          done
-          chmod 644 "$BASE/exim4/policies/"*.conf
+          cat <<EOF | tee "$BASE/exim4/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          cat <<'EOF' | tee "$BASE/exim4/permissions/ACL.txt" >/dev/null
+          [permissions]
+          dir_mode=755
+          file_mode=640
+          owner=${USER}
+          group=${USER}
+          EOF
+          cat <<'EOF' | tee "$BASE/exim4/firewall/ufw.rules" >/dev/null
+          allow 25/tcp comment 'SMTP (disabled in CI)'
+          EOF
+          cat <<'EOF' | tee "$BASE/exim4/firewall/iptables.rules" >/dev/null
+          *filter
+          :INPUT ACCEPT [0:0]
+          :FORWARD ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          # -A INPUT -p tcp --dport 25 -j ACCEPT
+          COMMIT
+          EOF
+          chmod -R 755 "$BASE/exim4"
+          find "$BASE/exim4" -type f -name "*.env" -exec chmod 640 {} \;
 
       # ---------------------- OpenSMTPD ----------------------
-      - name: Install & configure OpenSMTPD (no auto-start) + upgrade (best-effort)
+      - name: Install & configure OpenSMTPD (best-effort) + upgrade
         shell: bash
         run: |
           set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get install -y --no-install-recommends opensmtpd || true
           sudo apt-get install -y --only-upgrade opensmtpd || true
-          # 로컬 전용 리슨 설정(시작은 하지 않음)
-          sudo cp -n /etc/smtpd/smtpd.conf /etc/smtpd/smtpd.conf.bak || true
-          cat <<'EOF' | sudo tee /etc/smtpd/smtpd.conf >/dev/null
-          pki localhost cert "/etc/ssl/certs/ssl-cert-snakeoil.pem"
-          pki localhost key  "/etc/ssl/private/ssl-cert-snakeoil.key"
-          listen on 127.0.0.1 port 2526
-          action "local" mbox
-          match from any for domain "localhost" action "local"
-          EOF
 
-      - name: OpenSMTPD mass ACL/policy files (echo) and perms
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          for i in $(seq -w 001 020); do
-            cat <<EOF | tee "$BASE/opensmtpd/policies/rule_$i.conf" >/dev/null
-            # OpenSMTPD rule $i
-            match from any for domain "${DOMAIN}" action "local"
+          if [ -f /etc/smtpd/smtpd.conf ]; then
+            sudo cp -n /etc/smtpd/smtpd.conf /etc/smtpd/smtpd.conf.bak || true
+            cat <<'EOF' | sudo tee /etc/smtpd/smtpd.conf >/dev/null
+            pki localhost cert "/etc/ssl/certs/ssl-cert-snakeoil.pem"
+            pki localhost key  "/etc/ssl/private/ssl-cert-snakeoil.key"
+            listen on 127.0.0.1 port 25
+            action "local" mbox alias <aliases>
+            match from any for domain "localhost" action "local"
             EOF
-          done
-          chmod 644 "$BASE/opensmtpd/policies/"*.conf || true
+            sudo service opensmtpd stop || true
+          fi
 
-      # ---------------------- Test servers ----------------------
-      - name: MailHog install & run
+          cat <<EOF | tee "$BASE/opensmtpd/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          cat <<'EOF' | tee "$BASE/opensmtpd/permissions/ACL.txt" >/dev/null
+          [permissions]
+          dir_mode=755
+          file_mode=640
+          owner=${USER}
+          group=${USER}
+          EOF
+          cat <<'EOF' | tee "$BASE/opensmtpd/firewall/ufw.rules" >/dev/null
+          allow 25/tcp comment 'SMTP (disabled in CI)'
+          EOF
+          cat <<'EOF' | tee "$BASE/opensmtpd/firewall/iptables.rules" >/dev/null
+          *filter
+          :INPUT ACCEPT [0:0]
+          :FORWARD ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          # -A INPUT -p tcp --dport 25 -j ACCEPT
+          COMMIT
+          EOF
+          chmod -R 755 "$BASE/opensmtpd"
+          find "$BASE/opensmtpd" -type f -name "*.env" -exec chmod 640 {} \;
+
+      # ---------------------- Test servers start ----------------------
+      - name: Start MailHog (1025/8025)
         shell: bash
         run: |
           set -Eeuo pipefail
           cd "$BASE/mailhog/bin"
-          wget -q https://github.com/mailhog/MailHog/releases/download/v1.0.1/MailHog_linux_amd64
-          chmod +x MailHog_linux_amd64
-          sudo ln -sf "$BASE/mailhog/bin/MailHog_linux_amd64" /usr/local/bin/mailhog
-          nohup mailhog -smtp-bind-addr 127.0.0.1:1025 -ui-bind-addr 127.0.0.1:8025 \
-            > "$BASE/mailhog/logs/mailhog.log" 2>&1 &
+          wget -q https://github.com/mailhog/MailHog/releases/download/v1.0.1/MailHog_linux_amd64 -O MailHog
+          chmod +x MailHog
+          nohup ./MailHog > "$BASE/mailhog/logs/mailhog.log" 2>&1 &
+          sleep 2
+          curl -s http://127.0.0.1:8025/api/v2/info >/dev/null || (echo "MailHog not responding"; exit 1)
 
-      - name: MailCatcher install & run
+      - name: Start MailCatcher (1026/8026)
         shell: bash
         run: |
           set -Eeuo pipefail
           gem install --no-document mailcatcher
-          nohup mailcatcher --smtp-ip 127.0.0.1 --smtp-port 1026 \
-                            --http-ip 127.0.0.1 --http-port 8026 \
-            > "$BASE/mailcatcher/logs/mailcatcher.log" 2>&1 &
+          nohup mailcatcher --smtp-port 1026 --http-port 8026 > "$BASE/mailcatcher/logs/mailcatcher.log" 2>&1 &
+          sleep 2
+          curl -s http://127.0.0.1:8026 >/dev/null || (echo "MailCatcher not responding"; exit 1)
 
-      - name: smtp-sink run (Postfix tool)
+      - name: Start smtp-sink (2525)
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$BASE/smtp-sink/spool"
-          nohup /usr/sbin/smtp-sink -dv -u "$USER" 127.0.0.1:2525 \
-                "$BASE/smtp-sink/spool/%Y%m%d%H%M%S.msg" \
-            > "$BASE/smtp-sink/logs/smtp-sink.log" 2>&1 &
+          # smtp-sink is provided by postfix package on Ubuntu
+          nohup /usr/sbin/smtp-sink -a -v 127.0.0.1:2525 1000 > "$BASE/smtp-sink/logs/smtp-sink.log" 2>&1 &
+          sleep 1
 
-      - name: MailDev (Docker) pull & run (no containerd.io conflict)
+      - name: Start MailDev via Docker (1027/1081)
         shell: bash
         run: |
           set -Eeuo pipefail
           docker pull maildev/maildev:latest
-          # host:1027->container:1025, host:1081->container:1080
-          docker rm -f maildev >/dev/null 2>&1 || true
-          docker run -d --name maildev -p 127.0.0.1:1027:1025 -p 127.0.0.1:1081:1080 maildev/maildev:latest
+          docker rm -f maildev-ci >/dev/null 2>&1 || true
+          docker run -d --name maildev-ci -p 1027:1025 -p 1081:1080 maildev/maildev:latest
+          sleep 2
+          curl -s http://127.0.0.1:1081 >/dev/null || (echo "MailDev not responding"; docker logs maildev-ci; exit 1)
 
       # ---------------------- Virtual users & passwords ----------------------
-      - name: Generate virtual users/passwords per service (CSV/HTPASSWD/JSON)
+      - name: Generate virtual users (CSV/HTPASSWD/JSON) per service
         shell: bash
         run: |
           set -Eeuo pipefail
-          gen_users() {
-            local svc="$1"
-            local dir="$BASE/$svc/users"
-            mkdir -p "$dir"
-            : > "$dir/users.csv"
-            : > "$dir/users.json"
-            : > "$dir/users.htpasswd"
+          for SVC in $SERVICES; do
+            CSV="$BASE/$SVC/users/users.csv"
+            HTP="$BASE/$SVC/users/users.htpasswd"
+            JSON="$BASE/$SVC/users/users.json"
+            : > "$CSV"; : > "$HTP"; echo "[]" > "$JSON"
 
-            echo "email,password" >> "$dir/users.csv"
-            echo "[" >> "$dir/users.json"
-            for n in $(seq -w 001 "$USER_COUNT"); do
-              user="user${n}"
-              email="${user}@${DOMAIN}"
-              pass="$(openssl rand -base64 18 | tr -d '\n')"
-
-              # CSV
-              echo "${email},${pass}" >> "$dir/users.csv"
-
-              # JSON (append with comma except last)
-              if [ "$n" -lt "$USER_COUNT" ]; then
-                echo "  {\"email\":\"${email}\",\"password\":\"${pass}\"}," >> "$dir/users.json"
-              else
-                echo "  {\"email\":\"${email}\",\"password\":\"${pass}\"}" >> "$dir/users.json"
-              fi
-
-              # bcrypt htpasswd
-              htpasswd -B -C 10 -b "$dir/users.htpasswd" "$email" "$pass" >/dev/null
+            for i in $(seq -w 001 ${USER_COUNT}); do
+              USERNAME="user${i}@${DOMAIN}"
+              PASS="$(openssl rand -base64 18 | tr -d '\n')"
+              echo "${USERNAME},${PASS}" >> "$CSV"
+              # bcrypt htpasswd line
+              HLINE="$(htpasswd -nbB "${USERNAME}" "${PASS}")"
+              echo "$HLINE" >> "$HTP"
+              # append JSON
+              TMP=$(jq --arg u "$USERNAME" --arg p "$PASS" '. + [{"username":$u,"password":$p}]' "$JSON")
+              echo "$TMP" > "$JSON"
             done
-            echo "]" >> "$dir/users.json"
+            chmod 640 "$CSV" "$HTP" "$JSON"
+          done
 
-            # Permissions
-            chmod 640 "$dir/users.htpasswd"
-            chmod 640 "$dir/users.csv" "$dir/users.json"
+      # ---------------------- Echo policy & firewall templates per service ----------------------
+      - name: Create echo policy & firewall templates per service
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for SVC in $SERVICES; do
+            cat <<'EOF' | tee "$BASE/$SVC/policies/POLICY.md" >/dev/null
+            # Service Policy (Test Only)
+            - No production data.
+            - Rotate test users each run.
+            - Review firewall templates before applying on real hosts.
+            EOF
+            cat <<'EOF' | tee "$BASE/$SVC/firewall/ufw.rules" >/dev/null
+            # Example UFW rules (not applied in CI)
+            # ufw allow 25/tcp    # SMTP (for MTAs; disabled in CI)
+            # ufw allow 1025/tcp  # MailHog
+            # ufw allow 1026/tcp  # MailCatcher
+            # ufw allow 1027/tcp  # MailDev (host)
+            # ufw allow 1081/tcp  # MailDev Web UI
+            # ufw allow 8025/tcp  # MailHog Web UI
+            # ufw allow 8026/tcp  # MailCatcher Web UI
+            EOF
+            cat <<'EOF' | tee "$BASE/$SVC/firewall/iptables.rules" >/dev/null
+            # Example iptables rules (not applied in CI)
+            *filter
+            :INPUT ACCEPT [0:0]
+            :FORWARD ACCEPT [0:0]
+            :OUTPUT ACCEPT [0:0]
+            # -A INPUT -p tcp --dport 25 -j ACCEPT
+            # -A INPUT -p tcp --dport 1025 -j ACCEPT
+            # -A INPUT -p tcp --dport 1026 -j ACCEPT
+            # -A INPUT -p tcp --dport 1027 -j ACCEPT
+            # -A INPUT -p tcp --dport 1081 -j ACCEPT
+            # -A INPUT -p tcp --dport 8025 -j ACCEPT
+            # -A INPUT -p tcp --dport 8026 -j ACCEPT
+            COMMIT
+            EOF
+            cat <<'EOF' | tee "$BASE/$SVC/permissions/README.txt" >/dev/null
+            # Permission Intent (not enforced automatically)
+            - Directories: 755
+            - Sensitive files (.env, users.*): 640
+            - Owner/Group: current runner user
+            EOF
+            chmod -R 755 "$BASE/$SVC"
+            find "$BASE/$SVC" -type f -name "*.env" -exec chmod 640 {} \;
+            find "$BASE/$SVC/users" -type f -exec chmod 640 {} \;
+          done
+
+      # ---------------------- Virus defense (ClamAV v3-style DB update & scan) ----------------------
+      - name: Update ClamAV DB (best-effort) and scan per service
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo systemctl stop clamav-freshclam || true
+          sudo freshclam || true
+          for SVC in $SERVICES; do
+            REPORT="$BASE/$SVC/reports/clamav_scan.txt"
+            clamscan -r "$BASE/$SVC" | tee "$REPORT" >/dev/null || true
+          done
+
+      # ---------------------- Send tests via swaks ----------------------
+      - name: Send test messages to MailHog/MailCatcher/smtp-sink/MailDev
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FROM="sender@${DOMAIN}"
+          TO="receiver@${DOMAIN}"
+          BODY="CI test message"
+
+          send_n=${TEST_COUNT}
+
+          send_swaks () {
+            local host=$1; local port=$2; local tag=$3
+            for n in $(seq 1 ${send_n}); do
+              swaks --server 127.0.0.1 --port ${port} \
+                --from "${FROM}" --to "${TO}" \
+                --timeout 5 --h-Subject "[$tag] Test #${n}" \
+                --data "Subject: [$tag] Test #${n}\n\n${BODY}" \
+                --quit-after DATA || echo "swaks to ${tag} failed #${n}"
+            done
           }
 
-          for SVC in $SERVICES; do
-            gen_users "$SVC"
-          done
+          send_swaks 127.0.0.1 1025 "MailHog"
+          send_swaks 127.0.0.1 1026 "MailCatcher"
+          send_swaks 127.0.0.1 2525 "smtp-sink"
+          send_swaks 127.0.0.1 1027 "MailDev"
 
-      # ---------------------- Massive echo-based files & permissions ----------------------
-      - name: Create mass config/policy files per service with permissions
+      - name: Verify reception (MailHog/MailCatcher/MailDev APIs) & smtp-sink log
         shell: bash
         run: |
           set -Eeuo pipefail
-          for SVC in $SERVICES; do
-            # env
-            cat <<EOF | tee "$BASE/$SVC/env/.env" >/dev/null
-            DOMAIN=${DOMAIN}
-            USER_COUNT=${USER_COUNT}
-            SERVICE=${SVC}
-            EOF
+          MH_CNT=$(curl -s http://127.0.0.1:8025/api/v2/messages | jq '.count // length // 0' || echo 0)
+          MC_CNT=$(curl -s http://127.0.0.1:8026/messages.json | jq 'length' || echo 0)
+          # MailDev: try /email (newer) then /emails (older)
+          MD_CNT=$( (curl -s http://127.0.0.1:1081/email || curl -s http://127.0.0.1:1081/emails) | jq 'length' || echo 0)
 
-            # scripts
-            cat <<'EOF' | tee "$BASE/$SVC/scripts/rotate-logs.sh" >/dev/null
-            #!/usr/bin/env bash
-            set -Eeuo pipefail
-            LOG_DIR="$(dirname "$0")/../logs"
-            find "$LOG_DIR" -type f -name "*.log" -size +5M -print -exec gzip {} \;
-            EOF
+          echo "MailHog messages:   $MH_CNT"
+          echo "MailCatcher msgs:   $MC_CNT"
+          echo "MailDev messages:   $MD_CNT"
 
-            # policies (50개)
-            for i in $(seq -w 001 050); do
-              cat <<EOF | tee "$BASE/$SVC/policies/policy_$i.conf" >/dev/null
-              # ${SVC} policy $i
-              allow_local=true
-              allow_domain="${DOMAIN}"
-              EOF
-            done
+          # smtp-sink writes only to its stdout (captured in log)
+          SINK_LOG="$BASE/smtp-sink/logs/smtp-sink.log"
+          tail -n 200 "$SINK_LOG" || true
 
-            # ACL (50개)
-            for i in $(seq -w 001 050); do
-              echo "acl_${i}: permit_localhost" | tee "$BASE/$SVC/acl/acl_${i}.list" >/dev/null
-            done
+          # Simple thresholds (non-fatal)
+          if [ "$MH_CNT" -lt 1 ]; then echo "WARN: MailHog received <1 message"; fi
+          if [ "$MC_CNT" -lt 1 ]; then echo "WARN: MailCatcher received <1 message"; fi
+          if [ "$MD_CNT" -lt 1 ]; then echo "WARN: MailDev received <1 message"; fi
 
-            # perms
-            chmod 640 "$BASE/$SVC/env/.env"
-            chmod 755 "$BASE/$SVC/scripts/rotate-logs.sh"
-            chmod 644 "$BASE/$SVC/policies/"*.conf "$BASE/$SVC/acl/"*.list
-          done
-
-      # ---------------------- Summary ----------------------
-      - name: Summarize ports & locations
+      # ---------------------- Archive artifacts ----------------------
+      - name: Pack artifacts
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "MailHog    SMTP:127.0.0.1:1025  Web: http://127.0.0.1:8025"
-          echo "MailCatcher SMTP:127.0.0.1:1026  Web: http://127.0.0.1:8026"
-          echo "smtp-sink  SMTP:127.0.0.1:2525  Spool: $BASE/smtp-sink/spool"
-          echo "MailDev    SMTP:127.0.0.1:1027  Web: http://127.0.0.1:1081"
-          echo "Users generated per service under: $BASE/<service>/users/{users.csv,users.htpasswd,users.json}"
+          tar -czf "$BASE/artifacts/email-lab.tar.gz" -C "$BASE" .
+          echo "Packed: $BASE/artifacts/email-lab.tar.gz"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-lab-artifacts
+          path: /opt/email/artifacts/email-lab.tar.gz
+          if-no-files-found: warn
