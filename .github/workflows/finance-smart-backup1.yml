@@ -1,189 +1,331 @@
-name: "📊 Full Monitoring Stack — echo-only (stable)"
+name: "email-servers-mass-setup-and-send-test-secure-v3-echo-only"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
+    inputs:
+      domain:
+        description: "Base domain for virtual accounts"
+        required: false
+        default: "example.local"
+      user_count:
+        description: "Number of virtual accounts per service"
+        required: false
+        default: "50"
+      test_count:
+        description: "Number of test emails per server"
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
 
 jobs:
-  setup_monitoring:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 90
     env:
-      MONO: .monitoring
-      INF_BUCKET: metrics
-      INF_ORG: org
-      INF_USER: admin
-      INF_PASS: "admin1234!"
-      INF_TOKEN: "dev-token-123456"
-      VM_DATA: /tmp/victoria
+      BASE: /opt/email
+      DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
+      USER_COUNT: ${{ github.event.inputs.user_count || '50' }}
+      TEST_COUNT: ${{ github.event.inputs.test_count || '3' }}
+      SERVICES: "postfix exim4 opensmtpd mailhog mailcatcher smtp-sink maildev"
 
     steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-
-      - name: 📁 Create directories
+      - name: 🧰 Prepare directory tree (per service + bulk)
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$MONO"/{influxdb,telegraf,graphite,victoriametrics,otel,statsd,scripts,python}
-          echo "[OK] created $MONO subdirs"
+          sudo mkdir -p "$BASE"; sudo chown -R "$USER:$USER" "$BASE"
+          mkdir -p "$BASE"/{policies,reports,artifacts,global,tools}
+          for SVC in $SERVICES; do
+            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts; do
+              mkdir -p "$BASE/$SVC/$d"
+            done
+            for i in $(seq -w 001 100); do
+              mkdir -p "$BASE/$SVC/bulk/dir_$i"
+            done
+          done
+          chmod -R 755 "$BASE"
 
-      - name: 🐳 Ensure Docker (upgrade-only; avoid containerd.io conflicts)
+      - name: 📦 Install base prerequisites (no containerd.io reinstall)
         shell: bash
         run: |
           set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates apt-transport-https software-properties-common \
+            curl wget git build-essential jq \
+            ruby-full libsqlite3-dev \
+            apache2-utils openssl \
+            swaks \
+            nginx \
+            clamav clamav-daemon \
+            postfix bsd-mailx \
+            exim4 exim4-daemon-light \
+            opensmtpd
+          # Docker: upgrade only (avoid containerd.io conflict)
           sudo apt-get install -y --only-upgrade docker.io containerd || true
           sudo systemctl is-active --quiet docker || sudo systemctl start docker || true
+          sudo systemctl enable --now nginx || true
           docker --version || true
           containerd --version || true
-          docker network create monnet >/dev/null 2>&1 || true
+          docker network create emailnet >/dev/null 2>&1 || true
 
-      - name: 🛠️ Echo configs (InfluxDB/Telegraf/Graphite/OTEL)
+      - name: 📄 Global README & policies (echo-only)
         shell: bash
         run: |
           set -Eeuo pipefail
-          # InfluxDB2 config (echo-only)
-          cfg="$MONO/influxdb/influxdb.conf"
-          : > "$cfg"
-          echo 'reporting-disabled = true' >> "$cfg"
-          echo 'bolt-path = "/var/lib/influxdb2/influxd.bolt"' >> "$cfg"
-          echo 'engine-path = "/var/lib/influxdb2/engine"' >> "$cfg"
-          echo 'http-bind-address = ":8086"' >> "$cfg"
+          mkdir -p "$BASE/policies"
+          : > "$BASE/README.txt"
+          {
+            echo "This CI workspace provisions email servers for testing."
+            echo "MTAs (postfix/exim4/opensmtpd) are installed & configured but NOT auto-started."
+            echo "Test servers run on high ports. Nginx reverse proxy with security headers + BasicAuth is applied."
+          } >> "$BASE/README.txt"
+          : > "$BASE/policies/SECURITY.md"
+          {
+            echo "# Security (Test Only)"
+            echo "- Ephemeral CI environment. Do not store real credentials."
+            echo "- Virtual users are randomly generated per run."
+            echo "- Outputs: users.csv, users.htpasswd (bcrypt), users.json per service."
+            echo "- ClamAV DB is updated via echo-generated freshclam.conf; clamscan reports are produced."
+          } >> "$BASE/policies/SECURITY.md"
+          chmod 644 "$BASE/README.txt" "$BASE/policies/SECURITY.md"
 
-          # Telegraf config (echo-only, env expanded at container runtime)
-          tcfg="$MONO/telegraf/telegraf.conf"
-          : > "$tcfg"
-          echo '[agent]' >> "$tcfg"
-          echo '  interval = "10s"' >> "$tcfg"
-          echo '  round_interval = true' >> "$tcfg"
-          echo '' >> "$tcfg"
-          echo '[[outputs.influxdb_v2]]' >> "$tcfg"
-          echo '  urls = ["http://influxdb:8086"]' >> "$tcfg"
-          echo '  token = "${INFLUX_TOKEN}"' >> "$tcfg"
-          echo '  organization = "${INFLUX_ORG}"' >> "$tcfg"
-          echo '  bucket = "${INFLUX_BUCKET}"' >> "$tcfg"
-          echo '' >> "$tcfg"
-          echo '[[inputs.cpu]]' >> "$tcfg"
-          echo '  percpu = true' >> "$tcfg"
-          echo '  totalcpu = true' >> "$tcfg"
-          echo '[[inputs.mem]]' >> "$tcfg"
-          echo '[[inputs.disk]]' >> "$tcfg"
-          echo '  ignore_fs = ["tmpfs","devtmpfs","overlay"]' >> "$tcfg"
-          echo '[[inputs.net]]' >> "$tcfg"
+      - name: 🔐 Echo firewall & permission templates (not enforced)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for SVC in $SERVICES; do
+            dir="$BASE/$SVC"
+            mkdir -p "$dir/firewall" "$dir/permissions"
+            file="$dir/firewall/policy.conf"
+            : > "$file"
+            {
+              echo "# Echo-only firewall policy for $SVC (not applied automatically)"
+              echo "allow_tcp=1025,1026,1081,8025,8026,9001,9002,9003,2525"
+              echo "deny_all_else=true"
+              echo 'note="CI test environment; do not enforce on shared runner"'
+            } >> "$file"
+            chmod 640 "$file"
+            acl="$dir/permissions/default.acl"
+            : > "$acl"
+            {
+              echo "owner=$USER"
+              echo "dir_mode=755"
+              echo "file_mode=640"
+            } >> "$acl"
+            chmod 640 "$acl"
+          done
 
-          # Graphite storage schema (echo-only)
-          gcfg="$MONO/graphite/storage-schemas.conf"
-          mkdir -p "$(dirname "$gcfg")"
-          : > "$gcfg"
-          echo '[default]' >> "$gcfg"
-          echo 'pattern = .*' >> "$gcfg"
-          echo 'retentions = 60s:30d' >> "$gcfg"
+      - name: 👤 Generate virtual users per service (CSV/JSON/htpasswd — echo only)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for SVC in $SERVICES; do
+            udir="$BASE/$SVC/users"
+            mkdir -p "$udir"
+            csv="$udir/users.csv"; json="$udir/users.json"; htp="$udir/users.htpasswd"
+            : > "$csv"; : > "$json"; : > "$htp"
+            echo "email,password,service" >> "$csv"
+            echo "[" >> "$json"
+            for i in $(seq 1 "$USER_COUNT"); do
+              uname="user$(printf "%03d" "$i")"
+              pass="$(openssl rand -base64 18 | tr -d '\n=/' | cut -c1-16)"
+              email="$uname@$DOMAIN"
+              echo "$email,$pass,$SVC" >> "$csv"
+              # JSON 라인
+              printf '  {"email":"%s","password":"%s","service":"%s"}' "$email" "$pass" "$SVC" >> "$json"
+              if [ "$i" -lt "$USER_COUNT" ]; then echo "," >> "$json"; else echo "" >> "$json"; fi
+              # htpasswd (bcrypt)
+              htpasswd -Bbn "$email" "$pass" >> "$htp"
+              # 메일박스 디렉토리
+              mkdir -p "$BASE/$SVC/mailboxes/$uname"/{cur,new,tmp}
+              chmod -R 700 "$BASE/$SVC/mailboxes/$uname"
+            done
+            echo "]" >> "$json"
+          done
 
-          # OTEL Collector config (echo-only): OTLP -> VictoriaMetrics
-          ocfg="$MONO/otel/otel-collector.yaml"
-          : > "$ocfg"
-          echo 'receivers:' >> "$ocfg"
-          echo '  otlp:' >> "$ocfg"
-          echo '    protocols:' >> "$ocfg"
-          echo '      grpc:' >> "$ocfg"
-          echo '      http:' >> "$ocfg"
-          echo '' >> "$ocfg"
-          echo 'exporters:' >> "$ocfg"
-          echo '  otlphttp/victoria:' >> "$ocfg"
-          echo '    endpoint: http://victoriametrics:8428' >> "$ocfg"
-          echo '    traces_endpoint: http://victoriametrics:8428/opentelemetry/v1/traces' >> "$ocfg"
-          echo '    metrics_endpoint: http://victoriametrics:8428/opentelemetry/v1/metrics' >> "$ocfg"
-          echo '    logs_endpoint: http://victoriametrics:8428/opentelemetry/v1/logs' >> "$ocfg"
-          echo '' >> "$ocfg"
-          echo 'processors:' >> "$ocfg"
-          echo '  batch:' >> "$ocfg"
-          echo '' >> "$ocfg"
-          echo 'service:' >> "$ocfg"
-          echo '  pipelines:' >> "$ocfg"
-          echo '    metrics:' >> "$ocfg"
-          echo '      receivers: [otlp]' >> "$ocfg"
-          echo '      processors: [batch]' >> "$ocfg"
-          echo '      exporters: [otlphttp/victoria]' >> "$ocfg"
-          echo '    traces:' >> "$ocfg"
-          echo '      receivers: [otlp]' >> "$ocfg"
-          echo '      processors: [batch]' >> "$ocfg"
-          echo '      exporters: [otlphttp/victoria]' >> "$ocfg"
-          echo '    logs:' >> "$ocfg"
-          echo '      receivers: [otlp]' >> "$ocfg"
-          echo '      processors: [batch]' >> "$ocfg"
-          echo '      exporters: [otlphttp/victoria]' >> "$ocfg"
+      - name: 📬 Install MTA configs via echo (do not start services)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # postfix main.cf (최소 설정 — 서비스를 기동하지 않음)
+          pfx="$BASE/postfix/config/main.cf"
+          : > "$pfx"
+          {
+            echo "myhostname=ci-postfix.$DOMAIN"
+            echo "mydomain=$DOMAIN"
+            echo "myorigin=\$mydomain"
+            echo "inet_interfaces = loopback-only"
+            echo "relayhost ="
+            echo "default_transport = smtp"
+            echo "local_transport = local"
+          } >> "$pfx"
 
-          # VictoriaMetrics data dir
-          mkdir -p "$VM_DATA"
+          # exim4 config fragment(참고용)
+          exi="$BASE/exim4/config/exim4.conf.fragment"
+          : > "$exi"
+          {
+            echo "domainlist local_domains = $DOMAIN"
+            echo "hostlist   relay_from_hosts = 127.0.0.1"
+          } >> "$exi"
 
-      - name: 🚀 Run core containers
+          # OpenSMTPD (참고용)
+          osd="$BASE/opensmtpd/config/smtpd.conf"
+          : > "$osd"
+          {
+            echo "pki \"$DOMAIN\" cert \"/etc/ssl/certs/ssl-cert-snakeoil.pem\""
+            echo "pki \"$DOMAIN\" key \"/etc/ssl/private/ssl-cert-snakeoil.key\""
+            echo "listen on 127.0.0.1 port 2526"
+            echo "action \"local\" mbox"
+            echo "match from any for domain \"$DOMAIN\" action \"local\""
+          } >> "$osd"
+
+      - name: 🦠 ClamAV freshclam.conf (echo) + DB update + scan report
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo systemctl stop clamav-freshclam || true
+          tmp="$(mktemp)"
+          : > "$tmp"
+          {
+            echo "DatabaseMirror database.clamav.net"
+            echo "UpdateLogFile /var/log/clamav/freshclam.log"
+            echo "DatabaseOwner clamav"
+            echo "Checks 2"
+          } >> "$tmp"
+          sudo mv "$tmp" /etc/clamav/freshclam.conf
+          sudo chown root:root /etc/clamav/freshclam.conf
+          sudo chmod 644 /etc/clamav/freshclam.conf
+          sudo freshclam || true
+          # 샘플 스캔 리포트
+          rep="$BASE/reports/clamscan.txt"
+          : > "$rep"
+          clamscan -r "$BASE" >> "$rep" || true
+
+      - name: 🐳 Run test SMTP servers (MailHog/MailCatcher/MailDev/smtp-sink)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker rm -f mailhog mailcatcher maildev smtp-sink >/dev/null 2>&1 || true
+
+          # MailHog: SMTP 1025, Web 8025
+          docker run -d --name mailhog --network emailnet \
+            -p 1025:1025 -p 8025:8025 \
+            mailhog/mailhog
+
+          # MailCatcher: SMTP 1026, Web 8026
+          docker run -d --name mailcatcher --network emailnet \
+            -p 1026:1025 -p 8026:1080 \
+            dockage/mailcatcher:latest
+
+          # MailDev: SMTP 1027, Web 1081
+          docker run -d --name maildev --network emailnet \
+            -p 1027:1025 -p 1081:1080 \
+            maildev/maildev:2
+
+          # smtp-sink (Postfix 툴 이미지가 없으므로 busybox 기반 이미지 사용 대체)
+          docker run -d --name smtp-sink --network emailnet -p 2525:2525 alpine sh -c \
+            "apk add --no-cache postfix && smtp-sink -a -d '%Y-%m-%d %H:%M:%S ' 0.0.0.0:2525 1000 /dev/null"
+
+          sleep 4
+          docker ps
+
+      - name: 🌐 Nginx reverse proxy + security headers + BasicAuth (echo-only files)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WEB_USER="admin"
+          WEB_PASS="$(openssl rand -base64 18 | tr -d '\n=/' | cut -c1-16)"
+          : > "$BASE/global/web-auth.env"
+          {
+            echo "WEB_USER=$WEB_USER"
+            echo "WEB_PASS=$WEB_PASS"
+          } >> "$BASE/global/web-auth.env"
+          htpasswd -bBc "$BASE/global/web.htpasswd" "$WEB_USER" "$WEB_PASS"
+
+          sudo mkdir -p /etc/nginx/snippets /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+          # 보안헤더 스니펫
+          tmp_hdr="$(mktemp)"; : > "$tmp_hdr"
+          {
+            echo 'add_header X-Content-Type-Options "nosniff" always;'
+            echo 'add_header X-Frame-Options "SAMEORIGIN" always;'
+            echo 'add_header Referrer-Policy "no-referrer-when-downgrade" always;'
+            echo 'add_header X-XSS-Protection "1; mode=block" always;'
+            echo 'add_header Content-Security-Policy "default-src '\''self'\'' '\''unsafe-inline'\''; img-src data: *; connect-src *;" always;'
+          } >> "$tmp_hdr"
+          sudo mv "$tmp_hdr" /etc/nginx/snippets/security-headers.conf
+
+          # 공통 서버블록 생성 함수 (echo-only → 임시파일 → sudo mv)
+          write_srv () {
+            local port="$1"; local upstream="$2"; local outfile="$3"
+            local tmp="$(mktemp)"; : > "$tmp"
+            {
+              echo "server {"
+              echo "  listen $port;"
+              echo '  auth_basic "Restricted";'
+              echo "  auth_basic_user_file $BASE/global/web.htpasswd;"
+              echo "  location / {"
+              echo "    proxy_pass http://$upstream;"
+              echo "    include /etc/nginx/snippets/security-headers.conf;"
+              echo "    proxy_set_header Host \$host;"
+              echo "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+              echo "    proxy_set_header X-Forwarded-Proto \$scheme;"
+              echo "  }"
+              echo "}"
+            } >> "$tmp"
+            sudo mv "$tmp" "$outfile"
+          }
+
+          write_srv 9001 127.0.0.1:8025 /etc/nginx/sites-available/mailhog.conf
+          write_srv 9002 127.0.0.1:8026 /etc/nginx/sites-available/mailcatcher.conf
+          write_srv 9003 127.0.0.1:1081 /etc/nginx/sites-available/maildev.conf
+
+          sudo ln -sf /etc/nginx/sites-available/mailhog.conf /etc/nginx/sites-enabled/mailhog.conf
+          sudo ln -sf /etc/nginx/sites-available/mailcatcher.conf /etc/nginx/sites-enabled/mailcatcher.conf
+          sudo ln -sf /etc/nginx/sites-available/maildev.conf /etc/nginx/sites-enabled/maildev.conf
+          sudo nginx -t
+          sudo systemctl reload nginx
+
+          echo "[Nginx BasicAuth] user=$WEB_USER pass=$WEB_PASS"
+          echo "Saved at: $BASE/global/web-auth.env"
+
+      - name: ✉️ Bulk send tests with swaks (each service)
         shell: bash
         env:
-          INFLUX_BUCKET: ${{ env.INF_BUCKET }}
-          INFLUX_ORG: ${{ env.INF_ORG }}
-          INFLUX_USER: ${{ env.INF_USER }}
-          INFLUX_PASS: ${{ env.INF_PASS }}
-          INFLUX_TOKEN: ${{ env.INF_TOKEN }}
+          FROM_ADDR: "ci-sender@${{ env.DOMAIN }}"
         run: |
           set -Eeuo pipefail
-          docker rm -f influxdb telegraf graphite-statsd victoriametrics otel >/dev/null 2>&1 || true
+          rep="$BASE/reports/send-tests.txt"; : > "$rep"
+          send_batch () {
+            local name="$1"; local host="$2"; local port="$3"
+            echo "## $name ($host:$port)" | tee -a "$rep"
+            for i in $(seq 1 "$TEST_COUNT"); do
+              TO="user$(printf "%03d" "$i")@$DOMAIN"
+              swaks --to "$TO" --from "$FROM_ADDR" --server "$host" --port "$port" --timeout 8 \
+                --header "Subject: CI test $name #$i" \
+                --body "Hello from CI ($name test $i)" \
+                >> "$rep" 2>&1 || echo "[WARN] swaks failed for $name #$i" | tee -a "$rep"
+            done
+            echo "" >> "$rep"
+          }
+          send_batch "MailHog"     "127.0.0.1" "1025"
+          send_batch "MailCatcher" "127.0.0.1" "1026"
+          send_batch "MailDev"     "127.0.0.1" "1027"
+          send_batch "smtp-sink"   "127.0.0.1" "2525"
+          echo "== Done ==" | tee -a "$rep"
 
-          echo "[Start] InfluxDB 2.7"
-          docker run -d --name influxdb --network monnet \
-            -p 8086:8086 \
-            -e INFLUXD_CONFIG_PATH=/etc/influxdb2/config.toml \
-            -v "$PWD/$MONO/influxdb/influxdb.conf:/etc/influxdb2/config.toml" \
-            influxdb:2.7
-
-          echo "[Wait] InfluxDB API..."
-          timeout 90 bash -c 'until docker exec influxdb influx ping >/dev/null 2>&1; do sleep 2; done'
-
-          echo "[Init] InfluxDB setup"
-          docker exec influxdb influx setup \
-            --username "$INFLUX_USER" \
-            --password "$INFLUX_PASS" \
-            --org "$INFLUX_ORG" \
-            --bucket "$INFLUX_BUCKET" \
-            --token "$INFLUX_TOKEN" \
-            --force
-
-          echo "[Start] Telegraf"
-          docker run -d --name telegraf --network monnet \
-            -e INFLUX_TOKEN="$INFLUX_TOKEN" \
-            -e INFLUX_ORG="$INFLUX_ORG" \
-            -e INFLUX_BUCKET="$INFLUX_BUCKET" \
-            -v "$PWD/$MONO/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf" \
-            telegraf:1.28
-
-          echo "[Start] Graphite+StatsD"
-          docker run -d --name graphite-statsd --network monnet \
-            -p 80:80 -p 2003-2004:2003-2004 -p 8125:8125/udp \
-            -v "$PWD/$MONO/graphite/storage-schemas.conf:/opt/graphite/conf/storage-schemas.conf" \
-            graphiteapp/graphite-statsd
-
-          echo "[Start] VictoriaMetrics"
-          docker run -d --name victoriametrics --network monnet \
-            -p 8428:8428 \
-            -v "$VM_DATA:/victoria-metrics-data" \
-            victoriametrics/victoria-metrics:latest
-
-          echo "[Start] OTEL Collector"
-          docker run -d --name otel --network monnet \
-            -p 4317:4317 -p 4318:4318 \
-            -v "$PWD/$MONO/otel/otel-collector.yaml:/etc/otel/config.yaml" \
-            otel/opentelemetry-collector-contrib:latest \
-            --config /etc/otel/config.yaml
-
-      - name: 🔎 Verify & print logs on failure
-        if: failure()
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "[ps]"; docker ps -a || true
-          for c in influxdb telegraf graphite-statsd victoriametrics otel; do
-            echo "===== logs: $c ====="
-            docker logs --tail 200 "$c" || true
-          done
+      - name: 📦 Collect artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-ci-artifacts
+          path: |
+            /opt/email/**/*.csv
+            /opt/email/**/*.json
+            /opt/email/**/*.htpasswd
+            /opt/email/reports/**
+            /opt/email/global/web-auth.env
+          if-no-files-found: warn
