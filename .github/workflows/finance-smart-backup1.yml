@@ -1,336 +1,329 @@
-name: "🔒 Integrated Blacklist (1-min · keyless-safe · DC fallback · echo · no-missing-files)"
+name: email-servers-mass-setup
 
 on:
-  schedule:
-    - cron: "*/1 * * * *"
   workflow_dispatch:
+    inputs:
+      domain:
+        description: "Base domain for virtual accounts"
+        required: false
+        default: "example.local"
+      user_count:
+        description: "Number of virtual accounts per service"
+        required: false
+        default: "50"
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: read
-
-concurrency:
-  group: blacklist-integrated
-  cancel-in-progress: true
-
-env:
-  # Base dirs
-  BLACKLIST_DIR: .github/blacklist
-  REPORT_DIR: .github/blacklist/report
-  EXPORT_DIR: .github/blacklist/export
-  SNAPSHOT_DIR: .github/blacklist/snapshots
-  ARCHIVE_DIR: .github/blacklist/archive
-  LATEST_DIR: .github/blacklist/latest
-  NET_DIR: .github/blacklist/networks
-  PKG_DIR: .github/blacklist/packages
-  CODE_DIR: .github/blacklist/code
-  SUMMARY_DIR: .github/blacklist/summary
-
-  # Toggles (all free)
-  ENABLE_SPAMHAUS: "true"
-  ENABLE_EMERGING_THREATS: "true"
-  ENABLE_PY_AUDIT: "auto"
-  ENABLE_NPM_AUDIT: "auto"
-  ENABLE_SEMGREP: "true"
-
-  # Dependency-Check (installed to RUNNER_TEMP; NO KEY REQUIRED)
-  DC_VERSION: "9.2.0"
-  # DC_HOME / DC_DATA are set at runtime from RUNNER_TEMP
-
-  # Optional secret (will be used automatically if present)
-  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+  contents: read
 
 jobs:
-  generate:
+  setup:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BASE: /opt/email
+      DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
+      USER_COUNT: ${{ github.event.inputs.user_count || '50' }}
+      # 서비스 명세(필요시 추가/삭제)
+      SERVICES: "postfix exim4 opensmtpd mailhog mailcatcher smtp-sink maildev"
+
     steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
-
-      - name: 🧭 Init (time/temp/env)
-        id: init
+      - name: Prepare massive directory tree per service
         shell: bash
         run: |
-          set -euo pipefail
-          RUN_DATE_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
-          echo "RUN_DATE_UTC=${RUN_DATE_UTC}" >> "$GITHUB_ENV"
-          echo "LOGFILE=.github/blacklist/logs/run_${RUN_DATE_UTC}.log" >> "$GITHUB_ENV"
-          # Install path & data path in user temp (no sudo, cache-safe)
-          echo "DC_HOME=${RUNNER_TEMP}/dependency-check" >> "$GITHUB_ENV"
-          echo "DC_DATA=${RUNNER_TEMP}/dc-data" >> "$GITHUB_ENV"
-          echo "SNAP_DIR=.github/blacklist/snapshots/${RUN_DATE_UTC}" >> "$GITHUB_ENV"
-          echo "[ECHO] ▶ Start @ ${RUN_DATE_UTC}"
-          echo "[ECHO] RUNNER_TEMP=${RUNNER_TEMP}"
+          set -Eeuo pipefail
+          sudo mkdir -p "$BASE"
+          sudo chown -R "$USER:$USER" "$BASE"
+          # 표준 트리 + 대량 더미 디렉토리(100개)
+          for SVC in $SERVICES; do
+            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports; do
+              mkdir -p "$BASE/$SVC/$d"
+            done
+            # 대량 더미 디렉토리
+            for i in $(seq -w 001 100); do
+              mkdir -p "$BASE/$SVC/bulk/dir_$i"
+            done
+          done
+          chmod -R 755 "$BASE"
 
-      - name: 🧰 Ensure base packages
+      - name: Install prerequisites and tooling
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends curl unzip jq git python3-pip ca-certificates rsync
-          if ! command -v node >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends nodejs npm
-          fi
-          python3 -m pip install --user --upgrade pip pip-audit || true
-          python3 -m pip install --user semgrep || true
-          echo "[ECHO] Base tools ready"
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates apt-transport-https software-properties-common \
+            curl wget git build-essential jq \
+            ruby-full libsqlite3-dev \
+            docker.io \
+            apache2-utils openssl
+          # htpasswd(bcrypt) 제공: apache2-utils
 
-      - name: 📁 Create directories & placeholders
+      - name: Base README and global policy via echo/heredoc
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p \
-            "$BLACKLIST_DIR"/{raw,dist,logs} \
-            "$REPORT_DIR" \
-            "$EXPORT_DIR"/{json,txt,csv,html} \
-            "$SNAPSHOT_DIR" "$ARCHIVE_DIR" "$LATEST_DIR" \
-            "$NET_DIR"/{spamhaus,et,all} \
-            "$PKG_DIR"/{python,npm,dc} \
-            "$CODE_DIR"/semgrep \
-            "$SUMMARY_DIR" \
-            "$SNAP_DIR"/{networks,packages,code,summary,logs}
-          # Placeholders so later steps never fail
-          : > "$NET_DIR/all/ip_blacklist_spamhaus.txt"
-          : > "$NET_DIR/all/ip_blacklist_et.txt"
-          echo "{}" > "$PKG_DIR/dc/dc_report.json"
-          echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
-          echo "{}" > "$CODE_DIR/semgrep/semgrep.json"
-          echo "{}" > "$PKG_DIR/npm/npm_audit.json"
-          echo "{}" > "$PKG_DIR/python/pip_audit.json"
-          touch "$EXPORT_DIR/.gitkeep" "$EXPORT_DIR/json/.gitkeep" "$EXPORT_DIR/html/.gitkeep" "$EXPORT_DIR/csv/.gitkeep" "$EXPORT_DIR/txt/.gitkeep"
-          echo "[ECHO] Dirs & placeholders ready" | tee -a "$LOGFILE"
+          set -Eeuo pipefail
+          cat <<'EOF' | tee "$BASE/README.txt" >/dev/null
+          Email test sandbox generated by GitHub Actions.
+          MTA services are installed but not auto-started to avoid port-25 conflicts.
+          Test servers (MailHog/MailCatcher/smtp-sink/MailDev) run on high ports.
+          EOF
+          cat <<'EOF' | tee "$BASE/policies/SECURITY.md" >/dev/null
+          # Security Policy (Test Only)
+          - This environment is ephemeral for CI testing.
+          - Do not store real credentials.
+          - Virtual users are randomly generated.
+          EOF
+          chmod 644 "$BASE/README.txt" "$BASE/policies/SECURITY.md"
 
-      - name: 💾 Cache DC data (in RUNNER_TEMP)
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.DC_DATA }}
-          key: dc-data-${{ env.DC_VERSION }}-${{ runner.os }}
-          restore-keys: dc-data-${{ env.DC_VERSION }}-
-
-      - name: 🛠 Install OWASP Dependency-Check (to RUNNER_TEMP)
+      - name: Install & configure Postfix (no auto-start) + upgrade
         shell: bash
         run: |
-          set -euo pipefail
-          echo "[ECHO] DC install start v${DC_VERSION}" | tee -a "$LOGFILE"
-          rm -rf "${DC_HOME}" || true
-          mkdir -p "${DC_HOME}" "${DC_DATA}"
-          cd "${RUNNER_TEMP}"
-          curl -sSL -o dc.zip "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" || true
-          if unzip -q dc.zip -d "${RUNNER_TEMP}"; then
-            CANDIDATE="$(find "${RUNNER_TEMP}" -maxdepth 1 -type d -name 'dependency-check*' | head -n1 || true)"
-            if [ -n "$CANDIDATE" ]; then
-              mv "$CANDIDATE" "${DC_HOME}"
-              chmod +x "${DC_HOME}/bin/dependency-check.sh" || true
-              echo "DC_READY=true" >> "$GITHUB_ENV"
-              echo "[ECHO] DC installed at ${DC_HOME}" | tee -a "$LOGFILE"
-            else
-              echo "DC_READY=false" >> "$GITHUB_ENV"
-              echo "[WARN] DC folder not found; placeholder mode" | tee -a "$LOGFILE"
-            fi
-          else
-            echo "DC_READY=false" >> "$GITHUB_ENV"
-            echo "[WARN] DC unzip failed; placeholder mode" | tee -a "$LOGFILE"
-          fi
-          rm -f dc.zip || true
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          echo "postfix postfix/main_mailer_type select No configuration" | sudo debconf-set-selections
+          sudo apt-get install -y --no-install-recommends postfix
+          sudo apt-get install -y --only-upgrade postfix || true
 
-      - name: 🌐 Fetch Spamhaus (quiet, always file)
-        if: env.ENABLE_SPAMHAUS == 'true'
+          sudo cp -n /etc/postfix/main.cf /etc/postfix/main.cf.bak || true
+          cat <<'EOF' | sudo tee /etc/postfix/main.cf >/dev/null
+          # Generated for CI
+          myhostname = localhost
+          myorigin = localhost
+          inet_interfaces = loopback-only
+          inet_protocols = all
+          mydestination =
+          local_transport = error:local delivery disabled
+          relayhost =
+          smtp_tls_security_level = may
+          smtpd_banner = $myhostname ESMTP
+          EOF
+          sudo service postfix stop || true
+
+          cat <<EOF | tee "$BASE/postfix/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/postfix/env/.env"
+
+      - name: Install & configure Exim4 (no auto-start) + upgrade
         shell: bash
         run: |
-          set -euo pipefail
-          echo "[ECHO] Spamhaus fetch start" | tee -a "$LOGFILE"
-          : > "$BLACKLIST_DIR/raw/spamhaus_drop.txt"
-          : > "$BLACKLIST_DIR/raw/spamhaus_edrop.txt"
-          # quiet to console; write to files
-          curl -fsSL https://www.spamhaus.org/drop/drop.txt  | grep -v '^;' | tee "$BLACKLIST_DIR/raw/spamhaus_drop.txt"   >/dev/null || true
-          curl -fsSL https://www.spamhaus.org/drop/edrop.txt | grep -v '^;' | tee "$BLACKLIST_DIR/raw/spamhaus_edrop.txt" >/dev/null || true
-          cat "$BLACKLIST_DIR/raw/"spamhaus_*.txt 2>/dev/null | sort -u | tee "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" >/dev/null || echo -n > "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt"
-          cp -f "$BLACKLIST_DIR/dist/ip_blacklist_spamhaus.txt" "$NET_DIR/all/ip_blacklist_spamhaus.txt" || true
-          echo "[ECHO] Spamhaus IP count: $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0)" | tee -a "$LOGFILE"
-          echo "[ECHO] Spamhaus fetch done" | tee -a "$LOGFILE"
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y --no-install-recommends exim4 exim4-daemon-light
+          sudo apt-get install -y --only-upgrade exim4 exim4-daemon-light || true
 
-      - name: 🌐 Fetch EmergingThreats (quiet, always file)
-        if: env.ENABLE_EMERGING_THREATS == 'true'
+          sudo cp -n /etc/exim4/update-exim4.conf.conf /etc/exim4/update-exim4.conf.conf.bak || true
+          cat <<'EOF' | sudo tee /etc/exim4/update-exim4.conf.conf >/dev/null
+          dc_eximconfig_configtype='internet'
+          dc_local_interfaces='127.0.0.1.25'
+          dc_other_hostnames=''
+          dc_readhost=''
+          dc_relay_domains=''
+          dc_minimaldns='false'
+          dc_relay_nets=''
+          dc_smarthost=''
+          CFILEMODE='644'
+          dc_use_split_config='true'
+          dc_hide_mailname=''
+          EOF
+          sudo update-exim4.conf
+          sudo service exim4 stop || true
+
+          cat <<EOF | tee "$BASE/exim4/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/exim4/env/.env"
+
+      - name: Install & configure OpenSMTPD (no auto-start) + upgrade (best-effort)
         shell: bash
         run: |
-          set -euo pipefail
-          echo "[ECHO] ET fetch start" | tee -a "$LOGFILE"
-          : > "$BLACKLIST_DIR/raw/et_compromised_ips.txt"
-          curl -fsSL https://rules.emergingthreats.net/blockrules/compromised-ips.txt \
-            | grep -E '^[0-9]+\.[0-9]+' | sort -u \
-            | tee "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" >/dev/null || echo -n > "$BLACKLIST_DIR/dist/ip_blacklist_et.txt"
-          cp -f "$BLACKLIST_DIR/dist/ip_blacklist_et.txt" "$NET_DIR/all/ip_blacklist_et.txt" || true
-          echo "[ECHO] ET IP count: $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0)" | tee -a "$LOGFILE"
-          echo "[ECHO] ET fetch done" | tee -a "$LOGFILE"
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get install -y --no-install-recommends opensmtpd || true
+          sudo apt-get install -y --only-upgrade opensmtpd || true
 
-      - name: 🐍 pip-audit (optional)
-        if: env.ENABLE_PY_AUDIT != 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ECHO] pip-audit start" | tee -a "$LOGFILE"
-          if ls requirements*.txt pyproject.toml setup.cfg setup.py 2>/dev/null | grep -q .; then
-            (python3 -m pip_audit -f json || true) | tee "$PKG_DIR/python/pip_audit.json" >/dev/null
-          else
-            echo "{}" > "$PKG_DIR/python/pip_audit.json"
-            echo "[ECHO] No Python lockfiles; skip" | tee -a "$LOGFILE"
+          if [ -f /etc/smtpd/smtpd.conf ]; then
+            sudo cp -n /etc/smtpd/smtpd.conf /etc/smtpd/smtpd.conf.bak || true
+            cat <<'EOF' | sudo tee /etc/smtpd/smtpd.conf >/dev/null
+            pki localhost cert "/etc/ssl/certs/ssl-cert-snakeoil.pem"
+            pki localhost key  "/etc/ssl/private/ssl-cert-snakeoil.key"
+            listen on 127.0.0.1 port 25
+            action "local" mta host smtp://127.0.0.1
+            match from any for any action "local"
+            EOF
+            sudo service opensmtpd stop || true
           fi
 
-      - name: 📦 npm audit (optional)
-        if: env.ENABLE_NPM_AUDIT != 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ECHO] npm audit start" | tee -a "$LOGFILE"
-          if ls package-lock.json yarn.lock pnpm-lock.yaml 2>/dev/null | grep -q .; then
-            (npm audit --json || true) | tee "$PKG_DIR/npm/npm_audit.json" >/dev/null
-          else
-            echo "{}" > "$PKG_DIR/npm/npm_audit.json"
-            echo "[ECHO] No JS lockfiles; skip" | tee -a "$LOGFILE"
-          fi
+          cat <<EOF | tee "$BASE/opensmtpd/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/opensmtpd/env/.env"
 
-      - name: 🔍 Semgrep (optional)
-        if: env.ENABLE_SEMGREP == 'true'
+      - name: Install & run MailHog + upgrade (binary refresh)
         shell: bash
         run: |
-          set -euo pipefail
-          echo "[ECHO] Semgrep start" | tee -a "$LOGFILE"
-          semgrep --version || true
-          (semgrep ci --dry-run --config p/ci -o "$CODE_DIR/semgrep/semgrep.json" || semgrep --config p/ci -o "$CODE_DIR/semgrep/semgrep.json" || echo "{}" > "$CODE_DIR/semgrep/semgrep.json") 2>>"$LOGFILE"
-          echo "[ECHO] Semgrep done" | tee -a "$LOGFILE"
+          set -Eeuo pipefail
+          pushd "$BASE/mailhog/bin"
+          # 최신 릴리즈 바이너리 갱신(간단 업그레이드)
+          MH_URL="https://github.com/mailhog/MailHog/releases/download/v1.0.1/MailHog_linux_amd64"
+          curl -L "$MH_URL" -o MailHog || wget -O MailHog "$MH_URL"
+          chmod +x MailHog
+          popd
+          nohup "$BASE/mailhog/bin/MailHog" -smtp-bind-addr 0.0.0.0:1025 -ui-bind-addr 0.0.0.0:8025 > "$BASE/mailhog/logs/mailhog.log" 2>&1 &
+          echo "MailHog started (SMTP:1025, Web:8025)"
 
-      - name: 🧪 Dependency-Check (keyless-safe with fallback)
-        shell: bash
-        env:
-          DC_READY: ${{ env.DC_HOME }}
-        run: |
-          set -euo pipefail
-          echo "[ECHO] DC execution start" | tee -a "$LOGFILE"
-          mkdir -p "$PKG_DIR/dc" "$EXPORT_DIR/json" "$EXPORT_DIR/html"
-          # helper: write placeholders
-          write_placeholders() {
-            echo "{}" > "$PKG_DIR/dc/dc_report.json"
-            echo "<html><body>no report</body></html>" > "$PKG_DIR/dc/dc_report.html"
-            cp -f "$PKG_DIR/dc/dc_report.json" "$EXPORT_DIR/json/dc_report.json" || true
-            cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" || true
-          }
-          if [ ! -x "${DC_HOME}/bin/dependency-check.sh" ]; then
-            echo "[WARN] DC not installed; using placeholders" | tee -a "$LOGFILE"
-            write_placeholders
-          else
-            # Try with API key if present
-            set +e
-            CMD=("${DC_HOME}/bin/dependency-check.sh" \
-              --project "BlacklistScan" \
-              --scan . \
-              -f JSON -f HTML \
-              --out "$PKG_DIR/dc" \
-              --data "$DC_DATA" \
-              --failOnCVSS 0)
-            if [ -n "${NVD_API_KEY:-}" ]; then
-              CMD+=("--nvdApiKey" "${NVD_API_KEY}")
-            fi
-            "${CMD[@]}" 1>>"$LOGFILE" 2>>"$LOGFILE"
-            EC=$?
-            if [ $EC -ne 0 ]; then
-              echo "[WARN] DC online run failed (ec=$EC). Trying --noupdate..." | tee -a "$LOGFILE"
-              "${DC_HOME}/bin/dependency-check.sh" \
-                --project "BlacklistScan" \
-                --scan . \
-                -f JSON -f HTML \
-                --out "$PKG_DIR/dc" \
-                --data "$DC_DATA" \
-                --noupdate \
-                --failOnCVSS 0 1>>"$LOGFILE" 2>>"$LOGFILE"
-              EC=$?
-            fi
-            set -e
-            # Normalize or placeholders
-            if [ -f "$PKG_DIR/dc/dependency-check-report.json" ]; then
-              mv -f "$PKG_DIR/dc/dependency-check-report.json" "$PKG_DIR/dc/dc_report.json"
-            fi
-            if [ -f "$PKG_DIR/dc/dependency-check-report.html" ]; then
-              mv -f "$PKG_DIR/dc/dependency-check-report.html" "$PKG_DIR/dc/dc_report.html"
-            fi
-            [ -s "$PKG_DIR/dc/dc_report.json" ] || [ -s "$PKG_DIR/dc/dc_report.html" ] || write_placeholders
-            cp -f "$PKG_DIR/dc/dc_report.json" "$EXPORT_DIR/json/dc_report.json" || true
-            cp -f "$PKG_DIR/dc/dc_report.html" "$EXPORT_DIR/html/dc_report.html" || true
-          fi
-          echo "[ECHO] DC execution finished" | tee -a "$LOGFILE"
+          cat <<EOF | tee "$BASE/mailhog/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/mailhog/env/.env"
 
-      - name: 🧾 Summary generation
+      - name: Install & run MailCatcher + upgrade (gem update)
         shell: bash
         run: |
-          set -euo pipefail
-          echo "[ECHO] Summary generation" | tee -a "$LOGFILE"
-          SUMMARY_JSON="$SUMMARY_DIR/summary_${RUN_DATE_UTC}.json"
-          SUMMARY_MD="$SUMMARY_DIR/summary_${RUN_DATE_UTC}.md"
-          # JSON
-          {
-            echo "{"
-            echo "  \"run_at_utc\": \"${RUN_DATE_UTC}\","
-            echo "  \"spamhaus_count\": $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0),"
-            echo "  \"et_count\": $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0),"
-            echo "  \"files\": {"
-            while IFS= read -r -d '' f; do
-              sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-              bn="${f#./}"
-              echo "    \"${bn}\": ${sz},"
-            done < <(find "$EXPORT_DIR" "$PKG_DIR/dc" -type f -print0 2>/dev/null)
-            echo "    \"_end\": 0"
-            echo "  }"
-            echo "}"
-          } > "$SUMMARY_JSON"
-          # MD
-          {
-            echo "# Blacklist Summary (${RUN_DATE_UTC})"
-            echo ""
-            echo "- Spamhaus: $(wc -l < "$NET_DIR/all/ip_blacklist_spamhaus.txt" 2>/dev/null || echo 0) IPs"
-            echo "- EmergingThreats: $(wc -l < "$NET_DIR/all/ip_blacklist_et.txt" 2>/dev/null || echo 0) IPs"
-            echo ""
-            echo "## Files (bytes)"
-            while IFS= read -r -d '' f; do
-              sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-              echo "- ${f#./}: $sz"
-            done < <(find "$EXPORT_DIR" "$PKG_DIR/dc" -type f -print0 2>/dev/null)
-          } > "$SUMMARY_MD"
-          # Console short list
-          echo "[ECHO] ===== Result files ====="
-          while IFS= read -r -d '' f; do
-            sz=$(wc -c < "$f" 2>/dev/null || echo 0)
-            echo "[ECHO] file: ${f#./}, size(bytes): ${sz}"
-          done < <(find "$EXPORT_DIR" "$PKG_DIR/dc" -type f -print0 2>/dev/null)
-          echo "[ECHO] ========================"
-          echo "[ECHO] Summary created → $SUMMARY_JSON, $SUMMARY_MD" | tee -a "$LOGFILE"
+          set -Eeuo pipefail
+          gem install --no-document mailcatcher
+          gem update mailcatcher || true
+          nohup mailcatcher --smtp-ip 0.0.0.0 --smtp-port 1026 --http-ip 0.0.0.0 --http-port 8026 > "$BASE/mailcatcher/logs/mailcatcher.log" 2>&1 &
+          echo "MailCatcher started (SMTP:1026, Web:8026)"
 
-      - name: 🗂 Snapshot & latest sync
-        shell: bash
-        run: |
-          set -e
-          echo "[ECHO] Snapshot & latest sync" | tee -a "$LOGFILE"
-          mkdir -p "$SNAP_DIR/summary" "$SNAP_DIR/packages/dc" "$SNAP_DIR/networks" "$SNAP_DIR/code/semgrep"
-          rsync -a "$EXPORT_DIR"/ "$SNAP_DIR/summary/" --exclude '.gitkeep' || true
-          rsync -a "$PKG_DIR/dc/" "$SNAP_DIR/packages/dc/" --exclude '.gitkeep' || true
-          rsync -a "$NET_DIR/all/" "$SNAP_DIR/networks/" --exclude '.gitkeep' || true
-          rsync -a "$CODE_DIR/semgrep/" "$SNAP_DIR/code/semgrep/" --exclude '.gitkeep' || true
-          mkdir -p "$LATEST_DIR"
-          rsync -a --delete "$EXPORT_DIR"/ "$LATEST_DIR/" --exclude '.gitkeep' || true
+          cat <<EOF | tee "$BASE/mailcatcher/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/mailcatcher/env/.env"
 
-      - name: 📝 Commit & push (if changed)
+      - name: Run smtp-sink (from postfix package) on 2525
         shell: bash
         run: |
-          set -e
-          echo "[ECHO] Commit & push (if changed)" | tee -a "$LOGFILE"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$BLACKLIST_DIR" || true
-          if ! git diff --cached --quiet; then
-            git fetch --unshallow || true
-            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
-            git commit -m "chore(blacklist): update outputs @ ${RUN_DATE_UTC}"
-            git push || git push --force-with-lease
-            echo "[ECHO] Pushed updates" | tee -a "$LOGFILE"
-          else
-            echo "[ECHO] No changes to commit" | tee -a "$LOGFILE"
-          fi
+          set -Eeuo pipefail
+          nohup smtp-sink -v 0.0.0.0:2525 1000 > "$BASE/smtp-sink/logs/smtp-sink.log" 2>&1 &
+          echo "smtp-sink started (SMTP:2525)"
+          cat <<EOF | tee "$BASE/smtp-sink/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/smtp-sink/env/.env"
+
+      - name: Pull & run MailDev (docker) + upgrade (docker pull)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo systemctl enable --now docker || true
+          sudo docker pull maildev/maildev:latest
+          # 호스트 1027->컨테이너 1025, 호스트 1081->컨테이너 1080
+          sudo docker rm -f maildev || true
+          sudo docker run -d --name maildev \
+            -p 1027:1025 -p 1081:1080 \
+            -e MAILDEV_INCOMING_USER=dev -e MAILDEV_INCOMING_PASS=dev \
+            maildev/maildev:latest
+          echo "MailDev started (SMTP:1027, Web:1081)"
+
+          cat <<EOF | tee "$BASE/maildev/env/.env" >/dev/null
+          DOMAIN=${DOMAIN}
+          USER_COUNT=${USER_COUNT}
+          EOF
+          chmod 640 "$BASE/maildev/env/.env"
+
+      - name: Massive echo:permission/policy/env templates per service
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for SVC in $SERVICES; do
+            cat <<'TPL' | tee "$BASE/$SVC/policies/ACCESS_CONTROL.md" >/dev/null
+            # Access Control (Test)
+            - Principle: least privilege
+            - Files under /acl and /keys are 640 or stricter
+            - Logs readable by owner and group only
+            TPL
+            cat <<'TPL' | tee "$BASE/$SVC/acl/permissions.list" >/dev/null
+            /config 750
+            /keys   640
+            /certs  640
+            /logs   640
+            /users  750
+            TPL
+            cat <<'TPL' | tee "$BASE/$SVC/docs/NOTES.md" >/dev/null
+            This is a CI-only service folder. Do not use for production secrets.
+            TPL
+            chmod 640 "$BASE/$SVC/policies/ACCESS_CONTROL.md" "$BASE/$SVC/acl/permissions.list" "$BASE/$SVC/docs/NOTES.md"
+          done
+
+      - name: Apply ACLs and strict permissions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 공통 권한
+          chmod -R 755 "$BASE"
+          for SVC in $SERVICES; do
+            chmod 750 "$BASE/$SVC/config" "$BASE/$SVC/users" "$BASE/$SVC/scripts" || true
+            chmod 750 "$BASE/$SVC/acl" "$BASE/$SVC/env" || true
+            chmod 700 "$BASE/$SVC/keys" || true
+            chmod 700 "$BASE/$SVC/pid" "$BASE/$SVC/run" || true
+            chmod 640 "$BASE/$SVC/policies/ACCESS_CONTROL.md" "$BASE/$SVC/acl/permissions.list" || true
+          done
+
+      - name: Generate massive virtual users & passwords per service (CSV/HTPASSWD/JSON)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 계정 생성 도구: apache2-utils(htpasswd), openssl, jq
+          for SVC in $SERVICES; do
+            UDIR="$BASE/$SVC/users"
+            CSV="$UDIR/users.csv"
+            JN="$UDIR/users.json"
+            HTP="$UDIR/users.htpasswd"
+            : > "$CSV"
+            : > "$HTP"
+            echo "[]" > "$JN"
+
+            for i in $(seq 1 "$USER_COUNT"); do
+              user=$(printf "%s_user%03d" "$SVC" "$i")
+              email="${user}@${DOMAIN}"
+              pass_plain=$(openssl rand -base64 18 | tr -d '\n' | tr '/' '_' | tr '+' '-')
+              # bcrypt 해시
+              hash_line=$(htpasswd -nbBC 10 "$user" "$pass_plain")
+              # htpasswd 파일 추가
+              echo "$hash_line" >> "$HTP"
+              # CSV
+              echo "$user,$email,$pass_plain" >> "$CSV"
+              # JSON 누적
+              tmp=$(mktemp)
+              jq --arg u "$user" --arg e "$email" --arg p "$pass_plain" \
+                 '. += [{"username":$u,"email":$e,"password":$p}]' "$JN" > "$tmp" && mv "$tmp" "$JN"
+            done
+
+            # 권한 강화
+            chmod 640 "$CSV" "$HTP" "$JN"
+
+            # 서비스용 계정 안내 파일
+            cat <<EOF | tee "$UDIR/README.md" >/dev/null
+            # Virtual Users for $SVC
+            - Domain: ${DOMAIN}
+            - Count : ${USER_COUNT}
+            - Files :
+              - users.csv (username,email,plain_password)
+              - users.htpasswd (bcrypt)
+              - users.json (username/email/plain_password)
+            EOF
+            chmod 640 "$UDIR/README.md"
+          done
+
+      - name: Output quick summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "== Summary =="
+          echo "Base       : $BASE"
+          echo "Domain     : $DOMAIN"
+          echo "User Count : $USER_COUNT"
+          for SVC in $SERVICES; do
+            echo "--- $SVC ---"
+            ls -al "$BASE/$SVC" | sed 's/^/  /'
+            echo "Users samples:"
+            head -n 3 "$BASE/$SVC/users/users.csv" | sed 's/^/  /'
+          done
