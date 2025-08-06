@@ -1,4 +1,4 @@
-name: "email-servers-ULTRA-integrated-echo-only-with-monitoring-v4"
+name: "email-servers-ULTRA-integrated-echo-only-with-monitoring-v5"
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
       SERVICES: "postfix exim4 opensmtpd mailhog mailcatcher smtp-sink maildev"
       MTA_CHOICE: ${{ github.event.inputs.mta_choice || 'none' }}
 
-      # Monitoring logical paths (we'll compute absolute paths at runtime)
+      # Monitoring logical root (절대경로는 런타임 계산)
       MONO: .monitoring
 
       # InfluxDB bootstrap (demo only)
@@ -55,23 +55,25 @@ jobs:
           set -Eeuo pipefail
           sudo mkdir -p "$BASE"; sudo chown -R "$USER:$USER" "$BASE"
           mkdir -p "$BASE"/{policies,reports,artifacts,global,tools,tmp}
-          # 절대경로 계산
-          echo "export BASE_ABS=$BASE" > "$GITHUB_WORKSPACE/.env_abs"
-          echo "export MONO=${MONO}"  >> "$GITHUB_WORKSPACE/.env_abs"
-          echo "export MONO_ABS=$(pwd)/${MONO}" >> "$GITHUB_WORKSPACE/.env_abs"
-          # 모니터링 디렉토리
+          # 모니터링 디렉토리 (상대 → 절대 계산용)
           mkdir -p "${MONO}"/{influxdb,telegraf,graphite,victoriametrics,otel,statsd,scripts,python}
-          # 서비스별 대량 디렉토리
+          # 서비스별 대량 디렉토리/표준 트리
           for SVC in $SERVICES; do
             for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts; do
               mkdir -p "$BASE/$SVC/$d"
             done
+            # 대량 1000개 디렉토리
             for i in $(seq -w 0001 1000); do
               mkdir -p "$BASE/$SVC/bulk/dir_$i"
             done
           done
           chmod -R 755 "$BASE"
-          echo "[OK] BASE_ABS=$BASE ; MONO_ABS=$(pwd)/${MONO}"
+          # 절대경로 저장(이후 스텝에서 source)
+          {
+            echo "export BASE_ABS=$BASE"
+            echo "export MONO=${MONO}"
+            echo "export MONO_ABS=$(pwd)/${MONO}"
+          } > "$GITHUB_WORKSPACE/.env_abs"
 
       - name: 📦 Base packages (no MTA conflicts; Docker upgrade-only)
         shell: bash
@@ -85,7 +87,7 @@ jobs:
             ruby-full libsqlite3-dev \
             apache2-utils openssl swaks \
             nginx clamav clamav-daemon
-          # Docker upgrade-only (containerd.io 충돌 회피)
+          # Docker: upgrade-only (containerd.io 충돌 회피)
           sudo apt-get install -y --only-upgrade docker.io containerd || true
           sudo systemctl is-active --quiet docker || sudo systemctl start docker || true
           sudo systemctl enable --now nginx || true
@@ -107,11 +109,11 @@ jobs:
           esac
           # 자동 기동 방지
           sudo systemctl stop postfix 2>/dev/null || true
-          sudo systemctl stop exim4 2>/dev/null || true
+          sudo systemctl stop exim4 2>/dev/null   || true
           sudo systemctl stop opensmtpd 2>/dev/null || true
           sudo systemctl disable postfix exim4 opensmtpd 2>/dev/null || true
 
-      - name: 📄 Global README & policies (echo-only) + 대량 샘플 파일
+      - name: 📚 Global README & policies (echo-only)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -119,9 +121,8 @@ jobs:
           : > "$BASE/README.txt"
           {
             echo "This CI workspace provisions email servers for testing."
-            echo "All files created via echo only. No heredoc/tee."
-            echo "Single apt MTA to avoid mail-transport-agent conflicts."
-            echo "Monitoring: InfluxDB2 + Telegraf. Test SMTP via containers."
+            echo "MTAs (postfix/exim4/opensmtpd) may be installed but NOT auto-started."
+            echo "Test servers run on high ports. Nginx reverse proxy with security headers + BasicAuth is applied."
           } >> "$BASE/README.txt"
           : > "$BASE/policies/SECURITY.md"
           {
@@ -129,247 +130,277 @@ jobs:
             echo "- Ephemeral CI environment. Do not store real credentials."
             echo "- Virtual users are randomly generated per run."
             echo "- Outputs: users.csv, users.htpasswd (bcrypt), users.json per service."
-            echo "- ClamAV DB updated via echo-generated freshclam.conf; clamscan reports saved."
+            echo "- ClamAV DB is updated via echo-generated freshclam.conf; clamscan reports are produced."
           } >> "$BASE/policies/SECURITY.md"
-          # 서비스별 대량 에코 샘플 파일(200개)
-          for SVC in $SERVICES; do
-            for n in $(seq -w 0001 0200); do
-              f="$BASE/$SVC/docs/sample_$n.txt"
-              : > "$f"
-              echo "service=$SVC" >> "$f"
-              echo "index=$n"     >> "$f"
-              echo "domain=$DOMAIN" >> "$f"
-            done
-          done
+          chmod 644 "$BASE/README.txt" "$BASE/policies/SECURITY.md"
 
-      - name: 🔐 Echo firewall & permission templates (mass) + chmod
+      - name: 🔐 Echo firewall & permission templates (bulk)
         shell: bash
         run: |
           set -Eeuo pipefail
           for SVC in $SERVICES; do
-            d="$BASE/$SVC"
-            mkdir -p "$d/firewall" "$d/permissions" "$d/acl"
-            # firewall policy
-            file="$d/firewall/policy.conf"; : > "$file"
+            d="$BASE/$SVC/firewall"; mkdir -p "$d"
+            f="$d/policy.conf"; : > "$f"
             {
-              echo "# echo-only firewall policy for $SVC (not enforced automatically)"
-              echo "allow_tcp=1025,1026,1081,8025,8026,9001,9002,9003,2525"
+              echo "# Echo-only firewall policy for $SVC (not applied automatically)"
+              echo "allow_tcp=1025,1026,1027,1081,8025,8026,9001,9002,9003,2525"
               echo "deny_all_else=true"
-              echo 'note="CI test environment; not enforced on shared runner"'
-            } >> "$file"
-            chmod 640 "$file"
-            # permissions (ACL)
-            p="$d/permissions/default.acl"; : > "$p"
+              echo 'note="CI test environment; do not enforce on shared runner"'
+            } >> "$f"
+            chmod 640 "$f"
+            # 권한 템플릿
+            p="$BASE/$SVC/permissions/acl.conf"; : > "$p"
             {
-              echo "owner=$USER"
-              echo "dir_mode=755"
-              echo "file_mode=640"
+              echo "# ACL template for $SVC"
+              echo "umask=022"
+              echo "dirs=755 files=644"
             } >> "$p"
             chmod 640 "$p"
-            # 대량 권한 템플릿 복제
-            for n in $(seq -w 0001 0100); do
-              cp "$p" "$d/permissions/acl_$n.acl"
-            done
           done
 
-      - name: 👥 Generate virtual users (CSV/JSON/htpasswd via echo)
+      - name: 🧪 Generate massive echo files (200 per service)
         shell: bash
         run: |
           set -Eeuo pipefail
           for SVC in $SERVICES; do
-            udir="$BASE/$SVC/users"; mkdir -p "$udir"
-            : > "$udir/users.csv"; echo "email,password,service" >> "$udir/users.csv"
-            : > "$udir/users.json"; echo "[" >> "$udir/users.json"
-            : > "$udir/users.htpasswd"
-            for i in $(seq 1 "$USER_COUNT"); do
-              user="user$(printf %04d "$i")"
-              pass="$(openssl rand -base64 24 | tr -d '\n=/' | cut -c1-16)"
-              email="$user@$DOMAIN"
-              echo "$email,$pass,$SVC" >> "$udir/users.csv"
-              if [ "$i" -gt 1 ]; then echo "," >> "$udir/users.json"; fi
-              echo "  {\"email\":\"$email\",\"password\":\"$pass\",\"service\":\"$SVC\"}" >> "$udir/users.json"
-              htpasswd -bB "$udir/users.htpasswd" "$email" "$pass" >/dev/null
+            for i in $(seq -w 0001 0200); do
+              f="$BASE/$SVC/docs/sample_$i.txt"
+              : > "$f"
+              echo "service=$SVC index=$i domain=$DOMAIN" >> "$f"
             done
-            echo "]" >> "$udir/users.json"
           done
 
-      - name: 🌐 Nginx security headers + BasicAuth (echo-only → sudo mv)
+      - name: 👥 Virtual users & passwords (CSV/JSON/htpasswd) — echo-only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 공통 파일 초기화
+          : > "$BASE/artifacts/users.csv"
+          : > "$BASE/artifacts/users.json"
+          : > "$BASE/global/users.htpasswd"
+          printf '%s\n' "service,username,email,password" >> "$BASE/artifacts/users.csv"
+          printf '%s\n' "[" >> "$BASE/artifacts/users.json"
+
+          count_json=0
+          for SVC in $SERVICES; do
+            mkdir -p "$BASE/$SVC/users"
+            for n in $(seq 1 "$USER_COUNT"); do
+              user="${SVC}_user_${n}"
+              pass="$(openssl rand -base64 18 | tr -d '\n=/' | cut -c1-16)"
+              email="${user}@${DOMAIN}"
+              # csv
+              printf '%s\n' "${SVC},${user},${email},${pass}" >> "$BASE/artifacts/users.csv"
+              # json (수동 콤마 관리)
+              if [ $count_json -gt 0 ]; then printf '%s\n' "," >> "$BASE/artifacts/users.json"; fi
+              printf '%s' "  {\"service\":\"${SVC}\",\"username\":\"${user}\",\"email\":\"${email}\",\"password\":\"${pass}\"}" >> "$BASE/artifacts/users.json"
+              count_json=$((count_json+1))
+              # htpasswd(bcrypt)
+              htpasswd -bB "$BASE/global/users.htpasswd" "$email" "$pass" >/dev/null
+            done
+          done
+          printf '\n%s\n' "]" >> "$BASE/artifacts/users.json"
+          chmod 640 "$BASE/global/users.htpasswd"
+
+      - name: 🔧 Monitoring configs (InfluxDB/Telegraf) — echo-only + absolute paths
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$GITHUB_WORKSPACE/.env_abs"
-          sudo mkdir -p /etc/nginx/snippets /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+          # InfluxDB2 config (단순)
+          cfg="$MONO/influxdb/influxdb.conf"; : > "$cfg"
+          echo 'reporting-disabled = true'                       >> "$cfg"
+          echo 'bolt-path = "/var/lib/influxdb2/influxd.bolt"'  >> "$cfg"
+          echo 'engine-path = "/var/lib/influxdb2/engine"'      >> "$cfg"
+          echo 'http-bind-address = ":8086"'                     >> "$cfg"
+
+          # Telegraf config (런타임 ENV 확장)
+          tcfg="$MONO/telegraf/telegraf.conf"; : > "$tcfg"
+          echo '[agent]'                                         >> "$tcfg"
+          echo '  interval = "10s"'                              >> "$tcfg"
+          echo '  round_interval = true'                         >> "$tcfg"
+          echo ''                                                >> "$tcfg"
+          echo '[[outputs.influxdb_v2]]'                         >> "$tcfg"
+          echo '  urls = ["http://influxdb:8086"]'               >> "$tcfg"
+          echo '  token = "${INFLUX_TOKEN}"'                     >> "$tcfg"
+          echo '  organization = "${INFLUX_ORG}"'                >> "$tcfg"
+          echo '  bucket = "${INFLUX_BUCKET}"'                   >> "$tcfg"
+          echo ''                                                >> "$tcfg"
+          echo '[[inputs.cpu]]'                                  >> "$tcfg"
+          echo '  percpu = true'                                 >> "$tcfg"
+          echo '  totalcpu = true'                               >> "$tcfg"
+          echo '[[inputs.mem]]'                                  >> "$tcfg"
+          echo '[[inputs.disk]]'                                 >> "$tcfg"
+          echo '  ignore_fs = ["tmpfs","devtmpfs","overlay"]'    >> "$tcfg"
+          echo '[[inputs.net]]'                                  >> "$tcfg"
+
+      - name: 🐳 Launch monitoring (InfluxDB2 + Telegraf) with ABSOLUTE bind mounts
+        shell: bash
+        env:
+          INFLUXDB_VERSION: "2.7"
+        run: |
+          set -Eeuo pipefail
+          source "$GITHUB_WORKSPACE/.env_abs"
+
+          # InfluxDB2 (비대화형 초기화)
+          docker rm -f influxdb >/dev/null 2>&1 || true
+          docker run -d --name influxdb --network monnet \
+            --mount type=bind,src="${MONO_ABS}/influxdb/influxdb.conf",dst=/etc/influxdb2/config.yml,ro \
+            -e DOCKER_INFLUXDB_INIT_MODE=setup \
+            -e DOCKER_INFLUXDB_INIT_USERNAME="${INF_USER}" \
+            -e DOCKER_INFLUXDB_INIT_PASSWORD="${INF_PASS}" \
+            -e DOCKER_INFLUXDB_INIT_ORG="${INF_ORG}" \
+            -e DOCKER_INFLUXDB_INIT_BUCKET="${INF_BUCKET}" \
+            -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN="${INF_TOKEN}" \
+            -p 8086:8086 \
+            "influxdb:${INFLUXDB_VERSION}"
+
+          # 간단 대기
+          for i in $(seq 1 30); do
+            if docker exec influxdb influx ping >/dev/null 2>&1; then echo "[OK] influx up"; break; fi
+            sleep 2
+          done
+
+          # Telegraf
+          docker rm -f telegraf >/dev/null 2>&1 || true
+          docker run -d --name telegraf --network monnet \
+            --mount type=bind,src="${MONO_ABS}/telegraf/telegraf.conf",dst=/etc/telegraf/telegraf.conf,ro \
+            -e INFLUX_TOKEN="${INF_TOKEN}" \
+            -e INFLUX_ORG="${INF_ORG}" \
+            -e INFLUX_BUCKET="${INF_BUCKET}" \
+            telegraf:1.29
+
+      - name: 🌐 Nginx security headers + BasicAuth (echo-only, tmp → sudo mv)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$GITHUB_WORKSPACE/.env_abs"
+
           # BasicAuth
           WEB_USER="admin"
           WEB_PASS="$(openssl rand -base64 18 | tr -d '\n=/' | cut -c1-16)"
-          : > "$BASE/global/web-auth.env"
-          echo "WEB_USER=$WEB_USER" >> "$BASE/global/web-auth.env"
-          echo "WEB_PASS=$WEB_PASS" >> "$BASE/global/web-auth.env"
+          : > "$BASE/global/web-auth.env"; printf 'WEB_USER=%s\nWEB_PASS=%s\n' "$WEB_USER" "$WEB_PASS" >> "$BASE/global/web-auth.env"
           htpasswd -bBc "$BASE/global/web.htpasswd" "$WEB_USER" "$WEB_PASS"
-          # security headers (tmp -> mv)
+
+          sudo mkdir -p /etc/nginx/snippets /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+          # 보안 헤더 스니펫
           tmp_hdr="$(mktemp)"; : > "$tmp_hdr"
-          echo 'add_header X-Content-Type-Options "nosniff" always;' >> "$tmp_hdr"
-          echo 'add_header X-Frame-Options "SAMEORIGIN" always;' >> "$tmp_hdr"
-          echo 'add_header Referrer-Policy "no-referrer-when-downgrade" always;' >> "$tmp_hdr"
-          echo 'add_header X-XSS-Protection "1; mode=block" always;' >> "$tmp_hdr"
-          echo 'add_header Content-Security-Policy "default-src '\''self'\'' '\''unsafe-inline'\''; img-src data: *; connect-src *;" always;' >> "$tmp_hdr"
+          {
+            echo 'add_header X-Content-Type-Options "nosniff" always;'
+            echo 'add_header X-Frame-Options "SAMEORIGIN" always;'
+            echo 'add_header Referrer-Policy "no-referrer-when-downgrade" always;'
+            echo 'add_header X-XSS-Protection "1; mode=block" always;'
+            echo 'add_header Content-Security-Policy "default-src '\''self'\'' '\''unsafe-inline'\''; img-src data: *; connect-src *;" always;'
+          } >> "$tmp_hdr"
           sudo mv "$tmp_hdr" /etc/nginx/snippets/security-headers.conf
-          # 단일 리버스 프록시(예: MailHog UI 8025)
+
+          # 간단 reverse proxy (MailHog UI → :8025)
           tmp_site="$(mktemp)"; : > "$tmp_site"
-          echo "server {" >> "$tmp_site"
-          echo "  listen 8080;" >> "$tmp_site"
-          echo '  auth_basic "Restricted";' >> "$tmp_site"
-          echo "  auth_basic_user_file $BASE_ABS/global/web.htpasswd;" >> "$tmp_site"
-          echo "  location / {" >> "$tmp_site"
-          echo "    proxy_pass http://127.0.0.1:8025;" >> "$tmp_site"
-          echo "    include /etc/nginx/snippets/security-headers.conf;" >> "$tmp_site"
-          echo "    proxy_set_header Host \$host;" >> "$tmp_site"
-          echo "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" >> "$tmp_site"
-          echo "  }" >> "$tmp_site"
-          echo "}" >> "$tmp_site"
-          sudo mv "$tmp_site" /etc/nginx/sites-available/monitoring-mailhog.conf
-          sudo ln -sf /etc/nginx/sites-available/monitoring-mailhog.conf /etc/nginx/sites-enabled/monitoring-mailhog.conf
+          {
+            echo "server {"
+            echo "  listen 8080;"
+            echo '  auth_basic "Restricted";'
+            echo "  auth_basic_user_file $BASE/global/web.htpasswd;"
+            echo "  location / {"
+            echo "    proxy_pass http://127.0.0.1:8025;"
+            echo "    include /etc/nginx/snippets/security-headers.conf;"
+            echo "    proxy_set_header Host \$host;"
+            echo "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            echo "  }"
+            echo "}"
+          } >> "$tmp_site"
+          sudo mv "$tmp_site" /etc/nginx/sites-available/monitoring.conf
+          sudo ln -sf /etc/nginx/sites-available/monitoring.conf /etc/nginx/sites-enabled/monitoring.conf
           sudo nginx -t
           sudo systemctl reload nginx
 
-      - name: 🛡️ ClamAV echo-config + DB update + sample scan
+      - name: 🧿 Start SMTP test servers (MailHog/MailDev/MailCatcher/smtp-sink)
         shell: bash
         run: |
           set -Eeuo pipefail
+          # MailHog: SMTP 1025, UI 8025
+          docker rm -f mailhog >/dev/null 2>&1 || true
+          docker run -d --name mailhog --network emailnet -p 1025:1025 -p 8025:8025 mailhog/mailhog
+
+          # MailDev: SMTP 1026, UI 1080
+          docker rm -f maildev >/dev/null 2>&1 || true
+          docker run -d --name maildev --network emailnet -p 1026:1025 -p 1080:1080 maildev/maildev
+
+          # MailCatcher: SMTP 1027, UI 1081
+          docker rm -f mailcatcher >/dev/null 2>&1 || true
+          docker run -d --name mailcatcher --network emailnet -p 1027:1025 -p 1081:1080 sj26/mailcatcher
+
+          # smtp-sink (OpenSMTPD 유틸 포함 이미지 사용 가능; 여기선 bytemark/smtp-sink)
+          docker rm -f smtp-sink >/dev/null 2>&1 || true
+          docker run -d --name smtp-sink --network emailnet -p 2525:2525 "bytemark/smtp-sink" 2525 "sink-%Y%m%d%H%M%S-%Q"
+
+      - name: 📤 Massive send tests via swaks (to all servers)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SRC="sender@${DOMAIN}"
+          for i in $(seq 1 "$TEST_COUNT"); do
+            swaks --to "rcpt$i@${DOMAIN}" --from "$SRC" --server 127.0.0.1 --port 1025 --timeout 10 --data "Test $i to MailHog" || true
+            swaks --to "rcpt$i@${DOMAIN}" --from "$SRC" --server 127.0.0.1 --port 1026 --timeout 10 --data "Test $i to MailDev" || true
+            swaks --to "rcpt$i@${DOMAIN}" --from "$SRC" --server 127.0.0.1 --port 1027 --timeout 10 --data "Test $i to MailCatcher" || true
+            swaks --to "rcpt$i@${DOMAIN}" --from "$SRC" --server 127.0.0.1 --port 2525 --timeout 10 --data "Test $i to smtp-sink" || true
+          done
+
+      - name: 🛡️ ClamAV DB 업데이트 + 대량 테스트 스캔 (echo-only, nounset-safe)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # freshclam.conf 생성
           tmpc="$(mktemp)"; : > "$tmpc"
-          echo "DatabaseMirror database.clamav.net" >> "$tmpc"
-          echo "DNSDatabaseInfo current.cvd.clamav.net" >> "$tmpc"
+          echo "DatabaseMirror database.clamav.net"          >> "$tmpc"
+          echo "DNSDatabaseInfo current.cvd.clamav.net"      >> "$tmpc"
           echo "UpdateLogFile /var/log/clamav/freshclam.log" >> "$tmpc"
-          echo "NotifyClamd /etc/clamav/clamd.conf" >> "$tmpc"
-          echo "ScriptedUpdates yes" >> "$tmpc"
-          echo "CompressLocalDatabase no" >> "$tmpc"
+          echo "NotifyClamd /etc/clamav/clamd.conf"          >> "$tmpc"
+          echo "ScriptedUpdates yes"                         >> "$tmpc"
+          echo "CompressLocalDatabase no"                    >> "$tmpc"
           sudo mv "$tmpc" /etc/clamav/freshclam.conf
           sudo chown root:root /etc/clamav/freshclam.conf
           sudo chmod 644 /etc/clamav/freshclam.conf
+          # 업데이트
           sudo systemctl stop clamav-freshclam 2>/dev/null || true
           sudo freshclam || true
-          # 샘플 스캔 대상 생성
-          : > "$BASE/tmp/EICAR.txt"
-          echo "X5O!P%@AP[4\\PZX54(P^)7CC)7}\$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*" >> "$BASE/tmp/EICAR.txt"
-          clamscan -r "$BASE" | tee "$BASE/reports/clamav_scan.txt" >/dev/null || true
 
-      - name: 📊 Monitoring configs (echo-only) + launch InfluxDB/Telegraf (abs mounts)
-        shell: bash
-        env:
-          INFLUX_BUCKET: ${{ env.INF_BUCKET }}
-          INFLUX_ORG: ${{ env.INF_ORG }}
-          INFLUX_USER: ${{ env.INF_USER }}
-          INFLUX_PASS: ${{ env.INF_PASS }}
-          INFLUX_TOKEN: ${{ env.INF_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          source "$GITHUB_WORKSPACE/.env_abs"
-          # InfluxDB2 config (echo-only)
-          cfg="$MONO/influxdb/influxdb.conf"; : > "$cfg"
-          echo 'reporting-disabled = true'                         >> "$cfg"
-          echo 'bolt-path = "/var/lib/influxdb2/influxd.bolt"'    >> "$cfg"
-          echo 'engine-path = "/var/lib/influxdb2/engine"'        >> "$cfg"
-          echo 'http-bind-address = ":8086"'                       >> "$cfg"
-          # Telegraf config (env substitution at runtime)
-          tcfg="$MONO/telegraf/telegraf.conf"; : > "$tcfg"
-          echo '[agent]' >> "$tcfg"
-          echo '  interval = "10s"' >> "$tcfg"
-          echo '  round_interval = true' >> "$tcfg"
-          echo '' >> "$tcfg"
-          echo '[[outputs.influxdb_v2]]' >> "$tcfg"
-          echo '  urls = ["http://influxdb:8086"]' >> "$tcfg"
-          echo '  token = "${INFLUX_TOKEN}"' >> "$tcfg"
-          echo '  organization = "${INFLUX_ORG}"' >> "$tcfg"
-          echo '  bucket = "${INFLUX_BUCKET}"' >> "$tcfg"
-          echo '' >> "$tcfg"
-          echo '[[inputs.cpu]]' >> "$tcfg"
-          echo '  percpu = true' >> "$tcfg"
-          echo '  totalcpu = true' >> "$tcfg"
-          echo '[[inputs.mem]]' >> "$tcfg"
-          echo '[[inputs.disk]]' >> "$tcfg"
-          echo '  ignore_fs = ["tmpfs","devtmpfs","overlay"]' >> "$tcfg"
-          echo '[[inputs.net]]' >> "$tcfg"
-
-          docker rm -f influxdb telegraf >/dev/null 2>&1 || true
-          docker run -d --name influxdb --network monnet \
-            -p 8086:8086 \
-            --mount type=bind,src="${MONO_ABS}/influxdb/influxdb.conf",dst=/etc/influxdb2/config.toml,ro \
-            influxdb:2.7
-
-          echo "[wait] influxd API..."
-          timeout 90 bash -c 'until docker exec influxdb influx ping >/dev/null 2>&1; do sleep 2; done' || true
-
-          echo "[setup] influx setup..."
-          docker exec influxdb influx setup --force \
-            --username "$INFLUX_USER" \
-            --password "$INFLUX_PASS" \
-            --org "$INFLUX_ORG" \
-            --bucket "$INFLUX_BUCKET" \
-            --token "$INFLUX_TOKEN" \
-            --host http://localhost:8086 >/dev/null 2>&1 || true
-
-          docker run -d --name telegraf --network monnet \
-            -e INFLUX_TOKEN="$INFLUX_TOKEN" \
-            -e INFLUX_ORG="$INFLUX_ORG" \
-            -e INFLUX_BUCKET="$INFLUX_BUCKET" \
-            --mount type=bind,src="${MONO_ABS}/telegraf/telegraf.conf",dst=/etc/telegraf/telegraf.conf,ro \
-            telegraf:1.28
-
-      - name: 📮 Launch test SMTP containers (MailHog/MailDev/MailCatcher)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # MailHog : SMTP 1025, UI 8025
-          docker rm -f mailhog >/dev/null 2>&1 || true
-          docker run -d --name mailhog --network emailnet \
-            -p 1025:1025 -p 8025:8025 \
-            mailhog/mailhog:latest
-          # MailDev : SMTP 1080? → 공식은 1025/1080(web). 외부 포트 충돌 방지 위해 다른 포트로
-          docker rm -f maildev >/dev/null 2>&1 || true
-          docker run -d --name maildev --network emailnet \
-            -p 1026:1025 -p 8026:1080 \
-            maildev/maildev:2
-          # MailCatcher : SMTP 1025, Web 1080 → 포트 재배치
-          docker rm -f mailcatcher >/dev/null 2>&1 || true
-          docker run -d --name mailcatcher --network emailnet \
-            -p 2525:1025 -p 9001:1080 \
-            schickling/mailcatcher
-
-      - name: ✉️ Massive send tests (swaks) to all test servers
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # 대상: mailhog(1025), maildev(1026), mailcatcher(2525)
-          for svc in mailhog:127.0.0.1:1025 maildev:127.0.0.1:1026 mailcatcher:127.0.0.1:2525; do
-            name="${svc%%:*}"
-            hostport="${svc#*:}"
-            host="${hostport%%:*}"
-            port="${hostport##*:}"
-            for n in $(seq 1 "$TEST_COUNT"); do
-              swaks --to "dest$n@$DOMAIN" --from "src$n@$DOMAIN" \
-                --server "$host" --port "$port" --timeout 15 \
-                --data "Subject: swaks test $name #$n\n\nBody $n $(date -u +%FT%TZ)" \
-                --quit-after DATA >> "$BASE/reports/swaks_${name}.log" 2>&1 || true
+          # EICAR: single-quote로 변수확장 차단
+          eicar='X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+          mkdir -p "$BASE/tmp"
+          printf '%s\n' "$eicar" > "$BASE/tmp/EICAR.txt"
+          for SVC in $SERVICES; do
+            mkdir -p "$BASE/$SVC/tmp"
+            for i in 1 2 3 4 5; do
+              printf '%s\n' "$eicar" > "$BASE/$SVC/tmp/EICAR_${SVC}_$i.txt"
             done
           done
+          clamscan -r --no-summary "$BASE" > "$BASE/reports/clamav_scan.txt" 2>&1 || true
+          chmod 644 "$BASE/reports/clamav_scan.txt"
 
-      - name: 🧪 Health & logs snapshot
+      - name: 🧾 Collect container logs (debug aid)
         shell: bash
         run: |
           set -Eeuo pipefail
           {
-            echo "=== docker ps ==="; docker ps
-            echo "=== influx ping ==="; docker exec influxdb influx ping || true
-            echo "=== telegraf last 50 logs ==="; docker logs --tail 50 telegraf || true
-            echo "=== mailhog last 50 logs ==="; docker logs --tail 50 mailhog || true
-            echo "=== maildev last 50 logs ==="; docker logs --tail 50 maildev || true
-            echo "=== mailcatcher last 50 logs ==="; docker logs --tail 50 mailcatcher || true
-          } > "$BASE/reports/health_snapshot.txt"
+            echo "==== docker ps ===="
+            docker ps
+            echo "==== logs: influxdb ===="; docker logs --tail=200 influxdb || true
+            echo "==== logs: telegraf ===="; docker logs --tail=200 telegraf || true
+            echo "==== logs: mailhog ===="; docker logs --tail=200 mailhog || true
+            echo "==== logs: maildev ===="; docker logs --tail=200 maildev || true
+            echo "==== logs: mailcatcher ===="; docker logs --tail=200 mailcatcher || true
+            echo "==== logs: smtp-sink ===="; docker logs --tail=200 smtp-sink || true
+          } > "$BASE/reports/docker_logs.txt" 2>&1 || true
 
       - name: 📦 Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: email-stack-artifacts
+          name: email-servers-ultra-artifacts
           path: |
-            /opt/email/**/*
-            .monitoring/**/*
+            /opt/email/reports/**
+            /opt/email/artifacts/**
+            /opt/email/global/**
+            .monitoring/**
+          if-no-files-found: warn
