@@ -1,420 +1,189 @@
-name: email-servers-mass-setup-and-send-test-secure-v3
+name: "📊 Full Monitoring Stack — echo-only (stable)"
 
 on:
   workflow_dispatch:
-    inputs:
-      domain:
-        description: "Base domain for virtual accounts"
-        required: false
-        default: "example.local"
-      user_count:
-        description: "Number of virtual accounts per service"
-        required: false
-        default: "50"
-      test_count:
-        description: "Number of test emails per server"
-        required: false
-        default: "3"
-
-permissions:
-  contents: read
+  schedule:
+    - cron: "*/5 * * * *"
 
 jobs:
-  setup:
+  setup_monitoring:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
+
     env:
-      BASE: /opt/email
-      DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
-      USER_COUNT: ${{ github.event.inputs.user_count || '50' }}
-      TEST_COUNT: ${{ github.event.inputs.test_count || '3' }}
-      SERVICES: "postfix exim4 opensmtpd mailhog mailcatcher smtp-sink maildev"
+      MONO: .monitoring
+      INF_BUCKET: metrics
+      INF_ORG: org
+      INF_USER: admin
+      INF_PASS: "admin1234!"
+      INF_TOKEN: "dev-token-123456"
+      VM_DATA: /tmp/victoria
 
     steps:
-      - name: Prepare massive directory tree per service (incl. policies/firewall)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo mkdir -p "$BASE"; sudo chown -R "$USER:$USER" "$BASE"
-          # 공통 상위 디렉토리
-          mkdir -p "$BASE"/{policies,reports,artifacts,global,tools}
-          # 서비스별 표준 트리 + 대량 더미 디렉토리 + firewall/permissions
-          for SVC in $SERVICES; do
-            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts; do
-              mkdir -p "$BASE/$SVC/$d"
-            done
-            for i in $(seq -w 001 100); do
-              mkdir -p "$BASE/$SVC/bulk/dir_$i"
-            done
-          done
-          chmod -R 755 "$BASE"
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
 
-      - name: Install base prerequisites (NO containerd.io reinstall)
+      - name: 📁 Create directories
         shell: bash
         run: |
           set -Eeuo pipefail
-          export DEBIAN_FRONTEND=noninteractive
+          mkdir -p "$MONO"/{influxdb,telegraf,graphite,victoriametrics,otel,statsd,scripts,python}
+          echo "[OK] created $MONO subdirs"
+
+      - name: 🐳 Ensure Docker (upgrade-only; avoid containerd.io conflicts)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            ca-certificates apt-transport-https software-properties-common \
-            curl wget git build-essential jq \
-            ruby-full libsqlite3-dev \
-            apache2-utils openssl \
-            swaks \
-            nginx \
-            clamav clamav-daemon
-          # Docker: upgrade only (avoid containerd.io conflict)
           sudo apt-get install -y --only-upgrade docker.io containerd || true
+          sudo systemctl is-active --quiet docker || sudo systemctl start docker || true
           docker --version || true
           containerd --version || true
-          sudo systemctl is-active --quiet docker || sudo systemctl start docker || true
-          sudo systemctl enable --now nginx || true
+          docker network create monnet >/dev/null 2>&1 || true
 
-      - name: Global README & policies (echo/heredoc)
+      - name: 🛠️ Echo configs (InfluxDB/Telegraf/Graphite/OTEL)
         shell: bash
         run: |
           set -Eeuo pipefail
-          [[ -d "$BASE/policies" ]] || mkdir -p "$BASE/policies"
-          cat <<'EOF' | tee "$BASE/README.txt" >/dev/null
-          This CI workspace provisions email servers for testing.
-          MTAs (postfix/exim4/opensmtpd) are installed & configured but NOT auto-started.
-          Test servers run on high ports for local integration tests. Reverse proxy with security headers is applied (nginx).
-          EOF
-          cat <<'EOF' | tee "$BASE/policies/SECURITY.md" >/dev/null
-          # Security (Test Only)
-          - Ephemeral CI environment. Do not store real credentials.
-          - Virtual users are randomly generated per run.
-          - Outputs: users.csv, users.htpasswd (bcrypt), users.json per service.
-          - ClamAV DB is updated via freshclam (echo-generated config); clamscan reports are produced.
-          EOF
-          chmod 644 "$BASE/README.txt" "$BASE/policies/SECURITY.md"
+          # InfluxDB2 config (echo-only)
+          cfg="$MONO/influxdb/influxdb.conf"
+          : > "$cfg"
+          echo 'reporting-disabled = true' >> "$cfg"
+          echo 'bolt-path = "/var/lib/influxdb2/influxd.bolt"' >> "$cfg"
+          echo 'engine-path = "/var/lib/influxdb2/engine"' >> "$cfg"
+          echo 'http-bind-address = ":8086"' >> "$cfg"
 
-      - name: Echo firewall policy templates (not enforced)
+          # Telegraf config (echo-only, env expanded at container runtime)
+          tcfg="$MONO/telegraf/telegraf.conf"
+          : > "$tcfg"
+          echo '[agent]' >> "$tcfg"
+          echo '  interval = "10s"' >> "$tcfg"
+          echo '  round_interval = true' >> "$tcfg"
+          echo '' >> "$tcfg"
+          echo '[[outputs.influxdb_v2]]' >> "$tcfg"
+          echo '  urls = ["http://influxdb:8086"]' >> "$tcfg"
+          echo '  token = "${INFLUX_TOKEN}"' >> "$tcfg"
+          echo '  organization = "${INFLUX_ORG}"' >> "$tcfg"
+          echo '  bucket = "${INFLUX_BUCKET}"' >> "$tcfg"
+          echo '' >> "$tcfg"
+          echo '[[inputs.cpu]]' >> "$tcfg"
+          echo '  percpu = true' >> "$tcfg"
+          echo '  totalcpu = true' >> "$tcfg"
+          echo '[[inputs.mem]]' >> "$tcfg"
+          echo '[[inputs.disk]]' >> "$tcfg"
+          echo '  ignore_fs = ["tmpfs","devtmpfs","overlay"]' >> "$tcfg"
+          echo '[[inputs.net]]' >> "$tcfg"
+
+          # Graphite storage schema (echo-only)
+          gcfg="$MONO/graphite/storage-schemas.conf"
+          mkdir -p "$(dirname "$gcfg")"
+          : > "$gcfg"
+          echo '[default]' >> "$gcfg"
+          echo 'pattern = .*' >> "$gcfg"
+          echo 'retentions = 60s:30d' >> "$gcfg"
+
+          # OTEL Collector config (echo-only): OTLP -> VictoriaMetrics
+          ocfg="$MONO/otel/otel-collector.yaml"
+          : > "$ocfg"
+          echo 'receivers:' >> "$ocfg"
+          echo '  otlp:' >> "$ocfg"
+          echo '    protocols:' >> "$ocfg"
+          echo '      grpc:' >> "$ocfg"
+          echo '      http:' >> "$ocfg"
+          echo '' >> "$ocfg"
+          echo 'exporters:' >> "$ocfg"
+          echo '  otlphttp/victoria:' >> "$ocfg"
+          echo '    endpoint: http://victoriametrics:8428' >> "$ocfg"
+          echo '    traces_endpoint: http://victoriametrics:8428/opentelemetry/v1/traces' >> "$ocfg"
+          echo '    metrics_endpoint: http://victoriametrics:8428/opentelemetry/v1/metrics' >> "$ocfg"
+          echo '    logs_endpoint: http://victoriametrics:8428/opentelemetry/v1/logs' >> "$ocfg"
+          echo '' >> "$ocfg"
+          echo 'processors:' >> "$ocfg"
+          echo '  batch:' >> "$ocfg"
+          echo '' >> "$ocfg"
+          echo 'service:' >> "$ocfg"
+          echo '  pipelines:' >> "$ocfg"
+          echo '    metrics:' >> "$ocfg"
+          echo '      receivers: [otlp]' >> "$ocfg"
+          echo '      processors: [batch]' >> "$ocfg"
+          echo '      exporters: [otlphttp/victoria]' >> "$ocfg"
+          echo '    traces:' >> "$ocfg"
+          echo '      receivers: [otlp]' >> "$ocfg"
+          echo '      processors: [batch]' >> "$ocfg"
+          echo '      exporters: [otlphttp/victoria]' >> "$ocfg"
+          echo '    logs:' >> "$ocfg"
+          echo '      receivers: [otlp]' >> "$ocfg"
+          echo '      processors: [batch]' >> "$ocfg"
+          echo '      exporters: [otlphttp/victoria]' >> "$ocfg"
+
+          # VictoriaMetrics data dir
+          mkdir -p "$VM_DATA"
+
+      - name: 🚀 Run core containers
+        shell: bash
+        env:
+          INFLUX_BUCKET: ${{ env.INF_BUCKET }}
+          INFLUX_ORG: ${{ env.INF_ORG }}
+          INFLUX_USER: ${{ env.INF_USER }}
+          INFLUX_PASS: ${{ env.INF_PASS }}
+          INFLUX_TOKEN: ${{ env.INF_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          docker rm -f influxdb telegraf graphite-statsd victoriametrics otel >/dev/null 2>&1 || true
+
+          echo "[Start] InfluxDB 2.7"
+          docker run -d --name influxdb --network monnet \
+            -p 8086:8086 \
+            -e INFLUXD_CONFIG_PATH=/etc/influxdb2/config.toml \
+            -v "$PWD/$MONO/influxdb/influxdb.conf:/etc/influxdb2/config.toml" \
+            influxdb:2.7
+
+          echo "[Wait] InfluxDB API..."
+          timeout 90 bash -c 'until docker exec influxdb influx ping >/dev/null 2>&1; do sleep 2; done'
+
+          echo "[Init] InfluxDB setup"
+          docker exec influxdb influx setup \
+            --username "$INFLUX_USER" \
+            --password "$INFLUX_PASS" \
+            --org "$INFLUX_ORG" \
+            --bucket "$INFLUX_BUCKET" \
+            --token "$INFLUX_TOKEN" \
+            --force
+
+          echo "[Start] Telegraf"
+          docker run -d --name telegraf --network monnet \
+            -e INFLUX_TOKEN="$INFLUX_TOKEN" \
+            -e INFLUX_ORG="$INFLUX_ORG" \
+            -e INFLUX_BUCKET="$INFLUX_BUCKET" \
+            -v "$PWD/$MONO/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf" \
+            telegraf:1.28
+
+          echo "[Start] Graphite+StatsD"
+          docker run -d --name graphite-statsd --network monnet \
+            -p 80:80 -p 2003-2004:2003-2004 -p 8125:8125/udp \
+            -v "$PWD/$MONO/graphite/storage-schemas.conf:/opt/graphite/conf/storage-schemas.conf" \
+            graphiteapp/graphite-statsd
+
+          echo "[Start] VictoriaMetrics"
+          docker run -d --name victoriametrics --network monnet \
+            -p 8428:8428 \
+            -v "$VM_DATA:/victoria-metrics-data" \
+            victoriametrics/victoria-metrics:latest
+
+          echo "[Start] OTEL Collector"
+          docker run -d --name otel --network monnet \
+            -p 4317:4317 -p 4318:4318 \
+            -v "$PWD/$MONO/otel/otel-collector.yaml:/etc/otel/config.yaml" \
+            otel/opentelemetry-collector-contrib:latest \
+            --config /etc/otel/config.yaml
+
+      - name: 🔎 Verify & print logs on failure
+        if: failure()
         shell: bash
         run: |
           set -Eeuo pipefail
-          for SVC in $SERVICES; do
-            cat <<EOF > "$BASE/$SVC/firewall/policy.conf"
-            # Echo-only firewall policy for $SVC (not applied automatically)
-            allow_tcp=1025,1026,1081,8025,8026,9001,9002,9003,2525
-            deny_all_else=true
-            note="CI test environment; do not enforce on shared runner"
-            EOF
-            chmod 640 "$BASE/$SVC/firewall/policy.conf"
+          echo "[ps]"; docker ps -a || true
+          for c in influxdb telegraf graphite-statsd victoriametrics otel; do
+            echo "===== logs: $c ====="
+            docker logs --tail 200 "$c" || true
           done
-
-      - name: Web security:Nginx reverse proxy with security headers + BasicAuth
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # BasicAuth 계정 생성
-          WEB_USER="admin"
-          WEB_PASS="$(openssl rand -base64 18 | tr -d '\n=/' | cut -c1-16)"
-          echo "WEB_USER=$WEB_USER" | tee "$BASE/global/web-auth.env" >/dev/null
-          echo "WEB_PASS=$WEB_PASS" | tee -a "$BASE/global/web-auth.env" >/dev/null
-          htpasswd -bBc "$BASE/global/web.htpasswd" "$WEB_USER" "$WEB_PASS"
-
-          # 공통 보안 헤더 스니펫
-          cat <<'HDR' | sudo tee /etc/nginx/snippets/security-headers.conf >/dev/null
-          add_header X-Content-Type-Options "nosniff" always;
-          add_header X-Frame-Options "SAMEORIGIN" always;
-          add_header Referrer-Policy "no-referrer-when-downgrade" always;
-          add_header X-XSS-Protection "1; mode=block" always;
-          add_header Content-Security-Policy "default-src 'self' 'unsafe-inline'; img-src data: *; connect-src *;" always;
-          HDR
-
-          # 서버 블록 생성 (MailHog 9001 -> 8025)
-          cat <<'NGX' | sudo tee /etc/nginx/sites-available/mailhog.conf >/dev/null
-          server {
-            listen 9001;
-            auth_basic "Restricted";
-            auth_basic_user_file /opt/email/global/web.htpasswd;
-            location / {
-              proxy_pass http://127.0.0.1:8025;
-              include /etc/nginx/snippets/security-headers.conf;
-              proxy_set_header Host $host;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-            }
-          }
-          NGX
-
-          # MailCatcher 9002 -> 8026
-          cat <<'NGX' | sudo tee /etc/nginx/sites-available/mailcatcher.conf >/dev/null
-          server {
-            listen 9002;
-            auth_basic "Restricted";
-            auth_basic_user_file /opt/email/global/web.htpasswd;
-            location / {
-              proxy_pass http://127.0.0.1:8026;
-              include /etc/nginx/snippets/security-headers.conf;
-              proxy_set_header Host $host;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-            }
-          }
-          NGX
-
-          # MailDev 9003 -> 1081
-          cat <<'NGX' | sudo tee /etc/nginx/sites-available/maildev.conf >/dev/null
-          server {
-            listen 9003;
-            auth_basic "Restricted";
-            auth_basic_user_file /opt/email/global/web.htpasswd;
-            location / {
-              proxy_pass http://127.0.0.1:1081;
-              include /etc/nginx/snippets/security-headers.conf;
-              proxy_set_header Host $host;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-            }
-          }
-          NGX
-
-          sudo ln -sf /etc/nginx/sites-available/mailhog.conf /etc/nginx/sites-enabled/mailhog.conf
-          sudo ln -sf /etc/nginx/sites-available/mailcatcher.conf /etc/nginx/sites-enabled/mailcatcher.conf
-          sudo ln -sf /etc/nginx/sites-available/maildev.conf /etc/nginx/sites-enabled/maildev.conf
-          sudo nginx -t
-          sudo systemctl reload nginx
-
-      - name: Virus DB update & scan scripts via echo + run (freshclam + clamscan)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # freshclam.conf 에코 생성
-          sudo bash -c 'cat > /etc/clamav/freshclam.conf <<CFG
-          DatabaseOwner clamav
-          UpdateLogFile /var/log/clamav/freshclam.log
-          LogTime yes
-          DatabaseDirectory /var/lib/clamav
-          DNSDatabaseInfo current.cvd.clamav.net
-          Checks 1
-          DatabaseMirror database.clamav.net
-          CFG'
-          sudo chown clamav:clamav /etc/clamav/freshclam.conf
-          sudo chmod 644 /etc/clamav/freshclam.conf
-
-          # 업데이트 스크립트
-          cat <<'SH' > "$BASE/tools/virus_update_and_scan.sh"
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          LOG_DIR="${1:-/opt/email/reports}"
-          mkdir -p "$LOG_DIR"
-          sudo systemctl stop clamav-freshclam || true
-          sudo freshclam || true
-          for svc in postfix exim4 opensmtpd mailhog mailcatcher smtp-sink maildev; do
-            clamscan -r "/opt/email/$svc" > "$LOG_DIR/${svc}-scan.txt" || true
-          done
-          SH
-          chmod +x "$BASE/tools/virus_update_and_scan.sh"
-
-          # 즉시 1회 실행
-          "$BASE/tools/virus_update_and_scan.sh" "$BASE/reports"
-
-      # ---------------------- Postfix ----------------------
-      - name: Install & configure Postfix (no auto-start) + upgrade
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          echo "postfix postfix/main_mailer_type select No configuration" | sudo debconf-set-selections
-          sudo apt-get install -y --no-install-recommends postfix
-          sudo apt-get install -y --only-upgrade postfix || true
-          sudo cp -n /etc/postfix/main.cf /etc/postfix/main.cf.bak || true
-          sudo bash -c 'cat > /etc/postfix/main.cf <<CF
-          myhostname = localhost
-          myorigin = localhost
-          inet_interfaces = loopback-only
-          inet_protocols = all
-          mydestination =
-          local_transport = error:local delivery disabled
-          relayhost =
-          smtp_tls_security_level = may
-          smtpd_banner = \$myhostname ESMTP
-          CF'
-          sudo service postfix stop || true
-          printf "DOMAIN=%s\nUSER_COUNT=%s\n" "$DOMAIN" "$USER_COUNT" > "$BASE/postfix/env/.env"
-          chmod 640 "$BASE/postfix/env/.env"
-
-      # ---------------------- Exim4 ----------------------
-      - name: Install & configure Exim4 (no auto-start) + upgrade
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get install -y --no-install-recommends exim4 exim4-daemon-light
-          sudo apt-get install -y --only-upgrade exim4 exim4-daemon-light || true
-          sudo cp -n /etc/exim4/update-exim4.conf.conf /etc/exim4/update-exim4.conf.conf.bak || true
-          sudo bash -c 'cat > /etc/exim4/update-exim4.conf.conf <<CF
-          dc_eximconfig_configtype="internet"
-          dc_local_interfaces="127.0.0.1.25"
-          dc_other_hostnames=""
-          dc_readhost=""
-          dc_relay_domains=""
-          dc_minimaldns="false"
-          dc_relay_nets=""
-          dc_smarthost=""
-          CFILEMODE="644"
-          dc_use_split_config="true"
-          dc_hide_mailname=""
-          CF'
-          sudo update-exim4.conf
-          sudo service exim4 stop || true
-          printf "DOMAIN=%s\nUSER_COUNT=%s\n" "$DOMAIN" "$USER_COUNT" > "$BASE/exim4/env/.env"
-          chmod 640 "$BASE/exim4/env/.env"
-
-      # ---------------------- OpenSMTPD ----------------------
-      - name: Install & configure OpenSMTPD (no auto-start, best-effort) + upgrade
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get install -y --no-install-recommends opensmtpd || true
-          sudo apt-get install -y --only-upgrade opensmtpd || true
-          if [[ -f /etc/smtpd/smtpd.conf ]]; then
-            sudo cp -n /etc/smtpd/smtpd.conf /etc/smtpd/smtpd.conf.bak || true
-            sudo bash -c 'cat > /etc/smtpd/smtpd.conf <<CF
-            pki localhost cert "/etc/ssl/certs/ssl-cert-snakeoil.pem"
-            pki localhost key "/etc/ssl/private/ssl-cert-snakeoil.key"
-            listen on lo
-            action "local" mta host smtp.example.net
-            match from any for any action "local"
-            CF'
-            sudo service opensmtpd stop || true
-          fi
-          printf "DOMAIN=%s\nUSER_COUNT=%s\n" "$DOMAIN" "$USER_COUNT" > "$BASE/opensmtpd/env/.env"
-          chmod 640 "$BASE/opensmtpd/env/.env"
-
-      # ---------------------- Test servers start ----------------------
-      - name: Start MailHog (1025/8025)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          cd "$BASE/mailhog/bin"
-          curl -fsSL -o MailHog https://github.com/mailhog/MailHog/releases/download/v1.0.1/MailHog_linux_amd64
-          chmod +x MailHog
-          nohup "$BASE/mailhog/bin/MailHog" > "$BASE/mailhog/logs/mailhog.log" 2>&1 &
-
-      - name: Start MailCatcher (1026/8026)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          gem install mailcatcher --no-document
-          nohup mailcatcher --smtp-ip 127.0.0.1 --smtp-port 1026 --http-ip 127.0.0.1 --http-port 8026 > "$BASE/mailcatcher/logs/mailcatcher.log" 2>&1 &
-
-      - name: Start smtp-sink (2525)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # smtp-sink is provided by postfix package
-          nohup smtp-sink -d "%d.%H.%M.%S" 127.0.0.1:2525 "$BASE/smtp-sink/data/mail-%s.eml" > "$BASE/smtp-sink/logs/sink.log" 2>&1 &
-
-      - name: Start MailDev via Docker (1027/1081 -> 1025/1080)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo docker rm -f maildev >/dev/null 2>&1 || true
-          sudo docker run -d --name maildev \
-            -p 1027:1025 -p 1081:1080 \
-            maildev/maildev:2
-          # 간단한 헬스체크 대기
-          for i in {1..15}; do
-            curl -fsS http://127.0.0.1:1081 >/dev/null && break || sleep 2
-          done
-
-      # ---------------------- Virtual users per service ----------------------
-      - name: Generate virtual users & passwords (CSV/HTPASSWD/JSON) per service
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          gen_users() {
-            local svc="$1"; local count="$2"
-            local csv="$BASE/$svc/users/users.csv"
-            local json="$BASE/$svc/users/users.json"
-            local ht="$BASE/$svc/users/users.htpasswd"
-            echo "email,password" > "$csv"
-            echo "[]" > "$json"
-            : > "$ht"
-            for i in $(seq -w 001 "$count"); do
-              local user="user$i"
-              local pass="$(openssl rand -base64 24 | tr -d '\n=/' | head -c 16)"
-              local email="${user}@${DOMAIN}"
-              echo "$email,$pass" >> "$csv"
-              # htpasswd(bcrypt)
-              htpasswd -Bb "$ht" "$email" "$pass" >/dev/null
-              # JSON append
-              tmp="$(mktemp)"
-              jq --arg e "$email" --arg p "$pass" '. += [{"email":$e,"password":$p}]' "$json" > "$tmp" && mv "$tmp" "$json"
-            done
-            chmod 640 "$csv" "$json" "$ht"
-          }
-          export -f gen_users
-          for SVC in $SERVICES; do gen_users "$SVC" "$USER_COUNT"; done
-
-      # ---------------------- Send tests with swaks ----------------------
-      - name: Send test emails to MailHog / MailCatcher / smtp-sink / MailDev
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          FROM="tester@${DOMAIN}"
-          TO="receiver@${DOMAIN}"
-          for i in $(seq 1 "$TEST_COUNT"); do
-            swaks --to "$TO" --from "$FROM" --server 127.0.0.1:1025 --data "Subject: MH Test $i\n\nMailHog test body $i" || true
-            swaks --to "$TO" --from "$FROM" --server 127.0.0.1:1026 --data "Subject: MC Test $i\n\nMailCatcher test body $i" || true
-            swaks --to "$TO" --from "$FROM" --server 127.0.0.1:2525 --data "Subject: SINK Test $i\n\nsmtp-sink test body $i" || true
-            swaks --to "$TO" --from "$FROM" --server 127.0.0.1:1027 --data "Subject: MD Test $i\n\nMailDev test body $i" || true
-          done
-
-      - name: Verify deliveries via HTTP/APIs
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # MailHog messages
-          curl -fsS http://127.0.0.1:8025/api/v2/messages | jq '.count' | tee "$BASE/mailhog/reports/count.txt" || true
-          # MailCatcher messages
-          curl -fsS http://127.0.0.1:8026/messages | tee "$BASE/mailcatcher/reports/list.json" >/dev/null || true
-          # MailDev messages (proxy port 1081 -> 1080 in container; /email endpoint)
-          curl -fsS http://127.0.0.1:1081/email | tee "$BASE/maildev/reports/list.json" >/dev/null || true
-          # smtp-sink files count
-          find "$BASE/smtp-sink/data" -type f | wc -l | tee "$BASE/smtp-sink/reports/count.txt"
-
-      - name: Run virus update & scan again after traffic (freshclam + clamscan)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          "$BASE/tools/virus_update_and_scan.sh" "$BASE/reports/post-mail"
-
-      - name: Permissions hardening (echo permissions file per service)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          for SVC in $SERVICES; do
-            cat <<EOF > "$BASE/$SVC/permissions/policy.txt"
-            owner=$USER
-            dir_permissions=755
-            file_permissions=640
-            applied_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            EOF
-            chmod -R 755 "$BASE/$SVC"
-            find "$BASE/$SVC" -type f -exec chmod 640 {} \;
-            find "$BASE/$SVC" -type d -exec chmod 755 {} \;
-          done
-
-      - name: Upload artifacts (configs, logs, reports, creds)
-        uses: actions/upload-artifact@v4
-        with:
-          name: email-suite-artifacts
-          path: |
-            /opt/email/**/*
-          if-no-files-found: warn
-
-      - name: Show access info
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "MailHog UI (behind BasicAuth): http://localhost:9001"
-          echo "MailCatcher UI (behind BasicAuth): http://localhost:9002"
-          echo "MailDev UI (behind BasicAuth): http://localhost:9003"
-          echo "Download artifact 'email-suite-artifacts' to see:"
-          echo "- /opt/email/global/web-auth.env (auto-generated BasicAuth creds)"
-          echo "- /opt/email/*/users/users.csv|.json|.htpasswd"
-          echo "- /opt/email/reports/* (ClamAV scan reports)"
