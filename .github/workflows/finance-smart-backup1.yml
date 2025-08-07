@@ -1,121 +1,126 @@
-name: 📬 MEGA EmailOps + Echo + Monitoring + Bulk DB
+name: 📧 Ultra EmailOps + Monitoring + DB + Grafana + Echo 대통합
 
 on:
   workflow_dispatch:
-    inputs:
-      domain:
-        description: "Base domain for virtual accounts"
-        required: false
-        default: "example.local"
-      user_count:
-        description: "Number of virtual users per service"
-        required: false
-        default: "200"
-      bulk_dirs:
-        description: "Bulk directories per service (max 20000)"
-        required: false
-        default: "5000"
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *'
 
 jobs:
-  mega-email-echo:
+  ultra-echo-emailops:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-
     env:
       BASE: /opt/email
       MONO: .monitoring
+      DOMAIN: example.local
       SERVICES: postfix exim4 opensmtpd mailhog maildev mailcatcher smtp4dev
-      USER_COUNT: ${{ github.event.inputs.user_count || '200' }}
-      BULK_DIRS_PER_SERVICE: ${{ github.event.inputs.bulk_dirs || '5000' }}
+      USER_COUNT: 200
+      TEST_COUNT: 5
+      BULK_DIRS_PER_SERVICE: 5000
       PARALLEL_JOBS: 4
-      DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
+      INF_BUCKET: metrics
+      INF_ORG: org
+      INF_USER: admin
+      INF_PASS: admin1234!
+      INF_TOKEN: dev-token-123456
 
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Create base directories + echo logs
+      - name: 📁 디렉토리 및 대량 Bulk 구조 생성 (에코 포함)
         run: |
           set -Eeuo pipefail
-          mkdir -p "$BASE" "${MONO}" .github/echo_dirs
-          chmod -R 755 "$BASE" "${MONO}"
-          echo "echo '[ECHO] Created base directories at $BASE and $MONO'" >> .github/echo_dirs/base_dirs.sh
-
-          mkdir -p "$BASE"/{policies,reports,artifacts,global,tools,tmp}
-          mkdir -p "${MONO}"/{influxdb,telegraf,graphite,victoriametrics,otel,statsd,scripts,python}
-          echo "echo '[ECHO] Created all base subdirectories'" >> .github/echo_dirs/sub_dirs.sh
-
-          chmod +x .github/echo_dirs/*.sh
-
-      - name: 🔁 Generate echo directories per service
-        run: |
-          set -Eeuo pipefail
-          MAX_BULK=20000
-          MAX_USERS=5000
-          if [ "$BULK_DIRS_PER_SERVICE" -gt "$MAX_BULK" ]; then BULK_DIRS_PER_SERVICE="$MAX_BULK"; fi
-          if [ "$USER_COUNT" -gt "$MAX_USERS" ]; then USER_COUNT="$MAX_USERS"; fi
-
-          mkdir -p .github/echo_services
+          mkdir -p "$BASE" "$MONO" .github/echo_dirs
           for svc in $SERVICES; do
-            mkdir -p "$BASE/$svc"
             for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts dll db db/migrations; do
               mkdir -p "$BASE/$svc/$d"
-              echo "echo '[ECHO] mkdir -p $BASE/$svc/$d'" >> .github/echo_services/echo_dirs_${svc}.sh
+              echo "mkdir -p \"$BASE/$svc/$d\"" >> .github/echo_dirs/create_dirs.sh
             done
-
-            seq -w 0001 "$BULK_DIRS_PER_SERVICE" | xargs -I{} -P "$PARALLEL_JOBS" mkdir -p "$BASE/$svc/bulk/dir_{}"
-            echo "echo '[ECHO] bulk dirs created for $svc: $BULK_DIRS_PER_SERVICE'" >> .github/echo_services/echo_bulk_${svc}.sh
+            seq -w 0001 "$BULK_DIRS_PER_SERVICE" | xargs -I{} -P "$PARALLEL_JOBS" bash -c 'mkdir -p "$BASE/'"$svc"'/bulk/dir_{}"'
           done
+          chmod +x .github/echo_dirs/create_dirs.sh
 
-          chmod +x .github/echo_services/*.sh
-
-      - name: 📝 Generate absolute path env and echo
+      - name: 🔐 사용자 정보(.htpasswd, users.csv/json) 에코 자동 생성
         run: |
           set -Eeuo pipefail
-          echo "export BASE_ABS=$BASE" > "$GITHUB_WORKSPACE/.env_abs"
-          echo "export MONO_ABS=$(pwd)/$MONO" >> "$GITHUB_WORKSPACE/.env_abs"
-          echo "echo '[ECHO] Generated .env_abs with BASE_ABS and MONO_ABS'" > .github/echo_dirs/env_abs_echo.sh
-          chmod +x .github/echo_dirs/env_abs_echo.sh
+          mkdir -p .github/echo_users
+          htpasswd_file="$BASE/users/.htpasswd"
+          echo "htpasswd -cbB $htpasswd_file admin admin123" > .github/echo_users/generate_htpasswd.sh
+          htpasswd -cbB "$htpasswd_file" admin admin123
+          echo "email,username,password" > "$BASE/users/users.csv"
+          echo "admin@example.local,admin,admin123" >> "$BASE/users/users.csv"
+          echo '[{"email":"admin@example.local","username":"admin","password":"admin123"}]' > "$BASE/users/users.json"
 
-      - name: 📦 Setup and run InfluxDB + Telegraf containers
+      - name: 💾 SQL 마이그레이션 init.sql 및 실행 스크립트 자동 생성
         run: |
-          set -Eeuo pipefail
+          mkdir -p .github/echo_db/migrations "$BASE/db/migrations"
+          echo "CREATE TABLE IF NOT EXISTS email_logs (id SERIAL PRIMARY KEY, service VARCHAR(100), recipient VARCHAR(100), sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" > "$BASE/db/migrations/init.sql"
+          echo "psql -U postgres -d email -f $BASE/db/migrations/init.sql" > .github/echo_db/migrations/init_postgres.sh
+          chmod +x .github/echo_db/migrations/init_postgres.sh
+
+      - name: 📦 InfluxDB + Grafana docker-compose 실행 (에코 포함)
+        run: |
           mkdir -p .github/echo_monitoring
-          docker run -d --name influxdb \
-            -v "$(pwd)/${MONO}/influxdb:/var/lib/influxdb2" \
-            -e DOCKER_INFLUXDB_INIT_MODE=setup \
-            -e DOCKER_INFLUXDB_INIT_USERNAME=admin \
-            -e DOCKER_INFLUXDB_INIT_PASSWORD=admin1234! \
-            -e DOCKER_INFLUXDB_INIT_ORG=org \
-            -e DOCKER_INFLUXDB_INIT_BUCKET=metrics \
-            -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=dev-token-123456 \
-            -p 8086:8086 influxdb:2
+          cat <<EOF > docker-compose.yml
+          version: '3'
+          services:
+            influxdb:
+              image: influxdb:2
+              ports: [8086:8086]
+              volumes:
+                - \${{ github.workspace }}/${MONO}/influxdb:/var/lib/influxdb2
+              environment:
+                - DOCKER_INFLUXDB_INIT_MODE=setup
+                - DOCKER_INFLUXDB_INIT_USERNAME=\${INF_USER}
+                - DOCKER_INFLUXDB_INIT_PASSWORD=\${INF_PASS}
+                - DOCKER_INFLUXDB_INIT_ORG=\${INF_ORG}
+                - DOCKER_INFLUXDB_INIT_BUCKET=\${INF_BUCKET}
+                - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=\${INF_TOKEN}
 
-          echo "echo '[ECHO] InfluxDB container launched'" > .github/echo_monitoring/influxdb_start.sh
-          docker run -d --name telegraf \
-            -v "$(pwd)/${MONO}/telegraf:/etc/telegraf" \
-            --net=host telegraf:1.28
+            grafana:
+              image: grafana/grafana
+              ports: [3000:3000]
+              volumes:
+                - \${{ github.workspace }}/${MONO}/grafana:/var/lib/grafana
+          EOF
+          echo "docker-compose up -d" > .github/echo_monitoring/start_monitoring.sh
+          docker-compose up -d
 
-          echo "echo '[ECHO] Telegraf container launched'" > .github/echo_monitoring/telegraf_start.sh
-          chmod +x .github/echo_monitoring/*.sh
+      - name: 📬 SMTP 테스트 메시지 자동 전송 (에코 포함)
+        run: |
+          mkdir -p .github/echo_smtp
+          echo "curl -v smtp://localhost:1025 --mail-from \"from@example.local\" --mail-rcpt \"to@example.local\" -T <(echo -e 'Subject: Test\n\nSMTP Test Email')" > .github/echo_smtp/send_test.sh
+          bash .github/echo_smtp/send_test.sh || true
 
-      - name: 🧪 Tree snapshot + Echo Logging
+      - name: 📊 Grafana 대시보드 json 자동 에코 생성
+        run: |
+          mkdir -p .github/echo_monitoring
+          cat <<EOF > $MONO/email_dashboard.json
+          {
+            "dashboard": {
+              "id": null,
+              "title": "EmailOps Dashboard",
+              "panels": []
+            }
+          }
+          EOF
+          echo "echo '[ECHO] Grafana dashboard created'" >> .github/echo_monitoring/grafana_dashboard.sh
+
+      - name: 📁 Tree Snapshot 및 에코 로그 저장
         run: |
           mkdir -p .github/echo_logs
-          tree -a "$BASE" > .github/echo_logs/tree_email.txt
-          tree -a "${MONO}" > .github/echo_logs/tree_monitoring.txt
-          echo "echo '[ECHO] tree snapshot saved'" >> .github/echo_logs/tree_snapshot.sh
+          tree -a "$BASE" > .github/echo_logs/tree_email.txt || echo '[WARN] tree on BASE failed'
+          tree -a "$MONO" > .github/echo_logs/tree_monitoring.txt || echo '[WARN] tree on MONO failed'
+          echo "echo '[ECHO] tree snapshot saved'" > .github/echo_logs/tree_snapshot.sh
           chmod +x .github/echo_logs/tree_snapshot.sh
 
-      - name: 📤 Upload artifacts
+      - name: 📤 모든 결과 아티팩트 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: echo-emailops-logs
+          name: emailops-artifacts
           path: |
-            .github/echo_*/**/*
-            .github/echo_logs/*
-            .env_abs
-            ${{ env.BASE }}
-            ${{ env.MONO }}
+            $BASE
+            $MONO
+            .github/echo_*/
+            docker-compose.yml
