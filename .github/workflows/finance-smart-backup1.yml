@@ -1,17 +1,17 @@
-name: 📧 Ultra EmailOps + Monitoring + DB + Grafana + Echo 대통합
+name: 📡 초대형 EmailOps + SMTP + 모니터링 + DB + 보안 + 업그레이드 + 에코 자동화 통합
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: "*/5 * * * *"
 
 jobs:
-  ultra-echo-emailops:
+  mega-emailops:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       BASE: /opt/email
-      MONO: .monitoring
+      MONO: /opt/email/.monitoring
       DOMAIN: example.local
       SERVICES: postfix exim4 opensmtpd mailhog maildev mailcatcher smtp4dev
       USER_COUNT: 200
@@ -28,99 +28,112 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 디렉토리 및 대량 Bulk 구조 생성 (에코 포함)
+      - name: 🛠️ Init 디렉토리 생성 + 에코 로깅
         run: |
           set -Eeuo pipefail
-          mkdir -p "$BASE" "$MONO" .github/echo_dirs
+          mkdir -p "$BASE" "$MONO"
+          mkdir -p .github/echo_dirs
+          echo "echo '[ECHO] mkdir -p $BASE'" >> .github/echo_dirs/init_dirs.sh
+          echo "echo '[ECHO] mkdir -p $MONO'" >> .github/echo_dirs/init_dirs.sh
           for svc in $SERVICES; do
-            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts dll db db/migrations; do
+            for d in bin config logs pid run spool queue tmp data certs keys users inbox outbox archive scripts env acl docs policies backups reports firewall permissions artifacts dll db db/migrations upgrade; do
               mkdir -p "$BASE/$svc/$d"
-              echo "mkdir -p \"$BASE/$svc/$d\"" >> .github/echo_dirs/create_dirs.sh
+              echo "mkdir -p $BASE/$svc/$d" >> .github/echo_dirs/init_dirs.sh
             done
-            seq -w 0001 "$BULK_DIRS_PER_SERVICE" | xargs -I{} -P "$PARALLEL_JOBS" bash -c 'mkdir -p "$BASE/'"$svc"'/bulk/dir_{}"'
+            seq -w 0001 "$BULK_DIRS_PER_SERVICE" | xargs -I{} -P "$PARALLEL_JOBS" bash -c "mkdir -p \"$BASE/$svc/bulk/dir_{}\""
           done
-          chmod +x .github/echo_dirs/create_dirs.sh
+          mkdir -p "$MONO"/{influxdb,telegraf,graphite,victoriametrics,otel,statsd,scripts,python}
+          chmod -R 755 "$BASE" "$MONO"
 
-      - name: 🔐 사용자 정보(.htpasswd, users.csv/json) 에코 자동 생성
+      - name: 🔐 사용자 계정 생성 및 에코
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/echo_users
+          mkdir -p .github/echo_users "$BASE/users"
           htpasswd_file="$BASE/users/.htpasswd"
           echo "htpasswd -cbB $htpasswd_file admin admin123" > .github/echo_users/generate_htpasswd.sh
           htpasswd -cbB "$htpasswd_file" admin admin123
           echo "email,username,password" > "$BASE/users/users.csv"
-          echo "admin@example.local,admin,admin123" >> "$BASE/users/users.csv"
+          echo "admin@$DOMAIN,admin,admin123" >> "$BASE/users/users.csv"
           echo '[{"email":"admin@example.local","username":"admin","password":"admin123"}]' > "$BASE/users/users.json"
 
-      - name: 💾 SQL 마이그레이션 init.sql 및 실행 스크립트 자동 생성
+      - name: 💾 DB 마이그레이션 SQL 생성 및 에코
         run: |
-          mkdir -p .github/echo_db/migrations "$BASE/db/migrations"
-          echo "CREATE TABLE IF NOT EXISTS email_logs (id SERIAL PRIMARY KEY, service VARCHAR(100), recipient VARCHAR(100), sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" > "$BASE/db/migrations/init.sql"
-          echo "psql -U postgres -d email -f $BASE/db/migrations/init.sql" > .github/echo_db/migrations/init_postgres.sh
-          chmod +x .github/echo_db/migrations/init_postgres.sh
+          set -Eeuo pipefail
+          mkdir -p .github/echo_db/migrations
+          for svc in $SERVICES; do
+            sql_file="$BASE/$svc/db/migrations/init.sql"
+            echo "CREATE TABLE IF NOT EXISTS smtp_logs (id SERIAL PRIMARY KEY, svc TEXT, sender TEXT, recipient TEXT, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP);" > "$sql_file"
+            echo "echo '[ECHO] 생성: $sql_file'" >> .github/echo_db/migrations/init_${svc}.sh
+          done
 
-      - name: 📦 InfluxDB + Grafana docker-compose 실행 (에코 포함)
+      - name: 📬 SMTP 테스트 메시지 curl 에코
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/echo_smtp
+          for svc in $SERVICES; do
+            echo "echo '[SMTP_TEST] $svc 메일 전송 시뮬레이션'" >> .github/echo_smtp/test_${svc}.sh
+            echo "curl -s -X POST http://localhost:1025/send -d 'to=test@$DOMAIN&subject=Echo Test&body=Hello from $svc' || true" >> .github/echo_smtp/test_${svc}.sh
+          done
+
+      - name: 📊 Grafana 대시보드 echo 생성
         run: |
           mkdir -p .github/echo_monitoring
+          DASHBOARD_FILE="$MONO/grafana/email_dashboard.json"
+          echo '{"dashboard": {"title": "EmailOps Dashboard", "panels": []}}' > "$DASHBOARD_FILE"
+          echo "echo '[ECHO] 대시보드 생성: $DASHBOARD_FILE'" >> .github/echo_monitoring/grafana_dashboard.sh
+
+      - name: 📦 InfluxDB + Grafana docker-compose 실행 및 echo
+        run: |
+          mkdir -p .github/echo_compose
           cat <<EOF > docker-compose.yml
-          version: '3'
+          version: '3.8'
           services:
             influxdb:
               image: influxdb:2
               ports: [8086:8086]
               volumes:
-                - \${{ github.workspace }}/${MONO}/influxdb:/var/lib/influxdb2
+                - "$MONO/influxdb:/var/lib/influxdb2"
               environment:
                 - DOCKER_INFLUXDB_INIT_MODE=setup
-                - DOCKER_INFLUXDB_INIT_USERNAME=\${INF_USER}
-                - DOCKER_INFLUXDB_INIT_PASSWORD=\${INF_PASS}
-                - DOCKER_INFLUXDB_INIT_ORG=\${INF_ORG}
-                - DOCKER_INFLUXDB_INIT_BUCKET=\${INF_BUCKET}
-                - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=\${INF_TOKEN}
-
+                - DOCKER_INFLUXDB_INIT_USERNAME=\$INF_USER
+                - DOCKER_INFLUXDB_INIT_PASSWORD=\$INF_PASS
+                - DOCKER_INFLUXDB_INIT_ORG=\$INF_ORG
+                - DOCKER_INFLUXDB_INIT_BUCKET=\$INF_BUCKET
+                - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=\$INF_TOKEN
             grafana:
               image: grafana/grafana
               ports: [3000:3000]
-              volumes:
-                - \${{ github.workspace }}/${MONO}/grafana:/var/lib/grafana
           EOF
-          echo "docker-compose up -d" > .github/echo_monitoring/start_monitoring.sh
+          echo "echo '[ECHO] docker-compose up -d'" > .github/echo_compose/start_compose.sh
           docker-compose up -d
 
-      - name: 📬 SMTP 테스트 메시지 자동 전송 (에코 포함)
-        run: |
-          mkdir -p .github/echo_smtp
-          echo "curl -v smtp://localhost:1025 --mail-from \"from@example.local\" --mail-rcpt \"to@example.local\" -T <(echo -e 'Subject: Test\n\nSMTP Test Email')" > .github/echo_smtp/send_test.sh
-          bash .github/echo_smtp/send_test.sh || true
-
-      - name: 📊 Grafana 대시보드 json 자동 에코 생성
-        run: |
-          mkdir -p .github/echo_monitoring
-          cat <<EOF > $MONO/email_dashboard.json
-          {
-            "dashboard": {
-              "id": null,
-              "title": "EmailOps Dashboard",
-              "panels": []
-            }
-          }
-          EOF
-          echo "echo '[ECHO] Grafana dashboard created'" >> .github/echo_monitoring/grafana_dashboard.sh
-
-      - name: 📁 Tree Snapshot 및 에코 로그 저장
+      - name: 📥 SMTP 수신 로그 수집 및 DB 삽입 시뮬레이션 에코
         run: |
           mkdir -p .github/echo_logs
-          tree -a "$BASE" > .github/echo_logs/tree_email.txt || echo '[WARN] tree on BASE failed'
-          tree -a "$MONO" > .github/echo_logs/tree_monitoring.txt || echo '[WARN] tree on MONO failed'
-          echo "echo '[ECHO] tree snapshot saved'" > .github/echo_logs/tree_snapshot.sh
-          chmod +x .github/echo_logs/tree_snapshot.sh
+          for svc in $SERVICES; do
+            echo "echo '[LOG_MONITOR] $svc 로그 수신 및 DB 저장 시뮬레이션'" >> .github/echo_logs/monitor_${svc}.sh
+            echo "echo 'INSERT INTO smtp_logs (svc, sender, recipient) VALUES (\"$svc\", \"test@$DOMAIN\", \"admin@$DOMAIN\");'" >> .github/echo_logs/monitor_${svc}.sh
+          done
 
-      - name: 📤 모든 결과 아티팩트 업로드
+      - name: 📈 Telegraf, VictoriaMetrics, OTEL 연동 에코
+        run: |
+          mkdir -p .github/echo_monitoring
+          echo "echo '[TELEGRAF] config 연동 시뮬레이션'" >> .github/echo_monitoring/telegraf_connect.sh
+          echo "echo '[VICTORIAMETRICS] 연동 시뮬레이션'" >> .github/echo_monitoring/vm_connect.sh
+          echo "echo '[OTEL] OpenTelemetry trace 수집 설정 시뮬레이션'" >> .github/echo_monitoring/otel_connect.sh
+
+      - name: 🪵 Tree snapshot + 에코
+        run: |
+          mkdir -p .github/echo_logs
+          tree -a "$BASE" > .github/echo_logs/tree_email.txt || true
+          tree -a "$MONO" > .github/echo_logs/tree_monitoring.txt || true
+          echo "echo '[ECHO] tree snapshot saved'" >> .github/echo_logs/tree_snapshot.sh
+
+      - name: 📤 Artifacts 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: emailops-artifacts
+          name: echo-artifacts
           path: |
-            $BASE
-            $MONO
             .github/echo_*/
-            docker-compose.yml
+            $BASE/**
+            $MONO/**
