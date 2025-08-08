@@ -1,128 +1,145 @@
-name: 🔐 MEGA Secure CI + Backup + EchoOps + Pages + PRs
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '* * * * *'  # 매 1분마다 실행
+    - cron: '*/1 * * * *'  # 매 1분마다 실행
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
-  id-token: write
+  id-token: read
   security-events: write
   pages: write
 
 jobs:
-  secure-mega-ci:
+  mega-secure-ci:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      DB_USER: root
+      DB_PASS: rootpass123
+      DB_NAME: sample_db
 
     steps:
-      - name: 📂 Checkout Repository
-        uses: actions/checkout@v4
+    - name: 📂 Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: 📁 Echo Directories & Templates 생성
-        run: |
-          set -e
-          echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
-          chmod +x .github/echo_logs/create_dirs.sh
-          for dir in \
-            .github/echo_scorecard .github/echo_codeql .github/echo_logs \
-            .github/echo_security .github/echo_upgrade .github/echo_autoup \
-            .github/echo_templates .github/echo_pages .github/echo_backup \
-            site/scorecard site/security site/upgrade site/pr site/backup; do
-            mkdir -p "$dir"
-            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
-          done
-          bash .github/echo_logs/create_dirs.sh
+    - name: 📁 Create Echo Directories
+      run: |
+        set -e
+        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring} site/{scorecard,security,upgrade,pr,backup}; do
+          mkdir -p "$dir"
+          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+        done
+        chmod +x .github/echo_logs/create_dirs.sh
+        bash .github/echo_logs/create_dirs.sh
 
-          echo 'echo "DB_HOST=localhost"' > .github/echo_templates/.env
-          echo 'echo "{ \"config\": true }"' > .github/echo_templates/config.json
-          echo 'echo "[settings]\nenabled=true"' > .github/echo_templates/app.cfg
+    - name: 🛡️ Install Security Tools
+      run: |
+        set -e
+        sudo apt-get update -y
+        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client
+        pip install bandit pip-audit
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: 🛡️ 보안 도구 설치 (Scorecard, Bandit, Trivy 등)
-        run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl python3-pip unzip default-mysql-client postgresql-client
-          pip install bandit pip-audit
-          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+    - name: 🧪 Install Scorecard CLI
+      run: |
+        set -e
+        VERSION="4.10.3"
+        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
+        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
+        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -n1 || true)
+        if [ -z "$BIN" ]; then
+          echo "::error ::[ERR] Scorecard binary not found after extract."
+          exit 1
+        fi
+        chmod +x "$BIN"
+        sudo mv "$BIN" /usr/local/bin/scorecard
+        scorecard --version
 
-      - name: ✨ Scorecard 설치 및 실행
-        run: |
-          set -e
-          VERSION="4.10.3"
-          curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
-          tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-          BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -1 || true)
-          chmod +x "$BIN"
-          sudo mv "$BIN" /usr/local/bin/scorecard
-          scorecard --version
+    - name: 🧾 Run Scorecard
+      run: |
+        set -e
+        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
+        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
+        cp results.sarif site/scorecard/scorecard-results.sarif
+        cp results.json site/security/security.json
 
-          scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
-          scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
-          cp results.sarif site/scorecard/scorecard-results.sarif
-          cp results.json site/security/security.json
+    - name: 🔎 Run Bandit, pip-audit, Trivy
+      run: |
+        set -e
+        bandit -r . -f json > site/security/bandit.json || true
+        pip-audit -f json -o site/security/pip-audit.json || true
+        trivy fs . --format json --output site/security/trivy.json || true
 
-      - name: 💡 Bandit / pip-audit / Trivy 실행
-        run: |
-          set -e
-          bandit -r . -f json > site/security/bandit.json || true
-          pip-audit -f json -o site/security/pip-audit.json || true
-          trivy fs . --format json --output site/security/trivy.json || true
+    - name: 🧰 Run CodeQL Security Scan
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript
 
-      - name: 🔐 CodeQL 분석 및 업로드
-        uses: github/codeql-action/init@v3
-        with:
-          languages: python
-      - run: |
-          echo "[ECHO] CodeQL 실행"
-        continue-on-error: true
-      - uses: github/codeql-action/analyze@v3
+    - name: 📊 Run CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        output: site/security/codeql-results.sarif
+        category: codeql-security-scan
 
-      - name: 📦 mysqldump / pg_dump / sqlplus 백업
-        run: |
-          set -e
-          mkdir -p site/backup
-          mysqldump -u root -prootpass123 --all-databases > site/backup/mysql_backup.sql || echo "[WARN] mysqldump 실패"
-          pg_dump -U postgres -F c -f site/backup/pg_backup.dump || echo "[WARN] pg_dump 실패"
-          echo "exit" | sqlplus -S system/oracle@//localhost:1521/XE @some_backup.sql > site/backup/oracle_backup.log || echo "[WARN] sqlplus 실패"
+    - name: 💾 Run DB Backups
+      run: |
+        set -e
+        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
+        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
+        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
 
-      - name: 📅 업그레이드 확인 및 자동 PR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
-          if grep -q ".*" site/upgrade/upgradable.txt; then
-            echo "[ECHO] 자동 PR 생성"
-            gh pr create --title "🔄 보안 업그레이드 PR" --body "자동 생성됨\n확인: site/upgrade/upgradable.txt" || true
-          fi
+    - name: 📄 Generate Template Files
+      run: |
+        echo "ENV_VAR=VALUE" > site/security/.env
+        echo "{ \"config\": true }" > site/security/config.json
+        echo "[settings]\nsecure=true" > site/security/config.cfg
 
-      - name: 🛠️ autoup.sh 실행
-        run: |
-          echo '#!/bin/bash' > .github/echo_autoup/autoup.sh
-          echo "echo '[AUTOUP] 시작'" >> .github/echo_autoup/autoup.sh
-          echo "sudo apt-get update -y && sudo apt-get upgrade -y" >> .github/echo_autoup/autoup.sh
-          echo "echo '[AUTOUP] 완료'" >> .github/echo_autoup/autoup.sh
-          chmod +x .github/echo_autoup/autoup.sh
-          bash .github/echo_autoup/autoup.sh
+    - name: 📦 Save Security Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports
+        path: site/security/
 
-      - name: ⏳ 1분 후 자동 재부팅
-        run: |
-          echo "[REBOOT] 시스템 1분 후 재시작 예약됨"
-          sudo shutdown -r +1 || true
+    - name: 📈 Save Upgrade Info
+      run: |
+        set -e
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
 
-      - name: 📦 파일 사이즈 모니터링
-        run: |
-          mkdir -p .github/echo_monitoring
-          du -ah . | sort -hr | head -n 30 > .github/echo_monitoring/top_files.txt
-          du -sh . > .github/echo_monitoring/total_size.txt
+    - name: 🔁 Create Auto PR for Upgrade
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -e
+        if grep -q ".*" site/upgrade/upgradable.txt; then
+          echo "[ECHO] PR 생성 시작"
+          gh pr create --title "🔄 패키지 업그레이드 PR" \
+            --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
+        fi
 
-      - name: 🌐 GitHub Pages 업로드
-        uses: actions/upload-pages-artifact@v2
-        with:
-          path: site/
+    - name: 🌐 Upload GitHub Pages Artifact
+      uses: actions/upload-pages-artifact@v2
+      with:
+        path: site/
 
-      - name: ⚖️ GitHub Pages 배포
-        uses: actions/deploy-pages@v2
+    - name: 🚀 Deploy to GitHub Pages
+      uses: actions/deploy-pages@v2
+
+    - name: ⬆️ Auto Upgrade + Echo
+      run: |
+        set -e
+        cat <<'EOF' > .github/echo_autoup/autoup.sh
+        #!/bin/bash
+        echo "[AUTOUP] 시스템 자동 업그레이드 시작"
+        sudo apt-get update -y && sudo apt-get upgrade -y
+        echo "[AUTOUP] 완료"
+        EOF
+        chmod +x .github/echo_autoup/autoup.sh
+        bash .github/echo_autoup/autoup.sh
+
+    - name: 🔁 Schedule Reboot (1 min later)
+      run: |
+        echo "[REBOOT] 1분 후 자동 재시작 예약됨"
+        sudo shutdown -r +1 || true
