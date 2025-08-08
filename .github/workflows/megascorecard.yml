@@ -1,4 +1,4 @@
-name: 🛡️ MEGA Scorecard + 보안도구 + 업그레이드 + 위험 자동 PR + Pages + EchoOps
+name: 🛡️ MEGA Scorecard + 보안도구 + 업그레이드 + 위험 자동 PR + Pages + EchoOps + SARIF/JSON
 
 on:
   workflow_dispatch:
@@ -24,10 +24,12 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Echo 디렉토리 생성
+      - name: 📁 Echo 디렉토리 생성 및 로그
         run: |
           set -e
-          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard; do
+          echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
+          chmod +x .github/echo_logs/create_dirs.sh
+          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard site/security site/upgrade site/pr; do
             mkdir -p "$dir"
             echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
           done
@@ -41,9 +43,14 @@ jobs:
           chmod +x scorecard && sudo mv scorecard /usr/local/bin/
           scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
 
-      - name: 🔍 Run Scorecard CLI (JSON)
+      - name: 🔍 Run Scorecard CLI (SARIF + JSON)
         run: |
+          # Generate SARIF
+          scorecard --repo=https://github.com/${{ github.repository }} --format sarif --show-details > results.sarif
+          cp results.sarif site/scorecard/results.sarif
+          # Generate JSON
           scorecard --repo=https://github.com/${{ github.repository }} --format json --show-details > results.json
+          cp results.json site/scorecard/results.json
           jq '.score' results.json > .github/echo_scorecard/score_value.txt
 
       - name: 📎 Convert JSON → Markdown
@@ -65,11 +72,13 @@ jobs:
         run: |
           pip install --upgrade pip pip-audit > /dev/null
           pip-audit -v -r requirements.txt | tee .github/echo_security/pip_audit.txt || true
+          cp .github/echo_security/pip_audit.txt site/security/
 
       - name: 🕵️ Run Bandit
         run: |
           pip install bandit > /dev/null
           bandit -r . -f txt -o .github/echo_security/bandit.txt || true
+          cp .github/echo_security/bandit.txt site/security/
 
       - name: ⚙️ Run Trivy
         run: |
@@ -78,19 +87,17 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list
           sudo apt-get update && sudo apt-get install -y trivy
           trivy fs . --scanners vuln -f table -o .github/echo_security/trivy.txt || true
+          cp .github/echo_security/trivy.txt site/security/
 
       - name: 🔄 서비스별 업그레이드 수행
         run: |
           mkdir -p .github/echo_upgrade
-
           echo "[UPGRADE] pip" | tee .github/echo_upgrade/pip.log
           pip list --outdated | tee .github/echo_upgrade/pip_outdated.txt || true
           pip list --outdated | awk 'NR>2 {print $1}' | xargs -n1 pip install -U | tee -a .github/echo_upgrade/pip.log || true
-
           echo "[UPGRADE] apt" | tee .github/echo_upgrade/apt.log
           sudo apt update && sudo apt list --upgradable | tee .github/echo_upgrade/apt_outdated.txt || true
           sudo apt upgrade -y | tee -a .github/echo_upgrade/apt.log || true
-
           if [ -f package.json ]; then
             echo "[UPGRADE] npm" | tee .github/echo_upgrade/npm.log
             npm install -g npm
@@ -99,6 +106,7 @@ jobs:
           else
             echo "[INFO] package.json 없음" | tee .github/echo_upgrade/npm.log
           fi
+          cp .github/echo_upgrade/*_outdated.txt site/upgrade/ || true
 
       - name: ✅ 자동 PR 생성 (점수 낮거나 위험 항목 존재 시)
         run: |
@@ -107,34 +115,28 @@ jobs:
           SCORE_INT=$(printf "%.0f" "$SCORE")
           LOW_SCORE_FLAG=false
           WARNINGS=""
-
           if [ "$SCORE_INT" -le 5 ]; then
             LOW_SCORE_FLAG=true
             WARNINGS+="🔻 점수 낮음 (Score: $SCORE)\n"
           fi
-
           for CHECK in CI-Tests Maintained Code-Review Binary-Artifacts; do
             FOUND=$(jq -r --arg name "$CHECK" '.checks[] | select(.name==$name) | .score' results.json)
             if [ "$FOUND" == "0" ] || [ "$FOUND" == "-1" ]; then
               WARNINGS+="⚠️ 취약 항목: $CHECK (점수: $FOUND)\n"
             fi
           done
-
           UPGRADE_COUNT=$(find .github/echo_upgrade -name "*_outdated.txt" -exec grep -v "^Listing" {} \; | wc -l)
-
           if [ "$LOW_SCORE_FLAG" = true ] || [ -n "$WARNINGS" ] || [ "$UPGRADE_COUNT" -gt 0 ]; then
             BRANCH="auto/fix-security-${{ github.run_id }}"
             git config user.name "github-actions"
             git config user.email "actions@github.com"
             git checkout -b "$BRANCH"
-
             echo -e "$WARNINGS\n- 📦 업그레이드 대상 패키지 수: $UPGRADE_COUNT" > .github/echo_upgrade/AUTO_PR_SUMMARY.md
             echo "- [Scorecard Docs](https://github.com/ossf/scorecard/blob/main/docs/checks.md)" >> .github/echo_upgrade/AUTO_PR_SUMMARY.md
-
+            cp .github/echo_upgrade/AUTO_PR_SUMMARY.md site/pr/
             git add .github/echo_upgrade/AUTO_PR_SUMMARY.md
             git commit -m "🔐 Scorecard 위험 항목/업그레이드 자동 PR"
             git push origin "$BRANCH" || true
-
             gh pr create --title "🔐 자동 보안 PR: 위험 항목 또는 업그레이드 발생" \
               --body "$(cat .github/echo_upgrade/AUTO_PR_SUMMARY.md)" \
               --base main --head "$BRANCH" || true
@@ -142,20 +144,21 @@ jobs:
             echo "[INFO] Scorecard 안전 — PR 생성 조건 없음"
           fi
 
-      - name: 🌐 GitHub Pages 배포
+      - name: 🌐 GitHub Pages 배포 (SARIF, JSON 포함 전체)
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site/scorecard
+          publish_dir: ./site
           publish_branch: gh-pages
 
-      - name: 📦 아티팩트 업로드
+      - name: 📦 전체 분석 결과 업로드 (Artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: full-security-results
           path: |
             results.json
-            site/scorecard
+            results.sarif
+            site/
             .github/echo_scorecard
             .github/echo_codeql
             .github/echo_security
