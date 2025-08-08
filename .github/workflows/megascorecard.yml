@@ -1,79 +1,115 @@
-name: 🛡️ MEGA Scorecard + EchoOps + SARIF + 보안 + 업그레이드 + 대량 에코
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + GitHub Pages
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *' # 10분 간격 자동 실행
+    - cron: '*/10 * * * *'  # 10분 간격 자동 실행
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: read
+  security-events: read
 
 jobs:
-  security-fullops:
+  mega-secure-ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
-      - name: 📂 저장소 체크아웃
+      - name: 📂 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 에코 디렉토리 및 site 디렉토리 대량 생성
+      - name: 📁 Create Echo Directories
         run: |
           set -e
           echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
           chmod +x .github/echo_logs/create_dirs.sh
-          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard site/security site/upgrade site/pr; do
+          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs \
+                     .github/echo_security .github/echo_upgrade \
+                     .github/echo_autoup .github/echo_pages site/scorecard site/security site/upgrade site/pr; do
             mkdir -p "$dir"
             echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
           done
           bash .github/echo_logs/create_dirs.sh
 
-      - name: 📥 Scorecard CLI 설치 (정상 동작 보장)
+      - name: 🛡️ Install Security Tools
+        run: |
+          set -e
+          sudo apt-get update -y && sudo apt-get install -y jq curl unzip python3-pip
+          pip install bandit pip-audit
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: ✨ Install Scorecard CLI
         run: |
           set -e
           VERSION="4.10.3"
-          echo "[ECHO] Scorecard CLI 다운로드 시작"
-          curl -sLO "https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz"
-          mkdir -p scorecard-bin
-          tar -xzf "scorecard_${VERSION}_linux_amd64.tar.gz" -C scorecard-bin
-          BIN="scorecard-bin/scorecard"
-          if [ ! -f "$BIN" ]; then
-            echo "::error ::[ERR] Scorecard binary not found at $BIN"
+          curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
+          tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
+          BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -1 || true)
+          if [ -z "$BIN" ]; then
+            echo "::error ::[ERR] Scorecard binary not found after extract."
             exit 1
           fi
           chmod +x "$BIN"
           sudo mv "$BIN" /usr/local/bin/scorecard
           scorecard --version
-          echo "[ECHO] Scorecard CLI 설치 완료"
 
-      - name: 🛡️ Scorecard 분석 및 결과 저장
+      - name: 🔢 Run Scorecard
         run: |
           set -e
           echo "[ECHO] Scorecard 실행 시작"
-          scorecard --repo=https://github.com/davidkims/springboot --format sarif --no-upload > results.sarif
-          scorecard --repo=https://github.com/davidkims/springboot --format json --no-upload > results.json
+          scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
+          scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
           echo "[ECHO] Scorecard 결과 파일 저장"
           cp results.sarif site/scorecard/scorecard-results.sarif
           cp results.json site/security/security.json
 
-      - name: 🔁 서비스별 업그레이드 분석 및 에코 로그 저장
+      - name: 💡 Run Bandit, pip-audit, Trivy
         run: |
           set -e
-          echo "[UPGRADE] 업그레이드 가능한 패키지 확인 시작"
-          apt update -y > .github/echo_upgrade/apt_update.log
-          apt list --upgradable > .github/echo_upgrade/upgradable.txt
-          echo "#!/bin/bash" > .github/echo_upgrade/upgrade_all.sh
-          echo "echo '[ECHO] 모든 패키지 업그레이드 수행 중'" >> .github/echo_upgrade/upgrade_all.sh
-          echo "sudo apt upgrade -y" >> .github/echo_upgrade/upgrade_all.sh
-          chmod +x .github/echo_upgrade/upgrade_all.sh
-          cat .github/echo_upgrade/upgradable.txt | awk -F/ 'NR>1 {print $1}' | while read pkg; do
-            echo "echo '[UPGRADE] $pkg 업그레이드 실행 중'" >> .github/echo_upgrade/upgrade_$pkg.sh
-            echo "sudo apt install --only-upgrade -y $pkg" >> .github/echo_upgrade/upgrade_$pkg.sh
-            chmod +x .github/echo_upgrade/upgrade_$pkg.sh
-          done
-          echo "[ECHO] 업그레이드 스크립트 대량 생성 완료"
+          bandit -r . -f json > site/security/bandit.json || true
+          pip-audit -f json -o site/security/pip-audit.json || true
+          trivy fs . --format json --output site/security/trivy.json || true
+          echo "[ECHO] Security analysis results saved"
 
-      - name: 📝 GitHub Pages용 결과 파일 확인
+      - name: 📅 Upgrade Check
         run: |
           set -e
-          echo "[ECHO] 결과 파일 구조 확인"
-          ls -al site/scorecard
-          ls -al site/security
-          ls -al site/upgrade
+          apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
+
+      - name: 🔄 Create PR if Upgradable Exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if grep -q ".*" site/upgrade/upgradable.txt; then
+            echo "[ECHO] Creating PR for upgrade notice"
+            gh pr create --title "🔄 Weekly Upgrade Report" \
+              --body "Auto-generated PR for upgradable packages. See 'site/upgrade/upgradable.txt'" || true
+          fi
+
+      - name: 🌐 Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: site/
+
+      - name: ⚖️ Deploy GitHub Pages
+        uses: actions/deploy-pages@v2
+
+      - name: 🛠️ Autoupgrade Script
+        run: |
+          set -e
+          cat <<'EOF' > .github/echo_autoup/autoup.sh
+          #!/bin/bash
+          echo "[AUTOUP] Starting unattended-upgrades"
+          sudo apt-get update -y && sudo apt-get upgrade -y
+          echo "[AUTOUP] Upgrade complete"
+          EOF
+          chmod +x .github/echo_autoup/autoup.sh
+          bash .github/echo_autoup/autoup.sh
+
+      - name: ⏳ Auto Reboot
+        run: |
+          echo "[REBOOT] Scheduled reboot in 1 minute"
+          sudo shutdown -r +1 || true
