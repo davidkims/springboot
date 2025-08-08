@@ -1,15 +1,16 @@
-name: 🛡️ MEGA Scorecard + CodeQL + SARIF + Markdown + EchoOps + 업그레이드
+name: 🛡️ MEGA Scorecard + CodeQL + 보안도구 + Markdown + PR + GitHub Pages + EchoOps
 
 on:
   workflow_dispatch:
   schedule:
     - cron: '2 */3 * * *'
 
+permissions: {}
+
 jobs:
   scorecard_submit:
-    name: 📄 Scorecard 성공 Job (제약 준수)
+    name: 📄 Scorecard + SARIF
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       actions: read
@@ -20,49 +21,38 @@ jobs:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔮 Run Scorecard Action
+      - name: 🔮 Scorecard Action (SARIF)
         uses: ossf/scorecard-action@v2.4.2
         with:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
-          results_file_json: results.json
 
   post_analysis:
-    name: 📊 결과 분석 + SARIF + Markdown + Echo + 업그레이드
-    needs: scorecard_submit
+    name: 📊 Scorecard 분석 + 보안도구 + GitHub Pages + 자동 PR
     runs-on: ubuntu-latest
-
+    needs: scorecard_submit
     permissions:
-      contents: read
+      contents: write
+      pull-requests: write
       security-events: write
       id-token: write
+      pages: write
+      actions: read
 
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Echo 디렉토리 및 로그 스크립트 생성
+      - name: 📁 Echo 디렉토리 생성
         run: |
           set -e
-          ECHO_DIRS=".github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_upgrade site/scorecard"
+          ECHO_DIRS=".github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security site/scorecard"
           for dir in $ECHO_DIRS; do
             mkdir -p "$dir"
             echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
           done
-          chmod +x .github/echo_logs/create_dirs.sh
-          bash .github/echo_logs/create_dirs.sh
-
-      - name: 🧪 Install CodeQL CLI
-        run: |
-          set -e
-          VERSION=2.16.2
-          mkdir -p codeql_bin
-          curl -sLO https://github.com/github/codeql-cli-binaries/releases/download/v${VERSION}/codeql-linux64.zip
-          unzip -q codeql-linux64.zip -d codeql_bin
-          chmod +x codeql_bin/codeql/codeql
-          sudo mv codeql_bin/codeql/codeql /usr/local/bin/codeql
-          codeql version | tee .github/echo_codeql/codeql_version.txt
+          chmod +x .github/echo_logs/create_dirs.sh && bash .github/echo_logs/create_dirs.sh
 
       - name: 🛡️ Install Scorecard CLI
         run: |
@@ -70,52 +60,98 @@ jobs:
           VER=4.10.3
           curl -sLO https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz
           tar -xzf scorecard_${VER}_linux_amd64.tar.gz
-          BIN=$(find . -type f -name scorecard | head -1)
-          if [ -f "$BIN" ]; then
-            chmod +x "$BIN"
-            sudo mv "$BIN" /usr/local/bin/scorecard
-            scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
-          else
-            echo "::error ::[ERR] Scorecard 설치 실패: 바이너리 없음"
-            exit 1
-          fi
+          chmod +x scorecard && sudo mv scorecard /usr/local/bin/
+          scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
 
-      - name: 📎 Convert Scorecard JSON to Markdown
+      - name: 🧪 Install CodeQL CLI
         run: |
           set -e
-          echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
-          if jq -e 'type == "object" and .repo.name and .score and .checks' results.json > /dev/null 2>&1; then
-            jq -r '
-              "### 프로젝트: \(.repo.name)\n\n" +
-              "신력도 점수: \(.score) / 10\n\n" +
-              "| 확인 | 통과 | 점수 | 사유 |\n|--------|------|--------|--------|\n" +
-              (.checks[] |
-                "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
-              ) | join("\n")
-            ' results.json >> site/scorecard/scorecard-summary.md
-          else
-            echo "⚠️ results.json 변환 실패(구조 오류)" >> site/scorecard/scorecard-summary.md
-          fi
-          echo "echo '[ECHO] Markdown 변환 완료'" >> .github/echo_logs/convert_md.sh
+          VERSION=2.16.2
+          curl -sLO https://github.com/github/codeql-cli-binaries/releases/download/v${VERSION}/codeql-linux64.zip
+          unzip -q codeql-linux64.zip -d codeql_bin
+          chmod +x codeql_bin/codeql/codeql
+          sudo mv codeql_bin/codeql/codeql /usr/local/bin/codeql
+          codeql version | tee .github/echo_codeql/codeql_version.txt
 
-      - name: 📄 Upload SARIF to GitHub Code Scanning
+      - name: 🔍 Run Scorecard CLI (JSON)
+        run: |
+          set -e
+          scorecard --repo=https://github.com/${{ github.repository }} --format json --show-details > results.json
+          echo "echo '[ECHO] Scorecard JSON 결과 생성 완료'" >> .github/echo_logs/scorecard_json.sh
+
+      - name: 📎 Convert JSON to Markdown
+        run: |
+          set -e
+          mkdir -p site/scorecard
+          echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
+          jq -r '
+            "### 프로젝트: \(.repo.name)\n\n" +
+            "신력도 점수: \(.score) / 10\n\n" +
+            "| 확인 | 통과 | 점수 | 사유 |\n|--------|------|--------|--------|\n" +
+            (.checks[] |
+              "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
+            ) | join("\n")
+          ' results.json >> site/scorecard/scorecard-summary.md
+          jq '.score' results.json > .github/echo_scorecard/score_value.txt
+
+      - name: 📄 Upload SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
 
-      - name: 🪑 Analyze File Size & Log Echo
+      - name: 🔐 Run pip-audit
         run: |
-          set -e
-          du -ah . | sort -hr | head -n 30 > .github/echo_logs/top_sizes.txt || true
-          du -sh . > .github/echo_logs/total_size.txt || true
-          echo "echo '[ECHO] 파일 크기 분석 완료'" >> .github/echo_logs/file_size_check.sh
+          pip install --upgrade pip pip-audit > /dev/null
+          pip-audit -v -r requirements.txt | tee .github/echo_security/pip_audit.txt || true
 
-      - name: 📦 Upload Echo & Summary Artifacts
+      - name: 🕵️ Run Bandit
+        run: |
+          pip install bandit > /dev/null
+          bandit -r . -f txt -o .github/echo_security/bandit.txt || true
+
+      - name: ⚙️ Run Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+          trivy fs . --scanners vuln -f table -o .github/echo_security/trivy.txt || true
+
+      - name: 🔁 자동 PR 생성 (Score ≤ 5)
+        run: |
+          SCORE=$(cat .github/echo_scorecard/score_value.txt | awk '{printf "%.0f", $1}')
+          if [ "$SCORE" -le 5 ]; then
+            BRANCH="auto/scorecard-low-score"
+            git config --global user.name "github-actions"
+            git config --global user.email "actions@github.com"
+            git checkout -b $BRANCH
+            echo "보안 점수 낮음 (Score: $SCORE)" > .github/echo_scorecard/LOW_SCORE_ALERT.md
+            git add .github/echo_scorecard/LOW_SCORE_ALERT.md
+            git commit -m "🔐 Scorecard 낮은 점수 자동 경고"
+            git push origin $BRANCH || true
+            gh pr create --title "🔐 낮은 Scorecard 점수 경고 (Score: $SCORE)" \
+              --body "자동 생성된 PR입니다. 보안 점수가 낮습니다. 개선 필요!" \
+              --base main --head $BRANCH || true
+          else
+            echo "보안 점수 양호 (Score: $SCORE) - PR 생성 안함"
+          fi
+
+      - name: 🌐 Deploy GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site/scorecard
+          publish_branch: gh-pages
+
+      - name: 📦 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: scorecard-echo-results
+          name: scorecard-security-reports
           path: |
-            site/scorecard/scorecard-summary.md
+            results.json
+            results.sarif
+            site/scorecard
             .github/echo_scorecard
             .github/echo_codeql
+            .github/echo_security
             .github/echo_logs
