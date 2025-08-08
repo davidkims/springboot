@@ -1,4 +1,4 @@
-name: 🛡️ MEGA Scorecard + 보안도구 + 업그레이드 + 위험 자동 PR + Pages + EchoOps + SARIF/JSON
+name: 🧠 MEGA EchoOps + Scorecard + 업그레이드 + Pages + PR 자동화
 
 on:
   workflow_dispatch:
@@ -8,159 +8,103 @@ on:
 permissions: {}
 
 jobs:
-  secure-checkup:
-    name: 🔒 전체 보안 점검 및 자동 PR
+  echo-security:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
       pull-requests: write
       security-events: write
       id-token: write
       pages: write
-      actions: read
 
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Echo 디렉토리 생성 및 로그
+      - name: 📁 필수 디렉토리 및 echo 스크립트 디렉토리 생성
         run: |
           set -e
-          echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
-          chmod +x .github/echo_logs/create_dirs.sh
-          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard site/security site/upgrade site/pr; do
-            mkdir -p "$dir"
-            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+          mkdir -p .github/echo_scripts .github/echo_logs .github/echo_scorecard .github/echo_upgrade .github/echo_security .github/echo_codeql site/scorecard site/security site/upgrade site/pr
+          echo '#!/bin/bash' > .github/echo_logs/create_dirs.sh
+          for dir in .github/echo_scripts .github/echo_logs .github/echo_scorecard .github/echo_upgrade .github/echo_security .github/echo_codeql site/scorecard site/security site/upgrade site/pr; do
+            echo "mkdir -p $dir && echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
           done
+          chmod +x .github/echo_logs/create_dirs.sh
           bash .github/echo_logs/create_dirs.sh
 
-      - name: 🛡️ Install Scorecard CLI
+      - name: 🛡️ Scorecard 실행 echo 스크립트 생성 및 실행
         run: |
-          VER=4.10.3
-          curl -sLO https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz
-          tar -xzf scorecard_${VER}_linux_amd64.tar.gz
-          chmod +x scorecard && sudo mv scorecard /usr/local/bin/
-          scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
+          echo '#!/bin/bash' > .github/echo_scripts/run_scorecard.sh
+          echo 'scorecard --repo=https://github.com/${{ github.repository }} --format sarif --show-details > results.sarif' >> .github/echo_scripts/run_scorecard.sh
+          echo 'cp results.sarif site/scorecard/results.sarif' >> .github/echo_scripts/run_scorecard.sh
+          echo 'scorecard --repo=https://github.com/${{ github.repository }} --format json --show-details > results.json' >> .github/echo_scripts/run_scorecard.sh
+          echo 'cp results.json site/scorecard/results.json' >> .github/echo_scripts/run_scorecard.sh
+          echo 'jq ".score" results.json > .github/echo_scorecard/score_value.txt' >> .github/echo_scripts/run_scorecard.sh
+          chmod +x .github/echo_scripts/run_scorecard.sh
+          bash .github/echo_scripts/run_scorecard.sh
 
-      - name: 🔍 Run Scorecard CLI (SARIF + JSON)
+      - name: 📎 Scorecard → Markdown 변환 echo 스크립트 생성 및 실행
         run: |
-          # Generate SARIF
-          scorecard --repo=https://github.com/${{ github.repository }} --format sarif --show-details > results.sarif
-          cp results.sarif site/scorecard/results.sarif
-          # Generate JSON
-          scorecard --repo=https://github.com/${{ github.repository }} --format json --show-details > results.json
-          cp results.json site/scorecard/results.json
-          jq '.score' results.json > .github/echo_scorecard/score_value.txt
+          echo '#!/bin/bash' > .github/echo_scripts/convert_md.sh
+          echo 'echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md' >> .github/echo_scripts/convert_md.sh
+          echo "jq -r '\"### 프로젝트: \(.repo.name)\n\n신력도 점수: \(.score) / 10\n\n| 확인 | 통과 | 점수 | 사유 |\n|--------|------|--------|--------|\n\" + (.checks[] | \"| \(.name) | \(.pass) | \(.score) | \(.reason // \"-\") |\") | join(\"\\n\")' results.json >> site/scorecard/scorecard-summary.md" >> .github/echo_scripts/convert_md.sh
+          echo 'echo -e "\n---\n## 🚨 보안 경고 요약\n" >> site/scorecard/scorecard-summary.md' >> .github/echo_scripts/convert_md.sh
+          echo "jq -r '.checks[] | select(.score == 0 or .score == -1) | \"- ⚠️ \(.name): \(.reason // \\\"알 수 없음\\\")\\n  ([문서링크](\(.documentation.url)))\"' results.json >> site/scorecard/scorecard-summary.md || true" >> .github/echo_scripts/convert_md.sh
+          chmod +x .github/echo_scripts/convert_md.sh
+          bash .github/echo_scripts/convert_md.sh
 
-      - name: 📎 Convert JSON → Markdown
+      - name: 🔐 보안도구 실행 echo 스크립트 생성 및 실행
         run: |
-          echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
-          jq -r '
-            "### 프로젝트: \(.repo.name)\n\n" +
-            "신력도 점수: \(.score) / 10\n\n" +
-            "| 확인 | 통과 | 점수 | 사유 |\n|--------|------|--------|--------|\n" +
-            (.checks[] |
-              "| \(.name) | \(.pass) | \(.score) | \(.reason // "-") |"
-            ) | join("\n")
-          ' results.json >> site/scorecard/scorecard-summary.md
+          echo '#!/bin/bash' > .github/echo_scripts/run_security.sh
+          echo 'pip install --upgrade pip pip-audit bandit > /dev/null' >> .github/echo_scripts/run_security.sh
+          echo 'pip-audit -v -r requirements.txt | tee .github/echo_security/pip_audit.txt || true' >> .github/echo_scripts/run_security.sh
+          echo 'bandit -r . -f txt -o .github/echo_security/bandit.txt || true' >> .github/echo_scripts/run_security.sh
+          echo 'sudo apt-get install -y wget gnupg lsb-release' >> .github/echo_scripts/run_security.sh
+          echo 'wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg' >> .github/echo_scripts/run_security.sh
+          echo 'echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list' >> .github/echo_scripts/run_security.sh
+          echo 'sudo apt-get update && sudo apt-get install -y trivy' >> .github/echo_scripts/run_security.sh
+          echo 'trivy fs . --scanners vuln -f table -o .github/echo_security/trivy.txt || true' >> .github/echo_scripts/run_security.sh
+          chmod +x .github/echo_scripts/run_security.sh
+          bash .github/echo_scripts/run_security.sh
 
-          echo -e "\n---\n## 🚨 보안 경고 요약\n" >> site/scorecard/scorecard-summary.md
-          jq -r '.checks[] | select(.score == 0 or .score == -1) | "- ⚠️ \(.name): \(.reason // "알 수 없음")\n  ([문서링크](\(.documentation.url)))"' results.json >> site/scorecard/scorecard-summary.md || true
-
-      - name: 🔐 Run pip-audit
+      - name: 🔄 업그레이드 echo 스크립트 생성 및 실행
         run: |
-          pip install --upgrade pip pip-audit > /dev/null
-          pip-audit -v -r requirements.txt | tee .github/echo_security/pip_audit.txt || true
-          cp .github/echo_security/pip_audit.txt site/security/
+          echo '#!/bin/bash' > .github/echo_scripts/run_upgrade.sh
+          echo 'pip list --outdated | tee .github/echo_upgrade/pip_outdated.txt || true' >> .github/echo_scripts/run_upgrade.sh
+          echo 'pip list --outdated | awk '"'"'NR>2 {print $1}'"'"' | xargs -n1 pip install -U || true' >> .github/echo_scripts/run_upgrade.sh
+          echo 'sudo apt update && sudo apt list --upgradable | tee .github/echo_upgrade/apt_outdated.txt || true' >> .github/echo_scripts/run_upgrade.sh
+          echo 'sudo apt upgrade -y || true' >> .github/echo_scripts/run_upgrade.sh
+          echo '[ -f package.json ] && npm outdated | tee .github/echo_upgrade/npm_outdated.txt || true' >> .github/echo_scripts/run_upgrade.sh
+          echo '[ -f package.json ] && npm update || true' >> .github/echo_scripts/run_upgrade.sh
+          chmod +x .github/echo_scripts/run_upgrade.sh
+          bash .github/echo_scripts/run_upgrade.sh
 
-      - name: 🕵️ Run Bandit
+      - name: ✅ 자동 PR 생성 echo 스크립트 생성 및 실행
         run: |
-          pip install bandit > /dev/null
-          bandit -r . -f txt -o .github/echo_security/bandit.txt || true
-          cp .github/echo_security/bandit.txt site/security/
+          echo '#!/bin/bash' > .github/echo_scripts/create_pr.sh
+          echo 'SCORE=$(jq ".score" results.json)' >> .github/echo_scripts/create_pr.sh
+          echo 'WARNINGS=""' >> .github/echo_scripts/create_pr.sh
+          echo 'for CHECK in CI-Tests Maintained Code-Review Binary-Artifacts; do' >> .github/echo_scripts/create_pr.sh
+          echo '  FOUND=$(jq -r --arg name "$CHECK" ".checks[] | select(.name==\$name) | .score" results.json)' >> .github/echo_scripts/create_pr.sh
+          echo '  if [ "$FOUND" == "0" ] || [ "$FOUND" == "-1" ]; then WARNINGS+="⚠️ $CHECK (점수: $FOUND)\n"; fi' >> .github/echo_scripts/create_pr.sh
+          echo 'done' >> .github/echo_scripts/create_pr.sh
+          echo 'echo -e "$WARNINGS" > site/pr/AUTO_PR_SUMMARY.md' >> .github/echo_scripts/create_pr.sh
+          chmod +x .github/echo_scripts/create_pr.sh
+          bash .github/echo_scripts/create_pr.sh
 
-      - name: ⚙️ Run Trivy
-        run: |
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
-          trivy fs . --scanners vuln -f table -o .github/echo_security/trivy.txt || true
-          cp .github/echo_security/trivy.txt site/security/
-
-      - name: 🔄 서비스별 업그레이드 수행
-        run: |
-          mkdir -p .github/echo_upgrade
-          echo "[UPGRADE] pip" | tee .github/echo_upgrade/pip.log
-          pip list --outdated | tee .github/echo_upgrade/pip_outdated.txt || true
-          pip list --outdated | awk 'NR>2 {print $1}' | xargs -n1 pip install -U | tee -a .github/echo_upgrade/pip.log || true
-          echo "[UPGRADE] apt" | tee .github/echo_upgrade/apt.log
-          sudo apt update && sudo apt list --upgradable | tee .github/echo_upgrade/apt_outdated.txt || true
-          sudo apt upgrade -y | tee -a .github/echo_upgrade/apt.log || true
-          if [ -f package.json ]; then
-            echo "[UPGRADE] npm" | tee .github/echo_upgrade/npm.log
-            npm install -g npm
-            npm outdated | tee .github/echo_upgrade/npm_outdated.txt || true
-            npm update | tee -a .github/echo_upgrade/npm.log || true
-          else
-            echo "[INFO] package.json 없음" | tee .github/echo_upgrade/npm.log
-          fi
-          cp .github/echo_upgrade/*_outdated.txt site/upgrade/ || true
-
-      - name: ✅ 자동 PR 생성 (점수 낮거나 위험 항목 존재 시)
-        run: |
-          set -e
-          SCORE=$(jq '.score' results.json)
-          SCORE_INT=$(printf "%.0f" "$SCORE")
-          LOW_SCORE_FLAG=false
-          WARNINGS=""
-          if [ "$SCORE_INT" -le 5 ]; then
-            LOW_SCORE_FLAG=true
-            WARNINGS+="🔻 점수 낮음 (Score: $SCORE)\n"
-          fi
-          for CHECK in CI-Tests Maintained Code-Review Binary-Artifacts; do
-            FOUND=$(jq -r --arg name "$CHECK" '.checks[] | select(.name==$name) | .score' results.json)
-            if [ "$FOUND" == "0" ] || [ "$FOUND" == "-1" ]; then
-              WARNINGS+="⚠️ 취약 항목: $CHECK (점수: $FOUND)\n"
-            fi
-          done
-          UPGRADE_COUNT=$(find .github/echo_upgrade -name "*_outdated.txt" -exec grep -v "^Listing" {} \; | wc -l)
-          if [ "$LOW_SCORE_FLAG" = true ] || [ -n "$WARNINGS" ] || [ "$UPGRADE_COUNT" -gt 0 ]; then
-            BRANCH="auto/fix-security-${{ github.run_id }}"
-            git config user.name "github-actions"
-            git config user.email "actions@github.com"
-            git checkout -b "$BRANCH"
-            echo -e "$WARNINGS\n- 📦 업그레이드 대상 패키지 수: $UPGRADE_COUNT" > .github/echo_upgrade/AUTO_PR_SUMMARY.md
-            echo "- [Scorecard Docs](https://github.com/ossf/scorecard/blob/main/docs/checks.md)" >> .github/echo_upgrade/AUTO_PR_SUMMARY.md
-            cp .github/echo_upgrade/AUTO_PR_SUMMARY.md site/pr/
-            git add .github/echo_upgrade/AUTO_PR_SUMMARY.md
-            git commit -m "🔐 Scorecard 위험 항목/업그레이드 자동 PR"
-            git push origin "$BRANCH" || true
-            gh pr create --title "🔐 자동 보안 PR: 위험 항목 또는 업그레이드 발생" \
-              --body "$(cat .github/echo_upgrade/AUTO_PR_SUMMARY.md)" \
-              --base main --head "$BRANCH" || true
-          else
-            echo "[INFO] Scorecard 안전 — PR 생성 조건 없음"
-          fi
-
-      - name: 🌐 GitHub Pages 배포 (SARIF, JSON 포함 전체)
+      - name: 🌐 GitHub Pages 배포
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           publish_branch: gh-pages
 
-      - name: 📦 전체 분석 결과 업로드 (Artifacts)
+      - name: 📦 결과 업로드 (Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: full-security-results
+          name: full-echo-results
           path: |
+            site/
             results.json
             results.sarif
-            site/
-            .github/echo_scorecard
-            .github/echo_codeql
-            .github/echo_security
-            .github/echo_upgrade
-            .github/echo_logs
+            .github/echo_*
