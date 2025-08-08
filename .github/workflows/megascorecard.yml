@@ -5,15 +5,16 @@ on:
   schedule:
     - cron: '2 */3 * * *'
 
-permissions:
-  id-token: write
-  contents: read
-  security-events: write
-
 jobs:
   scorecard_submit:
     name: 📄 Scorecard 성공 Job (제약 준수)
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+      security-events: none
+      id-token: none
 
     steps:
       - name: 📦 Checkout
@@ -32,14 +33,20 @@ jobs:
     needs: scorecard_submit
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+
     steps:
-      - name: 📆 Checkout
+      - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 Echo 디렉토리 생성
+      - name: 📁 Echo 디렉토리 및 로그 스크립트 생성
         run: |
           set -e
-          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_upgrade site/scorecard; do
+          ECHO_DIRS=".github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_upgrade site/scorecard"
+          for dir in $ECHO_DIRS; do
             mkdir -p "$dir"
             echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
           done
@@ -65,14 +72,15 @@ jobs:
           tar -xzf scorecard_${VER}_linux_amd64.tar.gz
           BIN=$(find . -type f -name scorecard | head -1)
           if [ -f "$BIN" ]; then
-            chmod +x "$BIN" && sudo mv "$BIN" /usr/local/bin/scorecard
+            chmod +x "$BIN"
+            sudo mv "$BIN" /usr/local/bin/scorecard
             scorecard --version | tee .github/echo_scorecard/scorecard_version.txt
           else
             echo "::error ::[ERR] Scorecard 설치 실패: 바이너리 없음"
             exit 1
           fi
 
-      - name: 📎 Convert JSON to Markdown
+      - name: 📎 Convert Scorecard JSON to Markdown
         run: |
           set -e
           echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md
@@ -86,16 +94,18 @@ jobs:
               ) | join("\n")
             ' results.json >> site/scorecard/scorecard-summary.md
           else
-            echo "_\u26a0\ufe0f results.json 변환 실패(구조 오류)_" >> site/scorecard/scorecard-summary.md
+            echo "⚠️ results.json 변환 실패(구조 오류)" >> site/scorecard/scorecard-summary.md
           fi
+          echo "echo '[ECHO] Markdown 변환 완료'" >> .github/echo_logs/convert_md.sh
 
       - name: 📄 Upload SARIF to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
 
-      - name: 🪑 File Size & Log Info
+      - name: 🪑 Analyze File Size & Log Echo
         run: |
+          set -e
           du -ah . | sort -hr | head -n 30 > .github/echo_logs/top_sizes.txt || true
           du -sh . > .github/echo_logs/total_size.txt || true
           echo "echo '[ECHO] 파일 크기 분석 완료'" >> .github/echo_logs/file_size_check.sh
