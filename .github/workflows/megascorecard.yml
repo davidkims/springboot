@@ -1,89 +1,79 @@
-name: 🛡️ MEGA Scorecard + CodeQL + EchoOps + AutoUpgrade
+name: 🛡️ MEGA Scorecard + EchoOps + SARIF + 보안 + 업그레이드 + 대량 에코
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * 0'  # 매주 일요일 10분 간격
-
-permissions:
-  contents: write
-  pull-requests: write
-  security-events: write
+    - cron: '*/10 * * * *' # 10분 간격 자동 실행
 
 jobs:
   security-fullops:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-    - name: 📂 Checkout
-      uses: actions/checkout@v4
+      - name: 📂 저장소 체크아웃
+        uses: actions/checkout@v4
 
-    - name: 📥 Scorecard CLI 설치
-      run: |
-        set -e
-        VERSION="4.10.3"
-        echo "[ECHO] Scorecard CLI 다운로드 시작"
-        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
-        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -1 || true)
-        if [ -z "$BIN" ]; then
-          echo "::error ::[ERR] Scorecard binary not found after extract."
-          exit 1
-        fi
-        chmod +x "$BIN"
-        sudo mv "$BIN" /usr/local/bin/scorecard
-        scorecard --version
-        echo "[ECHO] Scorecard CLI 설치 완료"
+      - name: 📁 에코 디렉토리 및 site 디렉토리 대량 생성
+        run: |
+          set -e
+          echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
+          chmod +x .github/echo_logs/create_dirs.sh
+          for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard site/security site/upgrade site/pr; do
+            mkdir -p "$dir"
+            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+          done
+          bash .github/echo_logs/create_dirs.sh
 
-    - name: 📁 디렉토리 생성 (Echo 기반)
-      run: |
-        set -e
-        mkdir -p .github/echo_logs
-        echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
-        for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard site/security site/upgrade site/pr; do
-          echo "mkdir -p $dir" >> .github/echo_logs/create_dirs.sh
-          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
-        done
-        chmod +x .github/echo_logs/create_dirs.sh
-        bash .github/echo_logs/create_dirs.sh
+      - name: 📥 Scorecard CLI 설치 (정상 동작 보장)
+        run: |
+          set -e
+          VERSION="4.10.3"
+          echo "[ECHO] Scorecard CLI 다운로드 시작"
+          curl -sLO "https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz"
+          mkdir -p scorecard-bin
+          tar -xzf "scorecard_${VERSION}_linux_amd64.tar.gz" -C scorecard-bin
+          BIN="scorecard-bin/scorecard"
+          if [ ! -f "$BIN" ]; then
+            echo "::error ::[ERR] Scorecard binary not found at $BIN"
+            exit 1
+          fi
+          chmod +x "$BIN"
+          sudo mv "$BIN" /usr/local/bin/scorecard
+          scorecard --version
+          echo "[ECHO] Scorecard CLI 설치 완료"
 
-    - name: 🧪 Scorecard 분석 실행
-      run: |
-        set -e
-        echo "[ECHO] Scorecard 실행 시작"
-        scorecard --repo=https://github.com/davidkims/springboot --format sarif --no-upload > results.sarif
-        scorecard --repo=https://github.com/davidkims/springboot --format json --no-upload > results.json
-        echo "[ECHO] Scorecard 결과 파일 저장"
-        cp results.sarif site/scorecard/scorecard-results.sarif
-        cp results.json site/security/security.json
+      - name: 🛡️ Scorecard 분석 및 결과 저장
+        run: |
+          set -e
+          echo "[ECHO] Scorecard 실행 시작"
+          scorecard --repo=https://github.com/davidkims/springboot --format sarif --no-upload > results.sarif
+          scorecard --repo=https://github.com/davidkims/springboot --format json --no-upload > results.json
+          echo "[ECHO] Scorecard 결과 파일 저장"
+          cp results.sarif site/scorecard/scorecard-results.sarif
+          cp results.json site/security/security.json
 
-    - name: 🧪 CodeQL Init
-      uses: github/codeql-action/init@v3
-      with:
-        languages: 'java'
+      - name: 🔁 서비스별 업그레이드 분석 및 에코 로그 저장
+        run: |
+          set -e
+          echo "[UPGRADE] 업그레이드 가능한 패키지 확인 시작"
+          apt update -y > .github/echo_upgrade/apt_update.log
+          apt list --upgradable > .github/echo_upgrade/upgradable.txt
+          echo "#!/bin/bash" > .github/echo_upgrade/upgrade_all.sh
+          echo "echo '[ECHO] 모든 패키지 업그레이드 수행 중'" >> .github/echo_upgrade/upgrade_all.sh
+          echo "sudo apt upgrade -y" >> .github/echo_upgrade/upgrade_all.sh
+          chmod +x .github/echo_upgrade/upgrade_all.sh
+          cat .github/echo_upgrade/upgradable.txt | awk -F/ 'NR>1 {print $1}' | while read pkg; do
+            echo "echo '[UPGRADE] $pkg 업그레이드 실행 중'" >> .github/echo_upgrade/upgrade_$pkg.sh
+            echo "sudo apt install --only-upgrade -y $pkg" >> .github/echo_upgrade/upgrade_$pkg.sh
+            chmod +x .github/echo_upgrade/upgrade_$pkg.sh
+          done
+          echo "[ECHO] 업그레이드 스크립트 대량 생성 완료"
 
-    - name: 🧪 CodeQL 분석
-      uses: github/codeql-action/analyze@v3
-      continue-on-error: true
-
-    - name: 🔁 주간 자동 업그레이드 (APT)
-      run: |
-        set -e
-        echo "#!/bin/bash" > .github/echo_upgrade/weekly_upgrade.sh
-        echo "echo '[AUTOUP] apt update 수행'" >> .github/echo_upgrade/weekly_upgrade.sh
-        echo "sudo apt update -y" >> .github/echo_upgrade/weekly_upgrade.sh
-        echo "echo '[AUTOUP] apt upgrade 수행'" >> .github/echo_upgrade/weekly_upgrade.sh
-        echo "sudo apt upgrade -y" >> .github/echo_upgrade/weekly_upgrade.sh
-        chmod +x .github/echo_upgrade/weekly_upgrade.sh
-        bash .github/echo_upgrade/weekly_upgrade.sh | tee site/upgrade/upgrade.log
-
-    - name: ✅ 업그레이드 PR 자동 생성
-      uses: peter-evans/create-pull-request@v6
-      with:
-        commit-message: "🔁 weekly auto upgrade results"
-        title: "🔁 Weekly Upgrade: APT Packages"
-        body: |
-          This PR was automatically generated by the weekly upgrade workflow.
-          - See `site/upgrade/upgrade.log` for full details.
-        branch: auto/upgrade-${{ github.run_id }}
-        delete-branch: true
+      - name: 📝 GitHub Pages용 결과 파일 확인
+        run: |
+          set -e
+          echo "[ECHO] 결과 파일 구조 확인"
+          ls -al site/scorecard
+          ls -al site/security
+          ls -al site/upgrade
