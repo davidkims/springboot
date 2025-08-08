@@ -1,110 +1,74 @@
-name: 🧠 MEGA EchoOps + Scorecard + 업그레이드 + Pages + PR 자동화
+name: 🛡️ MEGA Scorecard + CodeQL + EchoOps + AutoUpgrade
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/10 * * * 0'  # 매주 일요일 10분 간격
 
-permissions: {}
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
 
 jobs:
-  echo-security:
+  secure-analyze:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      security-events: write
-      id-token: write
-      pages: write
 
     steps:
-      - name: 📦 Checkout
-        uses: actions/checkout@v4
+    - name: 📂 Checkout
+      uses: actions/checkout@v4
 
-      - name: 📁 필수 디렉토리 및 echo 스크립트 디렉토리 생성
-        run: |
-          set -e
-          mkdir -p .github/echo_scripts .github/echo_logs .github/echo_scorecard .github/echo_upgrade .github/echo_security .github/echo_codeql site/scorecard site/security site/upgrade site/pr
-          echo '#!/bin/bash' > .github/echo_logs/create_dirs.sh
-          for dir in .github/echo_scripts .github/echo_logs .github/echo_scorecard .github/echo_upgrade .github/echo_security .github/echo_codeql site/scorecard site/security site/upgrade site/pr; do
-            echo "mkdir -p $dir && echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
-          done
-          chmod +x .github/echo_logs/create_dirs.sh
-          bash .github/echo_logs/create_dirs.sh
+    - name: 📁 Echo 디렉토리 및 구조 생성
+      run: |
+        set -e
+        mkdir -p .github/echo_logs
+        echo "#!/bin/bash" > .github/echo_logs/create_dirs.sh
+        chmod +x .github/echo_logs/create_dirs.sh
+        for dir in .github/echo_scorecard .github/echo_codeql .github/echo_logs .github/echo_security .github/echo_upgrade site/scorecard site/security site/upgrade site/pr; do
+          mkdir -p "$dir"
+          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+        done
+        bash .github/echo_logs/create_dirs.sh
 
-      - name: 🛡️ Scorecard 실행 echo 스크립트 생성 및 실행
-        run: |
-          echo '#!/bin/bash' > .github/echo_scripts/run_scorecard.sh
-          echo 'scorecard --repo=https://github.com/${{ github.repository }} --format sarif --show-details > results.sarif' >> .github/echo_scripts/run_scorecard.sh
-          echo 'cp results.sarif site/scorecard/results.sarif' >> .github/echo_scripts/run_scorecard.sh
-          echo 'scorecard --repo=https://github.com/${{ github.repository }} --format json --show-details > results.json' >> .github/echo_scripts/run_scorecard.sh
-          echo 'cp results.json site/scorecard/results.json' >> .github/echo_scripts/run_scorecard.sh
-          echo 'jq ".score" results.json > .github/echo_scorecard/score_value.txt' >> .github/echo_scripts/run_scorecard.sh
-          chmod +x .github/echo_scripts/run_scorecard.sh
-          bash .github/echo_scripts/run_scorecard.sh
+    - name: 🧪 Run Scorecard (No Upload)
+      run: |
+        set -e
+        echo "[ECHO] Scorecard 실행 시작"
+        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
+        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
+        echo "[ECHO] Scorecard 결과 파일 저장"
+        cp results.sarif site/scorecard/scorecard-results.sarif
+        cp results.json site/security/security.json
 
-      - name: 📎 Scorecard → Markdown 변환 echo 스크립트 생성 및 실행
-        run: |
-          echo '#!/bin/bash' > .github/echo_scripts/convert_md.sh
-          echo 'echo "# 🛡️ OSSF Scorecard 결과 요약" > site/scorecard/scorecard-summary.md' >> .github/echo_scripts/convert_md.sh
-          echo "jq -r '\"### 프로젝트: \(.repo.name)\n\n신력도 점수: \(.score) / 10\n\n| 확인 | 통과 | 점수 | 사유 |\n|--------|------|--------|--------|\n\" + (.checks[] | \"| \(.name) | \(.pass) | \(.score) | \(.reason // \"-\") |\") | join(\"\\n\")' results.json >> site/scorecard/scorecard-summary.md" >> .github/echo_scripts/convert_md.sh
-          echo 'echo -e "\n---\n## 🚨 보안 경고 요약\n" >> site/scorecard/scorecard-summary.md' >> .github/echo_scripts/convert_md.sh
-          echo "jq -r '.checks[] | select(.score == 0 or .score == -1) | \"- ⚠️ \(.name): \(.reason // \\\"알 수 없음\\\")\\n  ([문서링크](\(.documentation.url)))\"' results.json >> site/scorecard/scorecard-summary.md || true" >> .github/echo_scripts/convert_md.sh
-          chmod +x .github/echo_scripts/convert_md.sh
-          bash .github/echo_scripts/convert_md.sh
+    - name: 🧪 Run CodeQL (if supported)
+      uses: github/codeql-action/init@v3
+      with:
+        languages: 'java'
 
-      - name: 🔐 보안도구 실행 echo 스크립트 생성 및 실행
-        run: |
-          echo '#!/bin/bash' > .github/echo_scripts/run_security.sh
-          echo 'pip install --upgrade pip pip-audit bandit > /dev/null' >> .github/echo_scripts/run_security.sh
-          echo 'pip-audit -v -r requirements.txt | tee .github/echo_security/pip_audit.txt || true' >> .github/echo_scripts/run_security.sh
-          echo 'bandit -r . -f txt -o .github/echo_security/bandit.txt || true' >> .github/echo_scripts/run_security.sh
-          echo 'sudo apt-get install -y wget gnupg lsb-release' >> .github/echo_scripts/run_security.sh
-          echo 'wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg' >> .github/echo_scripts/run_security.sh
-          echo 'echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/trivy.list' >> .github/echo_scripts/run_security.sh
-          echo 'sudo apt-get update && sudo apt-get install -y trivy' >> .github/echo_scripts/run_security.sh
-          echo 'trivy fs . --scanners vuln -f table -o .github/echo_security/trivy.txt || true' >> .github/echo_scripts/run_security.sh
-          chmod +x .github/echo_scripts/run_security.sh
-          bash .github/echo_scripts/run_security.sh
+    - name: 🧪 Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      continue-on-error: true
 
-      - name: 🔄 업그레이드 echo 스크립트 생성 및 실행
-        run: |
-          echo '#!/bin/bash' > .github/echo_scripts/run_upgrade.sh
-          echo 'pip list --outdated | tee .github/echo_upgrade/pip_outdated.txt || true' >> .github/echo_scripts/run_upgrade.sh
-          echo 'pip list --outdated | awk '"'"'NR>2 {print $1}'"'"' | xargs -n1 pip install -U || true' >> .github/echo_scripts/run_upgrade.sh
-          echo 'sudo apt update && sudo apt list --upgradable | tee .github/echo_upgrade/apt_outdated.txt || true' >> .github/echo_scripts/run_upgrade.sh
-          echo 'sudo apt upgrade -y || true' >> .github/echo_scripts/run_upgrade.sh
-          echo '[ -f package.json ] && npm outdated | tee .github/echo_upgrade/npm_outdated.txt || true' >> .github/echo_scripts/run_upgrade.sh
-          echo '[ -f package.json ] && npm update || true' >> .github/echo_scripts/run_upgrade.sh
-          chmod +x .github/echo_scripts/run_upgrade.sh
-          bash .github/echo_scripts/run_upgrade.sh
+    - name: 🔁 Weekly Upgrade Test (echo logging)
+      run: |
+        set -e
+        echo "#!/bin/bash" > .github/echo_upgrade/weekly_upgrade.sh
+        echo "echo '[AUTOUP] apt-get update -y'" >> .github/echo_upgrade/weekly_upgrade.sh
+        echo "sudo apt-get update -y" >> .github/echo_upgrade/weekly_upgrade.sh
+        echo "echo '[AUTOUP] apt-get upgrade -y'" >> .github/echo_upgrade/weekly_upgrade.sh
+        echo "sudo apt-get upgrade -y" >> .github/echo_upgrade/weekly_upgrade.sh
+        chmod +x .github/echo_upgrade/weekly_upgrade.sh
+        bash .github/echo_upgrade/weekly_upgrade.sh | tee site/upgrade/upgrade.log
 
-      - name: ✅ 자동 PR 생성 echo 스크립트 생성 및 실행
-        run: |
-          echo '#!/bin/bash' > .github/echo_scripts/create_pr.sh
-          echo 'SCORE=$(jq ".score" results.json)' >> .github/echo_scripts/create_pr.sh
-          echo 'WARNINGS=""' >> .github/echo_scripts/create_pr.sh
-          echo 'for CHECK in CI-Tests Maintained Code-Review Binary-Artifacts; do' >> .github/echo_scripts/create_pr.sh
-          echo '  FOUND=$(jq -r --arg name "$CHECK" ".checks[] | select(.name==\$name) | .score" results.json)' >> .github/echo_scripts/create_pr.sh
-          echo '  if [ "$FOUND" == "0" ] || [ "$FOUND" == "-1" ]; then WARNINGS+="⚠️ $CHECK (점수: $FOUND)\n"; fi' >> .github/echo_scripts/create_pr.sh
-          echo 'done' >> .github/echo_scripts/create_pr.sh
-          echo 'echo -e "$WARNINGS" > site/pr/AUTO_PR_SUMMARY.md' >> .github/echo_scripts/create_pr.sh
-          chmod +x .github/echo_scripts/create_pr.sh
-          bash .github/echo_scripts/create_pr.sh
+    - name: ✅ Create Upgrade PR
+      uses: peter-evans/create-pull-request@v6
+      with:
+        commit-message: "🔁 weekly auto upgrade results"
+        title: "🔁 weekly upgrade: dependencies updated"
+        body: |
+          This PR contains results from the automated weekly upgrade process.
 
-      - name: 🌐 GitHub Pages 배포
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          publish_branch: gh-pages
-
-      - name: 📦 결과 업로드 (Artifacts)
-        uses: actions/upload-artifact@v4
-        with:
-          name: full-echo-results
-          path: |
-            site/
-            results.json
-            results.sarif
-            .github/echo_*
+          - All APT packages updated
+          - See full log in `site/upgrade/upgrade.log`
+        branch: auto/upgrade-${{ github.run_id }}
+        delete-branch: true
