@@ -1,99 +1,163 @@
-name: 📧 MEGA EmailOps + 패키지업데이트 + 방화벽 + ClamAV + 에코 확장형
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + AllGen
 
 on:
   workflow_dispatch:
-    inputs:
-      domain:
-        description: "Base domain for virtual accounts"
-        required: false
-        default: "example.local"
-      user_count:
-        description: "Number of virtual accounts per service"
-        required: false
-        default: "50"
-      test_count:
-        description: "Number of test emails per server"
-        required: false
-        default: "3"
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/1 * * * *"  # 매 1분마다 실행
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: read
+  security-events: write
+  pages: write
 
 jobs:
-  emailops:
+  mega-secure-ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
+      DB_USER: root
+      DB_PASS: rootpass123
+      DB_NAME: sample_db
       BASE: /opt/email
       MONO: /opt/email/.monitoring
-      DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
-      USER_COUNT: ${{ github.event.inputs.user_count || '50' }}
-      TEST_COUNT: ${{ github.event.inputs.test_count || '3' }}
+      DOMAIN: example.local
+      USER_COUNT: 50
+      TEST_COUNT: 3
       SERVICES: postfix exim4 opensmtpd mailhog maildev mailcatcher smtp4dev
-      INF_BUCKET: metrics
-      INF_ORG: org
-      INF_USER: admin
-      INF_PASS: admin1234!
-      INF_TOKEN: dev-token-123456
 
     steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
+    - name: 📂 Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: 📦 패키지 업데이트 + 필수 설치
-        run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get upgrade -y
-          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara ufw
-          echo "[ECHO] 패키지 업데이트 및 설치 완료"
+    - name: 📁 Create All Echo Directories
+      run: |
+        set -e
+        for dir in \
+          .github/scripts \
+          .github/firewall \
+          .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions} \
+          site/{scorecard,security,upgrade,pr,backup,logs,templates}; do
+          mkdir -p "$dir"
+          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+        done
+        chmod +x .github/echo_logs/create_dirs.sh
+        bash .github/echo_logs/create_dirs.sh
 
-      - name: 📁 에코 디렉토리 대량 생성
-        run: |
-          set -e
-          for d in echo_dirs echo_logs echo_firewall echo_scripts echo_services; do
-            mkdir -p ".github/$d"
-            echo "echo '[ECHO] 디렉토리 생성: .github/$d'" >> .github/echo_dirs/create_dirs.sh
-          done
-          chmod +x .github/echo_dirs/create_dirs.sh
-          bash .github/echo_dirs/create_dirs.sh
+    - name: 🛡️ Install Security & DB Tools
+      run: |
+        set -e
+        sudo apt-get update -y
+        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client netcat-traditional iptables
+        pip install bandit pip-audit
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: 🔐 방화벽 설정 + 에코 파일 생성
-        run: |
-          sudo ufw allow 25/tcp
-          sudo ufw allow 1025/tcp
-          sudo ufw allow 2525/tcp
-          sudo ufw allow 80/tcp
-          sudo ufw allow 443/tcp
-          echo "#!/bin/bash" > .github/echo_firewall/setup_firewall.sh
-          echo "echo '[ECHO] 방화벽 포트 25,1025,2525,80,443 허용 완료'" >> .github/echo_firewall/setup_firewall.sh
-          chmod +x .github/echo_firewall/setup_firewall.sh
-          bash .github/echo_firewall/setup_firewall.sh
+    - name: 🧪 Install Scorecard CLI
+      run: |
+        set -e
+        VERSION="4.10.3"
+        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
+        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
+        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -n1 || true)
+        if [ -z "$BIN" ]; then
+          echo "::error ::[ERR] Scorecard binary not found after extract."
+          exit 1
+        fi
+        chmod +x "$BIN"
+        sudo mv "$BIN" /usr/local/bin/scorecard
+        scorecard --version
 
-      - name: 📬 SMTP 서버 및 Mailhog 설치
-        run: |
-          docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
-          echo "echo '[ECHO] Mailhog 설치 및 실행 완료'" >> .github/echo_services/install_mailhog.sh
-          chmod +x .github/echo_services/install_mailhog.sh
-          bash .github/echo_services/install_mailhog.sh
+    - name: 🧾 Run Scorecard
+      run: |
+        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
+        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
+        cp results.sarif site/scorecard/scorecard-results.sarif
+        cp results.json site/security/security.json
 
-      - name: 📤 SMTP 테스트 메일 발송
-        run: |
-          echo "#!/bin/bash" > .github/scripts/emailops_sendmail.sh
-          echo "swaks --server 127.0.0.1:1025 --from ci@local --to test@local --header \"Subject: test \$(date)\" --body \"This is a test mailing\"" >> .github/scripts/emailops_sendmail.sh
-          chmod +x .github/scripts/emailops_sendmail.sh
-          bash .github/scripts/emailops_sendmail.sh
-          echo "echo '[ECHO] 테스트 메일 발송 완료'" >> .github/echo_logs/sendmail.log
+    - name: 🔎 Run Bandit, pip-audit, Trivy
+      run: |
+        bandit -r . -f json > site/security/bandit.json || true
+        pip-audit -f json -o site/security/pip-audit.json || true
+        trivy fs . --format json --output site/security/trivy.json || true
 
-      - name: 🦠 ClamAV 전체 스캔 (exit code 2 허용)
-        run: |
-          mkdir -p .github/echo_logs
-          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt || true
-          echo "echo '[ECHO] ClamAV 스캔 완료 (오류 무시)'" >> .github/echo_logs/clamav_scan.sh
-          chmod +x .github/echo_logs/clamav_scan.sh
-          bash .github/echo_logs/clamav_scan.sh || true
+    - name: 🧰 Run CodeQL Security Scan
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript
 
-      - name: 📤 로그 아티팩트 업로드
-        uses: actions/upload-artifact@v4
-        with:
-          name: emailops-logs
-          path: .github/echo_logs
+    - name: 📊 Run CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        output: site/security/codeql-results.sarif
+        category: codeql-security-scan
+
+    - name: 💾 Run DB Backups
+      run: |
+        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
+        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
+        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
+
+    - name: 📄 Generate Template Files
+      run: |
+        echo "ENV_VAR=VALUE" > site/security/.env
+        echo "{ \"config\": true }" > site/security/config.json
+        echo "[settings]\nsecure=true" > site/security/config.cfg
+
+    - name: 🔥 Generate Firewall Rules Script
+      run: |
+        echo "#!/bin/bash" > .github/firewall/setup_firewall.sh
+        echo "sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT" >> .github/firewall/setup_firewall.sh
+        echo "sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT" >> .github/firewall/setup_firewall.sh
+        echo "sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT" >> .github/firewall/setup_firewall.sh
+        chmod +x .github/firewall/setup_firewall.sh
+        bash .github/firewall/setup_firewall.sh || true
+
+    - name: 📧 Generate & Run Email Test Script
+      run: |
+        mkdir -p .github/scripts
+        echo "#!/bin/bash" > .github/scripts/emailops_sendmail.sh
+        echo "swaks --server 127.0.0.1:1025 --from ci@local --to test@local --header \"Subject: test \$(date)\" --body \"This is a test mailing\"" >> .github/scripts/emailops_sendmail.sh
+        chmod +x .github/scripts/emailops_sendmail.sh
+        bash .github/scripts/emailops_sendmail.sh || echo "[WARN] 메일 발송 실패"
+
+    - name: 📦 Save Security Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports
+        path: site/security/
+
+    - name: 📈 Save Upgrade Info
+      run: |
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
+
+    - name: 🔁 Create Auto PR for Upgrade
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        if grep -q ".*" site/upgrade/upgradable.txt; then
+          gh pr create --title "🔄 패키지 업그레이드 PR" \
+            --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
+        fi
+
+    - name: 🌐 Upload GitHub Pages Artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: site/
+
+    - name: 🚀 Deploy to GitHub Pages
+      uses: actions/deploy-pages@v2
+
+    - name: ⬆️ Auto Upgrade + Echo
+      run: |
+        echo "#!/bin/bash" > .github/echo_autoup/autoup.sh
+        echo "echo '[AUTOUP] 시스템 자동 업그레이드 시작'" >> .github/echo_autoup/autoup.sh
+        echo "sudo apt-get update -y && sudo apt-get upgrade -y" >> .github/echo_autoup/autoup.sh
+        echo "echo '[AUTOUP] 완료'" >> .github/echo_autoup/autoup.sh
+        chmod +x .github/echo_autoup/autoup.sh
+        bash .github/echo_autoup/autoup.sh
+
+    - name: 🔁 Schedule Reboot (1 min later)
+      run: |
+        echo "[REBOOT] 1분 후 자동 재시작 예약됨"
+        sudo shutdown -r +1 || true
