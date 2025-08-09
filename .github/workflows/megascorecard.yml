@@ -349,15 +349,55 @@ jobs:
         # ⬅️ --version 대신 하위 명령
         /usr/local/bin/scorecard version | tee .github/echo_logs/scorecard_version.txt
 
-    - name: 🧪 Apache Spark 설치
+    # ✅ Apache Spark 설치 (견고 다운로드/검증 + GITHUB_PATH 반영)
+    - name: 🧪 Apache Spark 설치 (견고 다운로드/검증)
       shell: bash
       run: |
         set -Eeuo pipefail
-        curl -sSLO "https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz"
-        tar xzf "spark-${SPARK_VERSION}-bin-hadoop3.tgz"
-        sudo mv "spark-${SPARK_VERSION}-bin-hadoop3" /opt/spark
-        echo "PATH=/opt/spark/bin:$PATH" >> "$GITHUB_ENV"
-        echo "[ECHO] Spark ${SPARK_VERSION} 설치 완료" | tee -a .github/echo_logs/spark_install.log
+        exec > >(tee .github/echo_logs/04_spark_install.log) 2>&1
+
+        VER="${SPARK_VERSION}"
+        PKG="spark-${VER}-bin-hadoop3.tgz"
+        BASE="spark-${VER}-bin-hadoop3"
+        TMP="$(mktemp -d)"
+
+        URLS=(
+          "https://dlcdn.apache.org/spark/spark-${VER}/${PKG}"
+          "https://downloads.apache.org/spark/spark-${VER}/${PKG}"
+          "https://archive.apache.org/dist/spark/spark-${VER}/${PKG}"
+        )
+
+        got=""
+        for u in "${URLS[@]}"; do
+          echo "[ECHO] Try download: $u"
+          if curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 -o "${TMP}/${PKG}" "$u"; then
+            if file -b --mime-type "${TMP}/${PKG}" | grep -q 'gzip'; then
+              if tar -tzf "${TMP}/${PKG}" >/dev/null 2>&1; then
+                got="${TMP}/${PKG}"
+                echo "[ECHO] Valid tgz downloaded from: $u"
+                break
+              fi
+            fi
+            echo "[WARN] Not a valid gzip tarball from $u — trying next mirror"
+          else
+            echo "[WARN] Download failed from $u — trying next mirror"
+          fi
+        done
+        if [ -z "$got" ]; then
+          echo "::error ::Failed to download valid Spark tarball ${PKG} from all mirrors"
+          exit 1
+        fi
+
+        if curl -fsSL -o "${TMP}/${PKG}.sha512" "https://archive.apache.org/dist/spark/spark-${VER}/${PKG}.sha512"; then
+          echo "[ECHO] Verifying sha512 checksum (best-effort)"
+          (cd "${TMP}" && sha512sum -c "${PKG}.sha512") || echo "[WARN] sha512 check failed (continuing)"
+        fi
+
+        tar -xzf "${got}" -C "${TMP}"
+        sudo rm -rf /opt/spark || true
+        sudo mv "${TMP}/${BASE}" /opt/spark
+        echo "/opt/spark/bin" >> "${GITHUB_PATH}"
+        echo "[ECHO] Spark ${VER} 설치 완료 (PATH=/opt/spark/bin)"
 
     - name: 🐳 Pull & Run Containers (echo scripts)
       shell: bash
