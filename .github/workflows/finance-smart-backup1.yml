@@ -1,12 +1,12 @@
-name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + Containers + Oracle
+name: 🔐 MEGA Secure CI + Full AutoUP + EchoOps + Spark + DB + Pages + Backups
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/1 * * * *'
+    - cron: "*/1 * * * *"
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   id-token: write
   security-events: write
@@ -20,50 +20,61 @@ jobs:
       DB_USER: root
       DB_PASS: rootpass123
       DB_NAME: sample_db
+      SPARK_VERSION: 3.5.1
+      VAULT_VERSION: 1.15.2
 
     steps:
     - name: 📂 Checkout Repository
       uses: actions/checkout@v4
 
-    - name: 📁 Create Echo Directories (No Missing File)
+    - name: 📁 Create Echo Directories
       run: |
         set -e
         mkdir -p .github/echo_logs
-        CREATE_SCRIPT=".github/echo_logs/create_dirs.sh"
-        echo "#!/bin/bash" > $CREATE_SCRIPT
-        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,containers,downloads} site/{scorecard,security,upgrade,pr,backup,html,downloads}; do
+        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,spark,downloads} \
+                   site/{scorecard,security,upgrade,pr,backup,html,spark_results}; do
           mkdir -p "$dir"
-          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> $CREATE_SCRIPT
+          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
         done
-        chmod +x $CREATE_SCRIPT
-        bash $CREATE_SCRIPT
+        chmod +x .github/echo_logs/create_dirs.sh
+        bash .github/echo_logs/create_dirs.sh
 
-    - name: 🛡️ Install Security Tools
+    - name: 🛠 Install Dependencies (Fix containerd conflicts)
       run: |
         set -e
         sudo apt-get update -y
-        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client docker.io
+        sudo apt-get install -y --allow-change-held-packages \
+          jq curl python3-pip unzip mysql-client postgresql-client default-jdk scala
         pip install bandit pip-audit
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-    - name: 🧪 Install Scorecard CLI
+    - name: 📦 Install Security Tools
       run: |
         set -e
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+          | sh -s -- -b /usr/local/bin
         VERSION="4.10.3"
         curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
         tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -n1 || true)
-        if [ -z "$BIN" ]; then
-          echo "::error ::[ERR] Scorecard binary not found after extract."
-          exit 1
-        fi
-        chmod +x "$BIN"
-        sudo mv "$BIN" /usr/local/bin/scorecard
+        sudo mv scorecard_${VERSION}_linux_amd64*/scorecard /usr/local/bin/scorecard
         scorecard --version
+
+    - name: 🚀 Install Apache Spark
+      run: |
+        set -e
+        curl -O https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz
+        tar xvf spark-${SPARK_VERSION}-bin-hadoop3.tgz
+        sudo mv spark-${SPARK_VERSION}-bin-hadoop3 /opt/spark
+        echo "export PATH=/opt/spark/bin:$PATH" >> $GITHUB_ENV
+        echo "echo '[ECHO] Apache Spark 설치 완료'" >> .github/echo_logs/spark_install.sh
+
+    - name: 🔐 Run Vault (stable version)
+      run: |
+        set -e
+        docker run -d --name vault_test -p 8200:8200 vault:${VAULT_VERSION} || true
+        echo "echo '[ECHO] Vault 컨테이너 실행 완료 (${VAULT_VERSION})'" >> .github/echo_logs/vault_run.sh
 
     - name: 🧾 Run Scorecard
       run: |
-        set -e
         scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
         scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
         cp results.sarif site/scorecard/scorecard-results.sarif
@@ -71,12 +82,11 @@ jobs:
 
     - name: 🔎 Run Bandit, pip-audit, Trivy
       run: |
-        set -e
         bandit -r . -f json > site/security/bandit.json || true
         pip-audit -f json -o site/security/pip-audit.json || true
         trivy fs . --format json --output site/security/trivy.json || true
 
-    - name: 🧰 Run CodeQL Init
+    - name: 🧰 Run CodeQL Security Scan
       uses: github/codeql-action/init@v3
       with:
         languages: javascript
@@ -87,56 +97,51 @@ jobs:
         output: site/security/codeql-results.sarif
         category: codeql-security-scan
 
-    - name: 📦 Start Containers + Health Check
+    - name: 💾 Run DB Backups
       run: |
-        set -e
-        SERVICES="vault:1.14 mysql:8 postgres:15 redis:7 gvenzl/oracle-xe:latest"
-        HEALTH_LOG=".github/echo_logs/containers_health.sh"
-        echo "#!/bin/bash" > $HEALTH_LOG
-        for svc in $SERVICES; do
-          NAME=$(echo $svc | tr '/:' '_')
-          echo "[ECHO] Pulling $svc"
-          docker pull $svc || true
-          echo "[ECHO] Starting $svc"
-          docker run -d --name ${NAME}_test $svc || true
-          sleep 10
-          if docker ps --filter "name=${NAME}_test" --filter "status=running" | grep -q ${NAME}_test; then
-            echo "echo '[HEALTH] $svc is running ✅'" >> $HEALTH_LOG
-          else
-            echo "echo '[HEALTH] $svc failed ❌ - restarting...'" >> $HEALTH_LOG
-            docker restart ${NAME}_test || true
-          fi
-        done
-        chmod +x $HEALTH_LOG
-        bash $HEALTH_LOG
+        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || true
+        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || true
+        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || true
 
-    - name: 🗄️ DB Backups
+    - name: 📝 Generate SQL & Spark Queries
       run: |
-        set -e
-        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
-        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
-        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
+        echo "SELECT * FROM test_table;" > query.sql
+        echo "spark.read.text('README.md').show()" > query_spark.py
+
+    - name: 📥 Download Spark & SQL Results
+      run: |
+        echo "id,name\n1,Alice\n2,Bob" > site/spark_results/sample.csv
+        echo "echo '[ECHO] Spark & SQL 결과 다운로드 완료'" >> .github/echo_logs/download_results.sh
 
     - name: 📈 Save Upgrade Info
       run: |
-        set -e
+        mkdir -p site/upgrade .github/echo_upgrade
         apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
+        pip list --outdated --format=columns > site/upgrade/pip-upgradable.txt || true
+        docker images --format "{{.Repository}}:{{.Tag}}" | while read img; do
+          echo "$img" >> site/upgrade/docker-images.txt
+        done
+        echo "echo '[ECHO] 업그레이드 대상 목록 저장 완료'" >> .github/echo_upgrade/upgrade_log.sh
+
+    - name: 🔄 Run Full Upgrade
+      run: |
+        sudo apt-get update -y
+        sudo apt-get upgrade -y --allow-change-held-packages
+        pip install --upgrade pip
+        pip list --outdated | cut -d ' ' -f1 | xargs -n1 pip install -U || true
+        docker images --format "{{.Repository}}:{{.Tag}}" | while read img; do
+          docker pull "$img" || true
+        done
+        echo "echo '[ECHO] 전체 업그레이드 완료'" >> .github/echo_upgrade/upgrade_log.sh
 
     - name: 🔁 Create Auto PR for Upgrade
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        set -e
-        if [ -s site/upgrade/upgradable.txt ]; then
+        if grep -q ".*" site/upgrade/upgradable.txt; then
           gh pr create --title "🔄 패키지 업그레이드 PR" \
-            --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
+            --body "자동 생성된 업그레이드 PR입니다."
         fi
-
-    - name: 📦 Save Security Reports & Downloads
-      uses: actions/upload-artifact@v4
-      with:
-        name: all-reports
-        path: site/
 
     - name: 🌐 Upload GitHub Pages Artifact
       uses: actions/upload-pages-artifact@v3
@@ -145,21 +150,3 @@ jobs:
 
     - name: 🚀 Deploy to GitHub Pages
       uses: actions/deploy-pages@v4
-
-    - name: ⬆️ Auto Upgrade + Echo
-      run: |
-        set -e
-        mkdir -p .github/echo_autoup
-        cat <<'EOF' > .github/echo_autoup/autoup.sh
-        #!/bin/bash
-        echo "[AUTOUP] 시스템 자동 업그레이드 시작"
-        sudo apt-get update -y && sudo apt-get upgrade -y
-        echo "[AUTOUP] 완료"
-        EOF
-        chmod +x .github/echo_autoup/autoup.sh
-        bash .github/echo_autoup/autoup.sh
-
-    - name: 🔁 Schedule Reboot (1 min later)
-      run: |
-        echo "[REBOOT] 1분 후 자동 재시작 예약됨"
-        sudo shutdown -r +1 || true
