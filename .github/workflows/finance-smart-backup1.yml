@@ -1,4 +1,4 @@
-name: 🧠 MEGA EMAILOPS + SMTP + MONITORING + VIRUS + FULL ECHO
+name: 🧠 MEGA EMAILOPS + SMTP + MONITORING + VIRUS + FULL ECHO + REAL MTA
 
 on:
   workflow_dispatch:
@@ -27,77 +27,73 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: 📂 Checkout
+      - name: 📂 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🧱 Echo 디렉토리/파일 뼈대 생성 (실행 전 필수)
+      - name: 📁 필수 에코 디렉토리 및 스크립트 생성
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 1) echo 디렉토리들 선생성
-          for d in .github/echo_{dirs,virus,compose,scripts,logs,monitoring,pages,auth} ; do
+          for d in \
+            .github/echo_dirs \
+            .github/echo_virus \
+            .github/echo_compose \
+            .github/echo_scripts \
+            .github/echo_logs \
+            .github/echo_monitoring \
+            .github/echo_pages \
+            .github/echo_auth \
+            .github/scripts ; do
             mkdir -p "$d"
           done
           mkdir -p "$BASE" "$MONO"
 
-          # 2) init_dirs.sh 에코 생성
+          # init_dirs.sh
           cat <<'EOS' > .github/echo_dirs/init_dirs.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          echo "[ECHO] BASE 디렉토리 및 권한 생성 완료"
+          chmod -R 755 "$BASE" "$MONO"
+          echo "[ECHO] BASE/Monitoring 디렉토리 권한 설정 완료"
           EOS
           chmod +x .github/echo_dirs/init_dirs.sh
 
-          # 3) 대량 에코 생성 스크립트(서비스별 디렉토리/로그/샘플 등)
+          # emailops_massive_echo.sh
           cat <<'EOS' > .github/scripts/emailops_massive_echo.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          BASE="${BASE:-/opt/email}"
-          MONO="${MONO:-/opt/email/.monitoring}"
-          SERVICES="${SERVICES:-mailhog smtp4dev}"
           mkdir -p "$BASE/services" "$BASE/config" "$BASE/data" "$BASE/logs" \
                    "$MONO/virus" "$MONO/metrics" "$MONO/grafana" "$MONO/influxdb" "$MONO/tmp"
           for s in $SERVICES; do
             mkdir -p "$BASE/services/$s" "$BASE/logs/$s" "$BASE/config/$s"
-            echo "[ECHO] 준비: $s" | tee -a "$BASE/logs/$s/prepare.log"
-            # 샘플 계정/메일함
-            printf "user%03d@%s\n" 1 "${DOMAIN:-example.local}" > "$BASE/services/$s/users.txt"
+            echo "[ECHO] 서비스 준비: $s" | tee -a "$BASE/logs/$s/prepare.log"
+            printf "user%03d@%s\n" 1 "$DOMAIN" > "$BASE/services/$s/users.txt"
             touch "$BASE/services/$s/mailbox.mbox"
           done
-          # 모니터링 플레이스홀더
           echo "{}" > "$MONO/metrics/boot.json"
-          echo "[ECHO] Massive echo generation done"
+          echo "[ECHO] 서비스별 디렉토리 및 샘플 데이터 생성 완료"
           EOS
           chmod +x .github/scripts/emailops_massive_echo.sh
 
-          # 4) SMTP 테스트 스크립트
+          # emailops_sendmail.sh
           cat <<'EOS' > .github/scripts/emailops_sendmail.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          # MailHog(1025), smtp4dev(2525) 기본 테스트
           body_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "[ECHO] swaks 로컬 SMTP 테스트 시작"
+          echo "[ECHO] swaks SMTP 테스트 시작"
           swaks --version >/dev/null 2>&1 || { echo "[WARN] swaks 미설치"; exit 0; }
-
-          # MailHog
-          swaks --to test@local --from ci@local --server 127.0.0.1 --port 1025 \
-                --data "Subject: CI MailHog Test\r\n\r\nBody $body_ts" \
-                || echo "[WARN] MailHog SMTP 실패(무시)"
-
-          # smtp4dev
-          swaks --to test@local --from ci@local --server 127.0.0.1 --port 2525 \
-                --data "Subject: CI smtp4dev Test\r\n\r\nBody $body_ts" \
-                || echo "[WARN] smtp4dev SMTP 실패(무시)"
-
+          for port in 25 1025 2525; do
+            swaks --to test@local --from ci@local --server 127.0.0.1 --port $port \
+                  --data "Subject: SMTP Test on port $port\r\n\r\nBody $body_ts" \
+                  || echo "[WARN] SMTP 포트 $port 실패"
+          done
           echo "[ECHO] SMTP 테스트 종료"
           EOS
           chmod +x .github/scripts/emailops_sendmail.sh
 
-          # 5) Grafana 대시보드 템플릿 생성
+          # grafana_dashboard_gen.sh
           cat <<'EOS' > .github/scripts/grafana_dashboard_gen.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          MONO="${MONO:-/opt/email/.monitoring}"
           mkdir -p "$MONO/grafana/provisioning/dashboards"
           cat > "$MONO/grafana/provisioning/dashboards/emailops.json" <<'J'
           {
@@ -106,35 +102,29 @@ jobs:
             "schemaVersion": 39,
             "version": 1,
             "panels": [
-              { "type": "stat", "title": "Dummy Metric", "id": 1, "datasource": null,
+              { "type": "stat", "title": "Dummy Metric", "id": 1,
                 "targets": [], "options": { "reduceOptions": { "values": false } } }
             ]
           }
           J
-          echo "[ECHO] Grafana 대시보드 템플릿 생성 완료: $MONO/grafana/provisioning/dashboards/emailops.json"
+          echo "[ECHO] Grafana 대시보드 템플릿 생성 완료"
           EOS
           chmod +x .github/scripts/grafana_dashboard_gen.sh
 
-          # 6) docker compose 실행 스크립트
+          # docker_compose.sh
           cat <<'EOS' > .github/echo_compose/docker_compose.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          BASE="${BASE:-/opt/email}"
-          MONO="${MONO:-/opt/email/.monitoring}"
-          COMPOSE_DIR=".github/echo_compose"
-          mkdir -p "$COMPOSE_DIR"
-          cat > "$COMPOSE_DIR/docker-compose.yml" <<'YML'
+          cat > .github/echo_compose/docker-compose.yml <<'YML'
           services:
             mailhog:
               image: mailhog/mailhog:latest
               ports: ["1025:1025", "8025:8025"]
               restart: unless-stopped
-
             smtp4dev:
               image: rnwood/smtp4dev:latest
               ports: ["2525:25", "5000:80"]
               restart: unless-stopped
-
             influxdb:
               image: influxdb:2
               environment:
@@ -148,7 +138,6 @@ jobs:
                 - /opt/email/.monitoring/influxdb:/var/lib/influxdb2
               ports: ["8086:8086"]
               restart: unless-stopped
-
             grafana:
               image: grafana/grafana:latest
               volumes:
@@ -160,82 +149,99 @@ jobs:
               ports: ["3000:3000"]
               restart: unless-stopped
           YML
-          echo "[ECHO] docker-compose.yml 생성"
-          docker version
-          docker compose version || true
-          docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d
-          echo "[ECHO] docker compose up -d 완료"
+          echo "[ECHO] docker-compose.yml 생성 완료"
+          docker compose -f .github/echo_compose/docker-compose.yml up -d
           EOS
           chmod +x .github/echo_compose/docker_compose.sh
 
-      - name: 📦 필수 패키지 설치 (tree, swaks, jq, ClamAV/YARA)
+          # real_mta_install.sh
+          cat <<'EOS' > .github/scripts/real_mta_install.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          for svc in $SERVICES; do
+            case "$svc" in
+              postfix)
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+                sudo postconf -e "myhostname = $DOMAIN"
+                sudo postconf -e "mydestination = localhost"
+                sudo postconf -e "inet_interfaces = all"
+                sudo systemctl enable postfix
+                sudo systemctl restart postfix
+                echo "[ECHO] Postfix 설치 및 설정 완료"
+                ;;
+              exim4)
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y exim4
+                sudo sed -i "s/dc_eximconfig_configtype=.*/dc_eximconfig_configtype='internet'/" /etc/exim4/update-exim4.conf.conf
+                sudo update-exim4.conf
+                sudo systemctl enable exim4
+                sudo systemctl restart exim4
+                echo "[ECHO] Exim4 설치 및 설정 완료"
+                ;;
+              opensmtpd)
+                sudo apt-get install -y opensmtpd
+                echo "listen on 0.0.0.0" | sudo tee /etc/smtpd.conf
+                echo "action \"local_mail\" maildir \"$BASE/maildir\"" | sudo tee -a /etc/smtpd.conf
+                echo "match from any for domain \"$DOMAIN\" action \"local_mail\"" | sudo tee -a /etc/smtpd.conf
+                sudo systemctl enable opensmtpd
+                sudo systemctl restart opensmtpd
+                echo "[ECHO] OpenSMTPD 설치 및 설정 완료"
+                ;;
+            esac
+          done
+          EOS
+          chmod +x .github/scripts/real_mta_install.sh
+
+      - name: 📦 필수 패키지 설치
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara
+          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara docker-compose-plugin
           sudo systemctl stop clamav-freshclam || true
           sudo freshclam || true
           sudo systemctl start clamav-daemon || true
-          echo "[ECHO] 패키지 설치 완료" | tee -a .github/echo_logs/setup.log
 
-      - name: 📁 전체 디렉토리 및 권한 설정 (에코 실행)
+      - name: 📁 권한 설정
+        shell: bash
+        run: bash .github/echo_dirs/init_dirs.sh
+
+      - name: 🛠️ 서비스별 에코 생성
+        shell: bash
+        run: bash .github/scripts/emailops_massive_echo.sh
+
+      - name: 📨 REAL MTA 설치/설정(Postfix/Exim4/OpenSMTPD)
+        shell: bash
+        run: bash .github/scripts/real_mta_install.sh
+
+      - name: 📊 Grafana 대시보드 생성
+        shell: bash
+        run: bash .github/scripts/grafana_dashboard_gen.sh
+
+      - name: 🐳 Docker Compose 서비스 실행
+        shell: bash
+        run: bash .github/echo_compose/docker_compose.sh
+
+      - name: ✉️ SMTP 테스트
+        shell: bash
+        run: bash .github/scripts/emailops_sendmail.sh || true
+
+      - name: 🛡️ 바이러스 검사
         shell: bash
         run: |
-          set -Eeuo pipefail
-          chmod -R 755 "$BASE" "$MONO" .github || true
-          bash .github/echo_dirs/init_dirs.sh
+          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt
 
-      - name: 🛠️ 초대량 서비스별 에코 생성
+      - name: 🪵 구조 스냅샷 저장
         shell: bash
         run: |
-          set -Eeuo pipefail
-          bash .github/scripts/emailops_massive_echo.sh
-
-      - name: 📊 Grafana 대시보드 템플릿 생성
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          bash .github/scripts/grafana_dashboard_gen.sh
-
-      - name: 🐳 docker compose 올리기 (MailHog/smtp4dev/InfluxDB/Grafana)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          bash .github/echo_compose/docker_compose.sh
-
-      - name: ✉️ SMTP 테스트 이메일 전송 (MailHog/smtp4dev)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          bash .github/scripts/emailops_sendmail.sh || true
-
-      - name: 🛡️ 바이러스 스캔(ClamAV)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p .github/echo_logs
-          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt || true
-          echo "[ECHO] 바이러스 스캔 완료" | tee -a .github/echo_logs/clamav_scan.txt
-
-      - name: 🪵 구조 스냅샷 로그 저장
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p .github/echo_logs
           tree -a "$BASE" > .github/echo_logs/tree_email.txt || true
           tree -a "$MONO" > .github/echo_logs/tree_monitoring.txt || true
-          echo "echo '[ECHO] 트리 구조 저장 완료'" > .github/echo_logs/tree_snapshot.sh
-          bash .github/echo_logs/tree_snapshot.sh || true
 
-      - name: 📤 아티팩트 업로드 (logs/config)
+      - name: 📤 아티팩트 업로드
         uses: actions/upload-artifact@v4
         with:
           name: emailops-artifacts
           path: |
             .github/echo_logs/**
-            .github/echo_dirs/**
-            .github/echo_compose/**
             .github/scripts/**
-            ${{ env.MONO }}/grafana/provisioning/**
+            .github/echo_*/**
           if-no-files-found: warn
