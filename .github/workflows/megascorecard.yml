@@ -1,145 +1,214 @@
-name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security (ULTRA)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/1 * * * *'  # 매 1분마다 실행
+    - cron: '*/1 * * * *'    # 매 1분
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
-  id-token: read
+  id-token: write
   security-events: write
   pages: write
 
 jobs:
   mega-secure-ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       DB_USER: root
       DB_PASS: rootpass123
       DB_NAME: sample_db
+      SPARK_VERSION: 3.5.1
+      VAULT_VERSION: 1.15.2
 
     steps:
-    - name: 📂 Checkout Repository
+    - name: 📂 Checkout
       uses: actions/checkout@v4
 
-    - name: 📁 Create Echo Directories
+    - name: 📁 Echo 디렉토리/파일 선생성 (No missing file)
       run: |
         set -e
-        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring} site/{scorecard,security,upgrade,pr,backup}; do
-          mkdir -p "$dir"
-          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+        mkdir -p .github/echo_logs
+        CREATE=.github/echo_logs/create_dirs.sh
+        echo '#!/usr/bin/env bash' > "$CREATE"
+        for d in \
+          .github/{scripts,firewall,downloads} \
+          .github/echo_{logs,scorecard,codeql,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions,containers} \
+          site/{scorecard,security,upgrade,pr,backup,html,containers,logs,templates,downloads,db_backup_html}; do
+          mkdir -p "$d"
+          echo "echo '[ECHO] 디렉토리 생성: $d'" >> "$CREATE"
         done
-        chmod +x .github/echo_logs/create_dirs.sh
-        bash .github/echo_logs/create_dirs.sh
+        chmod +x "$CREATE" && bash "$CREATE"
 
-    - name: 🛡️ Install Security Tools
+    - name: 🔧 기본 패키지 & Python 보안툴
       run: |
         set -e
         sudo apt-get update -y
-        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client
-        pip install bandit pip-audit
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        sudo apt-get install -y jq curl unzip tar git mysql-client postgresql-client default-jdk scala
+        python3 -m pip install --upgrade pip
+        pip install --no-cache-dir bandit pip-audit
 
-    - name: 🧪 Install Scorecard CLI
+    - name: 🐳 Docker 설치 (containerd 충돌 우회)
       run: |
         set -e
-        VERSION="4.10.3"
-        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
-        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -n1 || true)
-        if [ -z "$BIN" ]; then
-          echo "::error ::[ERR] Scorecard binary not found after extract."
-          exit 1
+        if ! command -v docker >/dev/null 2>&1; then
+          curl -fsSL https://get.docker.com | sh
         fi
-        chmod +x "$BIN"
-        sudo mv "$BIN" /usr/local/bin/scorecard
-        scorecard --version
+        sudo usermod -aG docker $USER || true
+        docker --version
 
-    - name: 🧾 Run Scorecard
+    - name: 🛡️ Trivy & Scorecard 설치(안전)
       run: |
         set -e
-        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
-        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
-        cp results.sarif site/scorecard/scorecard-results.sarif
-        cp results.json site/security/security.json
+        # Trivy
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+          | sh -s -- -b /usr/local/bin
+        # Scorecard
+        VER="4.10.3"
+        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz
+        tar -xzf scorecard_${VER}_linux_amd64.tar.gz
+        BIN=$(find . -type f -name scorecard | head -n1 || true)
+        if [ -z "$BIN" ]; then echo "::error ::Scorecard binary not found"; exit 1; fi
+        sudo mv "$BIN" /usr/local/bin/scorecard && chmod +x /usr/local/bin/scorecard
+        scorecard --version | tee .github/echo_logs/scorecard_version.txt
 
-    - name: 🔎 Run Bandit, pip-audit, Trivy
+    - name: 🧪 Apache Spark 설치
       run: |
         set -e
-        bandit -r . -f json > site/security/bandit.json || true
+        curl -sSLO https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz
+        tar xzf spark-${SPARK_VERSION}-bin-hadoop3.tgz
+        sudo mv spark-${SPARK_VERSION}-bin-hadoop3 /opt/spark
+        echo "PATH=/opt/spark/bin:$PATH" >> $GITHUB_ENV
+        echo "[ECHO] Spark ${SPARK_VERSION} 설치 완료" | tee -a .github/echo_logs/spark_install.log
+
+    - name: 🐳 컨테이너 Pull/Run(버전 고정) + HealthCheck + Auto-Restart
+      run: |
+        set -e
+        declare -A IMGS=(
+          [mysql]="mysql:8.0.37"
+          [postgres]="postgres:16.3"
+          [redis]="redis:7.2.5"
+          [kafka]="bitnami/kafka:3.7.0"
+          [vault]="vault:${VAULT_VERSION}"
+          [spark-svc]="bitnami/spark:3.5.1"
+          [camunda]="camunda/camunda-bpm-platform:run-7.21.0"
+        )
+        for n in "${!IMGS[@]}"; do
+          img="${IMGS[$n]}"
+          docker rm -f "${n}_ci" >/dev/null 2>&1 || true
+          docker pull "$img" || true
+        done
+        docker run -d --name mysql_ci    -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 ${IMGS[mysql]}
+        docker run -d --name postgres_ci -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 ${IMGS[postgres]}
+        docker run -d --name redis_ci -p 6379:6379 ${IMGS[redis]}
+        docker run -d --name kafka_ci -p 9092:9092 ${IMGS[kafka]}
+        docker run -d --name vault_ci -p 8200:8200 ${IMGS[vault]}
+        docker run -d --name spark_ci -p 7077:7077 ${IMGS[spark-svc]}
+        docker run -d --name camunda_ci -p 8081:8080 ${IMGS[camunda]}
+        # HealthCheck + Restart
+        echo "#!/usr/bin/env bash" > .github/echo_logs/containers_health.sh
+        for c in mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci; do
+          st=$(docker inspect --format='{{.State.Status}}' "$c" 2>/dev/null || echo unknown)
+          if [ "$st" != "running" ]; then echo "[HEALTH] $c: $st → restart" >> .github/echo_logs/containers_health.sh; docker restart "$c" || true; else echo "[HEALTH] $c: OK" >> .github/echo_logs/containers_health.sh; fi
+        done
+        bash .github/echo_logs/containers_health.sh
+
+    - name: 🗄 DB 백업 + HTML 변환
+      run: |
+        set -e
+        # 대기(초간단) — 컨테이너 기동 안정화
+        sleep 10
+        mysqldump -h 127.0.0.1 -P 3306 -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패" | tee -a .github/echo_logs/backup.log
+        pg_dump -h 127.0.0.1 -p 5432 -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패" | tee -a .github/echo_logs/backup.log
+        for f in site/backup/*; do
+          [ -f "$f" ] || continue
+          b=$(basename "$f"); { echo "<html><body><h3>$b</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' "$f"; echo "</pre></body></html>"; } > "site/db_backup_html/${b}.html"
+        done
+
+    - name: 🔎 보안 스캔 (Scorecard / CodeQL / Bandit / pip-audit / Trivy)
+      run: |
+        set -e
+        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > site/security/scorecard.sarif || true
+        scorecard --repo=https://github.com/${{ github.repository }} --format json  --no-upload > site/security/scorecard.json  || true
         pip-audit -f json -o site/security/pip-audit.json || true
+        bandit -r . -f json -o site/security/bandit.json || true
         trivy fs . --format json --output site/security/trivy.json || true
 
-    - name: 🧰 Run CodeQL Security Scan
+    - name: 🧰 CodeQL Init
       uses: github/codeql-action/init@v3
       with:
         languages: javascript
 
-    - name: 📊 Run CodeQL Analysis
+    - name: 📊 CodeQL Analyze
       uses: github/codeql-action/analyze@v3
       with:
         output: site/security/codeql-results.sarif
         category: codeql-security-scan
 
-    - name: 💾 Run DB Backups
+    - name: ⬆️ 업그레이드 사전 목록 수집
       run: |
         set -e
-        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
-        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
-        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
+        mkdir -p site/upgrade .github/echo_upgrade
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.before.txt
+        pip list --outdated --format=columns > site/upgrade/pip-upgradable.before.txt || true
+        docker images --format '{{.Repository}}:{{.Tag}}' > site/upgrade/docker-images.before.txt || true
 
-    - name: 📄 Generate Template Files
-      run: |
-        echo "ENV_VAR=VALUE" > site/security/.env
-        echo "{ \"config\": true }" > site/security/config.json
-        echo "[settings]\nsecure=true" > site/security/config.cfg
-
-    - name: 📦 Save Security Reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-reports
-        path: site/security/
-
-    - name: 📈 Save Upgrade Info
+    - name: ⬆️ 시스템/파이썬/Docker 풀 업그레이드
       run: |
         set -e
-        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
+        sudo apt-get update -y && sudo apt-get upgrade -y && sudo apt-get autoremove -y && sudo apt-get clean
+        pip install --upgrade pip
+        pip list --outdated --format=freeze | cut -d= -f1 | xargs -n1 -r pip install -U || true
+        while read -r img; do [ -n "$img" ] && docker pull "$img" || true; done < site/upgrade/docker-images.before.txt
+        echo "[ECHO] 전체 업그레이드 완료" | tee -a .github/echo_upgrade/upgrade.log
 
-    - name: 🔁 Create Auto PR for Upgrade
+    - name: ⬆️ 업그레이드 사후 목록 & HTML 리포트
+      run: |
+        set -e
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.after.txt
+        pip list --outdated --format=columns > site/upgrade/pip-upgradable.after.txt || true
+        docker images --format '{{.Repository}}:{{.Tag}}' > site/upgrade/docker-images.after.txt || true
+        # 간단 diff → HTML
+        {
+          echo "<html><body><h2>Upgrade Diff</h2><h3>APT</h3><pre>"
+          diff -u site/upgrade/upgradable.before.txt site/upgrade/upgradable.after.txt || true
+          echo "</pre><h3>PIP</h3><pre>"
+          diff -u site/upgrade/pip-upgradable.before.txt site/upgrade/pip-upgradable.after.txt || true
+          echo "</pre><h3>Docker Images</h3><pre>"
+          diff -u site/upgrade/docker-images.before.txt site/upgrade/docker-images.after.txt || true
+          echo "</pre></body></html>"
+        } > site/upgrade/report.html
+
+    - name: 🔁 업그레이드 자동 PR (변경 있을 때만)
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -e
-        if grep -q ".*" site/upgrade/upgradable.txt; then
-          echo "[ECHO] PR 생성 시작"
-          gh pr create --title "🔄 패키지 업그레이드 PR" \
-            --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
+        if [ -s site/upgrade/upgradable.after.txt ] || [ -s site/upgrade/pip-upgradable.after.txt ]; then
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions"
+          git checkout -b auto/upgrade-$(date -u +%Y%m%d%H%M%S)
+          git add site/upgrade/ .github/echo_upgrade/ || true
+          git commit -m "chore: auto upgrade artifacts" || true
+          git push -u origin HEAD || true
+          gh pr create --title "⬆️ Auto Upgrade" --body "자동 업그레이드 산출물 커밋/페이지 반영" || true
         fi
 
-    - name: 🌐 Upload GitHub Pages Artifact
+    - name: 📦 아티팩트 업로드(다운로드 가능)
+      uses: actions/upload-artifact@v4
+      with:
+        name: mega-artifacts
+        path: |
+          site/**
+          .github/echo_logs/**
+          .github/echo_upgrade/**
+
+    - name: 🌐 Upload Pages Artifact
       uses: actions/upload-pages-artifact@v3
       with:
         path: site/
 
     - name: 🚀 Deploy to GitHub Pages
       uses: actions/deploy-pages@v4
-
-    - name: ⬆️ Auto Upgrade + Echo
-      run: |
-        set -e
-        cat <<'EOF' > .github/echo_autoup/autoup.sh
-        #!/bin/bash
-        echo "[AUTOUP] 시스템 자동 업그레이드 시작"
-        sudo apt-get update -y && sudo apt-get upgrade -y
-        echo "[AUTOUP] 완료"
-        EOF
-        chmod +x .github/echo_autoup/autoup.sh
-        bash .github/echo_autoup/autoup.sh
-
-    - name: 🔁 Schedule Reboot (1 min later)
-      run: |
-        echo "[REBOOT] 1분 후 자동 재시작 예약됨"
-        sudo shutdown -r +1 || true
