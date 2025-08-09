@@ -1,90 +1,175 @@
-name: 🏢 MEGA DB + Middleware + Upgrade + EchoOps
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/1 * * * *'  # 매 1분마다 실행
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+  security-events: write
+  pages: write
 
 jobs:
-  mega-deploy:
+  mega-secure-ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
       DB_USER: root
       DB_PASS: rootpass123
       DB_NAME: sample_db
-      BASE: /opt/email
-      DOMAIN: example.local
-      USER_COUNT: 50
-      TEST_COUNT: 3
-      MIDDLEWARE: mysql postgres oracle redis kafka vault airflow spark camunda
 
     steps:
-      - name: 📂 Checkout Repository
-        uses: actions/checkout@v4
+    - name: 📂 Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: 📁 디렉토리 및 에코 스크립트 생성
-        run: |
-          set -e
-          mkdir -p .github/echo_logs
-          for dir in \
-            .github/scripts \
-            .github/firewall \
-            .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions} \
-            site/{scorecard,security,upgrade,pr,backup,logs,templates}; do
-            mkdir -p "$dir"
-            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
-          done
-          chmod +x .github/echo_logs/create_dirs.sh
-          bash .github/echo_logs/create_dirs.sh
+    - name: 📁 Create Echo Directories
+      run: |
+        set -e
+        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring} site/{scorecard,security,upgrade,pr,backup,html}; do
+          mkdir -p "$dir"
+          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+        done
+        chmod +x .github/echo_logs/create_dirs.sh
+        bash .github/echo_logs/create_dirs.sh
 
-      - name: ⬆️ 모든 패키지 업데이트
-        run: |
-          set -e
-          sudo apt-get update -y
-          sudo apt-get upgrade -y
-          echo "echo '[ECHO] 시스템 패키지 업데이트 완료'" >> .github/echo_logs/upgrade.log
+    - name: 🐳 Install Docker & Middleware Containers
+      run: |
+        set -e
+        sudo apt-get update -y
+        sudo apt-get install -y docker.io
+        sudo systemctl start docker
+        sudo systemctl enable docker
+        # MySQL
+        docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 mysql:8
+        # PostgreSQL
+        docker run -d --name postgres -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 postgres:15
+        # Redis
+        docker run -d --name redis -p 6379:6379 redis:7
+        # Kafka
+        docker run -d --name kafka -p 9092:9092 bitnami/kafka:latest
+        # Vault
+        docker run -d --name vault -p 8200:8200 hashicorp/vault:latest
+        # Spark
+        docker run -d --name spark -p 7077:7077 bitnami/spark:latest
+        # Camunda
+        docker run -d --name camunda -p 8081:8080 camunda/camunda-bpm-platform:latest
+        echo "echo '[ECHO] DB 및 미들웨어 컨테이너 설치 완료'" >> .github/echo_logs/install.log
 
-      - name: 🔥 방화벽 권한 파일 생성
-        run: |
-          set -e
-          FW_FILE=".github/firewall/firewall_rules.sh"
-          echo "#!/bin/bash" > "$FW_FILE"
-          echo "ufw allow 22" >> "$FW_FILE"
-          echo "ufw allow 80" >> "$FW_FILE"
-          echo "ufw allow 443" >> "$FW_FILE"
-          echo "ufw allow 3306" >> "$FW_FILE"
-          echo "ufw allow 5432" >> "$FW_FILE"
-          echo "ufw allow 6379" >> "$FW_FILE"
-          echo "ufw allow 9092" >> "$FW_FILE"
-          echo "ufw allow 8200" >> "$FW_FILE"
-          echo "ufw allow 8080" >> "$FW_FILE"
-          echo "ufw allow 7077" >> "$FW_FILE"
-          echo "ufw allow 8081" >> "$FW_FILE"
-          chmod +x "$FW_FILE"
-          echo "echo '[ECHO] 방화벽 규칙 파일 생성 완료: $FW_FILE'" >> .github/echo_logs/firewall.log
+    - name: 🛡️ Install Security Tools
+      run: |
+        set -e
+        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client
+        pip install bandit pip-audit
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: 🐳 Docker 컨테이너 설치 (기본 설치 활용)
-        run: |
-          set -e
-          docker --version
-          sudo systemctl start docker
-          sudo systemctl enable docker
+    - name: 🧪 Install Scorecard CLI
+      run: |
+        set -e
+        VERSION="4.10.3"
+        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
+        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
+        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -n1 || true)
+        if [ -z "$BIN" ]; then
+          echo "::error ::[ERR] Scorecard binary not found after extract."
+          exit 1
+        fi
+        chmod +x "$BIN"
+        sudo mv "$BIN" /usr/local/bin/scorecard
+        scorecard --version
 
-          docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 mysql:8
-          docker run -d --name postgres -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 postgres:15
-          docker run -d --name redis -p 6379:6379 redis:7
-          docker run -d --name kafka -p 9092:9092 bitnami/kafka:latest
-          docker run -d --name vault -p 8200:8200 vault:latest
-          docker run -d --name airflow -p 8080:8080 apache/airflow:2.9.3
-          docker run -d --name spark -p 7077:7077 bitnami/spark:latest
-          docker run -d --name camunda -p 8081:8080 camunda/camunda-bpm-platform:latest
+    - name: 🧾 Run Scorecard
+      run: |
+        set -e
+        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
+        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
+        cp results.sarif site/scorecard/scorecard-results.sarif
+        cp results.json site/security/security.json
 
-          echo "echo '[ECHO] DB 및 미들웨어 컨테이너 설치 완료'" >> .github/echo_logs/install.log
+    - name: 🔎 Run Bandit, pip-audit, Trivy
+      run: |
+        set -e
+        bandit -r . -f json > site/security/bandit.json || true
+        pip-audit -f json -o site/security/pip-audit.json || true
+        trivy fs . --format json --output site/security/trivy.json || true
 
-      - name: 📜 설치 및 실행 로그 출력
-        run: |
-          set -e
-          echo "===== 생성된 로그 목록 ====="
-          ls -R .github/echo_logs || true
-          echo "===== 로그 파일 내용 ====="
-          cat .github/echo_logs/*.log || true
+    - name: 🧰 Run CodeQL Security Scan
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript
+
+    - name: 📊 Run CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        output: site/security/codeql-results.sarif
+        category: codeql-security-scan
+
+    - name: 💾 Run DB Backups
+      run: |
+        set -e
+        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
+        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
+        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
+
+    - name: 📝 Convert Backup to HTML
+      run: |
+        for file in site/backup/*; do
+          echo "<html><body><pre>" > "site/html/$(basename $file).html"
+          cat "$file" >> "site/html/$(basename $file).html"
+          echo "</pre></body></html>" >> "site/html/$(basename $file).html"
+        done
+
+    - name: 📄 Generate Template Files
+      run: |
+        echo "ENV_VAR=VALUE" > site/security/.env
+        echo "{ \"config\": true }" > site/security/config.json
+        echo "[settings]\nsecure=true" > site/security/config.cfg
+
+    - name: 📦 Save Security Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports
+        path: site/security/
+
+    - name: 📈 Save Upgrade Info
+      run: |
+        set -e
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
+
+    - name: 🔁 Create Auto PR for Upgrade
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -e
+        if grep -q ".*" site/upgrade/upgradable.txt; then
+          echo "[ECHO] PR 생성 시작"
+          gh pr create --title "🔄 패키지 업그레이드 PR" \
+            --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
+        fi
+
+    - name: 🌐 Upload GitHub Pages Artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: site/
+
+    - name: 🚀 Deploy to GitHub Pages
+      uses: actions/deploy-pages@v4
+
+    - name: ⬆️ Auto Upgrade + Echo
+      run: |
+        set -e
+        cat <<'EOF' > .github/echo_autoup/autoup.sh
+        #!/bin/bash
+        echo "[AUTOUP] 시스템 자동 업그레이드 시작"
+        sudo apt-get update -y && sudo apt-get upgrade -y
+        echo "[AUTOUP] 완료"
+        EOF
+        chmod +x .github/echo_autoup/autoup.sh
+        bash .github/echo_autoup/autoup.sh
+
+    - name: 🔁 Schedule Reboot (1 min later)
+      run: |
+        echo "[REBOOT] 1분 후 자동 재시작 예약됨"
+        sudo shutdown -r +1 || true
