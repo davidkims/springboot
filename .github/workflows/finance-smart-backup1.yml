@@ -1,9 +1,9 @@
-name: 🔐 MEGA Secure CI + Full AutoUP + EchoOps + Spark + DB + Pages + Backups
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + ServiceFiles (ULTRA+++)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: '*/1 * * * *'
 
 permissions:
   contents: write
@@ -15,135 +15,320 @@ permissions:
 jobs:
   mega-secure-ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       DB_USER: root
       DB_PASS: rootpass123
       DB_NAME: sample_db
       SPARK_VERSION: 3.5.1
       VAULT_VERSION: 1.15.2
+      VAULT_DEV_TOKEN: root-token-123
+      KAFKA_BROKER_PORT: "9092"
+      KAFKA_CTRL_PORT: "9093"
 
     steps:
-    - name: 📂 Checkout Repository
+    - name: 📂 Checkout
       uses: actions/checkout@v4
 
-    - name: 📁 Create Echo Directories
+    - name: 📁 Echo/서비스 디렉토리 선생성 + 가상 계정 대량 생성
       run: |
         set -e
         mkdir -p .github/echo_logs
-        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,spark,downloads} \
-                   site/{scorecard,security,upgrade,pr,backup,html,spark_results}; do
-          mkdir -p "$dir"
-          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+        for d in \
+          .github/{scripts,firewall,downloads} \
+          .github/echo_{logs,scorecard,codeql,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions,containers,auth} \
+          .github/services/{mysql,postgres,redis,kafka,vault,spark,camunda,airflow} \
+          site/{scorecard,security,upgrade,pr,backup,html,containers,logs,templates,downloads,db_backup_html,spark_results,auth}; do
+          mkdir -p "$d"
         done
-        chmod +x .github/echo_logs/create_dirs.sh
-        bash .github/echo_logs/create_dirs.sh
 
-    - name: 🛠 Install Dependencies (Fix containerd conflicts)
+        # 가상 이메일/패스워드 200명 생성
+        python3 - <<'PY'
+import csv,random,string,json,sys
+users=[(f"user{str(i).zfill(3)}@example.local","".join(random.choices(string.ascii_letters+string.digits, k=16))) for i in range(1,201)]
+with open(".github/services/auth/users.csv","w",newline="") as f:
+    w=csv.writer(f); w.writerow(["email","password"]); w.writerows(users)
+with open("site/auth/users.json","w") as f:
+    json.dump([{"email":u,"password":p} for u,p in users], f, indent=2)
+PY
+        echo "[ECHO] 가상 계정 200명 생성 완료" | tee -a .github/echo_logs/auth.log
+
+    - name: 🔧 기본 패키지 & Python 보안툴
       run: |
         set -e
         sudo apt-get update -y
-        sudo apt-get install -y --allow-change-held-packages \
-          jq curl python3-pip unzip mysql-client postgresql-client default-jdk scala
-        pip install bandit pip-audit
+        sudo apt-get install -y jq curl unzip tar git mysql-client postgresql-client default-jdk scala ufw iptables
+        python3 -m pip install --upgrade pip
+        pip install --no-cache-dir bandit pip-audit
 
-    - name: 📦 Install Security Tools
+    - name: 🐳 Docker 설치 (containerd 충돌 우회)
       run: |
         set -e
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          | sh -s -- -b /usr/local/bin
-        VERSION="4.10.3"
-        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
-        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-        sudo mv scorecard_${VERSION}_linux_amd64*/scorecard /usr/local/bin/scorecard
-        scorecard --version
+        if ! command -v docker >/dev/null 2>&1; then
+          curl -fsSL https://get.docker.com | sh
+        fi
+        sudo usermod -aG docker $USER || true
+        docker --version
 
-    - name: 🚀 Install Apache Spark
+    - name: 🛡️ Trivy & Scorecard 설치(안전)
       run: |
         set -e
-        curl -O https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz
-        tar xvf spark-${SPARK_VERSION}-bin-hadoop3.tgz
+        # Trivy
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        # Scorecard (안전 find)
+        VER="4.10.3"
+        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz
+        tar -xzf scorecard_${VER}_linux_amd64.tar.gz
+        BIN=$(find . -type f -name scorecard | head -n1 || true)
+        if [ -z "$BIN" ]; then echo "::error ::Scorecard binary not found"; exit 1; fi
+        sudo mv "$BIN" /usr/local/bin/scorecard && chmod +x /usr/local/bin/scorecard
+        scorecard --version | tee .github/echo_logs/scorecard_version.txt
+
+    - name: 🧪 Apache Spark 설치
+      run: |
+        set -e
+        curl -sSLO https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz
+        tar xzf spark-${SPARK_VERSION}-bin-hadoop3.tgz
         sudo mv spark-${SPARK_VERSION}-bin-hadoop3 /opt/spark
-        echo "export PATH=/opt/spark/bin:$PATH" >> $GITHUB_ENV
-        echo "echo '[ECHO] Apache Spark 설치 완료'" >> .github/echo_logs/spark_install.sh
+        echo "PATH=/opt/spark/bin:$PATH" >> $GITHUB_ENV
+        echo "[ECHO] Spark ${SPARK_VERSION} 설치 완료" | tee -a .github/echo_logs/spark_install.log
 
-    - name: 🔐 Run Vault (stable version)
+    - name: 🧰 서비스별 기본 파일 대량 생성
       run: |
         set -e
-        docker run -d --name vault_test -p 8200:8200 vault:${VAULT_VERSION} || true
-        echo "echo '[ECHO] Vault 컨테이너 실행 완료 (${VAULT_VERSION})'" >> .github/echo_logs/vault_run.sh
+        # MySQL 초기 SQL
+        cat > .github/services/mysql/init.sql <<'SQL'
+        CREATE DATABASE IF NOT EXISTS sample_db;
+        CREATE TABLE IF NOT EXISTS sample_db.test (id INT PRIMARY KEY, val VARCHAR(64));
+        INSERT INTO sample_db.test VALUES (1,'hello'),(2,'world')
+        ON DUPLICATE KEY UPDATE val=VALUES(val);
+        SQL
 
-    - name: 🧾 Run Scorecard
-      run: |
-        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
-        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
-        cp results.sarif site/scorecard/scorecard-results.sarif
-        cp results.json site/security/security.json
+        # Postgres 초기 SQL
+        cat > .github/services/postgres/init.sql <<'SQL'
+        CREATE DATABASE sample_db;
+        \connect sample_db;
+        CREATE TABLE IF NOT EXISTS test (id INT PRIMARY KEY, val VARCHAR(64));
+        INSERT INTO test (id,val) VALUES (1,'hello'),(2,'world')
+        ON CONFLICT (id) DO UPDATE SET val=EXCLUDED.val;
+        SQL
 
-    - name: 🔎 Run Bandit, pip-audit, Trivy
+        # Redis conf
+        cat > .github/services/redis/redis.conf <<'CONF'
+        protected-mode no
+        port 6379
+        tcp-keepalive 300
+        save 300 10
+        appendonly yes
+        CONF
+
+        # Kafka env (KRaft, 외부 리스너 포함)
+        echo "KAFKA_CFG_NODE_ID=1"                                         >  .github/services/kafka/env
+        echo "KAFKA_CFG_PROCESS_ROLES=broker,controller"                   >> .github/services/kafka/env
+        echo "KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,OUTSIDE://:19092,CONTROLLER://:9093" >> .github/services/kafka/env
+        echo "KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092,OUTSIDE://127.0.0.1:19092" >> .github/services/kafka/env
+        echo "KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,OUTSIDE:PLAINTEXT,CONTROLLER:PLAINTEXT" >> .github/services/kafka/env
+        echo "KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093"         >> .github/services/kafka/env
+        echo "KAFKA_ENABLE_KRAFT=yes"                                      >> .github/services/kafka/env
+
+        # Vault dev 설정
+        cat > .github/services/vault/dev.hcl <<'HCL'
+        ui = true
+        listener "tcp" { address = "0.0.0.0:8200" tls_disable = 1 }
+        disable_mlock = true
+        HCL
+
+        # Spark 기본 conf
+        mkdir -p .github/services/spark/conf
+        cat > .github/services/spark/conf/spark-defaults.conf <<'CONF'
+        spark.ui.enabled true
+        spark.eventLog.enabled true
+        spark.sql.shuffle.partitions 4
+        CONF
+
+        # Camunda env
+        cat > .github/services/camunda/env <<'ENV'
+        TZ=UTC
+        JAVA_TOOL_OPTIONS=-Xms256m -Xmx512m
+        ENV
+
+        # Airflow 구성
+        mkdir -p .github/services/airflow/dags
+        cat > .github/services/airflow/dags/example_dag.py <<'PY'
+        from datetime import datetime
+        from airflow import DAG
+        from airflow.operators.bash import BashOperator
+        with DAG("example_hello", start_date=datetime(2024,1,1), schedule="@daily", catchup=False) as dag:
+            t1 = BashOperator(task_id="hello", bash_command="echo 'hello from airflow'")
+        PY
+        cat > .github/services/airflow/requirements.txt <<'REQ'
+        REQ
+        echo "[ECHO] 서비스 파일 생성 완료" | tee -a .github/echo_logs/service_files.log
+
+    - name: 🧱 서비스별 방화벽 스크립트 생성/적용 (ufw + iptables)
       run: |
-        bandit -r . -f json > site/security/bandit.json || true
+        set -e
+        # 허용 포트 목록
+        PORTS="22 80 443 3000 5000 8086 3306 5432 6379 9092 19092 9093 8200 7077 8080 8081"
+        # ufw
+        {
+          echo "#!/usr/bin/env bash"
+          echo "sudo ufw --force reset || true"
+          for p in $PORTS; do echo "sudo ufw allow ${p}/tcp || true"; done
+          echo "sudo ufw --force enable || true"
+        } > .github/firewall/ufw_apply.sh
+        chmod +x .github/firewall/ufw_apply.sh
+        bash .github/firewall/ufw_apply.sh || true
+
+        # iptables
+        {
+          echo "#!/usr/bin/env bash"
+          for p in $PORTS; do echo "sudo iptables -A INPUT -p tcp --dport ${p} -j ACCEPT || true"; done
+        } > .github/firewall/iptables_apply.sh
+        chmod +x .github/firewall/iptables_apply.sh
+        bash .github/firewall/iptables_apply.sh || true
+        echo "[ECHO] 방화벽 규칙 적용(실패 무시)" | tee -a .github/echo_logs/firewall.log
+
+    - name: 🐳 컨테이너 실행(구성 반영) + Vault 시크릿 주입 + Airflow 초기화/유저
+      run: |
+        set -e
+        for c in mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci airflow_ci; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+
+        # MySQL
+        docker run -d --name mysql_ci -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 mysql:8.0.37
+        # Postgres
+        docker run -d --name postgres_ci -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 postgres:16.3
+        # Redis
+        docker run -d --name redis_ci -p 6379:6379 -v "$PWD/.github/services/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro" redis:7.2.5 redis-server /usr/local/etc/redis/redis.conf
+        # Kafka (외부/내부 동시)
+        docker run -d --name kafka_ci --env-file "$PWD/.github/services/kafka/env" -p 9092:9092 -p 9093:9093 -p 19092:19092 bitnami/kafka:3.7.0
+        # Vault dev (고정 토큰)
+        docker run -d --name vault_ci -p 8200:8200 vault:${VAULT_VERSION} server -dev -dev-root-token-id=${VAULT_DEV_TOKEN}
+        # Spark
+        docker run -d --name spark_ci -p 7077:7077 -v "$PWD/.github/services/spark/conf:/opt/bitnami/spark/conf" bitnami/spark:3.5.1
+        # Camunda
+        docker run -d --name camunda_ci --env-file "$PWD/.github/services/camunda/env" -p 8081:8080 camunda/camunda-bpm-platform:run-7.21.0
+        # Airflow (sqlite, root로 동작 허용)
+        docker run -d --name airflow_ci -e AIRFLOW__CORE__LOAD_EXAMPLES=True -p 8080:8080 \
+          -v "$PWD/.github/services/airflow/dags:/opt/airflow/dags" \
+          -v "$PWD/.github/services/airflow/requirements.txt:/requirements.txt" \
+          apache/airflow:2.9.3 || true
+
+        # Health & auto-restart
+        echo "#!/usr/bin/env bash" > .github/echo_logs/containers_health.sh
+        for c in mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci airflow_ci; do
+          st=$(docker inspect --format='{{.State.Status}}' "$c" 2>/dev/null || echo unknown)
+          if [ "$st" != "running" ]; then echo "[HEALTH] $c: $st → restart" >> .github/echo_logs/containers_health.sh; docker restart "$c" || true; else echo "[HEALTH] $c: OK" >> .github/echo_logs/containers_health.sh; fi
+        done
+        bash .github/echo_logs/containers_health.sh
+
+        # DB init SQL 적용
+        sleep 10
+        docker exec -i mysql_ci mysql -u${DB_USER} -p${DB_PASS} < .github/services/mysql/init.sql || true
+        docker exec -i postgres_ci psql -U postgres -f /dev/stdin < .github/services/postgres/init.sql || true
+
+        # Vault 시크릿 주입 (kv v2 경로: secret/data/app)
+        export VAULT_ADDR=http://127.0.0.1:8200
+        export VAULT_TOKEN=${VAULT_DEV_TOKEN}
+        # vault CLI가 컨테이너 안에만 있으므로 exec 사용
+        docker exec vault_ci sh -lc 'export VAULT_ADDR=http://127.0.0.1:8200; export VAULT_TOKEN='"${VAULT_DEV_TOKEN}"'; \
+          vault kv put secret/app api_key=DEMO_KEY_ABC123 admin_user=admin admin_pass=admin123' || true
+
+        # Airflow 초기화 & 관리자 계정
+        docker exec airflow_ci bash -lc "airflow db init && airflow users create \
+          --role Admin --username admin --password admin123 --firstname CI --lastname Bot --email admin@example.local" || true
+        echo "[ECHO] Vault 주입 & Airflow 초기화/유저 생성 완료" | tee -a .github/echo_logs/init_services.log
+
+    - name: 🗄 DB 백업 + HTML 변환
+      run: |
+        set -e
+        sleep 5
+        mysqldump -h 127.0.0.1 -P 3306 -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패" | tee -a .github/echo_logs/backup.log
+        pg_dump -h 127.0.0.1 -p 5432 -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패" | tee -a .github/echo_logs/backup.log
+        for f in site/backup/*; do
+          [ -f "$f" ] || continue
+          b=$(basename "$f"); { echo "<html><body><h3>$b</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' "$f"; echo "</pre></body></html>"; } > "site/db_backup_html/${b}.html"
+        done
+
+    - name: 🔎 보안 스캔 (Scorecard / CodeQL / Bandit / pip-audit / Trivy)
+      run: |
+        set -e
+        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > site/security/scorecard.sarif || true
+        scorecard --repo=https://github.com/${{ github.repository }} --format json  --no-upload > site/security/scorecard.json  || true
         pip-audit -f json -o site/security/pip-audit.json || true
+        bandit -r . -f json -o site/security/bandit.json || true
         trivy fs . --format json --output site/security/trivy.json || true
 
-    - name: 🧰 Run CodeQL Security Scan
+    - name: 🧰 CodeQL Init
       uses: github/codeql-action/init@v3
       with:
         languages: javascript
 
-    - name: 📊 Run CodeQL Analysis
+    - name: 📊 CodeQL Analyze
       uses: github/codeql-action/analyze@v3
       with:
         output: site/security/codeql-results.sarif
         category: codeql-security-scan
 
-    - name: 💾 Run DB Backups
+    - name: ⬆️ 업그레이드 사전 목록 수집
       run: |
-        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || true
-        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || true
-        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || true
-
-    - name: 📝 Generate SQL & Spark Queries
-      run: |
-        echo "SELECT * FROM test_table;" > query.sql
-        echo "spark.read.text('README.md').show()" > query_spark.py
-
-    - name: 📥 Download Spark & SQL Results
-      run: |
-        echo "id,name\n1,Alice\n2,Bob" > site/spark_results/sample.csv
-        echo "echo '[ECHO] Spark & SQL 결과 다운로드 완료'" >> .github/echo_logs/download_results.sh
-
-    - name: 📈 Save Upgrade Info
-      run: |
+        set -e
         mkdir -p site/upgrade .github/echo_upgrade
-        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
-        pip list --outdated --format=columns > site/upgrade/pip-upgradable.txt || true
-        docker images --format "{{.Repository}}:{{.Tag}}" | while read img; do
-          echo "$img" >> site/upgrade/docker-images.txt
-        done
-        echo "echo '[ECHO] 업그레이드 대상 목록 저장 완료'" >> .github/echo_upgrade/upgrade_log.sh
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.before.txt
+        pip list --outdated --format=columns > site/upgrade/pip-upgradable.before.txt || true
+        docker images --format '{{.Repository}}:{{.Tag}}' > site/upgrade/docker-images.before.txt || true
 
-    - name: 🔄 Run Full Upgrade
+    - name: ⬆️ 대량 업그레이드 (APT/PIP/Docker 이미지)
       run: |
-        sudo apt-get update -y
-        sudo apt-get upgrade -y --allow-change-held-packages
+        set -e
+        sudo apt-get update -y && sudo apt-get upgrade -y && sudo apt-get autoremove -y && sudo apt-get clean
         pip install --upgrade pip
-        pip list --outdated | cut -d ' ' -f1 | xargs -n1 pip install -U || true
-        docker images --format "{{.Repository}}:{{.Tag}}" | while read img; do
-          docker pull "$img" || true
-        done
-        echo "echo '[ECHO] 전체 업그레이드 완료'" >> .github/echo_upgrade/upgrade_log.sh
+        pip list --outdated --format=freeze | cut -d= -f1 | xargs -n1 -r pip install -U || true
+        while read -r img; do [ -n "$img" ] && docker pull "$img" || true; done < site/upgrade/docker-images.before.txt
+        echo "[ECHO] 전체 업그레이드 완료" | tee -a .github/echo_upgrade/upgrade.log
 
-    - name: 🔁 Create Auto PR for Upgrade
+    - name: ⬆️ 업그레이드 사후 목록 & HTML Diff
+      run: |
+        set -e
+        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.after.txt
+        pip list --outdated --format=columns > site/upgrade/pip-upgradable.after.txt || true
+        docker images --format '{{.Repository}}:{{.Tag}}' > site/upgrade/docker-images.after.txt || true
+        {
+          echo "<html><body><h2>Upgrade Diff</h2><h3>APT</h3><pre>"
+          diff -u site/upgrade/upgradable.before.txt site/upgrade/upgradable.after.txt || true
+          echo "</pre><h3>PIP</h3><pre>"
+          diff -u site/upgrade/pip-upgradable.before.txt site/upgrade/pip-upgradable.after.txt || true
+          echo "</pre><h3>Docker Images</h3><pre>"
+          diff -u site/upgrade/docker-images.before.txt site/upgrade/docker-images.after.txt || true
+          echo "</pre></body></html>"
+        } > site/upgrade/report.html
+
+    - name: 🔁 업그레이드 자동 PR(변경시)
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        if grep -q ".*" site/upgrade/upgradable.txt; then
-          gh pr create --title "🔄 패키지 업그레이드 PR" \
-            --body "자동 생성된 업그레이드 PR입니다."
+        set -e
+        if [ -s site/upgrade/upgradable.after.txt ] || [ -s site/upgrade/pip-upgradable.after.txt ]; then
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions"
+          git checkout -b auto/upgrade-$(date -u +%Y%m%d%H%M%S)
+          git add site/upgrade/ .github/echo_upgrade/ .github/echo_logs/ .github/services/ || true
+          git commit -m "chore: auto upgrade & service files & reports" || true
+          git push -u origin HEAD || true
+          gh pr create --title "⬆️ Auto Upgrade" --body "자동 업그레이드/리포트/서비스 파일 반영" || true
         fi
 
-    - name: 🌐 Upload GitHub Pages Artifact
+    - name: 📦 아티팩트 업로드(다운로드용)
+      uses: actions/upload-artifact@v4
+      with:
+        name: mega-artifacts
+        path: |
+          site/**
+          .github/services/**
+          .github/echo_logs/**
+          .github/echo_upgrade/**
+
+    - name: 🌐 Upload Pages Artifact
       uses: actions/upload-pages-artifact@v3
       with:
         path: site/
