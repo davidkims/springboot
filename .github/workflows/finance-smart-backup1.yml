@@ -1,14 +1,13 @@
-name: 🛡️ MEGA-FULL-OPS + Echo + Upgrade + DB/Middleware + Backup + Security + Pages
+name: 🏢 MEGA DB + Middleware + Upgrade + EchoOps
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *" # 5분마다 실행
+    - cron: "*/5 * * * *"
 
 jobs:
-  mega-full-ops:
+  mega-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
     env:
       DB_USER: root
       DB_PASS: rootpass123
@@ -23,101 +22,69 @@ jobs:
       - name: 📂 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 필수 디렉토리 및 에코 생성
+      - name: 📁 디렉토리 및 에코 스크립트 생성
         run: |
           set -e
           mkdir -p .github/echo_logs
-          CREATE_SCRIPT=".github/echo_logs/create_dirs.sh"
-          echo "#!/bin/bash" > "$CREATE_SCRIPT"
           for dir in \
             .github/scripts \
             .github/firewall \
             .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions} \
             site/{scorecard,security,upgrade,pr,backup,logs,templates}; do
             mkdir -p "$dir"
-            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> "$CREATE_SCRIPT"
+            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
           done
-          chmod +x "$CREATE_SCRIPT"
-          bash "$CREATE_SCRIPT"
+          chmod +x .github/echo_logs/create_dirs.sh
+          bash .github/echo_logs/create_dirs.sh
 
-      - name: 📦 시스템 패키지 업데이트
+      - name: ⬆️ 모든 패키지 업데이트
         run: |
           set -e
           sudo apt-get update -y
-          sudo apt-get dist-upgrade -y
-          sudo apt-get autoremove -y
-          echo "echo '[ECHO] 시스템 패키지 전체 업데이트 완료'" >> .github/echo_logs/upgrade.log
+          sudo apt-get upgrade -y
+          echo "echo '[ECHO] 시스템 패키지 업데이트 완료'" >> .github/echo_logs/upgrade.log
 
       - name: 🔥 방화벽 권한 파일 생성
         run: |
           set -e
-          FW_FILE=".github/firewall/rules.sh"
+          FW_FILE=".github/firewall/firewall_rules.sh"
           echo "#!/bin/bash" > "$FW_FILE"
-          echo "ufw allow 22/tcp" >> "$FW_FILE"
-          echo "ufw allow 80/tcp" >> "$FW_FILE"
-          echo "ufw allow 443/tcp" >> "$FW_FILE"
-          echo "ufw allow 3306/tcp" >> "$FW_FILE"
-          echo "ufw allow 5432/tcp" >> "$FW_FILE"
-          echo "ufw allow 6379/tcp" >> "$FW_FILE"
+          echo "ufw allow 22" >> "$FW_FILE"
+          echo "ufw allow 80" >> "$FW_FILE"
+          echo "ufw allow 443" >> "$FW_FILE"
+          echo "ufw allow 3306" >> "$FW_FILE"
+          echo "ufw allow 5432" >> "$FW_FILE"
+          echo "ufw allow 6379" >> "$FW_FILE"
+          echo "ufw allow 9092" >> "$FW_FILE"
+          echo "ufw allow 8200" >> "$FW_FILE"
+          echo "ufw allow 8080" >> "$FW_FILE"
+          echo "ufw allow 7077" >> "$FW_FILE"
+          echo "ufw allow 8081" >> "$FW_FILE"
           chmod +x "$FW_FILE"
-          echo "echo '[ECHO] 방화벽 규칙 파일 생성 완료'" >> .github/echo_logs/firewall.log
+          echo "echo '[ECHO] 방화벽 규칙 파일 생성 완료: $FW_FILE'" >> .github/echo_logs/firewall.log
 
-      - name: 🗄️ DB & Middleware 설치 (Docker 기반)
+      - name: 🐳 Docker 컨테이너 설치 (기본 설치 활용)
         run: |
           set -e
-          sudo apt-get install -y docker.io
+          docker --version
           sudo systemctl start docker
           sudo systemctl enable docker
-          # MySQL
+
           docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 mysql:8
-          # PostgreSQL
           docker run -d --name postgres -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 postgres:15
-          # Redis
           docker run -d --name redis -p 6379:6379 redis:7
-          # Kafka
           docker run -d --name kafka -p 9092:9092 bitnami/kafka:latest
-          # Vault
           docker run -d --name vault -p 8200:8200 vault:latest
-          # Airflow
           docker run -d --name airflow -p 8080:8080 apache/airflow:2.9.3
-          # Spark
           docker run -d --name spark -p 7077:7077 bitnami/spark:latest
-          # Camunda
           docker run -d --name camunda -p 8081:8080 camunda/camunda-bpm-platform:latest
+
           echo "echo '[ECHO] DB 및 미들웨어 컨테이너 설치 완료'" >> .github/echo_logs/install.log
 
-      - name: 💾 DB 백업 스크립트 생성
+      - name: 📜 설치 및 실행 로그 출력
         run: |
           set -e
-          mkdir -p .github/scripts
-          echo "#!/bin/bash" > .github/scripts/db_backup.sh
-          echo "mysqldump -h 127.0.0.1 -u$DB_USER -p$DB_PASS $DB_NAME > .github/backup/mysql_backup.sql || true" >> .github/scripts/db_backup.sh
-          echo "pg_dump -h 127.0.0.1 -U postgres $DB_NAME > .github/backup/postgres_backup.sql || true" >> .github/scripts/db_backup.sh
-          echo "echo '[ECHO] DB 백업 완료'" >> .github/echo_logs/db_backup.log
-          chmod +x .github/scripts/db_backup.sh
-          bash .github/scripts/db_backup.sh
-
-      - name: 🛡️ 보안 스캔 (ClamAV + Trivy)
-        run: |
-          set -e
-          sudo apt-get install -y clamav clamav-daemon
-          sudo freshclam || true
-          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt || true
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
-          ./trivy fs . | tee .github/echo_logs/trivy_scan.txt
-
-      - name: 📊 GitHub Pages 결과 업로드
-        run: |
-          set -e
-          mkdir -p site/security site/backup site/logs
-          cp -r .github/echo_logs/* site/logs/ || true
-          cp -r .github/backup/* site/backup/ || true
-          echo "echo '[ECHO] GitHub Pages 업로드 준비 완료'" >> .github/echo_logs/pages.log
-          touch site/index.html
-          echo "<h1>MEGA FULL OPS 실행 결과</h1>" >> site/index.html
-
-      - name: 🚀 GitHub Pages Deploy
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
+          echo "===== 생성된 로그 목록 ====="
+          ls -R .github/echo_logs || true
+          echo "===== 로그 파일 내용 ====="
+          cat .github/echo_logs/*.log || true
