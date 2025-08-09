@@ -308,19 +308,44 @@ jobs:
         sudo usermod -aG docker "$USER" || true
         docker --version | tee .github/echo_logs/docker_version.txt
 
-    - name: 🛡️ Trivy & Scorecard 설치
+    # ✅ 견고화된 Trivy & Scorecard 설치 (파일명 변동 대응)
+    - name: 🛡️ Trivy & Scorecard 설치(견고)
       shell: bash
       run: |
         set -Eeuo pipefail
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        exec > >(tee .github/echo_logs/03_security_tools_install.log) 2>&1
+
+        # Trivy
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+          | sh -s -- -b /usr/local/bin
         trivy --version | tee .github/echo_logs/trivy_version.txt
+
+        # Scorecard (robust)
         VER="4.10.3"
-        curl -sLO "https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz"
-        tar -xzf "scorecard_${VER}_linux_amd64.tar.gz"
-        BIN="$(find . -type f -name scorecard | head -n1 || true)"
-        [ -z "$BIN" ] && { echo "::error ::Scorecard binary not found"; exit 1; }
-        sudo mv "$BIN" /usr/local/bin/scorecard && chmod +x /usr/local/bin/scorecard
-        scorecard --version | tee .github/echo_logs/scorecard_version.txt
+        URL="https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz"
+        TMP="$(mktemp -d)"
+        echo "[ECHO] Downloading: $URL"
+        curl -fsSL "$URL" -o "$TMP/scorecard.tgz"
+
+        echo "[ECHO] Extracting to $TMP"
+        tar -xzf "$TMP/scorecard.tgz" -C "$TMP"
+
+        CANDIDATES=(
+          "$TMP/scorecard"
+          "$TMP/scorecard-linux-amd64"
+          $(find "$TMP" -maxdepth 2 -type f -name "scorecard*" 2>/dev/null | head -n 5)
+        )
+        BIN=""
+        for f in "${CANDIDATES[@]}"; do
+          if [ -f "$f" ]; then BIN="$f"; break; fi
+        done
+        if [ -z "$BIN" ]; then
+          echo "::warning ::tar contents:"; tar -tzf "$TMP/scorecard.tgz" || true
+          echo "::error ::Scorecard binary not found after extract"; exit 1
+        fi
+        echo "[ECHO] Installing $BIN -> /usr/local/bin/scorecard"
+        sudo install -m 0755 "$BIN" /usr/local/bin/scorecard
+        /usr/local/bin/scorecard --version | tee .github/echo_logs/scorecard_version.txt
 
     - name: 🧪 Apache Spark 설치
       shell: bash
@@ -370,20 +395,16 @@ jobs:
         mkdir -p site/containers
 
         echo "=== Kafka Demo ==="
-        # 토픽 생성
         docker exec kafka_ci bash -lc "kafka-topics.sh --create --topic demo-topic --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1" || true
-        # 프로듀스
         docker exec -i kafka_ci bash -lc "kafka-console-producer.sh --bootstrap-server localhost:9092 --topic demo-topic" <<'MSG'
         hello
         world
         kafka-demo
         MSG
-        # 컨슘 (타임아웃)
         docker exec kafka_ci bash -lc "kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic demo-topic --from-beginning --timeout-ms 5000" | tee site/containers/kafka_demo.log || true
         { echo "<html><body><h3>Kafka Demo Output</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/kafka_demo.log; echo "</pre></body></html>"; } > site/html/kafka_demo.html
 
         echo "=== Vault Demo (KV v2) ==="
-        # KV put/get
         source site/templates/vault.env
         curl -s -H "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID}" --request POST \
           --data '{"data":{"message":"hello-vault","ts":"'$(date -u +%FT%TZ)'"}}' \
@@ -399,15 +420,12 @@ jobs:
 
         echo "=== Camunda Demo (deploy + start) ==="
         CAM_BASE="http://127.0.0.1:8081/engine-rest"
-        # 배포 (인증 필요시 demo:demo 시도 → 실패해도 계속)
         curl -s -X POST "${CAM_BASE}/deployment/create" \
           -F "deployment-name=demo-deploy" \
           -F "enable-duplicate-filtering=true" \
           -F "deploy-changed-only=true" \
           -F "data=@.github/services/camunda/demo.bpmn;type=application/octet-stream" \
           | tee site/containers/camunda_deploy.json || true
-
-        # 대체: 인증 시도
         if ! jq -e . site/containers/camunda_deploy.json >/dev/null 2>&1; then
           curl -s -u demo:demo -X POST "${CAM_BASE}/deployment/create" \
             -F "deployment-name=demo-deploy" \
@@ -416,17 +434,11 @@ jobs:
             -F "data=@.github/services/camunda/demo.bpmn;type=application/octet-stream" \
             | tee site/containers/camunda_deploy.json || true
         fi
-
-        # 프로세스 시작
         curl -s -X POST "${CAM_BASE}/process-definition/key/DemoProcess/start" \
-          -H "Content-Type: application/json" \
-          -d '{}' \
+          -H "Content-Type: application/json" -d '{}' \
           | tee site/containers/camunda_start.json || true
-
-        # 인스턴스 조회
         curl -s "${CAM_BASE}/process-instance?processDefinitionKey=DemoProcess" \
           | tee site/containers/camunda_instances.json || true
-
         { echo "<html><body><h3>Camunda Demo</h3><h4>Deploy</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_deploy.json; \
           echo "</pre><h4>Start</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_start.json; \
           echo "</pre><h4>Instances</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_instances.json; \
