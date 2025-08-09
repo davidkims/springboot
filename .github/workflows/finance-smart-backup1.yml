@@ -1,9 +1,9 @@
-name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + Containers + Oracle
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/1 * * * *'  # 매 1분마다 실행
+    - cron: '*/1 * * * *'
 
 permissions:
   contents: read
@@ -25,43 +25,24 @@ jobs:
     - name: 📂 Checkout Repository
       uses: actions/checkout@v4
 
-    - name: 📁 Create Echo Directories
+    - name: 📁 Create Echo Directories (No Missing File)
       run: |
         set -e
-        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring} site/{scorecard,security,upgrade,pr,backup,html}; do
+        mkdir -p .github/echo_logs
+        CREATE_SCRIPT=".github/echo_logs/create_dirs.sh"
+        echo "#!/bin/bash" > $CREATE_SCRIPT
+        for dir in .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,containers,downloads} site/{scorecard,security,upgrade,pr,backup,html,downloads}; do
           mkdir -p "$dir"
-          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
+          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> $CREATE_SCRIPT
         done
-        chmod +x .github/echo_logs/create_dirs.sh
-        bash .github/echo_logs/create_dirs.sh
-
-    - name: 🐳 Install Docker & Middleware Containers
-      run: |
-        set -e
-        sudo apt-get update -y
-        sudo apt-get install -y docker.io
-        sudo systemctl start docker
-        sudo systemctl enable docker
-        # MySQL
-        docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 mysql:8
-        # PostgreSQL
-        docker run -d --name postgres -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 postgres:15
-        # Redis
-        docker run -d --name redis -p 6379:6379 redis:7
-        # Kafka
-        docker run -d --name kafka -p 9092:9092 bitnami/kafka:latest
-        # Vault
-        docker run -d --name vault -p 8200:8200 hashicorp/vault:latest
-        # Spark
-        docker run -d --name spark -p 7077:7077 bitnami/spark:latest
-        # Camunda
-        docker run -d --name camunda -p 8081:8080 camunda/camunda-bpm-platform:latest
-        echo "echo '[ECHO] DB 및 미들웨어 컨테이너 설치 완료'" >> .github/echo_logs/install.log
+        chmod +x $CREATE_SCRIPT
+        bash $CREATE_SCRIPT
 
     - name: 🛡️ Install Security Tools
       run: |
         set -e
-        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client
+        sudo apt-get update -y
+        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client docker.io
         pip install bandit pip-audit
         curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
@@ -95,7 +76,7 @@ jobs:
         pip-audit -f json -o site/security/pip-audit.json || true
         trivy fs . --format json --output site/security/trivy.json || true
 
-    - name: 🧰 Run CodeQL Security Scan
+    - name: 🧰 Run CodeQL Init
       uses: github/codeql-action/init@v3
       with:
         languages: javascript
@@ -106,32 +87,35 @@ jobs:
         output: site/security/codeql-results.sarif
         category: codeql-security-scan
 
-    - name: 💾 Run DB Backups
+    - name: 📦 Start Containers + Health Check
+      run: |
+        set -e
+        SERVICES="vault:1.14 mysql:8 postgres:15 redis:7 gvenzl/oracle-xe:latest"
+        HEALTH_LOG=".github/echo_logs/containers_health.sh"
+        echo "#!/bin/bash" > $HEALTH_LOG
+        for svc in $SERVICES; do
+          NAME=$(echo $svc | tr '/:' '_')
+          echo "[ECHO] Pulling $svc"
+          docker pull $svc || true
+          echo "[ECHO] Starting $svc"
+          docker run -d --name ${NAME}_test $svc || true
+          sleep 10
+          if docker ps --filter "name=${NAME}_test" --filter "status=running" | grep -q ${NAME}_test; then
+            echo "echo '[HEALTH] $svc is running ✅'" >> $HEALTH_LOG
+          else
+            echo "echo '[HEALTH] $svc failed ❌ - restarting...'" >> $HEALTH_LOG
+            docker restart ${NAME}_test || true
+          fi
+        done
+        chmod +x $HEALTH_LOG
+        bash $HEALTH_LOG
+
+    - name: 🗄️ DB Backups
       run: |
         set -e
         mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
         pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
         echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
-
-    - name: 📝 Convert Backup to HTML
-      run: |
-        for file in site/backup/*; do
-          echo "<html><body><pre>" > "site/html/$(basename $file).html"
-          cat "$file" >> "site/html/$(basename $file).html"
-          echo "</pre></body></html>" >> "site/html/$(basename $file).html"
-        done
-
-    - name: 📄 Generate Template Files
-      run: |
-        echo "ENV_VAR=VALUE" > site/security/.env
-        echo "{ \"config\": true }" > site/security/config.json
-        echo "[settings]\nsecure=true" > site/security/config.cfg
-
-    - name: 📦 Save Security Reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-reports
-        path: site/security/
 
     - name: 📈 Save Upgrade Info
       run: |
@@ -143,11 +127,16 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -e
-        if grep -q ".*" site/upgrade/upgradable.txt; then
-          echo "[ECHO] PR 생성 시작"
+        if [ -s site/upgrade/upgradable.txt ]; then
           gh pr create --title "🔄 패키지 업그레이드 PR" \
             --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
         fi
+
+    - name: 📦 Save Security Reports & Downloads
+      uses: actions/upload-artifact@v4
+      with:
+        name: all-reports
+        path: site/
 
     - name: 🌐 Upload GitHub Pages Artifact
       uses: actions/upload-pages-artifact@v3
@@ -160,6 +149,7 @@ jobs:
     - name: ⬆️ Auto Upgrade + Echo
       run: |
         set -e
+        mkdir -p .github/echo_autoup
         cat <<'EOF' > .github/echo_autoup/autoup.sh
         #!/bin/bash
         echo "[AUTOUP] 시스템 자동 업그레이드 시작"
