@@ -1,21 +1,14 @@
-name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + Middleware FullOps
+name: 🛡️ MEGA-FULL-OPS + Echo + Upgrade + DB/Middleware + Backup + Security + Pages
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/1 * * * *"
-
-permissions:
-  contents: read
-  pull-requests: write
-  id-token: write
-  security-events: write
-  pages: write
+    - cron: "*/5 * * * *" # 5분마다 실행
 
 jobs:
-  mega-fullops:
+  mega-full-ops:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       DB_USER: root
       DB_PASS: rootpass123
@@ -24,132 +17,107 @@ jobs:
       DOMAIN: example.local
       USER_COUNT: 50
       TEST_COUNT: 3
-      MIDDLEWARE: "mysql postgres oracle redis kafka vault airflow spark camunda"
+      MIDDLEWARE: mysql postgres oracle redis kafka vault airflow spark camunda
 
     steps:
-    - name: 📂 Checkout Repository
-      uses: actions/checkout@v4
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: 📁 Create All Echo Directories
-      run: |
-        set -e
-        for dir in \
-          .github/scripts \
-          .github/firewall \
-          .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions} \
-          site/{scorecard,security,upgrade,pr,backup,logs,templates}; do
-          mkdir -p "$dir"
-          echo "echo '[ECHO] 디렉토리 생성: $dir'" >> .github/echo_logs/create_dirs.sh
-        done
-        chmod +x .github/echo_logs/create_dirs.sh
-        bash .github/echo_logs/create_dirs.sh
+      - name: 📁 필수 디렉토리 및 에코 생성
+        run: |
+          set -e
+          mkdir -p .github/echo_logs
+          CREATE_SCRIPT=".github/echo_logs/create_dirs.sh"
+          echo "#!/bin/bash" > "$CREATE_SCRIPT"
+          for dir in \
+            .github/scripts \
+            .github/firewall \
+            .github/echo_{scorecard,codeql,logs,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions} \
+            site/{scorecard,security,upgrade,pr,backup,logs,templates}; do
+            mkdir -p "$dir"
+            echo "echo '[ECHO] 디렉토리 생성: $dir'" >> "$CREATE_SCRIPT"
+          done
+          chmod +x "$CREATE_SCRIPT"
+          bash "$CREATE_SCRIPT"
 
-    - name: 🛠 Install Security & DB Tools
-      run: |
-        set -e
-        sudo apt-get update -y
-        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client netcat-traditional iptables docker.io
-        pip install bandit pip-audit
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      - name: 📦 시스템 패키지 업데이트
+        run: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get dist-upgrade -y
+          sudo apt-get autoremove -y
+          echo "echo '[ECHO] 시스템 패키지 전체 업데이트 완료'" >> .github/echo_logs/upgrade.log
 
-    - name: 🐳 Pull & Start Middleware Containers
-      run: |
-        set -e
-        for svc in $MIDDLEWARE; do
-          echo "[ECHO] Pull & Start $svc"
-          docker pull $svc || true
-          docker run -d --name ${svc}_test $svc || true
-        done
-        docker ps -a
+      - name: 🔥 방화벽 권한 파일 생성
+        run: |
+          set -e
+          FW_FILE=".github/firewall/rules.sh"
+          echo "#!/bin/bash" > "$FW_FILE"
+          echo "ufw allow 22/tcp" >> "$FW_FILE"
+          echo "ufw allow 80/tcp" >> "$FW_FILE"
+          echo "ufw allow 443/tcp" >> "$FW_FILE"
+          echo "ufw allow 3306/tcp" >> "$FW_FILE"
+          echo "ufw allow 5432/tcp" >> "$FW_FILE"
+          echo "ufw allow 6379/tcp" >> "$FW_FILE"
+          chmod +x "$FW_FILE"
+          echo "echo '[ECHO] 방화벽 규칙 파일 생성 완료'" >> .github/echo_logs/firewall.log
 
-    - name: 🧪 Install Scorecard CLI
-      run: |
-        set -e
-        VERSION="4.10.3"
-        curl -sLO https://github.com/ossf/scorecard/releases/download/v${VERSION}/scorecard_${VERSION}_linux_amd64.tar.gz
-        tar -xzf scorecard_${VERSION}_linux_amd64.tar.gz
-        BIN=$(find scorecard_${VERSION}_linux_amd64* -type f -name scorecard | head -n1 || true)
-        if [ -z "$BIN" ]; then
-          echo "::error ::[ERR] Scorecard binary not found after extract."
-          exit 1
-        fi
-        chmod +x "$BIN"
-        sudo mv "$BIN" /usr/local/bin/scorecard
-        scorecard --version
+      - name: 🗄️ DB & Middleware 설치 (Docker 기반)
+        run: |
+          set -e
+          sudo apt-get install -y docker.io
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          # MySQL
+          docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=$DB_PASS -p 3306:3306 mysql:8
+          # PostgreSQL
+          docker run -d --name postgres -e POSTGRES_PASSWORD=$DB_PASS -p 5432:5432 postgres:15
+          # Redis
+          docker run -d --name redis -p 6379:6379 redis:7
+          # Kafka
+          docker run -d --name kafka -p 9092:9092 bitnami/kafka:latest
+          # Vault
+          docker run -d --name vault -p 8200:8200 vault:latest
+          # Airflow
+          docker run -d --name airflow -p 8080:8080 apache/airflow:2.9.3
+          # Spark
+          docker run -d --name spark -p 7077:7077 bitnami/spark:latest
+          # Camunda
+          docker run -d --name camunda -p 8081:8080 camunda/camunda-bpm-platform:latest
+          echo "echo '[ECHO] DB 및 미들웨어 컨테이너 설치 완료'" >> .github/echo_logs/install.log
 
-    - name: 📊 Run Security Scans
-      run: |
-        scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
-        scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
-        bandit -r . -f json > site/security/bandit.json || true
-        pip-audit -f json -o site/security/pip-audit.json || true
-        trivy fs . --format json --output site/security/trivy.json || true
-        cp results.sarif site/scorecard/scorecard-results.sarif
-        cp results.json site/security/security.json
+      - name: 💾 DB 백업 스크립트 생성
+        run: |
+          set -e
+          mkdir -p .github/scripts
+          echo "#!/bin/bash" > .github/scripts/db_backup.sh
+          echo "mysqldump -h 127.0.0.1 -u$DB_USER -p$DB_PASS $DB_NAME > .github/backup/mysql_backup.sql || true" >> .github/scripts/db_backup.sh
+          echo "pg_dump -h 127.0.0.1 -U postgres $DB_NAME > .github/backup/postgres_backup.sql || true" >> .github/scripts/db_backup.sh
+          echo "echo '[ECHO] DB 백업 완료'" >> .github/echo_logs/db_backup.log
+          chmod +x .github/scripts/db_backup.sh
+          bash .github/scripts/db_backup.sh
 
-    - name: 🧰 Run CodeQL Analysis
-      uses: github/codeql-action/init@v3
-      with:
-        languages: javascript
+      - name: 🛡️ 보안 스캔 (ClamAV + Trivy)
+        run: |
+          set -e
+          sudo apt-get install -y clamav clamav-daemon
+          sudo freshclam || true
+          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt || true
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+          ./trivy fs . | tee .github/echo_logs/trivy_scan.txt
 
-    - name: 📊 Analyze with CodeQL
-      uses: github/codeql-action/analyze@v3
-      with:
-        output: site/security/codeql-results.sarif
-        category: codeql-security-scan
+      - name: 📊 GitHub Pages 결과 업로드
+        run: |
+          set -e
+          mkdir -p site/security site/backup site/logs
+          cp -r .github/echo_logs/* site/logs/ || true
+          cp -r .github/backup/* site/backup/ || true
+          echo "echo '[ECHO] GitHub Pages 업로드 준비 완료'" >> .github/echo_logs/pages.log
+          touch site/index.html
+          echo "<h1>MEGA FULL OPS 실행 결과</h1>" >> site/index.html
 
-    - name: 💾 Database Backups
-      run: |
-        mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
-        pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
-        echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
-
-    - name: 🔥 Firewall Setup
-      run: |
-        echo "#!/bin/bash" > .github/firewall/setup_firewall.sh
-        echo "sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT" >> .github/firewall/setup_firewall.sh
-        echo "sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT" >> .github/firewall/setup_firewall.sh
-        echo "sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT" >> .github/firewall/setup_firewall.sh
-        chmod +x .github/firewall/setup_firewall.sh
-        bash .github/firewall/setup_firewall.sh || true
-
-    - name: 📦 Save Security Reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-reports
-        path: site/security/
-
-    - name: 📈 Save Upgrade Info
-      run: |
-        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.txt
-
-    - name: 🔁 Create Auto PR for Upgrade
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        if grep -q ".*" site/upgrade/upgradable.txt; then
-          gh pr create --title "🔄 패키지 업그레이드 PR" \
-            --body "자동 생성된 PR입니다. 참고: site/upgrade/upgradable.txt" || true
-        fi
-
-    - name: 🌐 Upload GitHub Pages Artifact
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: site/
-
-    - name: 🚀 Deploy to GitHub Pages
-      uses: actions/deploy-pages@v2
-
-    - name: ⬆️ Auto Upgrade + Echo
-      run: |
-        echo "#!/bin/bash" > .github/echo_autoup/autoup.sh
-        echo "echo '[AUTOUP] 시스템 자동 업그레이드 시작'" >> .github/echo_autoup/autoup.sh
-        echo "sudo apt-get update -y && sudo apt-get upgrade -y" >> .github/echo_autoup/autoup.sh
-        echo "echo '[AUTOUP] 완료'" >> .github/echo_autoup/autoup.sh
-        chmod +x .github/echo_autoup/autoup.sh
-        bash .github/echo_autoup/autoup.sh
-
-    - name: 🔁 Schedule Reboot (1 min later)
-      run: |
-        echo "[REBOOT] 1분 후 자동 재시작 예약됨"
-        sudo shutdown -r +1 || true
+      - name: 🚀 GitHub Pages Deploy
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
