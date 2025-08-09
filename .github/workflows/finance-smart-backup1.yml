@@ -1,19 +1,19 @@
-name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + AllGen
+name: 🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + Middleware FullOps
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/1 * * * *"  # 매 1분마다 실행
+    - cron: "*/1 * * * *"
 
 permissions:
   contents: read
   pull-requests: write
-  id-token: read
+  id-token: write
   security-events: write
   pages: write
 
 jobs:
-  mega-secure-ci:
+  mega-fullops:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -21,11 +21,10 @@ jobs:
       DB_PASS: rootpass123
       DB_NAME: sample_db
       BASE: /opt/email
-      MONO: /opt/email/.monitoring
       DOMAIN: example.local
       USER_COUNT: 50
       TEST_COUNT: 3
-      SERVICES: postfix exim4 opensmtpd mailhog maildev mailcatcher smtp4dev
+      MIDDLEWARE: "mysql postgres oracle redis kafka vault airflow spark camunda"
 
     steps:
     - name: 📂 Checkout Repository
@@ -45,13 +44,23 @@ jobs:
         chmod +x .github/echo_logs/create_dirs.sh
         bash .github/echo_logs/create_dirs.sh
 
-    - name: 🛡️ Install Security & DB Tools
+    - name: 🛠 Install Security & DB Tools
       run: |
         set -e
         sudo apt-get update -y
-        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client netcat-traditional iptables
+        sudo apt-get install -y jq curl python3-pip unzip mysql-client postgresql-client netcat-traditional iptables docker.io
         pip install bandit pip-audit
         curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+    - name: 🐳 Pull & Start Middleware Containers
+      run: |
+        set -e
+        for svc in $MIDDLEWARE; do
+          echo "[ECHO] Pull & Start $svc"
+          docker pull $svc || true
+          docker run -d --name ${svc}_test $svc || true
+        done
+        docker ps -a
 
     - name: 🧪 Install Scorecard CLI
       run: |
@@ -68,43 +77,34 @@ jobs:
         sudo mv "$BIN" /usr/local/bin/scorecard
         scorecard --version
 
-    - name: 🧾 Run Scorecard
+    - name: 📊 Run Security Scans
       run: |
         scorecard --repo=https://github.com/${{ github.repository }} --format sarif --no-upload > results.sarif
         scorecard --repo=https://github.com/${{ github.repository }} --format json --no-upload > results.json
-        cp results.sarif site/scorecard/scorecard-results.sarif
-        cp results.json site/security/security.json
-
-    - name: 🔎 Run Bandit, pip-audit, Trivy
-      run: |
         bandit -r . -f json > site/security/bandit.json || true
         pip-audit -f json -o site/security/pip-audit.json || true
         trivy fs . --format json --output site/security/trivy.json || true
+        cp results.sarif site/scorecard/scorecard-results.sarif
+        cp results.json site/security/security.json
 
-    - name: 🧰 Run CodeQL Security Scan
+    - name: 🧰 Run CodeQL Analysis
       uses: github/codeql-action/init@v3
       with:
         languages: javascript
 
-    - name: 📊 Run CodeQL Analysis
+    - name: 📊 Analyze with CodeQL
       uses: github/codeql-action/analyze@v3
       with:
         output: site/security/codeql-results.sarif
         category: codeql-security-scan
 
-    - name: 💾 Run DB Backups
+    - name: 💾 Database Backups
       run: |
         mysqldump -u${DB_USER} -p${DB_PASS} ${DB_NAME} > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
         pg_dump -U postgres -d ${DB_NAME} > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
         echo "exit" | sqlplus -S system/oracle@localhost @backup.sql > site/backup/sqlplus_backup.log || echo "[WARN] Oracle 백업 실패"
 
-    - name: 📄 Generate Template Files
-      run: |
-        echo "ENV_VAR=VALUE" > site/security/.env
-        echo "{ \"config\": true }" > site/security/config.json
-        echo "[settings]\nsecure=true" > site/security/config.cfg
-
-    - name: 🔥 Generate Firewall Rules Script
+    - name: 🔥 Firewall Setup
       run: |
         echo "#!/bin/bash" > .github/firewall/setup_firewall.sh
         echo "sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT" >> .github/firewall/setup_firewall.sh
@@ -112,14 +112,6 @@ jobs:
         echo "sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT" >> .github/firewall/setup_firewall.sh
         chmod +x .github/firewall/setup_firewall.sh
         bash .github/firewall/setup_firewall.sh || true
-
-    - name: 📧 Generate & Run Email Test Script
-      run: |
-        mkdir -p .github/scripts
-        echo "#!/bin/bash" > .github/scripts/emailops_sendmail.sh
-        echo "swaks --server 127.0.0.1:1025 --from ci@local --to test@local --header \"Subject: test \$(date)\" --body \"This is a test mailing\"" >> .github/scripts/emailops_sendmail.sh
-        chmod +x .github/scripts/emailops_sendmail.sh
-        bash .github/scripts/emailops_sendmail.sh || echo "[WARN] 메일 발송 실패"
 
     - name: 📦 Save Security Reports
       uses: actions/upload-artifact@v4
@@ -146,7 +138,7 @@ jobs:
         path: site/
 
     - name: 🚀 Deploy to GitHub Pages
-      uses: actions/deploy-pages@v4
+      uses: actions/deploy-pages@v2
 
     - name: ⬆️ Auto Upgrade + Echo
       run: |
