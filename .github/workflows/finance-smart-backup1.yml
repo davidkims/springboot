@@ -1,4 +1,4 @@
-name: 🧠 MEGA EMAILOPS + SMTP + MONITORING + VIRUS + FULL ECHO + REAL MTA
+name: 🧠 MEGA EMAILOPS + SMTP + MONITORING + VIRUS + FULL ECHO + REAL MTA + AUTOUP + FIREWALL
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
       - name: 📂 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 📁 필수 에코 디렉토리 및 스크립트 생성
+      - name: 📁 필수 에코 디렉토리 대량 생성
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -43,21 +43,67 @@ jobs:
             .github/echo_monitoring \
             .github/echo_pages \
             .github/echo_auth \
+            .github/echo_firewall \
+            .github/echo_autoup \
+            .github/echo_exec \
             .github/scripts ; do
             mkdir -p "$d"
           done
           mkdir -p "$BASE" "$MONO"
 
-          # init_dirs.sh
-          cat <<'EOS' > .github/echo_dirs/init_dirs.sh
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          chmod -R 755 "$BASE" "$MONO"
-          echo "[ECHO] BASE/Monitoring 디렉토리 권한 설정 완료"
-          EOS
-          chmod +x .github/echo_dirs/init_dirs.sh
+          echo "[ECHO] 필수 디렉토리 생성 완료" | tee -a .github/echo_logs/init.log
 
-          # emailops_massive_echo.sh
+      - name: 🔄 모든 패키지 업데이트 (AutoUP)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "#!/usr/bin/env bash" > .github/echo_autoup/autoup.sh
+          echo "set -Eeuo pipefail" >> .github/echo_autoup/autoup.sh
+          echo "sudo apt-get update -y" >> .github/echo_autoup/autoup.sh
+          echo "sudo apt-get upgrade -y | tee .github/echo_logs/autoupgraded_pkgs.txt" >> .github/echo_autoup/autoup.sh
+          echo "echo '[ECHO] 패키지 업데이트 완료'" >> .github/echo_autoup/autoup.sh
+          chmod +x .github/echo_autoup/autoup.sh
+          bash .github/echo_autoup/autoup.sh
+
+      - name: 🔐 방화벽 규칙 생성 및 적용
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "#!/usr/bin/env bash" > .github/echo_firewall/firewall_rules.sh
+          echo "set -Eeuo pipefail" >> .github/echo_firewall/firewall_rules.sh
+          echo "sudo apt-get install -y ufw" >> .github/echo_firewall/firewall_rules.sh
+          echo "sudo ufw --force reset" >> .github/echo_firewall/firewall_rules.sh
+          for port in 25 1025 2525 80 443 3000 5000 8086; do
+            echo "sudo ufw allow $port/tcp" >> .github/echo_firewall/firewall_rules.sh
+          done
+          echo "sudo ufw --force enable" >> .github/echo_firewall/firewall_rules.sh
+          echo "echo '[ECHO] 방화벽 규칙 적용 완료'" >> .github/echo_firewall/firewall_rules.sh
+          chmod +x .github/echo_firewall/firewall_rules.sh
+          bash .github/echo_firewall/firewall_rules.sh
+
+      - name: 📦 필수 패키지 설치
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara
+          sudo systemctl stop clamav-freshclam || true
+          sudo freshclam || true
+          sudo systemctl start clamav-daemon || true
+          echo "[ECHO] 필수 패키지 설치 완료" | tee -a .github/echo_logs/setup.log
+
+      - name: 📁 권한 설정
+        shell: bash
+        run: |
+          echo "#!/usr/bin/env bash" > .github/echo_dirs/init_dirs.sh
+          echo "chmod -R 755 \"$BASE\" \"$MONO\"" >> .github/echo_dirs/init_dirs.sh
+          echo "echo '[ECHO] BASE/Monitoring 디렉토리 권한 설정 완료'" >> .github/echo_dirs/init_dirs.sh
+          chmod +x .github/echo_dirs/init_dirs.sh
+          bash .github/echo_dirs/init_dirs.sh
+
+      - name: 🛠️ 서비스별 에코 생성
+        shell: bash
+        run: |
           cat <<'EOS' > .github/scripts/emailops_massive_echo.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -73,45 +119,49 @@ jobs:
           echo "[ECHO] 서비스별 디렉토리 및 샘플 데이터 생성 완료"
           EOS
           chmod +x .github/scripts/emailops_massive_echo.sh
+          bash .github/scripts/emailops_massive_echo.sh
 
-          # emailops_sendmail.sh
-          cat <<'EOS' > .github/scripts/emailops_sendmail.sh
+      - name: 📨 REAL MTA 설치/설정(Postfix/Exim4/OpenSMTPD)
+        shell: bash
+        run: |
+          cat <<'EOS' > .github/scripts/real_mta_install.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          body_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "[ECHO] swaks SMTP 테스트 시작"
-          swaks --version >/dev/null 2>&1 || { echo "[WARN] swaks 미설치"; exit 0; }
-          for port in 25 1025 2525; do
-            swaks --to test@local --from ci@local --server 127.0.0.1 --port $port \
-                  --data "Subject: SMTP Test on port $port\r\n\r\nBody $body_ts" \
-                  || echo "[WARN] SMTP 포트 $port 실패"
+          for svc in $SERVICES; do
+            case "$svc" in
+              postfix)
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+                sudo postconf -e "myhostname = $DOMAIN"
+                sudo postconf -e "mydestination = localhost"
+                sudo postconf -e "inet_interfaces = all"
+                sudo systemctl enable postfix
+                sudo systemctl restart postfix
+                ;;
+              exim4)
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y exim4
+                sudo sed -i "s/dc_eximconfig_configtype=.*/dc_eximconfig_configtype='internet'/" /etc/exim4/update-exim4.conf.conf
+                sudo update-exim4.conf
+                sudo systemctl enable exim4
+                sudo systemctl restart exim4
+                ;;
+              opensmtpd)
+                sudo apt-get install -y opensmtpd
+                echo "listen on 0.0.0.0" | sudo tee /etc/smtpd.conf
+                echo "action \"local_mail\" maildir \"$BASE/maildir\"" | sudo tee -a /etc/smtpd.conf
+                echo "match from any for domain \"$DOMAIN\" action \"local_mail\"" | sudo tee -a /etc/smtpd.conf
+                sudo systemctl enable opensmtpd
+                sudo systemctl restart opensmtpd
+                ;;
+            esac
           done
-          echo "[ECHO] SMTP 테스트 종료"
+          echo "[ECHO] MTA 설치/설정 완료"
           EOS
-          chmod +x .github/scripts/emailops_sendmail.sh
+          chmod +x .github/scripts/real_mta_install.sh
+          bash .github/scripts/real_mta_install.sh
 
-          # grafana_dashboard_gen.sh
-          cat <<'EOS' > .github/scripts/grafana_dashboard_gen.sh
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          mkdir -p "$MONO/grafana/provisioning/dashboards"
-          cat > "$MONO/grafana/provisioning/dashboards/emailops.json" <<'J'
-          {
-            "title": "EmailOps Overview",
-            "timezone": "browser",
-            "schemaVersion": 39,
-            "version": 1,
-            "panels": [
-              { "type": "stat", "title": "Dummy Metric", "id": 1,
-                "targets": [], "options": { "reduceOptions": { "values": false } } }
-            ]
-          }
-          J
-          echo "[ECHO] Grafana 대시보드 템플릿 생성 완료"
-          EOS
-          chmod +x .github/scripts/grafana_dashboard_gen.sh
-
-          # docker_compose.sh
+      - name: 🐳 Docker Compose 서비스 실행
+        shell: bash
+        run: |
           cat <<'EOS' > .github/echo_compose/docker_compose.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -149,81 +199,21 @@ jobs:
               ports: ["3000:3000"]
               restart: unless-stopped
           YML
-          echo "[ECHO] docker-compose.yml 생성 완료"
           docker compose -f .github/echo_compose/docker-compose.yml up -d
           EOS
           chmod +x .github/echo_compose/docker_compose.sh
-
-          # real_mta_install.sh
-          cat <<'EOS' > .github/scripts/real_mta_install.sh
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          for svc in $SERVICES; do
-            case "$svc" in
-              postfix)
-                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
-                sudo postconf -e "myhostname = $DOMAIN"
-                sudo postconf -e "mydestination = localhost"
-                sudo postconf -e "inet_interfaces = all"
-                sudo systemctl enable postfix
-                sudo systemctl restart postfix
-                echo "[ECHO] Postfix 설치 및 설정 완료"
-                ;;
-              exim4)
-                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y exim4
-                sudo sed -i "s/dc_eximconfig_configtype=.*/dc_eximconfig_configtype='internet'/" /etc/exim4/update-exim4.conf.conf
-                sudo update-exim4.conf
-                sudo systemctl enable exim4
-                sudo systemctl restart exim4
-                echo "[ECHO] Exim4 설치 및 설정 완료"
-                ;;
-              opensmtpd)
-                sudo apt-get install -y opensmtpd
-                echo "listen on 0.0.0.0" | sudo tee /etc/smtpd.conf
-                echo "action \"local_mail\" maildir \"$BASE/maildir\"" | sudo tee -a /etc/smtpd.conf
-                echo "match from any for domain \"$DOMAIN\" action \"local_mail\"" | sudo tee -a /etc/smtpd.conf
-                sudo systemctl enable opensmtpd
-                sudo systemctl restart opensmtpd
-                echo "[ECHO] OpenSMTPD 설치 및 설정 완료"
-                ;;
-            esac
-          done
-          EOS
-          chmod +x .github/scripts/real_mta_install.sh
-
-      - name: 📦 필수 패키지 설치
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara docker-compose-plugin
-          sudo systemctl stop clamav-freshclam || true
-          sudo freshclam || true
-          sudo systemctl start clamav-daemon || true
-
-      - name: 📁 권한 설정
-        shell: bash
-        run: bash .github/echo_dirs/init_dirs.sh
-
-      - name: 🛠️ 서비스별 에코 생성
-        shell: bash
-        run: bash .github/scripts/emailops_massive_echo.sh
-
-      - name: 📨 REAL MTA 설치/설정(Postfix/Exim4/OpenSMTPD)
-        shell: bash
-        run: bash .github/scripts/real_mta_install.sh
-
-      - name: 📊 Grafana 대시보드 생성
-        shell: bash
-        run: bash .github/scripts/grafana_dashboard_gen.sh
-
-      - name: 🐳 Docker Compose 서비스 실행
-        shell: bash
-        run: bash .github/echo_compose/docker_compose.sh
+          bash .github/echo_compose/docker_compose.sh
 
       - name: ✉️ SMTP 테스트
         shell: bash
-        run: bash .github/scripts/emailops_sendmail.sh || true
+        run: |
+          echo "#!/usr/bin/env bash" > .github/scripts/emailops_sendmail.sh
+          echo "swaks --version >/dev/null 2>&1 || exit 0" >> .github/scripts/emailops_sendmail.sh
+          for port in 25 1025 2525; do
+            echo "swaks --to test@local --from ci@local --server 127.0.0.1 --port $port" >> .github/scripts/emailops_sendmail.sh
+          done
+          chmod +x .github/scripts/emailops_sendmail.sh
+          bash .github/scripts/emailops_sendmail.sh || true
 
       - name: 🛡️ 바이러스 검사
         shell: bash
