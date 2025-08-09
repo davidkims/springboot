@@ -1,11 +1,35 @@
-name: "🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security (ULTRA)"
+name: "🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security (ULTRA, Realtime)"
 
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: "Manual run reason"
+        required: false
+        default: "manual"
+  push:
+    branches: [ main, master ]
+    paths:
+      - ".github/workflows/**"
+      - ".github/**"
+      - "site/**"
+      - "!**.md"
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - ".github/**"
+      - "site/**"
+  repository_dispatch:
+    types: [realtime-apply]
   schedule:
     - cron: "*/1 * * * *"  # 매 1분
 
+concurrency:
+  group: mega-secure-ci
+  cancel-in-progress: true
+
 permissions:
+  actions: read
   contents: write
   pull-requests: write
   id-token: write
@@ -27,43 +51,71 @@ jobs:
     - name: 📂 Checkout
       uses: actions/checkout@v4
 
-    - name: 📁 Echo 디렉토리/파일 선생성 (No missing file)
+    - name: 📁 Echo 부트스트랩 + 대량 실행 스크립트 생성(누락방지/즉시적용)
       shell: bash
       run: |
         set -Eeuo pipefail
-        mkdir -p .github/echo_logs
-        CREATE=.github/echo_logs/create_dirs.sh
-        echo '#!/usr/bin/env bash' > "$CREATE"
-        for d in \
-          .github/{scripts,firewall,downloads} \
-          .github/echo_{logs,scorecard,codeql,security,upgrade,autoup,pages,templates,backup,monitoring,services,db,permissions,containers,accounts} \
-          site/{scorecard,security,upgrade,pr,backup,html,containers,logs,templates,downloads,db_backup_html,accounts}; do
-          mkdir -p "$d"
-          echo "echo '[ECHO] 디렉토리 생성: $d'" >> "$CREATE"
-        done
-        chmod +x "$CREATE" && bash "$CREATE"
+        exec > >(tee .github/echo_logs/00_bootstrap.log) 2>&1
 
-        # 공통 에코 템플릿/권한 스크립트 생성
+        mapfile -t DIRS <<'LIST'
+        .github/scripts
+        .github/firewall
+        .github/downloads
+        .github/permissions
+        .github/echo_permissions
+        .github/echo_logs
+        .github/echo_accounts
+        .github/echo_services
+        .github/echo_containers
+        .github/echo_templates
+        .github/echo_scorecard
+        .github/echo_codeql
+        .github/echo_security
+        .github/echo_upgrade
+        .github/echo_autoup
+        .github/echo_pages
+        .github/echo_backup
+        .github/echo_monitoring
+        .github/echo_db
+        .github/services/mysql
+        .github/services/postgres
+        .github/services/redis
+        site/scorecard
+        site/security
+        site/upgrade
+        site/pr
+        site/backup
+        site/html
+        site/containers
+        site/logs
+        site/templates
+        site/downloads
+        site/db_backup_html
+        site/accounts
+        LIST
+        for d in "${DIRS[@]}"; do mkdir -p "$d"; echo "[ECHO] 디렉토리 생성: $d"; done
+
+        # 권한 스크립트
+        cat > .github/echo_permissions/chmod_all.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        chmod -R 755 .github || true
+        SH
+        chmod +x .github/echo_permissions/chmod_all.sh
+        .github/echo_permissions/chmod_all.sh || true
+
+        # 템플릿 README
         cat > .github/echo_templates/README.txt <<'TXT'
-        [ECHO] 이 디렉토리는 모든 자동 생성 스크립트/샘플 .env/.cfg/.json 템플릿을 보관합니다.
+        [ECHO] 자동 생성되는 스크립트(.sh), .env, 템플릿(.cfg/.json) 저장소
         TXT
-        echo "chmod -R 755 .github || true" > .github/permissions/chmod_all.sh
-        chmod +x .github/permissions/chmod_all.sh
 
-    - name: 🔐 가상 계정·비밀번호 대량 생성 (에코/파일 출력)
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        # 서비스별 랜덤 비밀번호 생성 (재현 불필요: 매 실행 시 갱신)
+        # 가상 계정/ENV (실행마다 갱신)
         gen() { openssl rand -hex 12; }
-        MYSQL_APP_USER="appuser"
-        MYSQL_APP_PASS="$(gen)"
-        POSTGRES_APP_USER="pguser"
-        POSTGRES_APP_PASS="$(gen)"
+        MYSQL_APP_USER="appuser";    MYSQL_APP_PASS="$(gen)"
+        POSTGRES_APP_USER="pguser";  POSTGRES_APP_PASS="$(gen)"
         REDIS_PASS="$(gen)"
         VAULT_DEV_TOKEN="root-$(gen)"
 
-        # 계정·토큰 목록을 CSV/ENV로 저장(카페·문서 공유용 아님: 데모 테스트 전용)
         {
           echo "service,username,password_or_token"
           echo "mysql,root,${DB_PASS}"
@@ -74,40 +126,149 @@ jobs:
           echo "vault,root_token,${VAULT_DEV_TOKEN}"
         } | tee site/accounts/accounts.csv > .github/echo_accounts/accounts.csv
 
-        # 서비스별 .env 템플릿 에코 생성
         cat > site/templates/mysql.env <<EOF
         MYSQL_ROOT_PASSWORD=${DB_PASS}
         MYSQL_DATABASE=${DB_NAME}
         MYSQL_APP_USER=${MYSQL_APP_USER}
         MYSQL_APP_PASS=${MYSQL_APP_PASS}
         EOF
-
         cat > site/templates/postgres.env <<EOF
         POSTGRES_PASSWORD=${DB_PASS}
         POSTGRES_DB=${DB_NAME}
         POSTGRES_APP_USER=${POSTGRES_APP_USER}
         POSTGRES_APP_PASS=${POSTGRES_APP_PASS}
         EOF
-
         cat > site/templates/redis.env <<EOF
         REDIS_PASSWORD=${REDIS_PASS}
         EOF
-
         cat > site/templates/vault.env <<EOF
         VAULT_DEV_ROOT_TOKEN_ID=${VAULT_DEV_TOKEN}
         VAULT_ADDR=http://127.0.0.1:8200
         EOF
 
-        # 가상 이메일 계정(테스트용) CSV — 각 서비스와 매핑
-        {
-          echo "email,service,username,password"
-          echo "app@local.test,mysql,${MYSQL_APP_USER},${MYSQL_APP_PASS}"
-          echo "app@local.test,postgres,${POSTGRES_APP_USER},${POSTGRES_APP_PASS}"
-          echo "cache@local.test,redis,default,${REDIS_PASS}"
-        } | tee site/accounts/virtual_emails.csv
+        # 서비스 초기화 파일 생성 (heredoc 안전)
+        cat > .github/echo_services/mysql_init.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        cat > .github/services/mysql/init.sql <<'SQL'
+        CREATE DATABASE IF NOT EXISTS sample_db;
+        CREATE TABLE IF NOT EXISTS sample_db.test (id INT PRIMARY KEY, val VARCHAR(64));
+        INSERT INTO sample_db.test VALUES (1,"hello"),(2,"world")
+          ON DUPLICATE KEY UPDATE val=VALUES(val);
+        SQL
+        echo "[ECHO] MySQL init.sql 생성 완료"
+        SH
+        chmod +x .github/echo_services/mysql_init.sh
+        .github/echo_services/mysql_init.sh
 
-        # 에코 로그
-        echo "[ECHO] 계정/비밀번호/토큰 템플릿 생성 완료" | tee -a .github/echo_logs/accounts_init.log
+        cat > .github/echo_services/pg_init.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        cat > .github/services/postgres/init.sql <<'SQL'
+        CREATE TABLE IF NOT EXISTS test (id INT PRIMARY KEY, val VARCHAR(64));
+        INSERT INTO test (id,val) VALUES (1,'hello'),(2,'world')
+          ON CONFLICT (id) DO UPDATE SET val=EXCLUDED.val;
+        SQL
+        echo "[ECHO] Postgres init.sql 생성 완료"
+        SH
+        chmod +x .github/echo_services/pg_init.sh
+        .github/echo_services/pg_init.sh
+
+        cat > .github/echo_services/redis_conf.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        cat > .github/services/redis/redis.conf <<'CONF'
+        protected-mode no
+        port 6379
+        tcp-keepalive 300
+        save 300 10
+        appendonly yes
+        CONF
+        echo "[ECHO] Redis redis.conf 생성 완료"
+        SH
+        chmod +x .github/echo_services/redis_conf.sh
+        .github/echo_services/redis_conf.sh
+
+        # 컨테이너 스크립트 (pull/run/health)
+        cat > .github/echo_containers/pull.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        declare -A IMGS=(
+          [mysql]="mysql:8.0.37"
+          [postgres]="postgres:16.3"
+          [redis]="redis:7.2.5"
+          [kafka]="bitnami/kafka:3.7.0"
+          [vault]="vault:${VAULT_VERSION:-1.15.2}"
+          [spark-svc]="bitnami/spark:3.5.1"
+          [camunda]="camunda/camunda-bpm-platform:run-7.21.0"
+        )
+        for n in "${!IMGS[@]}"; do
+          img="${IMGS[$n]}"; echo "[IMAGE] pull $img"; docker pull "$img" || true
+        done
+        SH
+        chmod +x .github/echo_containers/pull.sh
+
+        cat > .github/echo_containers/run.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        : "${MYSQL_ROOT_PASSWORD:?}" "${POSTGRES_PASSWORD:?}" "${REDIS_PASSWORD:?}" "${VAULT_DEV_ROOT_TOKEN_ID:?}"
+        docker rm -f mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci >/dev/null 2>&1 || true
+        docker run -d --name mysql_ci   -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" -p 3306:3306 mysql:8.0.37
+        docker run -d --name postgres_ci -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" -p 5432:5432 postgres:16.3
+        docker run -d --name redis_ci -p 6379:6379 redis:7.2.5 redis-server --appendonly yes --requirepass "${REDIS_PASSWORD}"
+        docker run -d --name kafka_ci -p 9092:9092 bitnami/kafka:3.7.0
+        docker run -d --name vault_ci -p 8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID="${VAULT_DEV_ROOT_TOKEN_ID}" -e VAULT_ADDR="http://0.0.0.0:8200" "vault:${VAULT_VERSION:-1.15.2}" server -dev -dev-root-token-id="${VAULT_DEV_ROOT_TOKEN_ID}"
+        docker run -d --name spark_ci -p 7077:7077 bitnami/spark:3.5.1
+        docker run -d --name camunda_ci -p 8081:8080 camunda/camunda-bpm-platform:run-7.21.0
+        SH
+        chmod +x .github/echo_containers/run.sh
+
+        cat > .github/echo_containers/health.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        for c in mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci; do
+          st="$(docker inspect --format='{{.State.Status}}' "$c" 2>/dev/null || echo unknown)"
+          if [ "$st" != "running" ]; then echo "[HEALTH] $c: $st → restart"; docker restart "$c" || true; else echo "[HEALTH] $c: OK"; fi
+        done
+        SH
+        chmod +x .github/echo_containers/health.sh
+
+        # init 적용 + 백업 통합
+        cat > .github/echo_services/apply_and_backup.sh <<'SH'
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"; MYSQL_PORT="${MYSQL_PORT:-3306}"
+        POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"; POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+        REDIS_PORT="${REDIS_PORT:-6379}"; : "${DB_USER:?}" "${DB_PASS:?}" "${DB_NAME:?}"
+        # Redis 파일 기반(비번 보강)
+        if [ -f ".github/services/redis/redis.conf" ]; then
+          if ! grep -q '^requirepass ' .github/services/redis/redis.conf 2>/dev/null && [ -n "${REDIS_PASSWORD:-}" ]; then
+            echo "requirepass ${REDIS_PASSWORD}" >> .github/services/redis/redis.conf
+          fi
+          docker rm -f redis_ci >/dev/null 2>&1 || true
+          docker run -d --name redis_ci -p ${REDIS_PORT}:6379 -v "${PWD}/.github/services/redis/redis.conf:/usr/local/etc/redis/redis.conf" redis:7.2.5 redis-server /usr/local/etc/redis/redis.conf
+        fi
+        # MySQL 대기 + init 적용
+        for i in {1..30}; do MYSQL_PWD="${DB_PASS}" mysqladmin ping -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" --silent && break; sleep 2; done
+        [ -f ".github/services/mysql/init.sql" ] && MYSQL_PWD="${DB_PASS}" mysql -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" < .github/services/mysql/init.sql || true
+        # Postgres 대기 + DB 생성 + init 적용
+        export PGPASSWORD="${DB_PASS}"
+        for i in {1..30}; do pg_isready -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" >/dev/null 2>&1 && break; sleep 2; done
+        if ! psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+          psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -c "CREATE DATABASE ${DB_NAME};"
+        fi
+        [ -f ".github/services/postgres/init.sql" ] && psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -f .github/services/postgres/init.sql || true
+        # health 보장
+        MYSQL_PWD="${DB_PASS}" mysql -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" -e "CREATE TABLE IF NOT EXISTS ${DB_NAME}.health (id INT PRIMARY KEY, msg VARCHAR(64)); INSERT IGNORE INTO ${DB_NAME}.health VALUES (1,'ok');" || true
+        psql -h "${POSTGRES_HOST}" -p "${POSTRES_PORT:-$POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS health (id INT PRIMARY KEY, msg TEXT); INSERT INTO health VALUES (1,'ok') ON CONFLICT (id) DO NOTHING;" || true
+        # 백업 + HTML 변환
+        mkdir -p site/backup site/db_backup_html
+        MYSQL_PWD="${DB_PASS}" mysqldump -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" "${DB_NAME}" > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
+        pg_dump -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
+        for f in site/backup/*; do [ -f "$f" ] || continue; b="$(basename "$f")"; { echo "<html><body><h3>$b</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' "$f"; echo "</pre></body></html>"; } > "site/db_backup_html/${b}.html"; done
+        echo "[ECHO] apply_and_backup 완료"
+        SH
+        chmod +x .github/echo_services/apply_and_backup.sh
 
     - name: 🔧 기본 패키지 & Python 보안툴
       shell: bash
@@ -118,35 +279,29 @@ jobs:
         python3 -m pip install --upgrade pip
         pip install --no-cache-dir bandit pip-audit
 
-    - name: 🐳 Docker 설치 (containerd 충돌 우회)
+    - name: 🐳 Docker 설치
       shell: bash
       run: |
         set -Eeuo pipefail
-        if ! command -v docker >/dev/null 2>&1; then
-          curl -fsSL https://get.docker.com | sh
-        fi
+        if ! command -v docker >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; fi
         sudo usermod -aG docker "$USER" || true
         docker --version | tee .github/echo_logs/docker_version.txt
 
-    - name: 🛡️ Trivy & Scorecard 설치(안전)
+    - name: 🛡️ Trivy & Scorecard 설치
       shell: bash
       run: |
         set -Eeuo pipefail
-        # Trivy
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          | sh -s -- -b /usr/local/bin
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
         trivy --version | tee .github/echo_logs/trivy_version.txt
-
-        # Scorecard
         VER="4.10.3"
         curl -sLO "https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz"
         tar -xzf "scorecard_${VER}_linux_amd64.tar.gz"
         BIN="$(find . -type f -name scorecard | head -n1 || true)"
-        if [ -z "$BIN" ]; then echo "::error ::Scorecard binary not found"; exit 1; fi
+        [ -z "$BIN" ] && { echo "::error ::Scorecard binary not found"; exit 1; }
         sudo mv "$BIN" /usr/local/bin/scorecard && chmod +x /usr/local/bin/scorecard
         scorecard --version | tee .github/echo_logs/scorecard_version.txt
 
-    - name: 🧪 Apache Spark 설치 (에코 로그)
+    - name: 🧪 Apache Spark 설치
       shell: bash
       run: |
         set -Eeuo pipefail
@@ -156,7 +311,7 @@ jobs:
         echo "PATH=/opt/spark/bin:$PATH" >> "$GITHUB_ENV"
         echo "[ECHO] Spark ${SPARK_VERSION} 설치 완료" | tee -a .github/echo_logs/spark_install.log
 
-    - name: 🐳 컨테이너 Pull/Run(버전 고정) + HealthCheck + Auto-Restart + 에코계정 적용
+    - name: 🐳 Pull & Run Containers (echo scripts)
       shell: bash
       run: |
         set -Eeuo pipefail
@@ -164,144 +319,24 @@ jobs:
         source site/templates/postgres.env
         source site/templates/redis.env
         source site/templates/vault.env
+        .github/echo_containers/pull.sh
+        .github/echo_containers/run.sh
+        .github/echo_containers/health.sh
 
-        declare -A IMGS=(
-          [mysql]="mysql:8.0.37"
-          [postgres]="postgres:16.3"
-          [redis]="redis:7.2.5"
-          [kafka]="bitnami/kafka:3.7.0"
-          [vault]="vault:${VAULT_VERSION}"
-          [spark-svc]="bitnami/spark:3.5.1"
-          [camunda]="camunda/camunda-bpm-platform:run-7.21.0"
-        )
-        for n in "${!IMGS[@]}"; do
-          img="${IMGS[$n]}"
-          docker rm -f "${n}_ci" >/dev/null 2>&1 || true
-          docker pull "$img" || true
-          echo "[IMAGE] pulled: $img" >> .github/echo_logs/images_pulled.log
-        done
-
-        # MySQL
-        docker run -d --name mysql_ci \
-          -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" \
-          -p 3306:3306 \
-          "${IMGS[mysql]}"
-
-        # PostgreSQL
-        docker run -d --name postgres_ci \
-          -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
-          -p 5432:5432 \
-          "${IMGS[postgres]}"
-
-        # Redis (비번 적용 위해 전용 커맨드)
-        docker run -d --name redis_ci -p 6379:6379 "${IMGS[redis]}" \
-          redis-server --appendonly yes --requirepass "${REDIS_PASSWORD}"
-
-        # Kafka (기본 실행 — 상세 보안설정은 별도 확장)
-        docker run -d --name kafka_ci -p 9092:9092 "${IMGS[kafka]}"
-
-        # Vault (dev 모드, 루트 토큰 고정)
-        docker run -d --name vault_ci -p 8200:8200 \
-          -e VAULT_DEV_ROOT_TOKEN_ID="${VAULT_DEV_ROOT_TOKEN_ID}" \
-          -e VAULT_ADDR="http://0.0.0.0:8200" \
-          "${IMGS[vault]}" server -dev -dev-root-token-id="${VAULT_DEV_ROOT_TOKEN_ID}"
-
-        # Spark / Camunda
-        docker run -d --name spark_ci -p 7077:7077 "${IMGS[spark-svc]}"
-        docker run -d --name camunda_ci -p 8081:8080 "${IMGS[camunda]}"
-
-        # HealthCheck + Restart (에코)
-        echo "#!/usr/bin/env bash" > .github/echo_logs/containers_health.sh
-        for c in mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci; do
-          st="$(docker inspect --format='{{.State.Status}}' "$c" 2>/dev/null || echo unknown)"
-          if [ "$st" != "running" ]; then
-            echo "[HEALTH] $c: $st → restart" >> .github/echo_logs/containers_health.sh
-            docker restart "$c" || true
-          else
-            echo "[HEALTH] $c: OK" >> .github/echo_logs/containers_health.sh
-          fi
-        done
-        bash .github/echo_logs/containers_health.sh
-
-        # DB init 스크립트(에코 생성 후 실행)
-        cat > .github/echo_services/mysql_init.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -h 127.0.0.1 -P 3306 -uroot <<SQL
-        CREATE DATABASE IF NOT EXISTS ${MYSQL_DATABASE};
-        CREATE USER IF NOT EXISTS '${MYSQL_APP_USER}'@'%' IDENTIFIED BY '${MYSQL_APP_PASS}';
-        GRANT ALL PRIVILEGES ON ${MYSQL_DATABASE}.* TO '${MYSQL_APP_USER}'@'%';
-        FLUSH PRIVILEGES;
-        SQL
-        echo "[ECHO] MySQL DB/USER 초기화 완료"
-        SH
-        chmod +x .github/echo_services/mysql_init.sh
-
-        cat > .github/echo_services/postgres_init.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        export PGPASSWORD="${POSTGRES_PASSWORD}"
-        psql -h 127.0.0.1 -p 5432 -U postgres <<SQL
-        DO
-        $$
-        BEGIN
-          IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '${POSTGRES_DB}') THEN
-            PERFORM dblink_exec('dbname='||current_database(), 'CREATE DATABASE ${POSTGRES_DB}');
-          END IF;
-        END
-        $$;
-        SQL
-        # ROLE/권한
-        psql -h 127.0.0.1 -p 5432 -U postgres <<SQL
-        DO
-        $$
-        BEGIN
-          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${POSTGRES_APP_USER}') THEN
-            CREATE ROLE ${POSTGRES_APP_USER} LOGIN PASSWORD '${POSTGRES_APP_PASS}';
-          END IF;
-          GRANT ALL PRIVILEGES ON DATABASE ${POSTGRES_DB} TO ${POSTGRES_APP_USER};
-        END
-        $$;
-        SQL
-        echo "[ECHO] Postgres DB/USER 초기화 완료"
-        SH
-        chmod +x .github/echo_services/postgres_init.sh
-
-        # 준비 대기 후 실행
-        sleep 12
-        source site/templates/mysql.env && bash .github/echo_services/mysql_init.sh || true
-        source site/templates/postgres.env && bash .github/echo_services/postgres_init.sh || true
-
-        # Vault에 예시 시크릿 저장(에코)
-        {
-          echo "curl -s -H \"X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID}\" --request POST \
-            --data '{\"data\": {\"db_user\": \"'${MYSQL_APP_USER}'\", \"db_pass\": \"'${MYSQL_APP_PASS}'\"}}' \
-            http://127.0.0.1:8200/v1/secret/data/app"
-        } > .github/echo_services/vault_seed.sh
-        bash -c "$(cat .github/echo_services/vault_seed.sh)" || true
-        echo "[ECHO] Vault KV seed 완료" | tee -a .github/echo_logs/vault_seed.log
-
-    - name: 🗄 DB 백업 + HTML 변환 (에코 포함)
+    - name: 🚀 Apply init + backup (echo script)
       shell: bash
+      env:
+        DB_USER: ${{ env.DB_USER }}
+        DB_PASS: ${{ env.DB_PASS }}
+        DB_NAME: ${{ env.DB_NAME }}
+        MYSQL_HOST: 127.0.0.1
+        MYSQL_PORT: 3306
+        POSTGRES_HOST: 127.0.0.1
+        POSTGRES_PORT: 5432
+        REDIS_PORT: 6379
       run: |
         set -Eeuo pipefail
-        source site/templates/mysql.env
-        source site/templates/postgres.env
-        sleep 8
-        # 존재 보장용 테이블 하나 생성(양쪽 DB)
-        MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -h 127.0.0.1 -P 3306 -uroot -e "CREATE TABLE IF NOT EXISTS ${MYSQL_DATABASE}.health(id INT PRIMARY KEY, msg VARCHAR(64)); INSERT IGNORE INTO ${MYSQL_DATABASE}.health VALUES (1,'ok');" || true
-        export PGPASSWORD="${POSTGRES_PASSWORD}"
-        psql -h 127.0.0.1 -p 5432 -U postgres -d "${POSTGRES_DB}" -c "CREATE TABLE IF NOT EXISTS health(id INT PRIMARY KEY, msg TEXT); INSERT INTO health VALUES (1,'ok') ON CONFLICT (id) DO NOTHING;" || true
-
-        mysqldump -h 127.0.0.1 -P 3306 -uroot -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DATABASE}" > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패" | tee -a .github/echo_logs/backup.log
-        pg_dump -h 127.0.0.1 -p 5432 -U postgres -d "${POSTGRES_DB}" > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패" | tee -a .github/echo_logs/backup.log
-
-        for f in site/backup/*; do
-          [ -f "$f" ] || continue
-          b="$(basename "$f")"
-          { echo "<html><body><h3>$b</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' "$f"; echo "</pre></body></html>"; } > "site/db_backup_html/${b}.html"
-        done
-        echo "[ECHO] 백업 및 HTML 변환 완료" | tee -a .github/echo_logs/backup.log
+        .github/echo_services/apply_and_backup.sh
 
     - name: 🔎 보안 스캔 (Scorecard / CodeQL / Bandit / pip-audit / Trivy)
       shell: bash
@@ -324,7 +359,7 @@ jobs:
         output: site/security/codeql-results.sarif
         category: codeql-security-scan
 
-    - name: ⬆️ 업그레이드 사전 목록 수집 (에코)
+    - name: ⬆️ 업그레이드 사전 목록 수집
       shell: bash
       run: |
         set -Eeuo pipefail
@@ -369,7 +404,7 @@ jobs:
         if [ -s site/upgrade/upgradable.after.txt ] || [ -s site/upgrade/pip-upgradable.after.txt ]; then
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions"
-          git checkout -b "auto/upgrade-$(date -u +%Y%m%d%H%M%S)" || git checkout -b auto/upgrade
+          git checkout -b "auto/upgrade-$(date -u +%Y%m%d%H%M%S)" || git checkout -B auto/upgrade
           git add site/upgrade/ .github/echo_upgrade/ .github/echo_logs/ site/accounts/ || true
           git commit -m "chore: auto upgrade artifacts (Pages + Echo logs)" || true
           git push -u origin HEAD || true
@@ -386,7 +421,9 @@ jobs:
           .github/echo_upgrade/**
           .github/echo_services/**
           .github/echo_accounts/**
+          .github/echo_containers/**
           .github/permissions/**
+          .github/echo_permissions/**
 
     - name: 🌐 Upload Pages Artifact
       uses: actions/upload-pages-artifact@v3
