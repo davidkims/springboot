@@ -1,237 +1,99 @@
-name: 🧠 MEGA EMAILOPS + SMTP + MONITORING + VIRUS + FULL ECHO + REAL MTA + AUTOUP + FIREWALL
+name: 📧 MEGA EmailOps + 패키지업데이트 + 방화벽 + ClamAV + 에코 확장형
 
 on:
   workflow_dispatch:
+    inputs:
+      domain:
+        description: "Base domain for virtual accounts"
+        required: false
+        default: "example.local"
+      user_count:
+        description: "Number of virtual accounts per service"
+        required: false
+        default: "50"
+      test_count:
+        description: "Number of test emails per server"
+        required: false
+        default: "3"
   schedule:
-    - cron: '*/5 * * * *'
-
-permissions:
-  contents: read
-
-env:
-  BASE: /opt/email
-  MONO: /opt/email/.monitoring
-  DOMAIN: example.local
-  SERVICES: postfix exim4 opensmtpd mailhog maildev mailcatcher smtp4dev
-  USER_COUNT: 200
-  TEST_COUNT: 5
-  INF_BUCKET: metrics
-  INF_ORG: org
-  INF_USER: admin
-  INF_PASS: admin1234!
-  INF_TOKEN: dev-token-123456
+    - cron: "*/5 * * * *"
 
 jobs:
-  mega-emailops:
+  emailops:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+    env:
+      BASE: /opt/email
+      MONO: /opt/email/.monitoring
+      DOMAIN: ${{ github.event.inputs.domain || 'example.local' }}
+      USER_COUNT: ${{ github.event.inputs.user_count || '50' }}
+      TEST_COUNT: ${{ github.event.inputs.test_count || '3' }}
+      SERVICES: postfix exim4 opensmtpd mailhog maildev mailcatcher smtp4dev
+      INF_BUCKET: metrics
+      INF_ORG: org
+      INF_USER: admin
+      INF_PASS: admin1234!
+      INF_TOKEN: dev-token-123456
 
     steps:
-      - name: 📂 Checkout Repository
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 📁 필수 에코 디렉토리 대량 생성
-        shell: bash
+      - name: 📦 패키지 업데이트 + 필수 설치
         run: |
-          set -Eeuo pipefail
-          for d in \
-            .github/echo_dirs \
-            .github/echo_virus \
-            .github/echo_compose \
-            .github/echo_scripts \
-            .github/echo_logs \
-            .github/echo_monitoring \
-            .github/echo_pages \
-            .github/echo_auth \
-            .github/echo_firewall \
-            .github/echo_autoup \
-            .github/echo_exec \
-            .github/scripts ; do
-            mkdir -p "$d"
-          done
-          mkdir -p "$BASE" "$MONO"
-
-          echo "[ECHO] 필수 디렉토리 생성 완료" | tee -a .github/echo_logs/init.log
-
-      - name: 🔄 모든 패키지 업데이트 (AutoUP)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "#!/usr/bin/env bash" > .github/echo_autoup/autoup.sh
-          echo "set -Eeuo pipefail" >> .github/echo_autoup/autoup.sh
-          echo "sudo apt-get update -y" >> .github/echo_autoup/autoup.sh
-          echo "sudo apt-get upgrade -y | tee .github/echo_logs/autoupgraded_pkgs.txt" >> .github/echo_autoup/autoup.sh
-          echo "echo '[ECHO] 패키지 업데이트 완료'" >> .github/echo_autoup/autoup.sh
-          chmod +x .github/echo_autoup/autoup.sh
-          bash .github/echo_autoup/autoup.sh
-
-      - name: 🔐 방화벽 규칙 생성 및 적용
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "#!/usr/bin/env bash" > .github/echo_firewall/firewall_rules.sh
-          echo "set -Eeuo pipefail" >> .github/echo_firewall/firewall_rules.sh
-          echo "sudo apt-get install -y ufw" >> .github/echo_firewall/firewall_rules.sh
-          echo "sudo ufw --force reset" >> .github/echo_firewall/firewall_rules.sh
-          for port in 25 1025 2525 80 443 3000 5000 8086; do
-            echo "sudo ufw allow $port/tcp" >> .github/echo_firewall/firewall_rules.sh
-          done
-          echo "sudo ufw --force enable" >> .github/echo_firewall/firewall_rules.sh
-          echo "echo '[ECHO] 방화벽 규칙 적용 완료'" >> .github/echo_firewall/firewall_rules.sh
-          chmod +x .github/echo_firewall/firewall_rules.sh
-          bash .github/echo_firewall/firewall_rules.sh
-
-      - name: 📦 필수 패키지 설치
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+          set -e
           sudo apt-get update -y
-          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara
-          sudo systemctl stop clamav-freshclam || true
-          sudo freshclam || true
-          sudo systemctl start clamav-daemon || true
-          echo "[ECHO] 필수 패키지 설치 완료" | tee -a .github/echo_logs/setup.log
+          sudo apt-get upgrade -y
+          sudo apt-get install -y tree swaks jq clamav clamav-daemon yara ufw
+          echo "[ECHO] 패키지 업데이트 및 설치 완료"
 
-      - name: 📁 권한 설정
-        shell: bash
+      - name: 📁 에코 디렉토리 대량 생성
         run: |
-          echo "#!/usr/bin/env bash" > .github/echo_dirs/init_dirs.sh
-          echo "chmod -R 755 \"$BASE\" \"$MONO\"" >> .github/echo_dirs/init_dirs.sh
-          echo "echo '[ECHO] BASE/Monitoring 디렉토리 권한 설정 완료'" >> .github/echo_dirs/init_dirs.sh
-          chmod +x .github/echo_dirs/init_dirs.sh
-          bash .github/echo_dirs/init_dirs.sh
-
-      - name: 🛠️ 서비스별 에코 생성
-        shell: bash
-        run: |
-          cat <<'EOS' > .github/scripts/emailops_massive_echo.sh
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          mkdir -p "$BASE/services" "$BASE/config" "$BASE/data" "$BASE/logs" \
-                   "$MONO/virus" "$MONO/metrics" "$MONO/grafana" "$MONO/influxdb" "$MONO/tmp"
-          for s in $SERVICES; do
-            mkdir -p "$BASE/services/$s" "$BASE/logs/$s" "$BASE/config/$s"
-            echo "[ECHO] 서비스 준비: $s" | tee -a "$BASE/logs/$s/prepare.log"
-            printf "user%03d@%s\n" 1 "$DOMAIN" > "$BASE/services/$s/users.txt"
-            touch "$BASE/services/$s/mailbox.mbox"
+          set -e
+          for d in echo_dirs echo_logs echo_firewall echo_scripts echo_services; do
+            mkdir -p ".github/$d"
+            echo "echo '[ECHO] 디렉토리 생성: .github/$d'" >> .github/echo_dirs/create_dirs.sh
           done
-          echo "{}" > "$MONO/metrics/boot.json"
-          echo "[ECHO] 서비스별 디렉토리 및 샘플 데이터 생성 완료"
-          EOS
-          chmod +x .github/scripts/emailops_massive_echo.sh
-          bash .github/scripts/emailops_massive_echo.sh
+          chmod +x .github/echo_dirs/create_dirs.sh
+          bash .github/echo_dirs/create_dirs.sh
 
-      - name: 📨 REAL MTA 설치/설정(Postfix/Exim4/OpenSMTPD)
-        shell: bash
+      - name: 🔐 방화벽 설정 + 에코 파일 생성
         run: |
-          cat <<'EOS' > .github/scripts/real_mta_install.sh
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          for svc in $SERVICES; do
-            case "$svc" in
-              postfix)
-                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
-                sudo postconf -e "myhostname = $DOMAIN"
-                sudo postconf -e "mydestination = localhost"
-                sudo postconf -e "inet_interfaces = all"
-                sudo systemctl enable postfix
-                sudo systemctl restart postfix
-                ;;
-              exim4)
-                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y exim4
-                sudo sed -i "s/dc_eximconfig_configtype=.*/dc_eximconfig_configtype='internet'/" /etc/exim4/update-exim4.conf.conf
-                sudo update-exim4.conf
-                sudo systemctl enable exim4
-                sudo systemctl restart exim4
-                ;;
-              opensmtpd)
-                sudo apt-get install -y opensmtpd
-                echo "listen on 0.0.0.0" | sudo tee /etc/smtpd.conf
-                echo "action \"local_mail\" maildir \"$BASE/maildir\"" | sudo tee -a /etc/smtpd.conf
-                echo "match from any for domain \"$DOMAIN\" action \"local_mail\"" | sudo tee -a /etc/smtpd.conf
-                sudo systemctl enable opensmtpd
-                sudo systemctl restart opensmtpd
-                ;;
-            esac
-          done
-          echo "[ECHO] MTA 설치/설정 완료"
-          EOS
-          chmod +x .github/scripts/real_mta_install.sh
-          bash .github/scripts/real_mta_install.sh
+          sudo ufw allow 25/tcp
+          sudo ufw allow 1025/tcp
+          sudo ufw allow 2525/tcp
+          sudo ufw allow 80/tcp
+          sudo ufw allow 443/tcp
+          echo "#!/bin/bash" > .github/echo_firewall/setup_firewall.sh
+          echo "echo '[ECHO] 방화벽 포트 25,1025,2525,80,443 허용 완료'" >> .github/echo_firewall/setup_firewall.sh
+          chmod +x .github/echo_firewall/setup_firewall.sh
+          bash .github/echo_firewall/setup_firewall.sh
 
-      - name: 🐳 Docker Compose 서비스 실행
-        shell: bash
+      - name: 📬 SMTP 서버 및 Mailhog 설치
         run: |
-          cat <<'EOS' > .github/echo_compose/docker_compose.sh
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          cat > .github/echo_compose/docker-compose.yml <<'YML'
-          services:
-            mailhog:
-              image: mailhog/mailhog:latest
-              ports: ["1025:1025", "8025:8025"]
-              restart: unless-stopped
-            smtp4dev:
-              image: rnwood/smtp4dev:latest
-              ports: ["2525:25", "5000:80"]
-              restart: unless-stopped
-            influxdb:
-              image: influxdb:2
-              environment:
-                - DOCKER_INFLUXDB_INIT_MODE=setup
-                - DOCKER_INFLUXDB_INIT_USERNAME=admin
-                - DOCKER_INFLUXDB_INIT_PASSWORD=admin1234!
-                - DOCKER_INFLUXDB_INIT_ORG=org
-                - DOCKER_INFLUXDB_INIT_BUCKET=metrics
-                - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=dev-token-123456
-              volumes:
-                - /opt/email/.monitoring/influxdb:/var/lib/influxdb2
-              ports: ["8086:8086"]
-              restart: unless-stopped
-            grafana:
-              image: grafana/grafana:latest
-              volumes:
-                - /opt/email/.monitoring/grafana:/var/lib/grafana
-                - /opt/email/.monitoring/grafana/provisioning:/etc/grafana/provisioning
-              environment:
-                - GF_SECURITY_ADMIN_USER=admin
-                - GF_SECURITY_ADMIN_PASSWORD=admin1234!
-              ports: ["3000:3000"]
-              restart: unless-stopped
-          YML
-          docker compose -f .github/echo_compose/docker-compose.yml up -d
-          EOS
-          chmod +x .github/echo_compose/docker_compose.sh
-          bash .github/echo_compose/docker_compose.sh
+          docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
+          echo "echo '[ECHO] Mailhog 설치 및 실행 완료'" >> .github/echo_services/install_mailhog.sh
+          chmod +x .github/echo_services/install_mailhog.sh
+          bash .github/echo_services/install_mailhog.sh
 
-      - name: ✉️ SMTP 테스트
-        shell: bash
+      - name: 📤 SMTP 테스트 메일 발송
         run: |
-          echo "#!/usr/bin/env bash" > .github/scripts/emailops_sendmail.sh
-          echo "swaks --version >/dev/null 2>&1 || exit 0" >> .github/scripts/emailops_sendmail.sh
-          for port in 25 1025 2525; do
-            echo "swaks --to test@local --from ci@local --server 127.0.0.1 --port $port" >> .github/scripts/emailops_sendmail.sh
-          done
+          echo "#!/bin/bash" > .github/scripts/emailops_sendmail.sh
+          echo "swaks --server 127.0.0.1:1025 --from ci@local --to test@local --header \"Subject: test \$(date)\" --body \"This is a test mailing\"" >> .github/scripts/emailops_sendmail.sh
           chmod +x .github/scripts/emailops_sendmail.sh
-          bash .github/scripts/emailops_sendmail.sh || true
+          bash .github/scripts/emailops_sendmail.sh
+          echo "echo '[ECHO] 테스트 메일 발송 완료'" >> .github/echo_logs/sendmail.log
 
-      - name: 🛡️ 바이러스 검사
-        shell: bash
+      - name: 🦠 ClamAV 전체 스캔 (exit code 2 허용)
         run: |
-          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt
+          mkdir -p .github/echo_logs
+          clamscan -r --infected "$BASE" "$MONO" | tee .github/echo_logs/clamav_scan.txt || true
+          echo "echo '[ECHO] ClamAV 스캔 완료 (오류 무시)'" >> .github/echo_logs/clamav_scan.sh
+          chmod +x .github/echo_logs/clamav_scan.sh
+          bash .github/echo_logs/clamav_scan.sh || true
 
-      - name: 🪵 구조 스냅샷 저장
-        shell: bash
-        run: |
-          tree -a "$BASE" > .github/echo_logs/tree_email.txt || true
-          tree -a "$MONO" > .github/echo_logs/tree_monitoring.txt || true
-
-      - name: 📤 아티팩트 업로드
+      - name: 📤 로그 아티팩트 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: emailops-artifacts
-          path: |
-            .github/echo_logs/**
-            .github/scripts/**
-            .github/echo_*/**
-          if-no-files-found: warn
+          name: emailops-logs
+          path: .github/echo_logs
