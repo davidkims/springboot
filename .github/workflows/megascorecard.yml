@@ -1,4 +1,4 @@
-name: "🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security (ULTRA, Realtime)"
+name: "🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + Demos (Realtime)"
 
 on:
   workflow_dispatch:
@@ -80,6 +80,7 @@ jobs:
         .github/services/mysql
         .github/services/postgres
         .github/services/redis
+        .github/services/camunda
         site/scorecard
         site/security
         site/upgrade
@@ -189,6 +190,24 @@ jobs:
         chmod +x .github/echo_services/redis_conf.sh
         .github/echo_services/redis_conf.sh
 
+        # Camunda 데모 BPMN
+        cat > .github/services/camunda/demo.bpmn <<'BPMN'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                     xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                     xmlns:omgdc="http://www.omg.org/spec/DD/20100524/DC"
+                     xmlns:omgdi="http://www.omg.org/spec/DD/20100524/DI"
+                     targetNamespace="Demo">
+          <process id="DemoProcess" name="Demo Process" isExecutable="true">
+            <startEvent id="start" name="Start"/>
+            <sequenceFlow id="flow1" sourceRef="start" targetRef="task1"/>
+            <serviceTask id="task1" name="Do Something"/>
+            <sequenceFlow id="flow2" sourceRef="task1" targetRef="end"/>
+            <endEvent id="end" name="End"/>
+          </process>
+        </definitions>
+        BPMN
+
         # 컨테이너 스크립트 (pull/run/health)
         cat > .github/echo_containers/pull.sh <<'SH'
         #!/usr/bin/env bash
@@ -213,7 +232,7 @@ jobs:
         set -Eeuo pipefail
         : "${MYSQL_ROOT_PASSWORD:?}" "${POSTGRES_PASSWORD:?}" "${REDIS_PASSWORD:?}" "${VAULT_DEV_ROOT_TOKEN_ID:?}"
         docker rm -f mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci >/dev/null 2>&1 || true
-        docker run -d --name mysql_ci   -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" -p 3306:3306 mysql:8.0.37
+        docker run -d --name mysql_ci    -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" -p 3306:3306 mysql:8.0.37
         docker run -d --name postgres_ci -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" -p 5432:5432 postgres:16.3
         docker run -d --name redis_ci -p 6379:6379 redis:7.2.5 redis-server --appendonly yes --requirepass "${REDIS_PASSWORD}"
         docker run -d --name kafka_ci -p 9092:9092 bitnami/kafka:3.7.0
@@ -240,7 +259,7 @@ jobs:
         MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"; MYSQL_PORT="${MYSQL_PORT:-3306}"
         POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"; POSTGRES_PORT="${POSTGRES_PORT:-5432}"
         REDIS_PORT="${REDIS_PORT:-6379}"; : "${DB_USER:?}" "${DB_PASS:?}" "${DB_NAME:?}"
-        # Redis 파일 기반(비번 보강)
+        # Redis (비번 보강하여 파일 기반)
         if [ -f ".github/services/redis/redis.conf" ]; then
           if ! grep -q '^requirepass ' .github/services/redis/redis.conf 2>/dev/null && [ -n "${REDIS_PASSWORD:-}" ]; then
             echo "requirepass ${REDIS_PASSWORD}" >> .github/services/redis/redis.conf
@@ -260,7 +279,7 @@ jobs:
         [ -f ".github/services/postgres/init.sql" ] && psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -f .github/services/postgres/init.sql || true
         # health 보장
         MYSQL_PWD="${DB_PASS}" mysql -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" -e "CREATE TABLE IF NOT EXISTS ${DB_NAME}.health (id INT PRIMARY KEY, msg VARCHAR(64)); INSERT IGNORE INTO ${DB_NAME}.health VALUES (1,'ok');" || true
-        psql -h "${POSTGRES_HOST}" -p "${POSTRES_PORT:-$POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS health (id INT PRIMARY KEY, msg TEXT); INSERT INTO health VALUES (1,'ok') ON CONFLICT (id) DO NOTHING;" || true
+        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS health (id INT PRIMARY KEY, msg TEXT); INSERT INTO health VALUES (1,'ok') ON CONFLICT (id) DO NOTHING;" || true
         # 백업 + HTML 변환
         mkdir -p site/backup site/db_backup_html
         MYSQL_PWD="${DB_PASS}" mysqldump -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" "${DB_NAME}" > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
@@ -269,6 +288,8 @@ jobs:
         echo "[ECHO] apply_and_backup 완료"
         SH
         chmod +x .github/echo_services/apply_and_backup.sh
+
+        echo "[ECHO] 부트스트랩 + 스크립트 생성 완료"
 
     - name: 🔧 기본 패키지 & Python 보안툴
       shell: bash
@@ -337,6 +358,81 @@ jobs:
       run: |
         set -Eeuo pipefail
         .github/echo_services/apply_and_backup.sh
+
+    # ▶️ 실행 데모: Kafka / Vault / Spark / Camunda
+    - name: ▶️ Service Demos (Kafka/Vault/Spark/Camunda)
+      shell: bash
+      env:
+        VAULT_ADDR: http://127.0.0.1:8200
+      run: |
+        set -Eeuo pipefail
+        exec > >(tee .github/echo_logs/10_service_demos.log) 2>&1
+        mkdir -p site/containers
+
+        echo "=== Kafka Demo ==="
+        # 토픽 생성
+        docker exec kafka_ci bash -lc "kafka-topics.sh --create --topic demo-topic --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1" || true
+        # 프로듀스
+        docker exec -i kafka_ci bash -lc "kafka-console-producer.sh --bootstrap-server localhost:9092 --topic demo-topic" <<'MSG'
+        hello
+        world
+        kafka-demo
+        MSG
+        # 컨슘 (타임아웃)
+        docker exec kafka_ci bash -lc "kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic demo-topic --from-beginning --timeout-ms 5000" | tee site/containers/kafka_demo.log || true
+        { echo "<html><body><h3>Kafka Demo Output</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/kafka_demo.log; echo "</pre></body></html>"; } > site/html/kafka_demo.html
+
+        echo "=== Vault Demo (KV v2) ==="
+        # KV put/get
+        source site/templates/vault.env
+        curl -s -H "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID}" --request POST \
+          --data '{"data":{"message":"hello-vault","ts":"'$(date -u +%FT%TZ)'"}}' \
+          ${VAULT_ADDR}/v1/secret/data/demo | tee site/containers/vault_put.json || true
+        curl -s -H "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID}" ${VAULT_ADDR}/v1/secret/data/demo \
+          | tee site/containers/vault_get.json || true
+        { echo "<html><body><h3>Vault KV Demo</h3><h4>PUT</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/vault_put.json; echo "</pre><h4>GET</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/vault_get.json; echo "</pre></body></html>"; } > site/html/vault_demo.html
+
+        echo "=== Spark Demo (local[*]) ==="
+        /opt/spark/bin/spark-submit --master local[*] /opt/spark/examples/src/main/python/pi.py 200 \
+          | tee site/containers/spark_demo.log || true
+        { echo "<html><body><h3>Spark Demo Output</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/spark_demo.log; echo "</pre></body></html>"; } > site/html/spark_demo.html
+
+        echo "=== Camunda Demo (deploy + start) ==="
+        CAM_BASE="http://127.0.0.1:8081/engine-rest"
+        # 배포 (인증 필요시 demo:demo 시도 → 실패해도 계속)
+        curl -s -X POST "${CAM_BASE}/deployment/create" \
+          -F "deployment-name=demo-deploy" \
+          -F "enable-duplicate-filtering=true" \
+          -F "deploy-changed-only=true" \
+          -F "data=@.github/services/camunda/demo.bpmn;type=application/octet-stream" \
+          | tee site/containers/camunda_deploy.json || true
+
+        # 대체: 인증 시도
+        if ! jq -e . site/containers/camunda_deploy.json >/dev/null 2>&1; then
+          curl -s -u demo:demo -X POST "${CAM_BASE}/deployment/create" \
+            -F "deployment-name=demo-deploy" \
+            -F "enable-duplicate-filtering=true" \
+            -F "deploy-changed-only=true" \
+            -F "data=@.github/services/camunda/demo.bpmn;type=application/octet-stream" \
+            | tee site/containers/camunda_deploy.json || true
+        fi
+
+        # 프로세스 시작
+        curl -s -X POST "${CAM_BASE}/process-definition/key/DemoProcess/start" \
+          -H "Content-Type: application/json" \
+          -d '{}' \
+          | tee site/containers/camunda_start.json || true
+
+        # 인스턴스 조회
+        curl -s "${CAM_BASE}/process-instance?processDefinitionKey=DemoProcess" \
+          | tee site/containers/camunda_instances.json || true
+
+        { echo "<html><body><h3>Camunda Demo</h3><h4>Deploy</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_deploy.json; \
+          echo "</pre><h4>Start</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_start.json; \
+          echo "</pre><h4>Instances</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_instances.json; \
+          echo "</pre></body></html>"; } > site/html/camunda_demo.html
+
+        echo "[ECHO] 서비스 데모 완료 (Kafka/Vault/Spark/Camunda)"
 
     - name: 🔎 보안 스캔 (Scorecard / CodeQL / Bandit / pip-audit / Trivy)
       shell: bash
@@ -424,6 +520,7 @@ jobs:
           .github/echo_containers/**
           .github/permissions/**
           .github/echo_permissions/**
+          .github/services/camunda/demo.bpmn
 
     - name: 🌐 Upload Pages Artifact
       uses: actions/upload-pages-artifact@v3
