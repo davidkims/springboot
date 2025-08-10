@@ -1,5 +1,4 @@
-# .github/workflows/megascorecard.yml
-name: "💽 SpringBoot Disk+Dirs — 1min Cron + Multi-Partition + Live .github + Bulk Gen/Upgrade (no unmount)"
+name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup + 24x365 Watchdog (Auto-Grow)"
 
 on:
   workflow_dispatch:
@@ -13,7 +12,7 @@ on:
         default: ""
         required: false
       fs_type:
-        description: "Filesystem for partitions: ext4 | xfs | btrfs"
+        description: "Filesystem: ext4 | xfs | btrfs"
         default: "ext4"
         required: true
       mount_point:
@@ -21,42 +20,47 @@ on:
         default: "/mnt/gh-disk"
         required: true
       dir_list:
-        description: "Extra dirs (comma-separated) to create on repo + both mounts"
+        description: "Extra dirs (comma-separated) for repo + both mounts"
         default: "logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts"
         required: true
       owner_group:
-        description: "Owner and group in user:group format"
+        description: "Owner:Group"
         default: "runner:runner"
         required: true
       dir_mode:
-        description: "Directory permission (octal)"
+        description: "Directory chmod (octal)"
         default: "0755"
         required: true
       bulk_spec:
-        description: "Bulk generator spec: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
+        description: "Bulk spec: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
         default: "dirs=100,files=10,size_kb=4,prefix=gen"
         required: true
       commit_and_push:
-        description: "Commit & push generated files? true|false"
+        description: "Commit & push files? true|false"
         default: "true"
         required: true
       commit_message:
         description: "Commit message"
-        default: "chore: disk+dirs + multi-partition + live .github + bulk gen/upgrade (auto)"
+        default: "chore: disk+dirs + massive + live .github + bulk gen/upgrade (auto)"
         required: true
-
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/1 * * * *"   # Disk/Dirs + Watchdog
+    - cron: "*/5 * * * *"   # Transfer log backup
 
 permissions:
   contents: write
+  security-events: write
 
 concurrency:
-  group: springboot-disk-dirs
+  group: ${{ github.workflow }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
-  springboot-disk-dirs:
+  #######################################################################
+  # 1) Disk+Dirs — Multi-Partition + MASSIVE BulkGen + Live Mirror
+  #######################################################################
+  diskdirs:
+    name: "💽 Disk+Dirs (1min) + MASSIVE"
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
@@ -67,6 +71,18 @@ jobs:
       MOUNT_P2_NAME: p2
       GIT_USER_NAME: gh-actions-bot
       GIT_USER_EMAIL: gh-actions-bot@example.com
+      # 리소스 증설
+      SWAP_SIZE_MB: "4096"      # 0=off
+      RAMDISK_MB: "512"         # 0=off
+      SYS_MAX_MAP_COUNT: "262144"
+      SYS_INOTIFY_WATCHES: "1048576"
+      ULIMIT_NOFILE: "1048576"
+      ULIMIT_NPROC:  "131072"
+      # 대량 확장
+      MASSIVE_SHARDS: "8"
+      MASSIVE_MULTIPLIER: "4"
+      PARALLEL_JOBS: "8"
+      TAR_SPLIT_MB: "256"
 
     steps:
       - name: 📂 Checkout
@@ -75,7 +91,7 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: 🧰 Init — FULL ECHO bootstrap (+helpers, heredoc safe)
+      - name: 🧰 Init — helpers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -83,34 +99,28 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
-          set +H   # disable history expansion
-          run_cmd() { echo "[CMD] $*"; eval "$@"; }
+          set +H
+          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
           cat > "$ECHO_DIR/_helpers.sh" <<'BASH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           set -x
-          run_cmd() { echo "[CMD] $*"; eval "$@"; }
-          # Idempotent loop device fetch/attach
-          get_loop() {
+          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
+          get_loop(){
             local dev
             dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "${dev}" ]]; then
+            if [[ -z "$dev" ]]; then
               sudo losetup -fP "$DISK_IMG"
               dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
             fi
-            [[ -z "${dev}" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
+            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
-          parse_owner_group() {
-            local og="${1:-runner:runner}"
-            local u="${og%%:*}"
-            local g="${og#*:}"
-            [[ -z "$u" ]] && u="runner"
-            [[ -z "$g" ]] && g="runner"
-            echo "$u" "$g"
+          parse_owner_group(){
+            local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"
+            [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"
           }
-          # Safe defaults when workflow_dispatch inputs are empty (e.g. on schedule)
           default_mount()      { echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
           default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
           default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
@@ -119,26 +129,39 @@ jobs:
           BASH
           chmod +x "$ECHO_DIR/_helpers.sh"
 
-      - name: 📦 Ensure FS tools (xfsprogs, btrfs-progs, parted)
+      - name: 🔋 Resource boost (swap/ramdisk/ulimit/sysctl + toolchain)
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/05_fs_tools.log") 2>&1
+          exec > >(tee -a "$LOG_DIR/03_resource_boost.log") 2>&1
           set -x
-          FST_RAW="${{ inputs.fs_type }}"
-          FST="$(INPUT_FS_TYPE="$FST_RAW" default_fs)"
           run_cmd "sudo apt-get update -y"
-          run_cmd "sudo apt-get install -y parted"
-          if [[ "$FST" == "xfs" ]]; then
-            run_cmd "sudo apt-get install -y xfsprogs"
-          elif [[ "$FST" == "btrfs" ]]; then
-            run_cmd "sudo apt-get install -y btrfs-progs"
-          else
-            echo "[ECHO] ext4 selected — e2fsprogs present"
+          run_cmd "sudo apt-get install -y --no-install-recommends \
+            build-essential openjdk-17-jdk maven gradle \
+            git-lfs jq moreutils pigz pv unzip tar curl ca-certificates \
+            xz-utils tree rsync parted xfsprogs btrfs-progs || true"
+          run_cmd "git lfs install || true"
+          if [[ "${SWAP_SIZE_MB}" != "0" ]]; then
+            if ! sudo swapon --show | grep -q '^'; then
+              run_cmd "sudo fallocate -l ${SWAP_SIZE_MB}M /swapfile"
+              run_cmd "sudo chmod 600 /swapfile"
+              run_cmd "sudo mkswap /swapfile"
+              run_cmd "sudo swapon /swapfile"
+            fi
           fi
+          if [[ "${RAMDISK_MB}" != "0" ]]; then
+            run_cmd "sudo mkdir -p /mnt/ramdisk"
+            mount | grep -q " on /mnt/ramdisk " || run_cmd "sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk"
+          fi
+          run_cmd "sudo prlimit --pid $$ --nofile=${ULIMIT_NOFILE}:${ULIMIT_NOFILE} || true"
+          run_cmd "sudo prlimit --pid $$ --nproc=${ULIMIT_NPROC}:${ULIMIT_NPROC} || true"
+          echo "fs.inotify.max_user_watches=${SYS_INOTIFY_WATCHES}" | sudo tee /etc/sysctl.d/99-echo-inotify.conf >/dev/null
+          echo "vm.max_map_count=${SYS_MAX_MAP_COUNT}"              | sudo tee /etc/sysctl.d/99-echo-mapcount.conf >/dev/null
+          echo "vm.swappiness=10"                                   | sudo tee /etc/sysctl.d/99-echo-swap.conf >/dev/null
+          run_cmd "sudo sysctl --system || sudo sysctl -p || true"
 
-      - name: 🧱 Create disk image (sparse) + attach loop
+      - name: 🧱 Create image + attach loop
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -146,569 +169,222 @@ jobs:
           exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
           set -x
           RAW_SIZE_MB="${{ inputs.disk_size_mb }}"
-          if [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]]; then
-            RAW_SIZE_MB="2048"
-            echo "[ECHO] inputs.disk_size_mb empty/invalid → default 2048MB"
-          fi
+          [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]] && RAW_SIZE_MB="2048"
           CUR_BYTES="$(stat -c%s "$DISK_IMG" 2>/dev/null || echo 0)"
-          if (( CUR_BYTES == 0 )); then
-            run_cmd "truncate -s ${RAW_SIZE_MB}M \"$DISK_IMG\""
-            echo "[ECHO] Created sparse image: ${RAW_SIZE_MB}MB"
-          else
-            echo "[ECHO] Existing image: ${CUR_BYTES} bytes → keep"
-          fi
-          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
-          run_cmd "ls -lh \"$DISK_IMG\""
+          if (( CUR_BYTES == 0 )); then truncate -s ${RAW_SIZE_MB}M "$DISK_IMG"; fi
+          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"; ls -lh "$DISK_IMG"
 
-      - name: 🧭 Partition GPT (p1=60%, p2=rest) — idempotent
+      - name: 🧭 GPT partition p1=60%, p2=rest
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
           set -x
-          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" print || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" mkpart ${MOUNT_P1_NAME} 1MiB 60% || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" mkpart ${MOUNT_P2_NAME} 60% 100% || true"
-          run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
-          run_cmd "ls -l ${LOOP_DEV}* || true"
-
-      - name: 🧪 Make filesystems on p1/p2
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
-          set -x
-          FST_RAW="${{ inputs.fs_type }}"
-          FST="$(INPUT_FS_TYPE="$FST_RAW" default_fs)"
           LOOP_DEV="$(get_loop)"
-          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          sudo parted -s "$LOOP_DEV" print || true
+          sudo parted -s "$LOOP_DEV" mklabel gpt || true
+          sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P1_NAME} 1MiB 60% || true
+          sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P2_NAME} 60% 100% || true
+          sudo partprobe "$LOOP_DEV" || true
+          ls -l ${LOOP_DEV}* || true
+
+      - name: 🧪 Make filesystems
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
+          set -x
+          FST="$(INPUT_FS_TYPE="${{ inputs.fs_type }}" default_fs)"
+          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
-            ext4)  run_cmd "sudo mkfs.ext4 -F \"$P1\""; run_cmd "sudo mkfs.ext4 -F \"$P2\"" ;;
-            xfs)   run_cmd "sudo mkfs.xfs -f \"$P1\"";  run_cmd "sudo mkfs.xfs -f \"$P2\"" ;;
-            btrfs) run_cmd "sudo mkfs.btrfs -f \"$P1\"";run_cmd "sudo mkfs.btrfs -f \"$P2\"" ;;
+            ext4)  sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
+            xfs)   sudo mkfs.xfs -f "$P1";  sudo mkfs.xfs -f "$P2" ;;
+            btrfs) sudo mkfs.btrfs -f "$P1";sudo mkfs.btrfs -f "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1 & p2 (create part2 AFTER p1 mount)
+      - name: 🔗 Mount p1/p2 + chown/chmod
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
           set -x
-          MNT_RAW="${{ inputs.mount_point }}"
-          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
-          OG_RAW="${{ inputs.owner_group }}"
-          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
-          LOOP_DEV="$(get_loop)"
-          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          run_cmd "sudo mkdir -p \"${MNT}\""
-          if mount | grep -q " on ${MNT} "; then
-            echo "[ECHO] ${MNT} already mounted"
-          else
-            run_cmd "sudo mount \"$P1\" \"${MNT}\""
-          fi
-          run_cmd "sudo mkdir -p \"${MNT}/part2\""
-          if mount | grep -q " on ${MNT}/part2 "; then
-            echo "[ECHO] ${MNT}/part2 already mounted"
-          else
-            run_cmd "sudo mount \"$P2\" \"${MNT}/part2\""
-          fi
-          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}\""
-          run_cmd "mount | grep -E \" on ${MNT} | on ${MNT}/part2 \" || true"
-          run_cmd "df -h | grep -E \"loop|Filesystem\" || true"
+          MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
+          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
+          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          sudo mkdir -p "${MNT}"
+          mount | grep -q " on ${MNT} " || sudo mount "$P1" "${MNT}"
+          sudo mkdir -p "${MNT}/part2"
+          mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "${MNT}/part2"
+          sudo chown -R "${OWNER}:${GROUP}" "${MNT}"
+          df -h | grep -E "loop|Filesystem" || true
 
-      - name: 📁 Create Spring Boot + extra dirs (repo + both mounts)
+      - name: 📁 Create SpringBoot + extra dirs
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
           set -x
-          MNT_RAW="${{ inputs.mount_point }}"
-          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
-          OG_RAW="${{ inputs.owner_group }}"
-          MODE_RAW="${{ inputs.dir_mode }}"
-          MODE="$(INPUT_DIR_MODE="$MODE_RAW" default_dir_mode)"
-          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
+          MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
+          MODE="$(INPUT_DIR_MODE="${{ inputs.dir_mode }}" default_dir_mode)"
+          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
           SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" )
-          DL_RAW="${{ inputs.dir_list }}"
-          IFS=',' read -ra EXTRA <<< "$(INPUT_DIR_LIST="$DL_RAW" default_dir_list)"
+          IFS=',' read -ra EXTRA <<< "$(INPUT_DIR_LIST="${{ inputs.dir_list }}" default_dir_list)"
           for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
           while IFS= read -r d; do
-            run_cmd "mkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
-            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
-            run_cmd "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
+            mkdir -p "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
+            sudo chown -R "${OWNER}:${GROUP}" "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
+            sudo chmod "${MODE}" "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
-            echo -e "#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\nmkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"\nsudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"\nsudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"\n[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\"" > "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh"
-            chmod +x "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh"
           done < "$ECHO_DIR/.all_dirs.txt"
 
-      - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart 2 → grow FS)
+      - name: 📏 Online resize p2
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
           set -x
-          MNT_RAW="${{ inputs.mount_point }}"
-          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
-          FST_RAW="${{ inputs.fs_type }}"
-          FST="$(INPUT_FS_TYPE="$FST_RAW" default_fs)"
-          CUR_BYTES="$(stat -c%s "$DISK_IMG")"
-          CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
-          REQ_MB_RAW="${{ inputs.resize_to_mb }}"
-          if [[ -n "${REQ_MB_RAW:-}" && "${REQ_MB_RAW}" =~ ^[0-9]+$ ]]; then
-            NEW_MB="$REQ_MB_RAW"
-          else
-            NEW_MB="$CUR_MB"
-          fi
-          echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
-          if (( NEW_MB > CUR_MB )); then
-            run_cmd "truncate -s ${NEW_MB}M \"$DISK_IMG\""
-          else
-            echo "[ECHO] No file growth needed"
-          fi
+          MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
+          FST="$(INPUT_FS_TYPE="${{ inputs.fs_type }}" default_fs)"
+          CUR_BYTES="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR_BYTES + 1048575)/1048576 ))
+          REQ="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ:-$CUR_MB}"
+          if [[ -n "${REQ:-}" && ! "${REQ}" =~ ^[0-9]+$ ]]; then NEW_MB="$CUR_MB"; fi
+          (( NEW_MB > CUR_MB )) && truncate -s ${NEW_MB}M "$DISK_IMG" || true
           LOOP_DEV="$(get_loop)"
-          run_cmd "sudo losetup -c \"$LOOP_DEV\""
-          run_cmd "sudo parted -s \"$LOOP_DEV\" resizepart 2 100% || true"
-          run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
+          sudo losetup -c "$LOOP_DEV"
+          sudo parted -s "$LOOP_DEV" resizepart 2 100% || true
+          sudo partprobe "$LOOP_DEV" || true
           case "$FST" in
-            ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}p2\"" ;;
-            xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"" ;;
-            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}/part2\"" ;;
+            ext4)  sudo resize2fs "${LOOP_DEV}p2" ;;
+            xfs)   sudo xfs_growfs "${MNT}/part2" ;;
+            btrfs) sudo btrfs filesystem resize max "${MNT}/part2" ;;
           esac
-          run_cmd "df -h | grep -E \"${MNT}(/part2)?\" || true"
+          df -h | grep -E "${MNT}(/part2)?"
 
-      - name: 🧨 Bulk generator/upgrade — repo + both mounts (idempotent)
+      - name: 🧨 Bulk generator/upgrade — repo + both mounts
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
           set -x
           SPEC_RAW="${{ inputs.bulk_spec }}"
           SPEC="$(INPUT_BULK_SPEC="$SPEC_RAW" default_bulk_spec)"
-          getv(){
-            local key="${1-}"
-            [ -z "$key" ] && return 0
-            echo "$SPEC" | tr ',' '\n' | awk -F= -v k="$key" '$1==k{print $2}'
-          }
+          getv(){ local k="${1-}"; [ -z "$k" ] && return 0; echo "$SPEC" | tr ',' '\n' | awk -F= -v kk="$k" '$1==kk{print $2}'; }
           NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"
           : "${NUM_DIRS:=100}" ; : "${NUM_FILES:=10}" ; : "${SIZE_KB:=4}" ; : "${PREFIX:=gen}"
-          echo "[ECHO] bulk_spec → dirs=$NUM_DIRS files=$NUM_FILES size_kb=$SIZE_KB prefix=$PREFIX"
-          MNT_RAW="${{ inputs.mount_point }}"
-          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
-          OG_RAW="${{ inputs.owner_group }}"
-          MODE_RAW="${{ inputs.dir_mode }}"
-          MODE="$(INPUT_DIR_MODE="$MODE_RAW" default_dir_mode)"
-          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
-          ROOT_REPO="bulk/${PREFIX}"
-          ROOT_P1="${MNT}/bulk/${PREFIX}"
-          ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
-          run_cmd "mkdir -p \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
-          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
-          run_cmd "sudo chmod -R \"${MODE}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
-
-          create_or_upgrade_dir() {
-            local base="${1-}"
-            local i="${2-}"
-            [[ -z "$base" || -z "$i" ]] && { echo "[ECHO] create_or_upgrade_dir(): missing args" >&2; return 1; }
-            local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
-            mkdir -p "$d"
+          MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
+          MODE="$(INPUT_DIR_MODE="${{ inputs.dir_mode }}" default_dir_mode)"
+          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
+          ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
+          mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
+          chown -R "$OWNER:$GROUP" "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
+          chmod -R "$MODE" "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
+          create_or_upgrade_dir(){
+            local base="${1-}"; local i="${2-}"; [[ -z "$base" || -z "$i" ]] && return 1
+            local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
             for n in $(seq 1 "$NUM_FILES"); do
               local f="${d}/file-$(printf '%04d' "$n").bin"
-              if [ -f "$f" ]; then
-                local cur; cur="$(stat -c%s "$f" || echo 0)"
-                local need=$(( SIZE_KB * 1024 ))
-                (( cur < need )) && truncate -s "${need}" "$f" || true
-              else
-                truncate -s "$(( SIZE_KB * 1024 ))" "$f"
-              fi
+              [ -f "$f" ] && { cur="$(stat -c%s "$f" || echo 0)"; need=$(( SIZE_KB*1024 )); (( cur < need )) && truncate -s "${need}" "$f" || true; } \
+                          || truncate -s "$(( SIZE_KB*1024 ))" "$f"
             done
           }
           export -f create_or_upgrade_dir
-
           for i in $(seq 1 "$NUM_DIRS"); do
             create_or_upgrade_dir "$ROOT_REPO" "$i"
             create_or_upgrade_dir "$ROOT_P1"   "$i"
             create_or_upgrade_dir "$ROOT_P2"   "$i"
           done
-          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
-          run_cmd "sudo chmod -R \"${MODE}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
+          chown -R "$OWNER:$GROUP" "bulk" "$MNT/bulk" "$MNT/part2/bulk"
+          chmod -R "$MODE" "bulk" "$MNT/bulk" "$MNT/part2/bulk"
 
-          cat > "$ECHO_DIR/bulk_gen_upgrade.sh" <<'BASH'
-          #!/usr/bin/env bash
+      - name: 🚀 MASSIVE — shard+parallel bulkgen
+        shell: bash
+        run: |
           set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/36_massive_sharded_bulkgen.log") 2>&1
           set -x
-          SPEC='__SPEC__PLACEHOLDER__'
-          getv(){
-            local key="${1-}"
-            [ -z "$key" ] && return 0
-            echo "$SPEC" | tr "," "\n" | awk -F= -v k="$key" '$1==k{print $2}'
-          }
-          NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"
-          : "${NUM_DIRS:=100}"; : "${NUM_FILES:=10}"; : "${SIZE_KB:=4}"; : "${PREFIX:=gen}"
-          MNT="__MNT__"; OWNER="__OWNER__"; GROUP="__GROUP__"; MODE="__MODE__"
-          ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
-
-          create_or_upgrade_dir() {
-            local base="${1-}"
-            local i="${2-}"
-            [[ -z "$base" || -z "$i" ]] && { echo "[ECHO] create_or_upgrade_dir(): missing args" >&2; return 1; }
-            local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
-            mkdir -p "$d"
-            for n in $(seq 1 "$NUM_FILES"); do
-              local f="${d}/file-$(printf '%04d' "$n").bin"
-              if [ -f "$f" ]; then
-                local cur; cur="$(stat -c%s "$f" || echo 0)"
-                local need=$(( SIZE_KB * 1024 ))
-                (( cur < need )) && truncate -s "${need}" "$f" || true
-              else
-                truncate -s "$(( SIZE_KB * 1024 ))" "$f"
-              fi
+          SPEC_RAW="${{ inputs.bulk_spec }}"; SPEC="$(INPUT_BULK_SPEC="$SPEC_RAW" default_bulk_spec)"
+          getv(){ local k="${1-}"; [ -z "$k" ] && return 0; echo "$SPEC" | tr ',' '\n' | awk -F= -v kk="$k" '$1==kk{print $2}'; }
+          BASE_DIRS="$(getv dirs)"; BASE_FILES="$(getv files)"; BASE_KB="$(getv size_kb)"; BASE_PREFIX="$(getv prefix)"
+          : "${BASE_DIRS:=100}" ; : "${BASE_FILES:=10}" ; : "${BASE_KB:=4}" ; : "${BASE_PREFIX:=gen}"
+          SHARDS="${MASSIVE_SHARDS:-8}"; MULT="${MASSIVE_MULTIPLIER:-4}"; PJ="${PARALLEL_JOBS:-8}"
+          MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
+          MODE="$(INPUT_DIR_MODE="${{ inputs.dir_mode }}" default_dir_mode)"
+          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
+          gen_one_shard(){
+            local shard="$1"; local SH_PREFIX="${BASE_PREFIX}-s${shard}"; local SH_DIRS=$(( BASE_DIRS * MULT ))
+            local ROOT_REPO="bulk/${SH_PREFIX}"; local ROOT_P1="${MNT}/bulk/${SH_PREFIX}"; local ROOT_P2="${MNT}/part2/bulk/${SH_PREFIX}"
+            mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
+            create_or_upgrade_dir(){
+              local base="${1-}"; local i="${2-}"; [[ -z "$base" || -z "$i" ]] && return 1
+              local d="${base}/$(printf '%s-%06d' "$SH_PREFIX" "$i")"; mkdir -p "$d"
+              for n in $(seq 1 "$BASE_FILES"); do
+                local f="${d}/file-$(printf '%04d' "$n").bin"
+                [ -f "$f" ] && { cur="$(stat -c%s "$f" || echo 0)"; need=$(( BASE_KB*1024 )); (( cur < need )) && truncate -s "${need}" "$f" || true; } \
+                            || truncate -s "$(( BASE_KB*1024 ))" "$f"
+              done
+            }
+            for i in $(seq 1 "$SH_DIRS"); do
+              create_or_upgrade_dir "$ROOT_REPO" "$i"
+              create_or_upgrade_dir "$ROOT_P1"   "$i"
+              create_or_upgrade_dir "$ROOT_P2"   "$i"
             done
+            sudo chown -R "$OWNER:$GROUP" "bulk/${SH_PREFIX}" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
+            sudo chmod -R "$MODE"          "bulk/${SH_PREFIX}" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
           }
+          export -f gen_one_shard; export BASE_DIRS BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE
+          seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
-          for i in $(seq 1 "$NUM_DIRS"); do
-            create_or_upgrade_dir "$ROOT_REPO" "$i"
-            create_or_upgrade_dir "$ROOT_P1" "$i"
-            create_or_upgrade_dir "$ROOT_P2" "$i"
-          done
-          sudo chown -R "$OWNER:$GROUP" "bulk" "$MNT/bulk" "$MNT/part2/bulk"
-          sudo chmod -R "$MODE" "bulk" "$MNT/bulk" "$MNT/part2/bulk"
-          BASH
-          sed -i "s|__SPEC__PLACEHOLDER__|${SPEC//|/\\|}|g" "$ECHO_DIR/bulk_gen_upgrade.sh"
-          sed -i "s|__MNT__|$MNT|g; s|__OWNER__|$OWNER|g; s|__GROUP__|$GROUP|g; s|__MODE__|$MODE|g" "$ECHO_DIR/bulk_gen_upgrade.sh"
-          chmod +x "$ECHO_DIR/bulk_gen_upgrade.sh"
-
-      - name: 👀 Live .github watcher — mirror new dirs to both mounts (5 min)
+      - name: ⚡ Mirror to RAMDISK + sha256 index
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/40_live_github_watch.log") 2>&1
+          exec > >(tee -a "$LOG_DIR/37_ramdisk_mirror.log") 2>&1
           set -x
-          MNT_RAW="${{ inputs.mount_point }}"
-          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
-          OG_RAW="${{ inputs.owner_group }}"
-          MODE_RAW="${{ inputs.dir_mode }}"
-          MODE="$(INPUT_DIR_MODE="$MODE_RAW" default_dir_mode)"
-          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
-          SNAP="$ECHO_DIR/.github_dirs.snap"
-          find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
-          for i in $(seq 1 60); do
-            sleep 5
-            NEW_SNAP="$ECHO_DIR/.github_dirs.new"
-            find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$NEW_SNAP" || true
-            DIFF="$ECHO_DIR/.github_dirs.diff"
-            comm -13 "$SNAP" "$NEW_SNAP" > "$DIFF" || true
-            if [ -s "$DIFF" ]; then
-              echo "[ECHO] Detected new .github directories:"; cat "$DIFF"
-              while IFS= read -r rel; do
-                [[ -z "$rel" ]] && continue
-                run_cmd "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
-                run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
-                run_cmd "sudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
-                echo -e "#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\nmkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"\nsudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"\nsudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" > "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh"
-                chmod +x "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh"
-              done < "$DIFF"
-              mv "$NEW_SNAP" "$SNAP"
-            else
-              echo "[ECHO] No new .github directories (iteration $i)"
-            fi
-          done
+          if mount | grep -q " on /mnt/ramdisk "; then
+            mkdir -p /mnt/ramdisk/bulk_mirror
+            rsync -a --delete bulk/ /mnt/ramdisk/bulk_mirror/
+            find /mnt/ramdisk/bulk_mirror -type f -name '*.bin' -print0 \
+              | xargs -0 -n 64 -P "${PARALLEL_JOBS:-8}" sha256sum \
+              | tee .github/echo_monitoring/sha256_bulk_ramdisk.txt > /dev/null
+            wc -l .github/echo_monitoring/sha256_bulk_ramdisk.txt || true
+          else
+            echo "[ECHO] ramdisk not mounted — skip"
+          fi
 
-      - name: 🧾 Generate EXTRA workflows/configs (.github/workflows + configs) — bulk, idempotent
+      - name: 🔧 IO stress: tar+pigz split + top consumers
         shell: bash
         run: |
           set -Eeuo pipefail
-          exec > >(tee -a ".github/echo_logs/42_generate_workflows.log") 2>&1
+          exec > >(tee -a "$LOG_DIR/38_io_stress.log") 2>&1
           set -x
-          mkdir -p .github/workflows .github
-          gen() {
-            local path="${1-}"; shift || true
-            local content="${*:-}"
-            if [[ -z "$path" ]]; then
-              echo "[ECHO] gen(): missing path" >&2
-              return 1
-            fi
-            if [ ! -f "$path" ]; then
-              printf "%s\n" "$content" > "$path"
-              echo "[ECHO] created: $path"
-            else
-              echo "[ECHO] exists (skip): $path"
-            fi
-          }
-          # --- 기본 5종 ---
-          gen ".github/workflows/diskdirs-resize-only.yml" "$(cat <<'YAML'
-          name: "🧩 DiskDirs — Resize Only (manual)"
-          on: { workflow_dispatch: {} }
-          jobs:
-            resize:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - name: Echo Resize Hint
-                  run: echo "[ECHO] Use main workflow inputs.resize_to_mb to grow disk.img"
-          YAML
-          )"
-          gen ".github/workflows/pages-size-report.yml" "$(cat <<'YAML'
-          name: "📊 Repo Size Report (manual)"
-          on: { workflow_dispatch: {} }
-          permissions: { contents: read }
-          jobs:
-            report:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - name: Size Snapshot
-                  run: |
-                    set -Eeuo pipefail
-                    mkdir -p .github/echo_monitoring
-                    du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
-                    du -sh . > .github/echo_monitoring/total_size.txt || true
-                - uses: actions/upload-artifact@v4
-                  with:
-                    name: repo-size-report
-                    path: .github/echo_monitoring/**
-          YAML
-          )"
-          gen ".github/workflows/echo-bulkgen-manual.yml" "$(cat <<'YAML'
-          name: "🧨 Echo BulkGen (manual)"
-          on: { workflow_dispatch: {} }
-          jobs:
-            bulk:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - name: Bulk Create (echo only)
-                  run: |
-                    set -Eeuo pipefail
-                    mkdir -p .github/echo_scripts
-                    echo '#!/usr/bin/env bash' > .github/echo_scripts/sample_bulk.sh
-                    echo 'echo "[ECHO] bulk generator placeholder (use main workflow for real gen)"' >> .github/echo_scripts/sample_bulk.sh
-                    chmod +x .github/echo_scripts/sample_bulk.sh
-          YAML
-          )"
-          gen ".github/workflows/dummy-keepalive-1min.yml" "$(cat <<'YAML'
-          name: "⏱️ 1min Keepalive — Echo"
-          on:
-            schedule:
-              - cron: "*/1 * * * *"
-          jobs:
-            ping:
-              runs-on: ubuntu-latest
-              steps:
-                - run: echo "[ECHO] keepalive tick $(date -u +%FT%TZ)"
-          YAML
-          )"
-          gen ".github/workflows/echo-verify-yaml.yml" "$(cat <<'YAML'
-          name: "✅ Echo Verify — YAML Syntax"
-          on: { workflow_dispatch: {} }
-          jobs:
-            lint:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - name: Check workflow files exist
-                  run: |
-                    set -Eeuo pipefail
-                    test -d .github/workflows
-                    ls -la .github/workflows
-          YAML
-          )"
-          # --- 추가 CI/보안 6종 (push protection 우회: 민감 토큰 라인 없음) ---
-          gen ".github/workflows/java-maven-ci.yml" "$(cat <<'YAML'
-          name: "☕ Java CI (Maven)"
-          on: { push: { branches: ["**"] }, pull_request: {} }
-          jobs:
-            build:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-java@v4
-                  with:
-                    distribution: temurin
-                    java-version: "17"
-                    cache: maven
-                - name: Build & Test
-                  run: mvn -B -ntp -DskipTests=false verify
-          YAML
-          )"
-          gen ".github/workflows/java-gradle-ci.yml" "$(cat <<'YAML'
-          name: "☕ Java CI (Gradle)"
-          on:
-            push: { branches: ["**"] }
-            pull_request: {}
-          jobs:
-            build:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-java@v4
-                  with:
-                    distribution: temurin
-                    java-version: "17"
-                    cache: gradle
-                - name: Build & Test
-                  run: |
-                    if [ -f gradlew ]; then chmod +x gradlew; ./gradlew build --no-daemon;
-                    else echo "[ECHO] gradlew not found — skipping"; fi
-          YAML
-          )"
-          gen ".github/workflows/codeql.yml" "$(cat <<'YAML'
-          name: "🔍 CodeQL (Java)"
-          permissions:
-            contents: read
-            security-events: write
-            actions: read
-          on:
-            push: { branches: ["main"] }
-            pull_request: { branches: ["main"] }
-            schedule: [{ cron: "0 2 * * 1" }]
-          jobs:
-            analyze:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: github/codeql-action/init@v3
-                  with: { languages: "java" }
-                - uses: github/codeql-action/autobuild@v3
-                - uses: github/codeql-action/analyze@v3
-          YAML
-          )"
-          gen ".github/workflows/shellcheck.yml" "$(cat <<'YAML'
-          name: "🧪 ShellCheck"
-          on: { push: { paths: ["**/*.sh","**/*.bash"] }, pull_request: { paths: ["**/*.sh","**/*.bash"] } }
-          jobs:
-            shellcheck:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: ludeeus/action-shellcheck@v2
-          YAML
-          )"
-          gen ".github/workflows/markdown-lint.yml" "$(cat <<'YAML'
-          name: "📝 Markdown Lint"
-          on: { push: { paths: ["**/*.md"] }, pull_request: { paths: ["**/*.md"] } }
-          jobs:
-            mdl:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: DavidAnson/markdownlint-cli2-action@v16
-                  with:
-                    globs: "**/*.md"
-          YAML
-          )"
-          gen ".github/workflows/yamllint.yml" "$(cat <<'YAML'
-          name: "📐 YAML Lint"
-          on: { push: { paths: ["**/*.yml","**/*.yaml"] }, pull_request: { paths: ["**/*.yml","**/*.yaml"] } }
-          jobs:
-            lint:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: ibiqlik/action-yamllint@v3
-                  with:
-                    format: colored
-          YAML
-          )"
-          gen ".github/workflows/pr-title-lint.yml" "$(cat <<'YAML'
-          name: "🏷️ PR Title Lint (Conventional Commits)"
-          on: [pull_request_target]
-          permissions:
-            pull-requests: read
-          jobs:
-            lint:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: amannn/action-semantic-pull-request@v5
-          YAML
-          )"
-          gen ".github/workflows/release-drafter.yml" "$(cat <<'YAML'
-          name: "📦 Release Drafter"
-          on:
-            push: { branches: ["main"] }
-            pull_request:
-              types: [opened, reopened, synchronize, labeled, unlabeled]
-          permissions:
-            contents: write
-            pull-requests: read
-          jobs:
-            update_release_draft:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: release-drafter/release-drafter@v6
-          YAML
-          )"
-          gen ".github/labeler.yml" "$(cat <<'YAML'
-          area/backend:
-            - 'src/**'
-          area/workflow:
-            - '.github/workflows/**'
-          area/docs:
-            - '**/*.md'
-          YAML
-          )"
-          gen ".github/dependabot.yml" "$(cat <<'YAML'
-          version: 2
-          updates:
-            - package-ecosystem: "maven"
-              directory: "/"
-              schedule: { interval: "weekly" }
-            - package-ecosystem: "github-actions"
-              directory: "/"
-              schedule: { interval: "weekly" }
-          YAML
-          )"
-          gen ".github/release-drafter.yml" "$(cat <<'YAML'
-          name-template: 'v$NEXT_PATCH_VERSION'
-          tag-template: 'v$NEXT_PATCH_VERSION'
-          categories:
-            - title: '🚀 Features'
-              labels: ['feature', 'enhancement']
-            - title: '🐛 Fixes'
-              labels: ['bug', 'fix']
-            - title: '🧰 Maintenance'
-              labels: ['chore', 'deps']
-          change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
-          template: |
-            ## What’s Changed
-            $CHANGES
-          YAML
-          )"
-
-      - name: 📊 Size reports (safe)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/45_sizes.log") 2>&1
-          set -x
+          OUT_BASE="/mnt/ramdisk"; [ -d "$OUT_BASE" ] || OUT_BASE="."
+          TAR_SPLIT_MB="${TAR_SPLIT_MB:-256}"
+          TAR_PATH="${OUT_BASE}/bulk_full.tar"; TGZ_PATH="${OUT_BASE}/bulk_full.tar.gz"; SPLIT_PREFIX="${OUT_BASE}/bulk_full.part."
+          tar -cf "$TAR_PATH" bulk
+          pigz -p "$(nproc)" -f "$TAR_PATH"
+          split -b "${TAR_SPLIT_MB}M" -d "$TGZ_PATH" "$SPLIT_PREFIX"
           mkdir -p .github/echo_monitoring
-          run_cmd "du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true"
-          run_cmd "du -sh . > .github/echo_monitoring/total_size.txt || true"
-          run_cmd "df -h > .github/echo_monitoring/df_all.txt || true"
+          du -ah bulk 2>/dev/null | sort -hr 2>/dev/null | head -n 200 > .github/echo_monitoring/top200_bulk.txt || true
+          echo "[SUMMARY] tgz=$(du -h "$TGZ_PATH" | awk '{print $1}'), parts=$(ls -1 ${SPLIT_PREFIX}* 2>/dev/null | wc -l | tr -d ' ')"
 
-      - name: 📝 .gitignore (avoid committing disk.img, logs)
+      - name: 📊 Size reports
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/50_gitignore.log") 2>&1
-          set -x
-          echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
-          run_cmd "tail -n 20 .gitignore || true"
-          printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\necho -e "\\n# auto-generated\\n%s\\n*.img\\n.github/echo_logs/*.log\\n" >> .gitignore\n' "${DISK_IMG}" > "$ECHO_DIR/add_gitignore.sh"
-          chmod +x "$ECHO_DIR/add_gitignore.sh"
+          mkdir -p .github/echo_monitoring
+          du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
+          du -sh . > .github/echo_monitoring/total_size.txt || true
+          df -h > .github/echo_monitoring/df_all.txt || true
 
-      - name: ✅ Commit & push (no-token safe; rebase; GH013 sanitize; workflows-perm fallback; backup branch)
+      - name: 📝 .gitignore update
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
+          tail -n 20 .gitignore || true
+
+      - name: ✅ Commit & push (token optional)
         if: ${{ inputs.commit_and_push == 'true' || github.event_name == 'schedule' }}
         shell: bash
         env:
@@ -718,149 +394,385 @@ jobs:
           COMMIT_MSG_IN: ${{ inputs.commit_message }}
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/60_commit_push.log") 2>&1
+          exec > >(tee -a ".github/echo_logs/60_commit_push.log") 2>&1
           set -x
-
           git config user.name "${GIT_USER_NAME}"
           git config user.email "${GIT_USER_EMAIL}"
           git config pull.rebase true
-
           TARGET_BR="${GITHUB_REF_NAME}"
           CURRENT="$(git rev-parse --abbrev-ref HEAD || echo main)"
           git fetch origin --prune || true
           if [[ "$CURRENT" != "$TARGET_BR" ]]; then
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
-
-          mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt" || true
-          git add \
-            .gitignore \
-            .github/workflows \
-            .github/echo_scripts \
-            .github/echo_logs \
-            .github/echo_monitoring \
-            .github/*.yml \
-            bulk \
-            "${DIRS[@]/#/.\/}" 2>/dev/null || true
-
-          if git diff --cached --quiet; then
-            echo "[ECHO] No changes to commit."
-            exit 0
-          fi
-
+          git add -A
+          if git diff --cached --quiet; then echo "[ECHO] No changes"; exit 0; fi
           COMMIT_MSG="${COMMIT_MSG_IN:-chore: disk+dirs auto (cron)}"
           git commit -m "$COMMIT_MSG"
-
-          PUSH_LOG="$ECHO_DIR/.push_err.txt"
+          PUSH_LOG=".github/echo_scripts/.push_err.txt"
           NO_TOKEN_MODE=0
-
-          # 자격증명 설정(토큰 있을 때만), 없으면 checkout이 설정한 기본 리모트 유지
           set +x
           if [[ -n "${WORKFLOW_PAT:-}" ]]; then
-            echo "[ECHO] Using WORKFLOW_PAT (workflow files allowed)"
-            git remote set-url origin "https://${GH_ACTOR}:${WORKFLOW_PAT}@github.com/${GH_REPO}.git"
+            echo "[ECHO] Using WORKFLOW_PAT"; git remote set-url origin "https://${GH_ACTOR}:${WORKFLOW_PAT}@github.com/${GH_REPO}.git"
           elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            echo "[ECHO] Using GITHUB_TOKEN"
-            git remote set-url origin "https://${GH_ACTOR}:${GITHUB_TOKEN}@github.com/${GH_REPO}.git"
+            echo "[ECHO] Using GITHUB_TOKEN"; git remote set-url origin "https://${GH_ACTOR}:${GITHUB_TOKEN}@github.com/${GH_REPO}.git"
           else
-            echo "[ECHO] No token present → NO-TOKEN MODE: keep current remote and try push"
-            NO_TOKEN_MODE=1
+            echo "[ECHO] NO TOKEN — will try push anyway"; NO_TOKEN_MODE=1
           fi
           set -x
-
-          # 1차 푸시
-          if git push origin "$TARGET_BR" 2> "$PUSH_LOG"; then
-            echo "[ECHO] Pushed to origin/$TARGET_BR (fast-forward)"
-            exit 0
-          fi
-
-          echo "[ECHO] Push rejected — trying rebase on origin/$TARGET_BR"
+          git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
           git fetch origin --prune || true
-          git rebase "origin/$TARGET_BR" || { git rebase --abort || true; echo "[ECHO] rebase failed, will fallback"; }
-
-          if git push origin "$TARGET_BR" 2> "$PUSH_LOG"; then
-            echo "[ECHO] Pushed to origin/$TARGET_BR after rebase"
-            exit 0
-          fi
-
-          # GH013(비밀탐지) 대응
+          git rebase "origin/$TARGET_BR" || { git rebase --abort || true; }
+          git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
           if grep -q 'Repository rule violations' "$PUSH_LOG"; then
-            echo "[ECHO] GH013 detected → sanitizing flagged files and retrying"
-            grep -o 'path: .*' "$PUSH_LOG" | sed 's/^path: //' | while read -r p; do
-              p_clean="${p%%:*}"
-              echo "[ECHO] Sanitizing $p_clean"
-              [[ -f "$p_clean" ]] && sed -i '/GITHUB_TOKEN:/d' "$p_clean" || true
-            done
-            git add -A
-            git commit -m "$COMMIT_MSG (sanitized for push-protection)" || true
-            if git push origin "$TARGET_BR" 2> "$PUSH_LOG"; then
-              echo "[ECHO] Pushed sanitized commit"
-              exit 0
-            fi
+            grep -o 'path: .*' "$PUSH_LOG" | sed 's/^path: //' | while read -r p; do p="${p%%:*}"; sed -i '/GITHUB_TOKEN:/d' "$p" || true; done
+            git add -A; git commit -m "$COMMIT_MSG (sanitized)" || true
+            git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
           fi
-
-          # workflows 권한 부족 시 workflows 제외 재커밋
           if grep -qi 'without `workflows` permission' "$PUSH_LOG"; then
-            echo "[ECHO] Missing workflows permission → re-commit without .github/workflows"
-            git reset --soft HEAD~1 || true
-            git restore --staged .
-            git add \
-              .gitignore \
-              .github/echo_scripts \
-              .github/echo_logs \
-              .github/echo_monitoring \
-              .github/*.yml \
-              bulk \
-              "${DIRS[@]/#/.\/}" 2>/dev/null || true
-            git commit -m "$COMMIT_MSG (no workflows)"
-            if git push origin "$TARGET_BR" 2> "$PUSH_LOG"; then
-              echo "[ECHO] Pushed without .github/workflows"
-              exit 0
-            fi
+            git reset --soft HEAD~1 || true; git restore --staged .
+            git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring bulk || true
+            git commit -m "$COMMIT_MSG (no workflows)"; git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
           fi
-
-          # 백업 브랜치(토큰 없으면 스킵)
-          if [[ "${NO_TOKEN_MODE:-0}" -eq 0 ]]; then
-            BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"
-            echo "[ECHO] Pushing to backup branch: $BK"
-            git checkout -B "$BK"
-            if git push -u origin "$BK" 2> "$PUSH_LOG"; then
-              echo "[ECHO] Backup branch pushed: origin/$BK"
-              exit 0
-            fi
-
-            if grep -q 'Repository rule violations' "$PUSH_LOG"; then
-              echo "[ECHO] GH013 on backup branch → removing flagged files and retrying"
-              grep -o 'path: .*' "$PUSH_LOG" | sed 's/^path: //' | while read -r p; do
-                p_clean="${p%%:*}"
-                echo "[ECHO] Removing flagged path: $p_clean"
-                git rm -f --cached "$p_clean" || true
-                rm -f "$p_clean" || true
-              done
-              git commit -m "$COMMIT_MSG (removed GH013-flagged files)" || true
-              git push -u origin "$BK" && exit 0
-            fi
-          else
-            echo "[ECHO] NO-TOKEN MODE: skip backup branch push"
+          if [[ "${NO_TOKEN_MODE}" -eq 0 ]]; then
+            BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"; git checkout -B "$BK"
+            git push -u origin "$BK" 2> "$PUSH_LOG" && exit 0 || true
           fi
-
-          # 최종 처리: 토큰 없거나 인증 실패 → 성공으로 종료(로그/아티팩트로 확인)
-          if grep -qiE 'Authentication failed|HTTP 403|HTTP 401' "$PUSH_LOG" || [[ "${NO_TOKEN_MODE:-0}" -eq 1 ]]; then
-            echo "[ECHO] No auth/push not possible. Commits kept locally; artifacts uploaded. Marking step success."
-            exit 0
+          if grep -qiE 'Authentication failed|HTTP 403|HTTP 401' "$PUSH_LOG" || [[ "${NO_TOKEN_MODE}" -eq 1 ]]; then
+            echo "[ECHO] No auth — mark success"; exit 0
           fi
+          echo "[ECHO] Final push failed"; cat "$PUSH_LOG"; exit 1
 
-          echo "[ECHO] Final push failed:"; cat "$PUSH_LOG"; exit 1
-
-      - name: 📦 Upload artifacts (logs + echo scripts)
+      - name: 📦 Upload artifacts (logs/scripts/monitoring)
         uses: actions/upload-artifact@v4
         with:
-          name: springboot-disk-dirs-echo
+          name: diskdirs-logs-${{ github.run_id }}
           path: |
             .github/echo_logs/**
             .github/echo_scripts/**
             .github/echo_monitoring/**
           retention-days: 7
 
-      # Per request: NO unmount/losetup detach step
+  #######################################################################
+  # 2) Transfer Log Backup — 60건 Infinite + Provenance (5min cron)
+  #######################################################################
+  transfer_log_backup:
+    name: "🧾 Transfer Log Backup (5min) + Provenance"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name != 'schedule' || contains(github.event.schedule, '*/5')
+    env:
+      TRANSFER_LOG_DIR: /opt/logs/transfer
+      BACKUP_DIR: /opt/backup/transfer
+      PROVENANCE_DIR: provenance
+      PROVENANCE_STORE_DIR: provenance/store
+    steps:
+      - name: 📦 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔄 Full package upgrade (safe)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[🔄] Updating and upgrading packages..."
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y --with-new-pkgs upgrade || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
+          sudo apt-get -y autoremove
+          sudo apt-get install -y --no-install-recommends tree jq
+
+      - name: 📁 Prepare directories
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[📁] Creating directories..."
+          sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
+          sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
+
+      - name: 📂 Generate 60 corporate transfer logs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[🕒] Generating logs..."
+          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || echo "[ℹ️] No logs to remove."
+          for i in $(seq 1 60); do
+            TS=$(date +'%Y-%m-%d %H:%M:%S')
+            AMOUNT=$((RANDOM % 900000 + 100000))
+            LOG="[TRANSFER] $TS | 기업거래ID:$i | 송금금액:₩$AMOUNT 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
+            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
+          done
+
+      - name: 📆 Backup logs into timestamped folder
+        id: backup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
+          echo "ts_folder=$TS_FOLDER" >> "$GITHUB_OUTPUT"
+          DEST="$BACKUP_DIR/$TS_FOLDER"
+          sudo mkdir -p "$DEST"
+          sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
+
+      - name: 📤 Upload generated logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
+
+      - name: 📤 Upload backup folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
+
+      - name: 📜 Generate provenance.json (echo)
+        id: genprov
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[📜] Creating provenance.json with echo..."
+          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          FILE="transfer-backup-${{ steps.backup.outputs.ts_folder }}"
+          mkdir -p "${{ env.PROVENANCE_DIR }}"
+          PROV_FILE="${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
+          echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
+          {
+            echo '{'
+            echo '  "type": "transfer_log_backup",'
+            echo "  \"timestamp\": \"$TS\","
+            echo '  "status": "completed",'
+            echo "  \"backup_file\": \"$FILE\","
+            echo "  \"workflow\": \"${{ github.workflow }}\","
+            echo "  \"repository\": \"${{ github.repository }}\","
+            echo "  \"run_id\": \"${{ github.run_id }}\","
+            echo "  \"run_number\": \"${{ github.run_number }}\""
+            echo '}'
+          } > "$PROV_FILE"
+          echo "[📁] Copying to: $PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
+          mkdir -p "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}"
+          cp "$PROV_FILE" "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
+          echo "[📄] File contents:"; cat "$PROV_FILE"
+
+      - name: 📤 Upload provenance.json
+        if: ${{ hashFiles(steps.genprov.outputs.prov_path) != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ steps.genprov.outputs.prov_path }}
+
+      - name: 📚 Generate .provenance_index.json
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[📚] Building .provenance_index.json..."
+          mkdir -p provenance
+          INDEX_FILE="provenance/.provenance_index.json"
+          FILES=$(ls provenance/.provenance_transfer_*.json 2>/dev/null || true)
+          if [ -z "$FILES" ]; then
+            echo "[]" > "$INDEX_FILE"
+          else
+            echo "[" > "$INDEX_FILE"
+            FIRST=1
+            for file in $FILES; do
+              [ -e "$file" ] || continue
+              if [ $FIRST -eq 0 ]; then echo "," >> "$INDEX_FILE"; fi
+              cat "$file" >> "$INDEX_FILE"
+              FIRST=0
+            done
+            echo "]" >> "$INDEX_FILE"
+          fi
+          echo "[📄] Final .provenance_index.json:"; cat "$INDEX_FILE"
+
+      - name: 📤 Upload provenance index
+        if: ${{ hashFiles('provenance/.provenance_index.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-index
+          path: provenance/.provenance_index.json
+
+      - name: 📂 Show backup structure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tree ${{ env.BACKUP_DIR }} -L 2 || echo "[⚠️] tree failed"
+          echo "[📁] Provenance storage structure:"
+          tree ${{ env.PROVENANCE_STORE_DIR }} || echo "[ℹ️] No provenance store yet"
+
+  #######################################################################
+  # 3) 24x365 Resource Watchdog — per-service create+exit, auto-grow+retry
+  #######################################################################
+  resources_24x7:
+    name: "🛡️ 24x365 Resource Watchdog (auto-grow+retry)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'schedule' || contains(github.event.schedule, '*/1')
+    needs: [diskdirs]   # mount/이미지 선행 (동시 실행 원하면 제거)
+    env:
+      LOG_DIR: .github/echo_logs
+      ECHO_DIR: .github/echo_scripts
+      DISK_IMG: disk.img
+      MOUNT_P1_NAME: p1
+      MOUNT_P2_NAME: p2
+      MIN_FREE_MB: "2048"        # 임계 여유 공간
+      GROW_STEP_MB: "4096"       # 확장 단위
+      MAX_GROW_ATTEMPTS: "3"     # 최대 재시도
+      SERVICES: "mysql postgres mongo redis kafka vault minio airflow spark camunda"
+      MNT_ROOT: "/mnt/gh-disk"
+      SVC_SUBDIRS: "data,logs,conf,tmp,backup,site"
+      OWNER_GROUP: "runner:runner"
+      DIR_MODE: "0755"
+
+    steps:
+      - name: 📦 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🧰 Helpers (watchdog)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$ECHO_DIR"
+          exec > >(tee -a "$LOG_DIR/70_watchdog.log") 2>&1
+          set -x
+          cat > "$ECHO_DIR/_helpers_watchdog.sh" <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          export PS4='+ [$(date "+%F %T")] watchdog:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          set -x
+          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
+          parse_owner_group(){ local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"; [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"; }
+          get_loop(){
+            local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
+            if [[ -z "$dev" && -f "$DISK_IMG" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""; fi
+            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
+            printf "%s" "$dev"
+          }
+          ensure_mounts(){
+            local mnt="$1"; local loop; loop="$(get_loop)"
+            sudo mkdir -p "$mnt" "$mnt/part2"
+            mount | grep -q " on $mnt "       || sudo mount "${loop}p1" "$mnt"
+            mount | grep -q " on $mnt/part2 " || sudo mount "${loop}p2" "$mnt/part2"
+          }
+          free_mb(){ df -Pm "$1" | awk 'NR==2{print $4}'; }
+          grow_image_and_fs(){
+            local grow_mb="$1" ; local mnt="$2" ; local fs="ext4"; local loop ; loop="$(get_loop)"
+            fs="$(sudo blkid -o value -s TYPE ${loop}p2 2>/dev/null || echo ext4)"
+            echo "[ECHO] Growing disk.img by ${grow_mb}MB (fs=$fs)"
+            run_cmd "truncate -s +${grow_mb}M \"$DISK_IMG\""
+            run_cmd "sudo losetup -c \"$loop\""
+            run_cmd "sudo parted -s \"$loop\" resizepart 2 100% || true"
+            run_cmd "sudo partprobe \"$loop\" || true"
+            case "$fs" in
+              ext4)  run_cmd "sudo resize2fs \"${loop}p2\"" ;;
+              xfs)   run_cmd "sudo xfs_growfs \"${mnt}/part2\"" ;;
+              btrfs) run_cmd "sudo btrfs filesystem resize max \"${mnt}/part2\"" ;;
+              *)     run_cmd "sudo resize2fs \"${loop}p2\"" ;;
+            esac
+            run_cmd "df -h \"$mnt/part2\" || true"
+          }
+          BASH
+          chmod +x "$ECHO_DIR/_helpers_watchdog.sh"
+
+      - name: 🔗 Ensure mounts + pre-space-check (auto-grow if low)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers_watchdog.sh"
+          exec > >(tee -a "$LOG_DIR/71_mount_space.log") 2>&1
+          set -x
+          ensure_mounts "$MNT_ROOT"
+          CUR_FREE="$(free_mb "$MNT_ROOT/part2")"
+          echo "[ECHO] Free on p2: ${CUR_FREE}MB (min ${MIN_FREE_MB}MB)"
+          ATT=0
+          while (( CUR_FREE < MIN_FREE_MB && ATT < MAX_GROW_ATTEMPTS )); do
+            echo "[ECHO] Low space → grow attempt $((ATT+1))/${MAX_GROW_ATTEMPTS}"
+            grow_image_and_fs "$GROW_STEP_MB" "$MNT_ROOT"
+            CUR_FREE="$(free_mb "$MNT_ROOT/part2")"
+            ATT=$((ATT+1))
+          done
+          echo "[ECHO] Free after pre-check: ${CUR_FREE}MB"
+
+      - name: 🧱 Create per-service resources (idempotent, auto-retry on ENOSPC)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers_watchdog.sh"
+          exec > >(tee -a "$LOG_DIR/72_resources.log") 2>&1
+          set -x
+          read OWNER GROUP < <(parse_owner_group "${OWNER_GROUP}")
+          IFS=',' read -ra SUBS <<< "${SVC_SUBDIRS}"
+          mkdir -p status || true
+
+          create_one(){
+            local svc="$1"
+            local base_repo="services/${svc}"
+            local base_p1="${MNT_ROOT}/services/${svc}"
+            local base_p2="${MNT_ROOT}/part2/services/${svc}"
+            if [ -f "status/${svc}.ok" ]; then
+              echo "[SKIP] ${svc} already ok"; return 0
+            fi
+            mkdir -p "$base_repo" "$base_p1" "$base_p2"
+            for d in "${SUBS[@]}"; do
+              mkdir -p "${base_repo}/${d}" "${base_p1}/${d}" "${base_p2}/${d}"
+            done
+            : > "${base_repo}/conf/${svc}.conf" || true
+            : > "${base_repo}/logs/.gitkeep"    || true
+            : > "${base_repo}/data/.gitkeep"    || true
+            sudo chown -R "${OWNER}:${GROUP}" "$base_repo" "$base_p1" "$base_p2"
+            sudo chmod -R "${DIR_MODE}" "$base_repo" "$base_p1" "$base_p2"
+          }
+
+          ensure_service(){
+            local svc="$1"; local att=0
+            while (( att <= MAX_GROW_ATTEMPTS )); do
+              if create_one "$svc"; then
+                echo "[OK] ${svc} resources created"
+                echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "status/${svc}.ok"
+                return 0
+              fi
+              local free="$(df -Pm "$MNT_ROOT/part2" | awk 'NR==2{print $4}')"
+              if (( free < MIN_FREE_MB )); then
+                echo "[ECHO] ENOSPC or low space → grow & retry"
+                grow_image_and_fs "$GROW_STEP_MB" "$MNT_ROOT"
+                att=$((att+1)); continue
+              fi
+              att=$((att+1)); sleep 2
+            done
+            echo "[ERROR] ${svc} creation failed after retries"; return 1
+          }
+
+          export -f ensure_service create_one
+          export MNT_ROOT OWNER GROUP DIR_MODE MIN_FREE_MB MAX_GROW_ATTEMPTS GROW_STEP_MB
+          for svc in ${SERVICES}; do echo "$svc"; done | xargs -I{} -P 6 bash -c 'ensure_service "$@"' _ {}
+
+      - name: 📜 Write provenance for resources (per run)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/73_provenance.log") 2>&1
+          set -x
+          mkdir -p provenance
+          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          OUT="provenance/.provenance_resources_${GITHUB_RUN_ID}.json"
+          {
+            echo '{'
+            echo '  "type": "resources_watchdog",'
+            echo "  \"timestamp\": \"${TS}\","
+            echo "  \"services\": \"${SERVICES}\","
+            echo "  \"mount\": \"${MNT_ROOT}/part2\","
+            echo "  \"min_free_mb\": \"${MIN_FREE_MB}\","
+            echo "  \"grow_step_mb\": \"${GROW_STEP_MB}\""
+            echo '}'
+          } > "$OUT"
+          cat "$OUT"
+
+      - name: 📦 Upload watchdog logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchdog-logs-${{ github.run_id }}
+          path: |
+            .github/echo_logs/70_watchdog.log
+            .github/echo_logs/71_mount_space.log
+            .github/echo_logs/72_resources.log
+            .github/echo_logs/73_provenance.log
+            status/**
+          retention-days: 7
