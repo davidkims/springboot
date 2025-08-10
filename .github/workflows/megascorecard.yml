@@ -47,8 +47,10 @@ on:
   schedule:
     - cron: "*/1 * * * *"
 
+# NOTE: workflows: write 필요 — 없으면 아래 커밋 스텝이 자동 폴백으로 처리
 permissions:
   contents: write
+  workflows: write
 
 concurrency:
   group: springboot-disk-dirs
@@ -82,7 +84,7 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
-          set +H   # history expansion off (for '!' chars)
+          set +H   # disable history expansion
 
           run_cmd() { echo "[CMD] $*"; eval "$@"; }
 
@@ -407,14 +409,20 @@ jobs:
             fi
           done
 
-      - name: 🧾 Generate EXTRA workflows under .github/workflows (bulk, idempotent)
+      - name: 🧾 Generate EXTRA workflows/configs (.github/workflows + configs) — bulk, idempotent
         shell: bash
         run: |
           set -Eeuo pipefail
           exec > >(tee -a ".github/echo_logs/42_generate_workflows.log") 2>&1
           set -x
-          mkdir -p .github/workflows
-          gen() { local path="$1"; shift; local content="$*"; if [ ! -f "$path" ]; then printf "%s\n" "$content" > "$path"; echo "[ECHO] created workflow: $path"; else echo "[ECHO] exists (skip): $path"; fi; }
+
+          mkdir -p .github/workflows .github
+
+          gen() { local path="$1"; shift; local content="$*";
+            if [ ! -f "$path" ]; then printf "%s\n" "$content" > "$path"; echo "[ECHO] created: $path";
+            else echo "[ECHO] exists (skip): $path"; fi; }
+
+          # --- 기존 5종 ---
           gen ".github/workflows/diskdirs-resize-only.yml" "$(cat <<'YAML'
           name: "🧩 DiskDirs — Resize Only (manual)"
           on: { workflow_dispatch: {} }
@@ -442,8 +450,7 @@ jobs:
                     mkdir -p .github/echo_monitoring
                     du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
                     du -sh . > .github/echo_monitoring/total_size.txt || true
-                - name: Upload artifact
-                  uses: actions/upload-artifact@v4
+                - uses: actions/upload-artifact@v4
                   with:
                     name: repo-size-report
                     path: .github/echo_monitoring/**
@@ -494,6 +501,191 @@ jobs:
           YAML
           )"
 
+          # --- 신규 대량 추가 8종 ---
+          # 1) Java (Maven) CI
+          gen ".github/workflows/java-maven-ci.yml" "$(cat <<'YAML'
+          name: "☕ Java CI (Maven)"
+          on: { push: { branches: ["**"] }, pull_request: {} }
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-java@v4
+                  with:
+                    distribution: temurin
+                    java-version: "17"
+                    cache: maven
+                - name: Build & Test
+                  run: mvn -B -ntp -DskipTests=false verify
+          YAML
+          )"
+
+          # 2) Java (Gradle) CI
+          gen ".github/workflows/java-gradle-ci.yml" "$(cat <<'YAML'
+          name: "☕ Java CI (Gradle)"
+          on:
+            push: { branches: ["**"] }
+            pull_request: {}
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-java@v4
+                  with:
+                    distribution: temurin
+                    java-version: "17"
+                    cache: gradle
+                - name: Build & Test
+                  run: |
+                    if [ -f gradlew ]; then chmod +x gradlew; ./gradlew build --no-daemon;
+                    else echo "[ECHO] gradlew not found — skipping"; fi
+          YAML
+          )"
+
+          # 3) CodeQL (Java)
+          gen ".github/workflows/codeql.yml" "$(cat <<'YAML'
+          name: "🔍 CodeQL (Java)"
+          permissions:
+            contents: read
+            security-events: write
+            actions: read
+          on:
+            push: { branches: ["main"] }
+            pull_request: { branches: ["main"] }
+            schedule: [{ cron: "0 2 * * 1" }]
+          jobs:
+            analyze:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: github/codeql-action/init@v3
+                  with: { languages: "java" }
+                - uses: github/codeql-action/autobuild@v3
+                - uses: github/codeql-action/analyze@v3
+          YAML
+          )"
+
+          # 4) ShellCheck
+          gen ".github/workflows/shellcheck.yml" "$(cat <<'YAML'
+          name: "🧪 ShellCheck"
+          on: { push: { paths: ["**/*.sh","**/*.bash"] }, pull_request: { paths: ["**/*.sh","**/*.bash"] } }
+          jobs:
+            shellcheck:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: ludeeus/action-shellcheck@v2
+          YAML
+          )"
+
+          # 5) Markdown Lint
+          gen ".github/workflows/markdown-lint.yml" "$(cat <<'YAML'
+          name: "📝 Markdown Lint"
+          on: { push: { paths: ["**/*.md"] }, pull_request: { paths: ["**/*.md"] } }
+          jobs:
+            mdl:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: DavidAnson/markdownlint-cli2-action@v16
+                  with:
+                    globs: "**/*.md"
+          YAML
+          )"
+
+          # 6) YAML Lint
+          gen ".github/workflows/yamllint.yml" "$(cat <<'YAML'
+          name: "📐 YAML Lint"
+          on: { push: { paths: ["**/*.yml","**/*.yaml"] }, pull_request: { paths: ["**/*.yml","**/*.yaml"] } }
+          jobs:
+            lint:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: ibiqlik/action-yamllint@v3
+                  with:
+                    format: colored
+          YAML
+          )"
+
+          # 7) PR Title (Conventional Commits)
+          gen ".github/workflows/pr-title-lint.yml" "$(cat <<'YAML'
+          name: "🏷️ PR Title Lint (Conventional Commits)"
+          on: [pull_request_target]
+          permissions:
+            pull-requests: write
+          jobs:
+            lint:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: amannn/action-semantic-pull-request@v5
+                  env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          YAML
+          )"
+
+          # 8) Release Drafter
+          gen ".github/workflows/release-drafter.yml" "$(cat <<'YAML'
+          name: "📦 Release Drafter"
+          on:
+            push: { branches: ["main"] }
+            pull_request:
+              types: [opened, reopened, synchronize, labeled, unlabeled]
+          permissions:
+            contents: write
+            pull-requests: read
+          jobs:
+            update_release_draft:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: release-drafter/release-drafter@v6
+                  env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          YAML
+          )"
+
+          # ---- 추가 설정 파일들 (.github/*) ----
+          gen ".github/labeler.yml" "$(cat <<'YAML'
+          area/backend:
+            - 'src/**'
+          area/workflow:
+            - '.github/workflows/**'
+          area/docs:
+            - '**/*.md'
+          YAML
+          )"
+
+          gen ".github/dependabot.yml" "$(cat <<'YAML'
+          version: 2
+          updates:
+            - package-ecosystem: "maven"
+              directory: "/"
+              schedule: { interval: "weekly" }
+            - package-ecosystem: "github-actions"
+              directory: "/"
+              schedule: { interval: "weekly" }
+          YAML
+          )"
+
+          gen ".github/release-drafter.yml" "$(cat <<'YAML'
+          name-template: 'v$NEXT_PATCH_VERSION'
+          tag-template: 'v$NEXT_PATCH_VERSION'
+          categories:
+            - title: '🚀 Features'
+              labels: ['feature', 'enhancement']
+            - title: '🐛 Fixes'
+              labels: ['bug', 'fix']
+            - title: '🧰 Maintenance'
+              labels: ['chore', 'deps']
+          change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
+          template: |
+            ## What’s Changed
+            $CHANGES
+          YAML
+          )"
+
       - name: 📊 Size reports (safe)
         shell: bash
         run: |
@@ -518,7 +710,7 @@ jobs:
           printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\necho -e "\\n# auto-generated\\n%s\\n*.img\\n.github/echo_logs/*.log\\n" >> .gitignore\n' "${DISK_IMG}" > "$ECHO_DIR/add_gitignore.sh"
           chmod +x "$ECHO_DIR/add_gitignore.sh"
 
-      - name: ✅ Commit & (optional) push (with rebase fallback + backup branch)
+      - name: ✅ Commit & (optional) push (with rebase + workflows-permission fallback + backup branch)
         if: ${{ inputs.commit_and_push == 'true' || github.event_name == 'schedule' }}
         shell: bash
         env:
@@ -528,15 +720,18 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/60_commit_push.log") 2>&1
           set -x
+
           git config user.name "${GIT_USER_NAME}"
           git config user.email "${GIT_USER_EMAIL}"
           git config pull.rebase true
+
           TARGET_BR="${GITHUB_REF_NAME}"
           CURRENT="$(git rev-parse --abbrev-ref HEAD)"
           git fetch origin --prune
           if [[ "$CURRENT" != "$TARGET_BR" ]]; then
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
+
           mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt" || true
           git add \
             .gitignore \
@@ -544,29 +739,60 @@ jobs:
             .github/echo_scripts \
             .github/echo_logs \
             .github/echo_monitoring \
+            .github/*.yml \
             bulk \
             "${DIRS[@]/#/.\/}" 2>/dev/null || true
+
           if git diff --cached --quiet; then
             echo "[ECHO] No changes to commit."
             exit 0
           fi
-          git commit -m "${{ inputs.commit_message || 'chore: disk+dirs auto (cron)' }}"
-          if git push origin "$TARGET_BR"; then
+
+          COMMIT_MSG="${{ inputs.commit_message || 'chore: disk+dirs auto (cron)' }}"
+          git commit -m "$COMMIT_MSG"
+
+          PUSH_LOG="$ECHO_DIR/.push_err.txt"
+          if git push origin "$TARGET_BR" 2> "$PUSH_LOG"; then
             echo "[ECHO] Pushed to origin/$TARGET_BR (fast-forward)"
             exit 0
           fi
+
           echo "[ECHO] Push rejected — trying rebase on origin/$TARGET_BR"
           git fetch origin --prune
           git rebase "origin/$TARGET_BR" || { git rebase --abort || true; echo "[ECHO] rebase failed, will fallback"; }
-          if git push origin "$TARGET_BR"; then
+
+          if git push origin "$TARGET_BR" 2> "$PUSH_LOG"; then
             echo "[ECHO] Pushed to origin/$TARGET_BR after rebase"
             exit 0
           fi
+
+          if grep -q 'without `workflows` permission' "$PUSH_LOG"; then
+            echo "[ECHO] Missing workflows permission → re-commit without .github/workflows"
+            git reset --soft HEAD~1
+            git restore --staged .
+            git add \
+              .gitignore \
+              .github/echo_scripts \
+              .github/echo_logs \
+              .github/echo_monitoring \
+              .github/*.yml \
+              bulk \
+              "${DIRS[@]/#/.\/}" 2>/dev/null || true
+            git commit -m "$COMMIT_MSG (no workflows)"
+            if git push origin "$TARGET_BR"; then
+              echo "[ECHO] Pushed without .github/workflows (grant workflows: write to enable full sync)"
+              exit 0
+            fi
+          fi
+
           BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"
           echo "[ECHO] Still rejected. Pushing to backup branch: $BK"
           git checkout -B "$BK"
-          git push -u origin "$BK"
-          echo "[ECHO] Backup branch pushed: origin/$BK"
+          if git push -u origin "$BK" 2> "$PUSH_LOG"; then
+            echo "[ECHO] Backup branch pushed: origin/$BK"
+            exit 0
+          fi
+          echo "[ECHO] Final push failed:"; cat "$PUSH_LOG"; exit 1
 
       - name: 📦 Upload artifacts (logs + echo scripts)
         uses: actions/upload-artifact@v4
