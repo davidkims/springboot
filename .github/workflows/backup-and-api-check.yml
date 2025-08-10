@@ -1,79 +1,80 @@
-name: DB CLI Remake & CodeQL Fallback Robust Automation
+name: "💾 Real-time Disk Boost (Ubuntu runners)"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
 
 jobs:
-  db-cli-remake-batch:
+  disk-boost:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    env:
-      DBCLI_DIR: .github/dbcli
-      OUTPUT_DIR: .github/dbcli/output
-      VA_DIR: .github/dbcli/virtual_accounts
-      ORDER_DIR: .github/dbcli/orders
-      USER_DIR: .github/dbcli/users
-      TMP_SAFE_DIR: /tmp/dbcli_safe_tmp
-      DB2_CLI_URL: "https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz"
-      DB2_CLI_DIR: /opt/ibm/db2_cli
-      MIN_FREE_MB: 500
-      DBECHO_SAMPLE: .github/workflows/codeql-db-echo-template.txt
-
+    timeout-minutes: 60
     steps:
-      - name: 📦 Checkout
+      - name: 🔎 Before — disk snapshot
+        shell: bash
+        run: |
+          set -e
+          mkdir -p .github/echo_logs
+          {
+            echo "[BEFORE] df -h"
+            df -h
+            echo
+            echo "[BEFORE] lsblk"
+            lsblk
+            echo
+            echo "[BEFORE] /mnt usage"
+            sudo du -sh /mnt || true
+          } | tee .github/echo_logs/disk_before.log
+
+      # 1) 루트/도구/스왑/도커이미지 등 대용량 정리 (약 20~30GB 확보)
+      #   ※ 필요시 옵션을 false로 바꿔 보존할 수 있음
+      - name: 🧹 Free up preinstalled stuff (safe cleanup)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      # 위 액션은 우분투 러너에서 약 30GB까지 확보 보고 사례가 있습니다. :contentReference[oaicite:1]{index=1}
+
+      # 2) / 와 /mnt 여유공간을 LVM으로 결합해 작업공간($GITHUB_WORKSPACE)을 크게 마운트
+      #   * 체크아웃 이전에 실행해야 함 (README 권장)
+      - name: 💽 Maximize build space (LVM mount over workspace)
+        uses: easimon/maximize-build-space@v10
+        with:
+          # 루트와 /mnt에 남겨둘 최소 여유(MB) — apt, docker 등을 위해 약간 남겨둡니다
+          root-reserve-mb: 1536
+          temp-reserve-mb: 512
+          # 스왑을 1GB만 재구성(필요 없으면 0)
+          swap-size-mb: 1024
+          # 덩치 큰 사전 설치물 제거(위 단계와 중복되지만 문제 없음, 필요시 false)
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+      # 이 액션은 /mnt 임시디스크를 활용해 작업공간을 크게 만들고,
+      # 필요시 불필요 소프트웨어 제거/스왑 조정까지 지원합니다. :contentReference[oaicite:2]{index=2}
+
+      - name: 📥 Checkout (after disk boost)
         uses: actions/checkout@v4
 
-      - name: 🛠️ robust DB 디렉토리/파일 구조 생성
+      - name: 🔁 After — disk snapshot
+        shell: bash
         run: |
           set -e
-          robust_mkdir() {
-            DIR="$1"
-            if [ -e "$DIR" ] && [ ! -d "$DIR" ]; then
-              rm -f "$DIR"
-            fi
-            mkdir -p "$DIR"
-            chmod 700 "$DIR"
-          }
-          for DB in mysql mariadb percona postgresql sqlite redis clickhouse firebird db2; do
-            robust_mkdir "$DBCLI_DIR/$DB"
-          done
-          robust_mkdir "$OUTPUT_DIR"
-          robust_mkdir "$VA_DIR"
-          robust_mkdir "$ORDER_DIR"
-          robust_mkdir "$USER_DIR"
-
-      - name: CodeQL DB Echo robust 복제/생성
-        run: |
-          set -e
-          CODEQL_OUT_DIR=".github/codeql-out"
-          DBQL_DIR="$CODEQL_OUT_DIR/db-ql-dummy"
-          ECHO_FILE="$DBQL_DIR/codeql-db-echo.txt"
-          SAMPLE="$DBECHO_SAMPLE"
-          mkdir -p "$DBQL_DIR"
-          if [ -f "$SAMPLE" ]; then
-            cp "$SAMPLE" "$ECHO_FILE"
-            chmod 600 "$ECHO_FILE"
-            echo "[✅] CodeQL DB Echo 파일 robust 복제: $ECHO_FILE ← $SAMPLE"
-          else
-            echo "[⚠️] 템플릿 파일 없음, robust fallback으로 생성"
-            echo "==== CodeQL DB Echo Batch ====" > "$ECHO_FILE"
-            echo "timestamp: $(date '+%Y-%m-%d %H:%M:%S')" >> "$ECHO_FILE"
-            echo "repository: $GITHUB_REPOSITORY" >> "$ECHO_FILE"
-            echo "commit_sha: $GITHUB_SHA" >> "$ECHO_FILE"
-            echo "run_id: $GITHUB_RUN_ID" >> "$ECHO_FILE"
-            echo "run_number: $GITHUB_RUN_NUMBER" >> "$ECHO_FILE"
-            echo "workflow: $GITHUB_WORKFLOW" >> "$ECHO_FILE"
-            echo "generated_by: DB CLI Remake Automation" >> "$ECHO_FILE"
-            echo "----" >> "$ECHO_FILE"
-            chmod 600 "$ECHO_FILE"
-          fi
-
-      - name: 최신 DB CLI 추가 설치 (옵션, 에러 무시)
-        run: |
-          sudo apt-get install -y mysql-client-8.0 mysql-client-core-8.0 mariadb-client-10.6 || true
-          sudo apt-get install -y postgresql-client-16 postgresql-client-common || true
-          sudo apt-get install -y clickhouse-client || true
-          sudo apt-get install -y firebird-utils || true
+          {
+            echo "[AFTER] df -h"
+            df -h
+            echo
+            echo "[AFTER] mount points (dev only)"
+            mount | grep -E '^/dev' || true
+            echo
+            echo "[NOTE] Workspace:"
+            echo "$GITHUB_WORKSPACE"
+            du -sh "$GITHUB_WORKSPACE" || true
+          } | tee .github/echo_logs/disk_after.log
