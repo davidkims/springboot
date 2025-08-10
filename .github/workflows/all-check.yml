@@ -1,83 +1,394 @@
-name: 🗂️ 완전통합 DB/에코/Compose/권한/스크립트/설치/로그 자동화 (XXL++ Live)
+name: "🗂️ 완전통합 DB/에코/Compose/권한/스크립트/설치/로그 자동화 (XXL++ Live) + Disk/Partitions/Bulk"
 
 on:
   workflow_dispatch:
     inputs:
-      live_iter:
-        description: "실시간 업데이트 반복 횟수 (기본 5)"
-        required: false
-        default: "5"
-      live_sleep:
-        description: "반복 간격(초) (기본 30)"
-        required: false
-        default: "30"
+      disk_plan:
+        description: "디스크 계획: init_mb=<MB>,resize_mb=<MB|blank>,fs=<ext4|xfs|btrfs>"
+        default: "init_mb=2048,resize_mb=,fs=ext4"
+        required: true
+      mount_point:
+        description: "p1 마운트 지점 (p2는 <mount_point>/part2)"
+        default: "/mnt/gh-disk"
+        required: true
+      dir_list:
+        description: "레포+양 파티션에 생성할 추가 디렉토리(쉼표구분)"
+        default: "logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts"
+        required: true
+      owner_group:
+        description: "소유자:그룹 (예: runner:runner)"
+        default: "runner:runner"
+        required: true
+      dir_mode:
+        description: "디렉토리 권한(8진수)"
+        default: "0755"
+        required: true
+      bulk_spec:
+        description: "대량 생성 스펙: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
+        default: "dirs=100,files=10,size_kb=4,prefix=gen"
+        required: true
+      live_spec:
+        description: "라이브 반복: iter=<횟수>,sleep=<초>"
+        default: "iter=5,sleep=30"
+        required: true
+      commit_and_push:
+        description: "생성물 커밋/푸시? true|false"
+        default: "true"
+        required: true
+      commit_message:
+        description: "커밋 메시지"
+        default: "chore: XXL live disk+partitions+echo+db+bulk+pages (auto)"
+        required: true
+      pages_publish:
+        description: "GitHub Pages 게시? true|false"
+        default: "true"
+        required: true
+
   schedule:
-    - cron: '3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48,51,54,57 * * * *'
+    # 요청안의 분단위 스케줄 유지
+    - cron: "3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48,51,54,57 * * * *"
 
 permissions:
   contents: write
   pages: write
   id-token: write
 
+# 크론/수동 동시 실행 충돌 방지
+concurrency:
+  group: xxl-live-disk-db-echo
+  cancel-in-progress: false
+
 jobs:
   build-and-echo:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-
     env:
       DEBIAN_FRONTEND: noninteractive
+      DISK_IMG: disk.img
+      LOG_DIR: .github/echo_logs
+      ECHO_DIR: .github/echo_scripts
       MYSQL_ROOT_PASSWORD: rootpass123
       POSTGRES_PASSWORD: pgpass123
       DB_USER: runner
       DB_PASS: pw
       DB_NAME: sample_db
-      LIVE_ITER: ${{ inputs.live_iter || '5' }}
-      LIVE_SLEEP: ${{ inputs.live_sleep || '30' }}
+      MOUNT_P1_NAME: p1
+      MOUNT_P2_NAME: p2
+      GIT_USER_NAME: gh-actions-bot
+      GIT_USER_EMAIL: gh-actions-bot@example.com
 
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
-      - name: 📁 에코 디렉토리/파일/스크립트/권한 대량 생성 (안전한 tee + shebang)
+      - name: 🧰 Init — FULL ECHO bootstrap (+helpers)
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$ECHO_DIR"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
+          set -x
 
-          # 0) tee 대상 선생성
-          mkdir -p .github/echo_db/dirs
-          echo '#!/usr/bin/env bash' > .github/echo_db/dirs/mkdir_cmds.sh
-          chmod +x .github/echo_db/dirs/mkdir_cmds.sh
+          run_cmd() { echo "[CMD] $*"; eval "$@"; }
 
-          echo "===== [에코] 디렉토리 대량 생성 시작 ====="
-          for d in \
-            .github/echo_db/dirs \
-            .github/echo_db/files \
-            .github/echo_db/installs \
-            .github/echo_db/upgrade \
-            .github/echo_db/permissions \
-            .github/echo_db/scripts \
-            .github/echo_db/logs \
-            .github/echo_db/services \
-            .github/echo_db/compose \
-            .github/echo_db/homebrew \
-            .github/echo_db/choco \
-            .github/echo_db/snap \
-            .github/echo_db/cloud \
-            .github/echo_db/marketplace \
-            .github/echo_db/config \
-            .github/echo_db/sql \
-            .github/echo_db/dump \
-            .github/echo_db/health \
-            .github/echo_db/monitor \
-            site live_snapshots
-          do
+          write_echo() {
+            local target="$1"; shift
+            mkdir -p "$(dirname "$target")"
+            {
+              echo '#!/usr/bin/env bash'
+              echo 'set -Eeuo pipefail'
+              echo 'export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\'''
+              echo 'set -x'
+              for line in "$@"; do echo "$line"; done
+            } > "$target"
+            chmod +x "$target"
+            echo "[ECHO] Wrote echo script: $target"
+          }
+
+          # Key=Value 추출 (CSV 'k=v' 목록에서)
+          getv() {
+            local spec="$1" key="$2"
+            echo "$spec" | tr ',' '\n' | awk -F= -v k="$key" '$1==k{print $2}'
+          }
+
+          # loop-device getter (idempotent)
+          get_loop() {
+            local dev
+            dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
+            if [[ -z "$dev" ]]; then
+              sudo losetup -fP "$DISK_IMG"
+              dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
+            fi
+            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
+            printf "%s" "$dev"
+          }
+
+          # owner:group 파싱
+          parse_owner_group() {
+            local og="$1"
+            local u="${og%%:*}"
+            local g="${og#*:}"
+            echo "$u" "$g"
+          }
+
+          export -f run_cmd write_echo getv get_loop parse_owner_group
+
+          # helpers 파일 생성(후속 스텝에서 source)
+          write_echo "$ECHO_DIR/_helpers.sh" \
+            'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
+            'getv(){ spec="$1"; key="$2"; echo "$spec" | tr "," "\n" | awk -F= -v k="$key" '\''$1==k{print $2}'\''; }' \
+            'get_loop(){ local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; fi; [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }; printf "%s" "$dev"; }' \
+            'parse_owner_group(){ local og="$1"; local u="${og%%:*}"; local g="${og#*:}"; echo "$u" "$g"; }'
+
+      - name: 🔧 Parse inputs → runtime env
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/01_parse.log") 2>&1
+          set -x
+          DISK_PLAN='${{ inputs.disk_plan }}'
+          INIT_MB="$(getv "$DISK_PLAN" init_mb)"
+          RESIZE_MB="$(getv "$DISK_PLAN" resize_mb)"
+          FS_TYPE="$(getv "$DISK_PLAN" fs)"
+          : "${INIT_MB:=2048}"
+          : "${FS_TYPE:=ext4}"
+
+          LIVE_SPEC='${{ inputs.live_spec }}'
+          LIVE_ITER="$(getv "$LIVE_SPEC" iter)"
+          LIVE_SLEEP="$(getv "$LIVE_SPEC" sleep)"
+          : "${LIVE_ITER:=5}"
+          : "${LIVE_SLEEP:=30}"
+
+          echo "INIT_MB=$INIT_MB" >> "$GITHUB_ENV"
+          echo "RESIZE_MB=$RESIZE_MB" >> "$GITHUB_ENV"
+          echo "FS_TYPE=$FS_TYPE" >> "$GITHUB_ENV"
+          echo "LIVE_ITER=$LIVE_ITER" >> "$GITHUB_ENV"
+          echo "LIVE_SLEEP=$LIVE_SLEEP" >> "$GITHUB_ENV"
+          echo "MOUNT_POINT=${{ inputs.mount_point }}" >> "$GITHUB_ENV"
+          echo "OWNER_GROUP=${{ inputs.owner_group }}" >> "$GITHUB_ENV"
+          echo "DIR_MODE=${{ inputs.dir_mode }}" >> "$GITHUB_ENV"
+          echo "DIR_LIST=${{ inputs.dir_list }}" >> "$GITHUB_ENV"
+          echo "BULK_SPEC='${{ inputs.bulk_spec }}'" >> "$GITHUB_ENV"
+
+      - name: 📦 Ensure FS tools (xfsprogs / btrfs-progs / parted)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/05_fs_tools.log") 2>&1
+          set -x
+          run_cmd "sudo apt-get update -y"
+          run_cmd "sudo apt-get install -y parted"
+          case "$FS_TYPE" in
+            xfs)   run_cmd "sudo apt-get install -y xfsprogs" ;;
+            btrfs) run_cmd "sudo apt-get install -y btrfs-progs" ;;
+            ext4|*) echo "[ECHO] ext4 선택 — e2fsprogs 기본 탑재" ;;
+          esac
+
+      - name: 💽 Create disk image (sparse) + attach loop
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
+          set -x
+          run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${INIT_MB}\""
+          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
+          run_cmd "ls -lh \"${DISK_IMG}\""
+
+      - name: 🧭 Partition GPT (p1=60%, p2=rest) — idempotent
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
+          set -x
+          LOOP_DEV="$(get_loop)"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" print || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60% || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P2_NAME} 60% 100% || true"
+          run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
+          run_cmd "ls -l ${LOOP_DEV}* || true"
+
+      - name: 🧪 Make filesystems on p1/p2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
+          set -x
+          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          case "$FS_TYPE" in
+            ext4)  run_cmd "sudo mkfs.ext4 -F \"$P1\""; run_cmd "sudo mkfs.ext4 -F \"$P2\"" ;;
+            xfs)   run_cmd "sudo mkfs.xfs -f \"$P1\"";  run_cmd "sudo mkfs.xfs -f \"$P2\"" ;;
+            btrfs) run_cmd "sudo mkfs.btrfs -f \"$P1\"";run_cmd "sudo mkfs.btrfs -f \"$P2\"" ;;
+          esac
+
+      - name: 🔗 Mount p1 & p2 (create part2 AFTER p1 mount)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
+          set -x
+          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
+          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+
+          run_cmd "sudo mkdir -p \"${MOUNT_POINT}\""
+          if mount | grep -q " on ${MOUNT_POINT} "; then
+            echo "[ECHO] ${MOUNT_POINT} already mounted"
+          else
+            run_cmd "sudo mount \"$P1\" \"${MOUNT_POINT}\""
+          fi
+
+          run_cmd "sudo mkdir -p \"${MOUNT_POINT}/part2\""
+          if mount | grep -q " on ${MOUNT_POINT}/part2 "; then
+            echo "[ECHO] ${MOUNT_POINT}/part2 already mounted"
+          else
+            run_cmd "sudo mount \"$P2\" \"${MOUNT_POINT}/part2\""
+          fi
+
+          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MOUNT_POINT}\""
+          run_cmd "mount | grep -E \" on ${MOUNT_POINT} | on ${MOUNT_POINT}/part2 \" || true"
+          run_cmd "df -h | grep -E \"loop|Filesystem\" || true"
+
+      - name: 📁 Create base dirs (repo + both mounts) — Spring + extras
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
+          set -x
+          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
+          SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" )
+          IFS=',' read -ra EXTRA <<< "$DIR_LIST"
+          for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
+          printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
+
+          while IFS= read -r d; do
+            run_cmd "mkdir -p \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\""
+            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\""
+            run_cmd "sudo chmod \"${DIR_MODE}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\""
+            [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
+            write_echo "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh" \
+              "mkdir -p \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\"" \
+              "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\"" \
+              "sudo chmod \"${DIR_MODE}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\"" \
+              "[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\""
+          done < "$ECHO_DIR/.all_dirs.txt"
+
+      - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart 2 → grow FS)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
+          set -x
+          CUR_BYTES="$(stat -c%s "${DISK_IMG}")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
+          NEW_MB="${RESIZE_MB:-$CUR_MB}"
+          echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
+          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\"" || echo "[ECHO] No file growth needed"
+          LOOP_DEV="$(get_loop)"
+          run_cmd "sudo losetup -c \"${LOOP_DEV}\""
+          run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100% || true"
+          run_cmd "sudo partprobe \"${LOOP_DEV}\" || true"
+          case "$FS_TYPE" in
+            ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}p2\"" ;;
+            xfs)   run_cmd "sudo xfs_growfs \"${MOUNT_POINT}/part2\"" ;;
+            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MOUNT_POINT}/part2\"" ;;
+          esac
+          run_cmd "df -h | grep -E \"${MOUNT_POINT}(/part2)?\" || true"
+
+      - name: 🧨 Bulk generator/upgrade — repo + both mounts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
+          set -x
+          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
+          NUM_DIRS="$(getv "$BULK_SPEC" dirs)"; NUM_FILES="$(getv "$BULK_SPEC" files)"; SIZE_KB="$(getv "$BULK_SPEC" size_kb)"; PREFIX="$(getv "$BULK_SPEC" prefix)"
+          : "${NUM_DIRS:=100}"; : "${NUM_FILES:=10}"; : "${SIZE_KB:=4}"; : "${PREFIX:=gen}"
+          ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MOUNT_POINT}/bulk/${PREFIX}"; ROOT_P2="${MOUNT_POINT}/part2/bulk/${PREFIX}"
+          run_cmd "mkdir -p \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
+
+          create_or_upgrade_dir() {
+            local base="$1" i="$2" d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
             mkdir -p "$d"
-            echo "echo 'mkdir -p $d'" | tee -a .github/echo_db/dirs/mkdir_cmds.sh >/dev/null
-            echo "echo '[에코] $d 디렉토리 생성 완료'" | tee -a .github/echo_db/dirs/mkdir_cmds.sh >/dev/null
+            for n in $(seq 1 "$NUM_FILES"); do
+              local f="${d}/file-$(printf '%04d' "$n").bin"
+              if [ -f "$f" ]; then
+                local cur; cur="$(stat -c%s "$f" || echo 0)"
+                local need=$(( SIZE_KB * 1024 ))
+                (( cur < need )) && truncate -s "${need}" "$f" || true
+              else
+                truncate -s "$(( SIZE_KB * 1024 ))" "$f"
+              fi
+            done
+          }
+          export -f create_or_upgrade_dir
+          for i in $(seq 1 "$NUM_DIRS"); do
+            create_or_upgrade_dir "$ROOT_REPO" "$i"
+            create_or_upgrade_dir "$ROOT_P1" "$i"
+            create_or_upgrade_dir "$ROOT_P2" "$i"
           done
-          echo "===== [에코] 디렉토리 대량 생성 완료 ====="
+          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"bulk\" \"${MOUNT_POINT}/bulk\" \"${MOUNT_POINT}/part2/bulk\""
+          run_cmd "sudo chmod -R \"${DIR_MODE}\" \"bulk\" \"${MOUNT_POINT}/bulk\" \"${MOUNT_POINT}/part2/bulk\""
 
-          # 1) 패키지 설치/업그레이드 에코 스크립트
+      - name: 👀 Live .github watcher — mirror new dirs to both mounts (5 min)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/40_live_github_watch.log") 2>&1
+          set -x
+          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
+          SNAP="$ECHO_DIR/.github_dirs.snap"
+          find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
+          for i in $(seq 1 60); do
+            sleep 5
+            NEW_SNAP="$ECHO_DIR/.github_dirs.new"
+            find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$NEW_SNAP" || true
+            DIFF="$ECHO_DIR/.github_dirs.diff"
+            comm -13 "$SNAP" "$NEW_SNAP" > "$DIFF" || true
+            if [ -s "$DIFF" ]; then
+              while IFS= read -r rel; do
+                [[ -z "$rel" ]] && continue
+                run_cmd "mkdir -p \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
+                run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
+                run_cmd "sudo chmod \"${DIR_MODE}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
+                write_echo "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh" \
+                  "mkdir -p \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\"" \
+                  "sudo chown -R \"${OWNER}:${GROUP}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\"" \
+                  "sudo chmod \"${DIR_MODE}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
+              done < "$DIFF"
+              mv "$NEW_SNAP" "$SNAP"
+            else
+              echo "[ECHO] No new .github directories (iteration $i)"
+            fi
+          done
+
+      # ===================== DB/에코/Compose/권한/설치/로그 (요청안 통합) =====================
+      - name: 📁 에코 디렉토리/파일/스크립트/권한 대량 생성
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/70_echo_db.log") 2>&1
+          set -x
+          mkdir -p .github/echo_db/dirs .github/echo_db/files .github/echo_db/installs .github/echo_db/upgrade \
+                   .github/echo_db/permissions .github/echo_db/scripts .github/echo_db/logs .github/echo_db/services \
+                   .github/echo_db/compose .github/echo_db/homebrew .github/echo_db/choco .github/echo_db/snap \
+                   .github/echo_db/cloud .github/echo_db/marketplace .github/echo_db/config .github/echo_db/sql \
+                   .github/echo_db/dump .github/echo_db/health .github/echo_db/monitor site live_snapshots
+          echo '#!/usr/bin/env bash' > .github/echo_db/dirs/mkdir_cmds.sh && chmod +x .github/echo_db/dirs/mkdir_cmds.sh
+          for d in $(find .github/echo_db -type d); do echo "echo 'mkdir -p $d'"; done >> .github/echo_db/dirs/mkdir_cmds.sh
+
           DB_LIST="mysql-server mariadb-server postgresql sqlite3 mongodb redis-server"
           for pkg in $DB_LIST; do
             f=".github/echo_db/installs/${pkg}-apt-install.sh"
@@ -85,40 +396,29 @@ jobs:
             b=".github/echo_db/homebrew/${pkg}-brew-install.sh"
             c=".github/echo_db/choco/${pkg}-choco-install.sh"
             s=".github/echo_db/snap/${pkg}-snap-install.sh"
-
-            { echo '#!/usr/bin/env bash'; echo 'set -Eeuo pipefail'
-              echo "echo '[에코] apt install $pkg'"
-              echo "sudo apt-get -yq update"
-              echo "sudo apt-get -yq install $pkg"
-            } > "$f" && chmod +x "$f"
-
-            { echo '#!/usr/bin/env bash'; echo 'set -Eeuo pipefail'
-              echo "echo '[에코] apt upgrade $pkg (--only-upgrade)'"
-              echo "sudo apt-get -yq update"
-              echo "sudo apt-get -yq install --only-upgrade $pkg || true"
-            } > "$u" && chmod +x "$u"
-
-            { echo '#!/usr/bin/env bash'; echo "echo '[에코] brew install $pkg'"; echo "brew install $pkg"; } > "$b" && chmod +x "$b"
-            { echo '#!/usr/bin/env bash'; echo "echo '[에코] choco install $pkg'"; echo "choco install $pkg"; } > "$c" && chmod +x "$c"
-            { echo '#!/usr/bin/env bash'; echo "echo '[에코] snap install $pkg'"; echo "sudo snap install $pkg"; } > "$s" && chmod +x "$s"
+            printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
+              "echo '[에코] apt install $pkg'" 'sudo apt-get -yq update' "sudo apt-get -yq install $pkg" > "$f"
+            printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
+              "echo '[에코] apt upgrade $pkg (--only-upgrade)'" 'sudo apt-get -yq update' \
+              "sudo apt-get -yq install --only-upgrade $pkg || true" > "$u"
+            printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] brew install $pkg'" "brew install $pkg" > "$b"
+            printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] choco install $pkg'" "choco install $pkg" > "$c"
+            printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] snap install $pkg'" "sudo snap install $pkg" > "$s"
+            chmod +x "$f" "$u" "$b" "$c" "$s"
           done
 
-          # 2) 컨테이너 서비스 YAML
           for db in mysql postgres mongo redis; do
             yml=".github/echo_db/services/${db}-service.yml"
             {
-              echo "# [에코] ${db} 컨테이너 예시"
               echo "services:"
               echo "  ${db}:"
               if [ "$db" = "mysql" ]; then
                 echo "    image: mysql:8.0"
-                echo "    environment:"
-                echo "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}"
+                echo "    environment:"; echo "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}"
                 echo "    ports: [ '3306:3306' ]"
               elif [ "$db" = "postgres" ]; then
                 echo "    image: postgres:15"
-                echo "    environment:"
-                echo "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
+                echo "    environment:"; echo "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
                 echo "    ports: [ '5432:5432' ]"
               elif [ "$db" = "mongo" ]; then
                 echo "    image: mongo:7"
@@ -127,48 +427,31 @@ jobs:
                 echo "    image: redis:7"
                 echo "    ports: [ '6379:6379' ]"
               fi
-              echo "# [에코] ${db} 서비스 컨테이너 yaml 생성 완료"
             } > "$yml"
           done
 
-          # 3) Docker Compose
           composefile=".github/echo_db/compose/all-db-compose.yml"
           {
-            echo "# [에코] docker compose all-db"
             echo "version: '3.8'"
             echo "services:"
-            echo "  mysql:"
-            echo "    image: mysql:8.0"
-            echo "    environment:"
-            echo "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}"
-            echo "    ports: [ '3306:3306' ]"
-            echo "  postgres:"
-            echo "    image: postgres:15"
-            echo "    environment:"
-            echo "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
-            echo "    ports: [ '5432:5432' ]"
-            echo "  mongo:"
-            echo "    image: mongo:7"
-            echo "    ports: [ '27017:27017' ]"
-            echo "  redis:"
-            echo "    image: redis:7"
-            echo "    ports: [ '6379:6379' ]"
+            echo "  mysql:";   echo "    image: mysql:8.0";   echo "    environment:"; echo "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}"; echo "    ports: [ '3306:3306' ]"
+            echo "  postgres:";echo "    image: postgres:15"; echo "    environment:"; echo "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"; echo "    ports: [ '5432:5432' ]"
+            echo "  mongo:";   echo "    image: mongo:7";     echo "    ports: [ '27017:27017' ]"
+            echo "  redis:";   echo "    image: redis:7";     echo "    ports: [ '6379:6379' ]"
           } > "$composefile"
-
-          { echo '#!/usr/bin/env bash'
-            echo "set -Eeuo pipefail"
-            echo "echo '[에코] docker compose up -d 실행 시도(가능한 경우만)'"
-            echo "if docker compose version >/dev/null 2>&1; then"
-            echo "  docker compose up -d || true"
-            echo "else"
-            echo "  echo '[WARN] docker compose 미탑재: 명령 기록만 수행'"
-            echo "fi"
-          } > .github/echo_db/compose/compose_echo.sh
+          cat > .github/echo_db/compose/compose_echo.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo '[에코] docker compose up -d 실행 시도(가능한 경우만)'
+          if docker compose version >/dev/null 2>&1; then
+            docker compose -f .github/echo_db/compose/all-db-compose.yml up -d || true
+          else
+            echo '[WARN] docker compose 미탑재: 명령 기록만 수행'
+          fi
+          SH
           chmod +x .github/echo_db/compose/compose_echo.sh
 
-          # 4) Marketplace 예시(참고 전용)
           cat > .github/echo_db/marketplace/postgresql-action.yml <<'YML'
-          # 참고용: Marketplace 액션 사용 예시(실행 아님)
           - uses: harmon758/postgresql-action@v1
             with:
               postgresql version: '13'
@@ -177,13 +460,11 @@ jobs:
               postgresql password: 'pgpass'
           YML
 
-          # 5) 권한/유저 설정 에코(예시)
           for db in mysql postgres mongo redis; do
             perm=".github/echo_db/permissions/${db}-permission.sh"
             {
-              echo '#!/usr/bin/env bash'
-              echo 'set -Eeuo pipefail'
-              echo "echo '[에코] $db 권한/유저 설정 예시 시작'"
+              echo '#!/usr/bin/env bash'; echo 'set -Eeuo pipefail'
+              echo "echo '[에코] $db 권한/유저 설정 예시'"
               if [ "$db" = "mysql" ]; then
                 echo "echo \"GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}' WITH GRANT OPTION;\""
                 echo "echo \"FLUSH PRIVILEGES;\""
@@ -193,253 +474,276 @@ jobs:
               fi
               echo "echo 'chown -R runner:runner /var/lib/${db} || true'"
               echo "echo 'chmod 700 /var/lib/${db} || true'"
-              echo "echo '[에코] $db 권한/유저 설정 예시 종료'"
             } > "$perm"
             chmod +x "$perm"
           done
 
-          # 6) 설정 템플릿(.my.cnf / .pgpass)
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo 'cat > .github/echo_db/config/my.cnf <<CONF'
-            echo "[client]"
-            echo "user=${DB_USER}"
-            echo "password=${DB_PASS}"
-            echo "host=127.0.0.1"
-            echo "port=3306"
-            echo 'CONF'
-            echo 'chmod 600 .github/echo_db/config/my.cnf'
-          } > .github/echo_db/config/render_mycnf.sh
+          cat > .github/echo_db/config/render_mycnf.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          cat > .github/echo_db/config/my.cnf <<CONF
+          [client]
+          user=runner
+          password=pw
+          host=127.0.0.1
+          port=3306
+          CONF
+          chmod 600 .github/echo_db/config/my.cnf
+          SH
           chmod +x .github/echo_db/config/render_mycnf.sh
           .github/echo_db/config/render_mycnf.sh
 
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo 'cat > .github/echo_db/config/pgpass <<CONF'
-            echo "127.0.0.1:5432:${DB_NAME}:${DB_USER}:${DB_PASS}"
-            echo 'CONF'
-            echo 'chmod 600 .github/echo_db/config/pgpass'
-          } > .github/echo_db/config/render_pgpass.sh
+          cat > .github/echo_db/config/render_pgpass.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          cat > .github/echo_db/config/pgpass <<CONF
+          127.0.0.1:5432:sample_db:runner:pw
+          CONF
+          chmod 600 .github/echo_db/config/pgpass
+          SH
           chmod +x .github/echo_db/config/render_pgpass.sh
           .github/echo_db/config/render_pgpass.sh
 
-          # 7) 초기 SQL
           cat > .github/echo_db/sql/init_mysql.sql <<'SQL'
           CREATE DATABASE IF NOT EXISTS sample_db;
           CREATE TABLE IF NOT EXISTS sample_db.test (id INT PRIMARY KEY, val VARCHAR(64));
           INSERT INTO sample_db.test (id,val) VALUES (1,'hello'),(2,'world')
             ON DUPLICATE KEY UPDATE val=VALUES(val);
           SQL
-
           cat > .github/echo_db/sql/init_postgres.sql <<'SQL'
-          -- 참고: DB 생성은 클러스터 레벨에서 수행됨
           -- psql -h 127.0.0.1 -U runner -c "CREATE DATABASE sample_db;"
           SQL
-
           cat > .github/echo_db/sql/init_sqlite.sql <<'SQL'
           CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, val TEXT);
           INSERT INTO test(id,val) VALUES (1,'hello'),(2,'world');
           SQL
 
-          # 8) 덤프 스크립트
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo "echo '[에코] mysqldump sample_db > dump/mysql_sample.sql'"
-            echo "mysqldump --defaults-file=.github/echo_db/config/my.cnf sample_db > .github/echo_db/dump/mysql_sample.sql || true"
-          } > .github/echo_db/dump/dump_mysql.sh
+          cat > .github/echo_db/dump/dump_mysql.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo '[에코] mysqldump sample_db > dump/mysql_sample.sql'
+          mysqldump --defaults-file=.github/echo_db/config/my.cnf sample_db > .github/echo_db/dump/mysql_sample.sql || true
+          SH
           chmod +x .github/echo_db/dump/dump_mysql.sh
 
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo "echo '[에코] pg_dump -d sample_db > dump/postgres_sample.sql'"
-            echo "PGPASSFILE=.github/echo_db/config/pgpass pg_dump -h 127.0.0.1 -U ${DB_USER} -d ${DB_NAME} > .github/echo_db/dump/postgres_sample.sql || true"
-          } > .github/echo_db/dump/dump_postgres.sh
+          cat > .github/echo_db/dump/dump_postgres.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo '[에코] pg_dump -d sample_db > dump/postgres_sample.sql'
+          PGPASSFILE=.github/echo_db/config/pgpass pg_dump -h 127.0.0.1 -U runner -d sample_db > .github/echo_db/dump/postgres_sample.sql || true
+          SH
           chmod +x .github/echo_db/dump/dump_postgres.sh
 
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo "echo '[에코] sqlite3 dump > dump/sqlite_sample.sql'"
-            echo "sqlite3 ${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite '.read .github/echo_db/sql/init_sqlite.sql' || true"
-            echo "sqlite3 ${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite '.dump' > .github/echo_db/dump/sqlite_sample.sql || true"
-          } > .github/echo_db/dump/dump_sqlite.sh
+          cat > .github/echo_db/dump/dump_sqlite.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo '[에코] sqlite dump > dump/sqlite_sample.sql'
+          sqlite3 ${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite '.read .github/echo_db/sql/init_sqlite.sql' || true
+          sqlite3 ${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite '.dump' > .github/echo_db/dump/sqlite_sample.sql || true
+          SH
           chmod +x .github/echo_db/dump/dump_sqlite.sh
 
-          # 9) 헬스체크
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo "echo '[에코] 포트 체크 3306/5432/27017/6379'"
-            echo "for p in 3306 5432 27017 6379; do"
-            echo "  (timeout 1 bash -c \"</dev/tcp/127.0.0.1/\$p\") && echo \"[OK] port:\$p\" || echo \"[WAIT] port:\$p 닫힘\""
-            echo "done"
-          } > .github/echo_db/health/port_check.sh
+          cat > .github/echo_db/health/port_check.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo '[에코] 포트 체크 3306/5432/27017/6379'
+          for p in 3306 5432 27017 6379; do
+            (timeout 1 bash -c "</dev/tcp/127.0.0.1/$p") && echo "[OK] port:$p" || echo "[WAIT] port:$p 닫힘"
+          done
+          SH
           chmod +x .github/echo_db/health/port_check.sh
 
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo "echo '[에코] 프로세스 체크 mysqld/postgres/mongo/redis'"
-            echo "for n in mysqld postgres mongo redis; do"
-            echo "  pgrep -laf \"\$n\" >/dev/null 2>&1 && echo \"[OK] proc:\$n\" || echo \"[WAIT] proc:\$n 미동작\""
-            echo "done"
-          } > .github/echo_db/health/process_check.sh
+          cat > .github/echo_db/health/process_check.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo '[에코] 프로세스 체크 mysqld/postgres/mongo/redis'
+          for n in mysqld postgres mongo redis; do
+            pgrep -laf "$n" >/dev/null 2>&1 && echo "[OK] proc:$n" || echo "[WAIT] proc:$n 미동작"
+          done
+          SH
           chmod +x .github/echo_db/health/process_check.sh
 
-          # 10) 용량 모니터
-          { echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo "mkdir -p .github/echo_db/monitor"
-            echo "LC_ALL=C du -ah . | LC_ALL=C sort -hr | head -n 30 > .github/echo_db/monitor/top_file_sizes.txt || true"
-            echo "du -sh . > .github/echo_db/monitor/total_size.txt || true"
-            echo "echo '[에코] 용량 분석 완료'"
-          } > .github/echo_db/monitor/size_check.sh
+          cat > .github/echo_db/monitor/size_check.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          mkdir -p .github/echo_db/monitor
+          LC_ALL=C du -ah . | LC_ALL=C sort -hr | head -n 30 > .github/echo_db/monitor/top_file_sizes.txt || true
+          du -sh . > .github/echo_db/monitor/total_size.txt || true
+          echo '[에코] 용량 분석 완료'
+          SH
           chmod +x .github/echo_db/monitor/size_check.sh
 
-          # 11) 설치/권한 로그 스크립트
-          { echo '#!/usr/bin/env bash'; echo "echo '[에코] DB 설치 완료 로그 기록'"; echo 'date'; } > .github/echo_db/logs/install_done_echo.sh
-          chmod +x .github/echo_db/logs/install_done_echo.sh
-          { echo '#!/usr/bin/env bash'; echo "echo '[에코] DB 권한 완료 로그 기록'"; echo 'date'; } > .github/echo_db/logs/permission_done_echo.sh
-          chmod +x .github/echo_db/logs/permission_done_echo.sh
+          printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] DB 설치 완료 로그 기록'" 'date' > .github/echo_db/logs/install_done_echo.sh
+          printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] DB 권한 완료 로그 기록'" 'date' > .github/echo_db/logs/permission_done_echo.sh
+          chmod +x .github/echo_db/logs/install_done_echo.sh .github/echo_db/logs/permission_done_echo.sh
 
-          # 12) 🔴 실시간 업데이트 전용 스크립트 (한 번 실행 시 snapshot/summary 갱신)
           cat > .github/echo_db/scripts/live_update.sh <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          ITER="$1"  # 숫자 태그
+          ITER="$1"
           NOW="$(date +'%Y-%m-%d %H:%M:%S %Z')"
           SNAP_DIR="live_snapshots/iter_${ITER}"
           mkdir -p "$SNAP_DIR"
-
-          # 헬스/모니터 실행
           .github/echo_db/health/port_check.sh || true
           .github/echo_db/health/process_check.sh || true
           .github/echo_db/monitor/size_check.sh || true
-
-          # SQLite 덤프(항상 가능)
           .github/echo_db/dump/dump_sqlite.sh || true
-          # MySQL/PG 접속 가능 시 덤프 시도
           .github/echo_db/dump/dump_mysql.sh || true
           .github/echo_db/dump/dump_postgres.sh || true
-
-          # site 리포트 갱신
           {
             echo "# EchoOps DB 통합 리포트 (Live)"
-            echo ""
-            echo "## 갱신 시각: ${NOW}"
-            echo ""
+            echo ""; echo "## 갱신 시각: ${NOW}"; echo ""
             echo "## 덤프 존재 여부"
-            for f in .github/echo_db/dump/*.sql; do
-              [ -f "$f" ] && echo "- $(basename "$f") ✅" || true
-            done
-            echo ""
-            echo "## 용량 상위 30개 파일"
-            echo '```'
+            for f in .github/echo_db/dump/*.sql; do [ -f "$f" ] && echo "- $(basename "$f") ✅" || true; done
+            echo ""; echo "## 용량 상위 30개 파일"; echo '```'
             [ -f .github/echo_db/monitor/top_file_sizes.txt ] && cat .github/echo_db/monitor/top_file_sizes.txt || echo "(생성 안 됨)"
-            echo '```'
-            echo ""
-            echo "## 헬스체크 로그"
-            echo '```'
+            echo '```'; echo ""; echo "## 헬스체크 로그"; echo '```'
             .github/echo_db/health/port_check.sh || true
             .github/echo_db/health/process_check.sh || true
             echo '```'
           } > site/index.md
-
-          # 스냅샷 보관
           cp -r .github/echo_db/dump "$SNAP_DIR/" 2>/dev/null || true
           cp -r .github/echo_db/monitor "$SNAP_DIR/" 2>/dev/null || true
           cp site/index.md "$SNAP_DIR/" 2>/dev/null || true
-
-          # Step Summary에 실시간 업데이트 반영
           {
             echo "### 🔄 Live Update #${ITER}"
             echo "- 시간: ${NOW}"
-            echo "- 덤프 파일:"
-            ls -1 .github/echo_db/dump/*.sql 2>/dev/null || echo "(없음)"
-            echo ""
+            echo "- 덤프 파일:"; ls -1 .github/echo_db/dump/*.sql 2>/dev/null || echo "(없음)"; echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           SH
           chmod +x .github/echo_db/scripts/live_update.sh
 
-      - name: 🛠 실제 설치/업그레이드 실행 (비대화/에러 무시)
+      - name: 🛠 DB 설치/업그레이드 (가능한 경우만, 오류 무시)
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[에코] apt update 1회 실행"
+          exec > >(tee -a "$LOG_DIR/72_db_install.log") 2>&1
+          set -x
           sudo apt-get -yq update
-
           DB_LIST="mysql-server mariadb-server postgresql sqlite3 mongodb redis-server"
           for pkg in $DB_LIST; do
-            echo "[에코] 설치 시도: $pkg"
             sudo apt-get -yq install "$pkg" || echo "[$pkg] 설치 오류(무시)"
-            echo "[에코] 업그레이드 시도: $pkg (--only-upgrade)"
             sudo apt-get -yq install --only-upgrade "$pkg" || echo "[$pkg] 업그레이드 오류(무시)"
           done
-          echo "[에코] 설치/업그레이드 단계 종료"
-          echo "[에코] 서비스 상태 확인(가능한 경우)"
-          echo "sudo service mysql status || true"
-          echo "sudo service postgresql status || true"
-          echo "sudo service redis-server status || true"
 
-      - name: 🧪 1차 측정/리포트 생성
+      - name: 🧪 1차 리포트 생성
         shell: bash
         run: |
           set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/74_live_init.log") 2>&1
+          set -x
           .github/echo_db/scripts/live_update.sh "init"
 
-      - name: 📡 실시간 업데이트 루프 (LIVE_ITER x LIVE_SLEEP초)
+      - name: 📡 Live 업데이트 루프
         shell: bash
         run: |
           set -Eeuo pipefail
-          iters="${LIVE_ITER}"
-          sleepsec="${LIVE_SLEEP}"
-          echo "Live updates: ${iters}회, 간격 ${sleepsec}초"
-          for i in $(seq 1 "${iters}"); do
-            echo "[LIVE] 업데이트 #${i} 시작"
+          exec > >(tee -a "$LOG_DIR/75_live_loop.log") 2>&1
+          set -x
+          echo "Live updates: ${LIVE_ITER}회, 간격 ${LIVE_SLEEP}초"
+          for i in $(seq 1 "${LIVE_ITER}"); do
             .github/echo_db/scripts/live_update.sh "${i}" || true
-
-            # 👉 중간 아티팩트 업로드(동일 이름으로 append)
-            echo "[LIVE] 중간 아티팩트 업로드 #${i}"
             tar -czf "live_snapshots/snap_${i}.tgz" "live_snapshots/iter_${i}" || true
-            echo "::group::upload-artifact (append #${i})"
-            ghwf_artifact_name="echo-db-live"
-            # actions/upload-artifact는 액션이므로 여기선 echo만; 실제 업로드는 다음 step에서 수행
-            echo "::endgroup::"
-            # 대기
-            if [ "$i" -lt "${iters}" ]; then
-              echo "[LIVE] ${sleepsec}초 대기..."
-              sleep "${sleepsec}"
-            fi
+            if [ "$i" -lt "${LIVE_ITER}" ]; then sleep "${LIVE_SLEEP}"; fi
           done
 
-      - name: 📦 아티팩트 업로드 (정적 + 라이브 스냅샷)
-        uses: actions/upload-artifact@v4
-        with:
-          name: echo-db-live
-          path: |
-            .github/echo_db/dump/
-            .github/echo_db/monitor/
-            .github/echo_db/health/
-            .github/echo_db/**/*.sh
-            .github/echo_db/**/*.yml
-            .github/echo_db/**/*.sql
-            site/
-            live_snapshots/
-
-      - name: 🔎 최종 에코 산출물 마스킹 출력(cat)
+      - name: 📊 Size reports (safe)
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[에코] 에코 파일/스크립트 전체 출력 시작"
-          find .github/echo_db -type f -print0 | sort -z | xargs -0 -I{} sh -c 'echo "------------------"; echo "[에코][파일] {}"; sed -e "s/${{ env.MYSQL_ROOT_PASSWORD }}/****/g" -e "s/${{ env.POSTGRES_PASSWORD }}/****/g" -e "s/${{ env.DB_PASS }}/****/g" "{}" | cat; echo'
-          echo "[에코] 에코 전체 출력 종료"
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/80_sizes.log") 2>&1
+          set -x
+          mkdir -p .github/echo_monitoring
+          run_cmd "du -ah . | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true"
+          run_cmd "du -sh . > .github/echo_monitoring/total_size.txt || true"
+          run_cmd "df -h > .github/echo_monitoring/df_all.txt || true"
+
+      - name: 📝 .gitignore 업데이트
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/82_gitignore.log") 2>&1
+          set -x
+          {
+            echo ""; echo "# auto-generated"
+            echo "${DISK_IMG}"; echo "*.img"
+            echo ".github/echo_logs/*.log"
+          } >> .gitignore
+          tail -n 30 .gitignore || true
+
+      - name: ✅ Commit & (optional) push (rebase fallback + backup branch)
+        if: ${{ inputs.commit_and_push == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/90_commit_push.log") 2>&1
+          set -x
+          git config user.name "${GIT_USER_NAME}"
+          git config user.email "${GIT_USER_EMAIL}"
+          git config pull.rebase true
+          TARGET_BR="${GITHUB_REF_NAME}"
+          CURRENT="$(git rev-parse --abbrev-ref HEAD)"
+          git fetch origin --prune
+          if [[ "$CURRENT" != "$TARGET_BR" ]]; then
+            git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
+          fi
+          mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt" || true
+          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring .github/echo_db site bulk "${DIRS[@]/#/.\/}" 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "[ECHO] No changes to commit."
+          else
+            git commit -m "${{ inputs.commit_message }}"
+            git push origin "$TARGET_BR" || {
+              echo "[ECHO] Push rejected — trying rebase"
+              git fetch origin --prune
+              git rebase "origin/$TARGET_BR" || { git rebase --abort || true; }
+              git push origin "$TARGET_BR" || {
+                BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"
+                echo "[ECHO] Fallback to backup branch: $BK"
+                git checkout -B "$BK"
+                git push -u origin "$BK"
+              }
+            }
+          fi
+
+      - name: 📦 아티팩트 업로드 (logs + echo_db + snapshots)
+        uses: actions/upload-artifact@v4
+        with:
+          name: xxl-live-echo-artifacts
+          path: |
+            .github/echo_logs/**
+            .github/echo_scripts/**
+            .github/echo_monitoring/**
+            .github/echo_db/**
+            site/**
+            live_snapshots/**
+          retention-days: 7
+
+      - name: 🔎 최종 에코 산출물 마스킹 출력
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/95_masked_cat.log") 2>&1
+          set -x
+          find .github/echo_db -type f -print0 | sort -z | \
+            xargs -0 -I{} sh -c 'echo "------------------"; echo "[에코][파일] {}"; \
+              sed -e "s/${MYSQL_ROOT_PASSWORD}/****/g" -e "s/${POSTGRES_PASSWORD}/****/g" -e "s/${DB_PASS}/****/g" "{}" | cat; echo'
 
       - name: 🌐 Pages 설정
+        if: ${{ inputs.pages_publish == 'true' }}
         uses: actions/configure-pages@v5
 
       - name: ⬆️ Pages 아티팩트 업로드
+        if: ${{ inputs.pages_publish == 'true' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy-pages:
+    if: ${{ inputs.pages_publish == 'true' }}
     needs: build-and-echo
     runs-on: ubuntu-latest
     permissions:
@@ -452,3 +756,5 @@ jobs:
       - name: 🚀 Pages 배포
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # 요청에 따라 언마운트/losetup detach 단계 없음
