@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-export PS4='+ [2025-08-10 08:30:48] _helpers.sh:8:write_echo ▶ '
 set -x
 mkdir -p "src/main/resources" "/mnt/gh-disk/src/main/resources" "/mnt/gh-disk/part2/src/main/resources"
 sudo chown -R "runner:runner" "src/main/resources" "/mnt/gh-disk/src/main/resources" "/mnt/gh-disk/part2/src/main/resources"
