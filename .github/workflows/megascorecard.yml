@@ -73,6 +73,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+          fetch-depth: 0   # allow rebase/pull
 
       - name: 🧰 Init — FULL ECHO bootstrap (+helpers)
         shell: bash
@@ -207,7 +208,7 @@ jobs:
             run_cmd "sudo mount \"$P1\" \"${MNT}\""
           fi
 
-          # important: create part2 after p1 mount
+          # important: create part2 after p1 mount (p1 hides pre-created dirs)
           run_cmd "sudo mkdir -p \"${MNT}/part2\""
           if mount | grep -q " on ${MNT}/part2 "; then
             echo "[ECHO] ${MNT}/part2 already mounted"
@@ -235,7 +236,7 @@ jobs:
 
           while IFS= read -r d; do
             run_cmd "mkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
-            run_cmd "sudo chown -R \"${OWNER}:${GROUP}}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" || sudo chown -R "${OWNER}:${GROUP}" "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
+            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
             run_cmd "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
             write_echo "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh" \
@@ -256,7 +257,7 @@ jobs:
           CUR_BYTES="$(stat -c%s "${DISK_IMG}")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
           REQ_MB="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ_MB:-$CUR_MB}"
           echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
-          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\"" || echo "[ECHO] No file growth needed"
+          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}}\"" || echo "[ECHO] No file growth needed"
           LOOP_DEV="$(get_loop)"
           run_cmd "sudo losetup -c \"${LOOP_DEV}\""
           run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100% || true"
@@ -395,7 +396,7 @@ jobs:
           write_echo "$ECHO_DIR/add_gitignore.sh" \
             "echo -e \"\\n# auto-generated\\n${DISK_IMG}\\n*.img\\n.github/echo_logs/*.log\\n\" >> .gitignore"
 
-      - name: ✅ Commit & (optional) push
+      - name: ✅ Commit & (optional) push (with rebase fallback + backup branch)
         if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
@@ -405,23 +406,48 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/60_commit_push.log") 2>&1
           set -x
+
           git config user.name "${GIT_USER_NAME}"
           git config user.email "${GIT_USER_EMAIL}"
+          git config pull.rebase true
+
           TARGET_BR="${GITHUB_REF_NAME}"
           CURRENT="$(git rev-parse --abbrev-ref HEAD)"
+
+          git fetch origin --prune
           if [[ "$CURRENT" != "$TARGET_BR" ]]; then
-            git fetch origin "$TARGET_BR" || true
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
-          mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt"
-          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring "${DIRS[@]/#/.\/}" bulk
+
+          mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt" || true
+          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring bulk "${DIRS[@]/#/.\/}" 2>/dev/null || true
+
           if git diff --cached --quiet; then
             echo "[ECHO] No changes to commit."
-          else
-            git commit -m "${{ inputs.commit_message }}"
-            git push origin "$TARGET_BR"
-            echo "[ECHO] Pushed to origin/$TARGET_BR"
+            exit 0
           fi
+
+          git commit -m "${{ inputs.commit_message }}"
+
+          if git push origin "$TARGET_BR"; then
+            echo "[ECHO] Pushed to origin/$TARGET_BR (fast-forward)"
+            exit 0
+          fi
+
+          echo "[ECHO] Push rejected — trying rebase on origin/$TARGET_BR"
+          git fetch origin --prune
+          git rebase "origin/$TARGET_BR" || { git rebase --abort || true; echo "[ECHO] rebase failed, will fallback"; }
+
+          if git push origin "$TARGET_BR"; then
+            echo "[ECHO] Pushed to origin/$TARGET_BR after rebase"
+            exit 0
+          fi
+
+          BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "[ECHO] Still rejected. Pushing to backup branch: $BK"
+          git checkout -B "$BK"
+          git push -u origin "$BK"
+          echo "[ECHO] Backup branch pushed: origin/$BK"
 
       - name: 📦 Upload artifacts (logs + echo scripts)
         uses: actions/upload-artifact@v4
