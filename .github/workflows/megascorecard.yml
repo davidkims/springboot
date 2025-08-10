@@ -1,29 +1,73 @@
-name: "💽 Disk Image + Directory Creator (Echo Ready)"
+name: "💽 Disk+Dirs (EXT4/XFS/Btrfs) — Online Resize + Echo + Commit/Push (no unmount)"
 
 on:
   workflow_dispatch:
     inputs:
       disk_size_mb:
-        description: "Disk image size (MB)"
+        description: "Initial disk image size (MB)"
         default: "1024"
         required: true
+      resize_to_mb:
+        description: "Online grow to this size (MB). Leave blank to skip"
+        default: ""
+        required: false
+      fs_type:
+        description: "Filesystem: ext4 | xfs | btrfs"
+        default: "ext4"
+        required: true
       mount_point:
-        description: "Mount point on runner"
+        description: "Mount point"
         default: "/mnt/gh-disk"
         required: true
       dir_list:
-        description: "Comma-separated directories to create (created both on mount and in repo)"
+        description: "Comma-separated dirs (created on mount + repo)"
         default: "data,logs,tmp,backup"
         required: true
+      owner:
+        description: "Owner (user)"
+        default: "runner"
+        required: true
+      group:
+        description: "Group"
+        default: "runner"
+        required: true
+      dir_mode:
+        description: "Directory permission (octal)"
+        default: "0755"
+        required: true
+      commit_enable:
+        description: "Commit generated files to repo? true|false"
+        default: "true"
+        required: true
+      push_enable:
+        description: "Push commit to remote? true|false"
+        default: "true"
+        required: true
+      push_branch:
+        description: "Branch to commit/push (default: current)"
+        default: ""
+        required: false
+      git_user_name:
+        description: "Git user.name for commit"
+        default: "gh-actions-bot"
+        required: true
+      git_user_email:
+        description: "Git user.email for commit"
+        default: "gh-actions-bot@example.com"
+        required: true
+      commit_message:
+        description: "Commit message"
+        default: "chore: echo-created disk/dirs/logs (auto)"
+        required: true
 
+# 커밋/푸시를 위해 write 권한 필요
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  make-disk-and-dirs:
+  disk-dirs:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 45
     env:
       DISK_IMG: disk.img
       LOG_DIR: .github/echo_logs
@@ -32,134 +76,273 @@ jobs:
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # GITHUB_TOKEN으로 push 허용
 
-      - name: 🧰 Prepare echo log & script folders
+      - name: 🧰 Init — FULL ECHO bootstrap
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "$LOG_DIR" "$ECHO_DIR"
-          echo "[ECHO] Init echo/log directories: $LOG_DIR, $ECHO_DIR" | tee -a "$LOG_DIR/00_init.log"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
+          set -x
 
-      - name: 🧱 Create EXT4 disk image (sparse)
+          echo "[ECHO] Init echo/log dirs: $LOG_DIR, $ECHO_DIR"
+
+          run_cmd() { echo "[CMD] $*"; eval "$@"; }
+          write_echo() {
+            local target="$1"; shift
+            mkdir -p "$(dirname "$target")"
+            {
+              echo '#!/usr/bin/env bash'
+              echo 'set -Eeuo pipefail'
+              echo 'export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\'''
+              echo 'set -x'
+              for line in "$@"; do echo "$line"; done
+            } > "$target"
+            chmod +x "$target"
+            echo "[ECHO] Wrote echo script: $target"
+          }
+          export -f run_cmd write_echo
+          write_echo "$ECHO_DIR/_helpers.sh" \
+            'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
+            'write_echo() {' \
+            '  local target="$1"; shift' \
+            '  mkdir -p "$(dirname "$target")"' \
+            '  { echo "#!/usr/bin/env bash"; echo "set -Eeuo pipefail"; echo "export PS4='"'"'+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '"'"'"; echo "set -x"; for line in "$@"; do echo "$line"; done; } > "$target"' \
+            '  chmod +x "$target"; echo "[ECHO] Wrote echo script: $target"' \
+            '}'
+
+      - name: 📦 Ensure FS tools (xfsprogs, btrfs-progs)
         shell: bash
         run: |
           set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/10_disk_create.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/05_fs_tools.log") 2>&1
+          set -x
+          FST="${{ inputs.fs_type }}"
+          if [[ "$FST" == "xfs" ]]; then
+            run_cmd "sudo apt-get update -y"
+            run_cmd "sudo apt-get install -y xfsprogs"
+          elif [[ "$FST" == "btrfs" ]]; then
+            run_cmd "sudo apt-get update -y"
+            run_cmd "sudo apt-get install -y btrfs-progs"
+          else
+            echo "[ECHO] ext4 selected — e2fsprogs already present on runners"
+          fi
+
+      - name: 🧱 Create disk image + mkfs (EXT4/XFS/Btrfs) — FULL ECHO
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/10_mkfs.log") 2>&1
+          set -x
 
           SIZE_MB="${{ inputs.disk_size_mb }}"
-          echo "[ECHO] Creating sparse disk image: ${DISK_IMG} (${SIZE_MB} MB)"
-          # Sparse file: uses seek to avoid writing zeros
-          dd if=/dev/zero of="${DISK_IMG}" bs=1M count=0 seek="${SIZE_MB}"
-          
-          echo "[ECHO] Formatting as EXT4"
-          sudo mkfs.ext4 -F "${DISK_IMG}"
+          FST="${{ inputs.fs_type }}"
+          run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\""
 
-          echo "[ECHO] Disk image ready: $(ls -lh ${DISK_IMG})"
+          case "$FST" in
+            ext4)  run_cmd "sudo mkfs.ext4 -F \"${DISK_IMG}\"" ;;
+            xfs)   run_cmd "sudo mkfs.xfs -f \"${DISK_IMG}\"" ;;
+            btrfs) run_cmd "sudo mkfs.btrfs -f \"${DISK_IMG}\"" ;;
+            *) echo "[ERROR] Unsupported fs_type: $FST"; exit 1 ;;
+          esac
+          run_cmd "ls -lh \"${DISK_IMG}\""
 
-      - name: 🔗 Attach loop device & mount
+          write_echo "$ECHO_DIR/create_disk_${FST}.sh" \
+            "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\"" \
+            "sudo mkfs.${FST} ${FST:+'-f'} \"${DISK_IMG}\"" \
+            "ls -lh \"${DISK_IMG}\""
+
+      - name: 🔗 losetup + mount (no unmount later) — FULL ECHO
         shell: bash
         run: |
           set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/20_mount.log") 2>&1
+          set -x
 
           MNT="${{ inputs.mount_point }}"
-          echo "[ECHO] Setting up loop device for ${DISK_IMG}"
-          sudo losetup -fP "${DISK_IMG}"
+          OWNER="${{ inputs.owner }}"
+          GROUP="${{ inputs.group }}"
+          FST="${{ inputs.fs_type }}"
+
+          run_cmd "sudo losetup -fP \"${DISK_IMG}\""
           LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
-          if [[ -z "${LOOP_DEV}" ]]; then
-            echo "[ERROR] Failed to get loop device for ${DISK_IMG}"
-            exit 1
-          fi
-          echo "[ECHO] LOOP_DEV=${LOOP_DEV}"
+          [[ -z "$LOOP_DEV" ]] && { echo "[ERROR] loop device not found"; exit 1; }
+          echo "[ECHO] LOOP_DEV=$LOOP_DEV"
 
-          echo "[ECHO] Creating mount point: ${MNT}"
-          sudo mkdir -p "${MNT}"
+          run_cmd "sudo mkdir -p \"${MNT}\""
+          run_cmd "sudo mount \"${LOOP_DEV}\" \"${MNT}\""
+          run_cmd "mount | grep ' on ${MNT} '"
+          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}\""
+          run_cmd "ls -al \"${MNT}\""
+          run_cmd "df -h \"${MNT}\""
 
-          echo "[ECHO] Mounting ${LOOP_DEV} -> ${MNT}"
-          sudo mount "${LOOP_DEV}" "${MNT}"
+          # cleanup helper intentionally NOT used later (no unmount by request)
+          write_echo "$ECHO_DIR/_note_no_unmount.sh" \
+            "echo '[NOTE] This run intentionally leaves ${MNT} mounted (no unmount per request).'" 
 
-          echo "[ECHO] Verifying mount"
-          mount | grep "${MNT}" || (echo "[ERROR] Mount verification failed" && exit 1)
-
-          echo "[ECHO] Permissions (owner runner) on mount root"
-          sudo chown -R $USER:$USER "${MNT}"
-          ls -al "${MNT}"
-
-          echo "[ECHO] Disk usage after mount"
-          df -h "${MNT}"
-
-          # Save helper for cleanup
-          cat > "${ECHO_DIR}/umount_and_detach.sh" <<'EOS'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          MNT="${1:-/mnt/gh-disk}"
-          echo "[ECHO] Unmounting ${MNT} (if mounted)"
-          if mount | grep -q " on ${MNT} "; then
-            sudo umount "${MNT}"
-          else
-            echo "[WARN] ${MNT} not mounted"
-          fi
-          LOOP_DEV="$(sudo losetup -j disk.img | awk -F: '{print $1}')"
-          if [[ -n "${LOOP_DEV}" ]]; then
-            echo "[ECHO] Detaching loop device ${LOOP_DEV}"
-            sudo losetup -d "${LOOP_DEV}" || true
-          else
-            echo "[WARN] No loop device for disk.img"
-          fi
-          EOS
-          chmod +x "${ECHO_DIR}/umount_and_detach.sh"
-
-      - name: 📁 Create directories (mounted disk + repo)
+      - name: 📁 Create directories + perms (mount & repo) — FULL ECHO
         shell: bash
         run: |
           set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/30_dirs.log") 2>&1
+          set -x
 
           MNT="${{ inputs.mount_point }}"
+          OWNER="${{ inputs.owner }}"
+          GROUP="${{ inputs.group }}"
+          MODE="${{ inputs.dir_mode }}"
           IFS=',' read -ra DIRS <<< "${{ inputs.dir_list }}"
 
-          echo "[ECHO] Target mount: ${MNT}"
-          echo "[ECHO] Directories to create: ${DIRS[*]}"
+          echo "[ECHO] target=${MNT} owner=${OWNER} group=${GROUP} mode=${MODE}"
+          echo "[ECHO] dirs=${DIRS[*]}"
 
           for d in "${DIRS[@]}"; do
-            CLEAN="$(echo "$d" | xargs)"  # trim
-            [[ -z "$CLEAN" ]] && continue
-
-            # On mounted disk
-            echo "[ECHO] mkdir -p ${MNT}/${CLEAN}"
-            mkdir -p "${MNT}/${CLEAN}"
-
-            # Also in repository workspace
-            echo "[ECHO] mkdir -p ./${CLEAN}"
-            mkdir -p "./${CLEAN}"
-
-            # Write an echo script per directory for reproducibility
-            echo "#!/usr/bin/env bash" > "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
-            echo "set -Eeuo pipefail" >> "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
-            echo "mkdir -p \"${MNT}/${CLEAN}\" \"./${CLEAN}\"" >> "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
-            chmod +x "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
+            CLEAN="$(echo "$d" | xargs)"; [[ -z "$CLEAN" ]] && continue
+            run_cmd "mkdir -p \"${MNT}/${CLEAN}\""
+            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/${CLEAN}\""
+            run_cmd "sudo chmod \"${MODE}\" \"${MNT}/${CLEAN}\""
+            run_cmd "mkdir -p \"./${CLEAN}\""
+            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"./${CLEAN}\""
+            run_cmd "sudo chmod \"${MODE}\" \"./${CLEAN}\""
+            write_echo "$ECHO_DIR/mkdir_${CLEAN//\//_}.sh" \
+              "mkdir -p \"${MNT}/${CLEAN}\" \"./${CLEAN}\"" \
+              "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/${CLEAN}\" \"./${CLEAN}\"" \
+              "sudo chmod \"${MODE}\" \"${MNT}/${CLEAN}\" \"./${CLEAN}\""
           done
 
           echo "[ECHO] Result in mount:"
-          find "${MNT}" -maxdepth 2 -type d -print | sort
+          run_cmd "find \"${MNT}\" -maxdepth 2 -type d -print | sort | head -n 200"
+          echo "[ECHO] Result in repo (top-level only):"
+          for d in "${DIRS[@]}"; do
+            CLEAN="$(echo "$d" | xargs)"; [[ -z "$CLEAN" ]] && continue
+            [ -d "./${CLEAN}" ] && echo "./${CLEAN}" || true
+          done
 
-          echo "[ECHO] Result in repo:"
-          find . -maxdepth 2 -type d -name "${DIRS[0]}" -o -name "${DIRS[1]}" -o -name "${DIRS[2]}" -o -name "${DIRS[3]}" 2>/dev/null | sort || true
-
-      - name: 📦 Archive logs & echo scripts
-        uses: actions/upload-artifact@v4
-        with:
-          name: disk-and-dirs-logs
-          path: |
-            .github/echo_logs/**
-            .github/echo_scripts/**
-            disk.img
-
-      - name: 🧹 Cleanup (umount + detach)
-        if: always()
+      - name: 📏 Online resize to ${{ inputs.resize_to_mb }} MB (if set) — FULL ECHO
+        if: ${{ inputs.resize_to_mb != '' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/99_cleanup.log") 2>&1
-          bash "${ECHO_DIR}/umount_and_detach.sh" "${{ inputs.mount_point }}"
-          echo "[ECHO] Cleanup done"
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/40_resize.log") 2>&1
+          set -x
+
+          NEW_MB="${{ inputs.resize_to_mb }}"
+          MNT="${{ inputs.mount_point }}"
+          FST="${{ inputs.fs_type }}"
+          run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\""
+
+          # loop device size 재인식 (no detach)
+          LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          [[ -z "$LOOP_DEV" ]] && { echo "[ERROR] loop device not found"; exit 1; }
+          run_cmd "sudo losetup -c \"${LOOP_DEV}\""
+
+          case "$FST" in
+            ext4)
+              # ext4는 온라인 grow 지원
+              run_cmd "sudo resize2fs \"${LOOP_DEV}\""
+              ;;
+            xfs)
+              # xfs는 mount된 상태에서 xfs_growfs <mountpoint>
+              run_cmd "sudo xfs_growfs \"${MNT}\""
+              ;;
+            btrfs)
+              # btrfs는 mountpoint 기준으로 max까지 확장
+              run_cmd "sudo btrfs filesystem resize max \"${MNT}\""
+              ;;
+            *)
+              echo "[ERROR] Unsupported fs_type for resize: $FST"; exit 1 ;;
+          esac
+
+          run_cmd "df -h \"${MNT}\""
+          write_echo "$ECHO_DIR/resize_${FST}.sh" \
+            "truncate -s ${NEW_MB}M \"${DISK_IMG}\"" \
+            "LOOP_DEV=\$(sudo losetup -j disk.img | awk -F: '{print \$1}')" \
+            "sudo losetup -c \"\${LOOP_DEV}\"" \
+            $([ "${{ inputs.fs_type }}" = "ext4" ] && echo "\"sudo resize2fs \\\"\${LOOP_DEV}\\\"\"" || true) \
+            $([ "${{ inputs.fs_type }}" = "xfs" ] && echo "\"sudo xfs_growfs \\\"${MNT}\\\"\"" || true) \
+            $([ "${{ inputs.fs_type }}" = "btrfs" ] && echo "\"sudo btrfs filesystem resize max \\\"${MNT}\\\"\"" || true)
+
+      - name: 📝 .gitignore for artifacts (avoid committing disk.img)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/50_gitignore.log") 2>&1
+          set -x
+          echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
+          run_cmd "tail -n 20 .gitignore || true"
+          write_echo "$ECHO_DIR/add_gitignore.sh" \
+            "echo -e \"\\n# auto-generated\\n${DISK_IMG}\\n*.img\\n.github/echo_logs/*.log\\n\" >> .gitignore"
+
+      - name: ✅ Commit & (optional) push — FULL ECHO
+        if: ${{ inputs.commit_enable == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          exec > >(tee -a "$LOG_DIR/60_commit_push.log") 2>&1
+          set -x
+
+          git config user.name "${{ inputs.git_user_name }}"
+          git config user.email "${{ inputs.git_user_email }}"
+
+          # 대상 브랜치 결정
+          TARGET_BR="${{ inputs.push_branch }}"
+          if [[ -z "$TARGET_BR" ]]; then
+            TARGET_BR="${GITHUB_REF_NAME}"
+          fi
+          echo "[ECHO] Target branch: $TARGET_BR"
+
+          # 브랜치 전환 (필요시 생성)
+          CURRENT="$(git rev-parse --abbrev-ref HEAD)"
+          if [[ "$CURRENT" != "$TARGET_BR" ]]; then
+            git fetch origin "$TARGET_BR" || true
+            git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
+          fi
+
+          # 스테이징(생성 디렉토리/스크립트/로그)
+          git add .gitignore .github/echo_scripts .github/echo_logs \
+                  $(echo "${{ inputs.dir_list }}" | tr ',' ' ' | xargs -n1 -I{} echo "./{}")
+
+          # 변경 없으면 종료
+          if git diff --cached --quiet; then
+            echo "[ECHO] No changes to commit."
+          else
+            git commit -m "${{ inputs.commit_message }}"
+            echo "[ECHO] Commit created."
+            if [[ "${{ inputs.push_enable }}" == "true" ]]; then
+              # checkout@v4 persist-credentials=true 이므로 https remote에 토큰이 이미 세팅됨
+              git push origin "$TARGET_BR"
+              echo "[ECHO] Pushed to origin/$TARGET_BR"
+            else
+              echo "[ECHO] Push skipped by input."
+            fi
+          fi
+
+      - name: 📦 Upload artifacts (logs + echo scripts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-dirs-echo-full
+          path: |
+            .github/echo_logs/**
+            .github/echo_scripts/**
+          retention-days: 7
+
+      # ⚠️ 요청에 따라 언마운트/losetup 해제 단계 없음 (의도적으로 생략)
