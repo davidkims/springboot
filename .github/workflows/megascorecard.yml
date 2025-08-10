@@ -1,586 +1,165 @@
-name: "🔐 MEGA Secure CI + AutoUP + EchoOps + Pages + Backups + Security + Demos (Realtime)"
+name: "💽 Disk Image + Directory Creator (Echo Ready)"
 
 on:
   workflow_dispatch:
     inputs:
-      reason:
-        description: "Manual run reason"
-        required: false
-        default: "manual"
-  push:
-    branches: [ main, master ]
-    paths:
-      - ".github/workflows/**"
-      - ".github/**"
-      - "site/**"
-      - "!**.md"
-  pull_request:
-    branches: [ main, master ]
-    paths:
-      - ".github/**"
-      - "site/**"
-  repository_dispatch:
-    types: [realtime-apply]
-  schedule:
-    - cron: "*/1 * * * *"  # 매 1분
-
-concurrency:
-  group: mega-secure-ci
-  cancel-in-progress: true
+      disk_size_mb:
+        description: "Disk image size (MB)"
+        default: "1024"
+        required: true
+      mount_point:
+        description: "Mount point on runner"
+        default: "/mnt/gh-disk"
+        required: true
+      dir_list:
+        description: "Comma-separated directories to create (created both on mount and in repo)"
+        default: "data,logs,tmp,backup"
+        required: true
 
 permissions:
-  actions: read
-  contents: write
-  pull-requests: write
-  id-token: write
-  security-events: write
-  pages: write
+  contents: read
 
 jobs:
-  mega-secure-ci:
+  make-disk-and-dirs:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 30
+
     env:
-      DB_USER: root
-      DB_PASS: rootpass123
-      DB_NAME: sample_db
-      SPARK_VERSION: "3.5.1"
-      VAULT_VERSION: "1.15.2"
+      DISK_IMG: disk.img
+      LOG_DIR: .github/echo_logs
+      ECHO_DIR: .github/echo_scripts
 
     steps:
-    - name: 📂 Checkout
-      uses: actions/checkout@v4
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
 
-    - name: 📁 Echo 부트스트랩 + 대량 실행 스크립트 생성(누락방지/즉시적용)
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        exec > >(tee .github/echo_logs/00_bootstrap.log) 2>&1
+      - name: 🧰 Prepare echo log & script folders
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$ECHO_DIR"
+          echo "[ECHO] Init echo/log directories: $LOG_DIR, $ECHO_DIR" | tee -a "$LOG_DIR/00_init.log"
 
-        mapfile -t DIRS <<'LIST'
-        .github/scripts
-        .github/firewall
-        .github/downloads
-        .github/permissions
-        .github/echo_permissions
-        .github/echo_logs
-        .github/echo_accounts
-        .github/echo_services
-        .github/echo_containers
-        .github/echo_templates
-        .github/echo_scorecard
-        .github/echo_codeql
-        .github/echo_security
-        .github/echo_upgrade
-        .github/echo_autoup
-        .github/echo_pages
-        .github/echo_backup
-        .github/echo_monitoring
-        .github/echo_db
-        .github/services/mysql
-        .github/services/postgres
-        .github/services/redis
-        .github/services/camunda
-        site/scorecard
-        site/security
-        site/upgrade
-        site/pr
-        site/backup
-        site/html
-        site/containers
-        site/logs
-        site/templates
-        site/downloads
-        site/db_backup_html
-        site/accounts
-        LIST
-        for d in "${DIRS[@]}"; do mkdir -p "$d"; echo "[ECHO] 디렉토리 생성: $d"; done
+      - name: 🧱 Create EXT4 disk image (sparse)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/10_disk_create.log") 2>&1
 
-        # 권한 스크립트
-        cat > .github/echo_permissions/chmod_all.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        chmod -R 755 .github || true
-        SH
-        chmod +x .github/echo_permissions/chmod_all.sh
-        .github/echo_permissions/chmod_all.sh || true
+          SIZE_MB="${{ inputs.disk_size_mb }}"
+          echo "[ECHO] Creating sparse disk image: ${DISK_IMG} (${SIZE_MB} MB)"
+          # Sparse file: uses seek to avoid writing zeros
+          dd if=/dev/zero of="${DISK_IMG}" bs=1M count=0 seek="${SIZE_MB}"
+          
+          echo "[ECHO] Formatting as EXT4"
+          sudo mkfs.ext4 -F "${DISK_IMG}"
 
-        # 템플릿 README
-        cat > .github/echo_templates/README.txt <<'TXT'
-        [ECHO] 자동 생성되는 스크립트(.sh), .env, 템플릿(.cfg/.json) 저장소
-        TXT
+          echo "[ECHO] Disk image ready: $(ls -lh ${DISK_IMG})"
 
-        # 가상 계정/ENV (실행마다 갱신)
-        gen() { openssl rand -hex 12; }
-        MYSQL_APP_USER="appuser";    MYSQL_APP_PASS="$(gen)"
-        POSTGRES_APP_USER="pguser";  POSTGRES_APP_PASS="$(gen)"
-        REDIS_PASS="$(gen)"
-        VAULT_DEV_TOKEN="root-$(gen)"
+      - name: 🔗 Attach loop device & mount
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/20_mount.log") 2>&1
 
-        {
-          echo "service,username,password_or_token"
-          echo "mysql,root,${DB_PASS}"
-          echo "mysql,${MYSQL_APP_USER},${MYSQL_APP_PASS}"
-          echo "postgres,postgres,${DB_PASS}"
-          echo "postgres,${POSTGRES_APP_USER},${POSTGRES_APP_PASS}"
-          echo "redis,default,${REDIS_PASS}"
-          echo "vault,root_token,${VAULT_DEV_TOKEN}"
-        } | tee site/accounts/accounts.csv > .github/echo_accounts/accounts.csv
-
-        cat > site/templates/mysql.env <<EOF
-        MYSQL_ROOT_PASSWORD=${DB_PASS}
-        MYSQL_DATABASE=${DB_NAME}
-        MYSQL_APP_USER=${MYSQL_APP_USER}
-        MYSQL_APP_PASS=${MYSQL_APP_PASS}
-        EOF
-        cat > site/templates/postgres.env <<EOF
-        POSTGRES_PASSWORD=${DB_PASS}
-        POSTGRES_DB=${DB_NAME}
-        POSTGRES_APP_USER=${POSTGRES_APP_USER}
-        POSTGRES_APP_PASS=${POSTGRES_APP_PASS}
-        EOF
-        cat > site/templates/redis.env <<EOF
-        REDIS_PASSWORD=${REDIS_PASS}
-        EOF
-        cat > site/templates/vault.env <<EOF
-        VAULT_DEV_ROOT_TOKEN_ID=${VAULT_DEV_TOKEN}
-        VAULT_ADDR=http://127.0.0.1:8200
-        EOF
-
-        # 서비스 초기화 파일 생성 (heredoc 안전)
-        cat > .github/echo_services/mysql_init.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        cat > .github/services/mysql/init.sql <<'SQL'
-        CREATE DATABASE IF NOT EXISTS sample_db;
-        CREATE TABLE IF NOT EXISTS sample_db.test (id INT PRIMARY KEY, val VARCHAR(64));
-        INSERT INTO sample_db.test VALUES (1,"hello"),(2,"world")
-          ON DUPLICATE KEY UPDATE val=VALUES(val);
-        SQL
-        echo "[ECHO] MySQL init.sql 생성 완료"
-        SH
-        chmod +x .github/echo_services/mysql_init.sh
-        .github/echo_services/mysql_init.sh
-
-        cat > .github/echo_services/pg_init.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        cat > .github/services/postgres/init.sql <<'SQL'
-        CREATE TABLE IF NOT EXISTS test (id INT PRIMARY KEY, val VARCHAR(64));
-        INSERT INTO test (id,val) VALUES (1,'hello'),(2,'world')
-          ON CONFLICT (id) DO UPDATE SET val=EXCLUDED.val;
-        SQL
-        echo "[ECHO] Postgres init.sql 생성 완료"
-        SH
-        chmod +x .github/echo_services/pg_init.sh
-        .github/echo_services/pg_init.sh
-
-        cat > .github/echo_services/redis_conf.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        cat > .github/services/redis/redis.conf <<'CONF'
-        protected-mode no
-        port 6379
-        tcp-keepalive 300
-        save 300 10
-        appendonly yes
-        CONF
-        echo "[ECHO] Redis redis.conf 생성 완료"
-        SH
-        chmod +x .github/echo_services/redis_conf.sh
-        .github/echo_services/redis_conf.sh
-
-        # Camunda 데모 BPMN
-        cat > .github/services/camunda/demo.bpmn <<'BPMN'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
-                     xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
-                     xmlns:omgdc="http://www.omg.org/spec/DD/20100524/DC"
-                     xmlns:omgdi="http://www.omg.org/spec/DD/20100524/DI"
-                     targetNamespace="Demo">
-          <process id="DemoProcess" name="Demo Process" isExecutable="true">
-            <startEvent id="start" name="Start"/>
-            <sequenceFlow id="flow1" sourceRef="start" targetRef="task1"/>
-            <serviceTask id="task1" name="Do Something"/>
-            <sequenceFlow id="flow2" sourceRef="task1" targetRef="end"/>
-            <endEvent id="end" name="End"/>
-          </process>
-        </definitions>
-        BPMN
-
-        # 컨테이너 스크립트 (pull/run/health)
-        cat > .github/echo_containers/pull.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        declare -A IMGS=(
-          [mysql]="mysql:8.0.37"
-          [postgres]="postgres:16.3"
-          [redis]="redis:7.2.5"
-          [kafka]="bitnami/kafka:3.7.0"
-          [vault]="vault:${VAULT_VERSION:-1.15.2}"
-          [spark-svc]="bitnami/spark:3.5.1"
-          [camunda]="camunda/camunda-bpm-platform:run-7.21.0"
-        )
-        for n in "${!IMGS[@]}"; do
-          img="${IMGS[$n]}"; echo "[IMAGE] pull $img"; docker pull "$img" || true
-        done
-        SH
-        chmod +x .github/echo_containers/pull.sh
-
-        cat > .github/echo_containers/run.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        : "${MYSQL_ROOT_PASSWORD:?}" "${POSTGRES_PASSWORD:?}" "${REDIS_PASSWORD:?}" "${VAULT_DEV_ROOT_TOKEN_ID:?}"
-        docker rm -f mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci >/dev/null 2>&1 || true
-        docker run -d --name mysql_ci    -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" -p 3306:3306 mysql:8.0.37
-        docker run -d --name postgres_ci -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" -p 5432:5432 postgres:16.3
-        docker run -d --name redis_ci -p 6379:6379 redis:7.2.5 redis-server --appendonly yes --requirepass "${REDIS_PASSWORD}"
-        docker run -d --name kafka_ci -p 9092:9092 bitnami/kafka:3.7.0
-        docker run -d --name vault_ci -p 8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID="${VAULT_DEV_ROOT_TOKEN_ID}" -e VAULT_ADDR="http://0.0.0.0:8200" "vault:${VAULT_VERSION:-1.15.2}" server -dev -dev-root-token-id="${VAULT_DEV_ROOT_TOKEN_ID}"
-        docker run -d --name spark_ci -p 7077:7077 bitnami/spark:3.5.1
-        docker run -d --name camunda_ci -p 8081:8080 camunda/camunda-bpm-platform:run-7.21.0
-        SH
-        chmod +x .github/echo_containers/run.sh
-
-        cat > .github/echo_containers/health.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        for c in mysql_ci postgres_ci redis_ci kafka_ci vault_ci spark_ci camunda_ci; do
-          st="$(docker inspect --format='{{.State.Status}}' "$c" 2>/dev/null || echo unknown)"
-          if [ "$st" != "running" ]; then echo "[HEALTH] $c: $st → restart"; docker restart "$c" || true; else echo "[HEALTH] $c: OK"; fi
-        done
-        SH
-        chmod +x .github/echo_containers/health.sh
-
-        # init 적용 + 백업 통합
-        cat > .github/echo_services/apply_and_backup.sh <<'SH'
-        #!/usr/bin/env bash
-        set -Eeuo pipefail
-        MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"; MYSQL_PORT="${MYSQL_PORT:-3306}"
-        POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"; POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-        REDIS_PORT="${REDIS_PORT:-6379}"; : "${DB_USER:?}" "${DB_PASS:?}" "${DB_NAME:?}"
-        # Redis (비번 보강하여 파일 기반)
-        if [ -f ".github/services/redis/redis.conf" ]; then
-          if ! grep -q '^requirepass ' .github/services/redis/redis.conf 2>/dev/null && [ -n "${REDIS_PASSWORD:-}" ]; then
-            echo "requirepass ${REDIS_PASSWORD}" >> .github/services/redis/redis.conf
+          MNT="${{ inputs.mount_point }}"
+          echo "[ECHO] Setting up loop device for ${DISK_IMG}"
+          sudo losetup -fP "${DISK_IMG}"
+          LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          if [[ -z "${LOOP_DEV}" ]]; then
+            echo "[ERROR] Failed to get loop device for ${DISK_IMG}"
+            exit 1
           fi
-          docker rm -f redis_ci >/dev/null 2>&1 || true
-          docker run -d --name redis_ci -p ${REDIS_PORT}:6379 -v "${PWD}/.github/services/redis/redis.conf:/usr/local/etc/redis/redis.conf" redis:7.2.5 redis-server /usr/local/etc/redis/redis.conf
-        fi
-        # MySQL 대기 + init 적용
-        for i in {1..30}; do MYSQL_PWD="${DB_PASS}" mysqladmin ping -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" --silent && break; sleep 2; done
-        [ -f ".github/services/mysql/init.sql" ] && MYSQL_PWD="${DB_PASS}" mysql -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" < .github/services/mysql/init.sql || true
-        # Postgres 대기 + DB 생성 + init 적용
-        export PGPASSWORD="${DB_PASS}"
-        for i in {1..30}; do pg_isready -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" >/dev/null 2>&1 && break; sleep 2; done
-        if ! psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
-          psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -c "CREATE DATABASE ${DB_NAME};"
-        fi
-        [ -f ".github/services/postgres/init.sql" ] && psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -f .github/services/postgres/init.sql || true
-        # health 보장
-        MYSQL_PWD="${DB_PASS}" mysql -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" -e "CREATE TABLE IF NOT EXISTS ${DB_NAME}.health (id INT PRIMARY KEY, msg VARCHAR(64)); INSERT IGNORE INTO ${DB_NAME}.health VALUES (1,'ok');" || true
-        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS health (id INT PRIMARY KEY, msg TEXT); INSERT INTO health VALUES (1,'ok') ON CONFLICT (id) DO NOTHING;" || true
-        # 백업 + HTML 변환
-        mkdir -p site/backup site/db_backup_html
-        MYSQL_PWD="${DB_PASS}" mysqldump -h "${MYSQL_HOST}" -P "${MYSQL_PORT}" -u"${DB_USER}" "${DB_NAME}" > site/backup/mysqldump.sql || echo "[WARN] MySQL 백업 실패"
-        pg_dump -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U postgres -d "${DB_NAME}" > site/backup/pgdump.sql || echo "[WARN] PostgreSQL 백업 실패"
-        for f in site/backup/*; do [ -f "$f" ] || continue; b="$(basename "$f")"; { echo "<html><body><h3>$b</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' "$f"; echo "</pre></body></html>"; } > "site/db_backup_html/${b}.html"; done
-        echo "[ECHO] apply_and_backup 완료"
-        SH
-        chmod +x .github/echo_services/apply_and_backup.sh
+          echo "[ECHO] LOOP_DEV=${LOOP_DEV}"
 
-        echo "[ECHO] 부트스트랩 + 스크립트 생성 완료"
+          echo "[ECHO] Creating mount point: ${MNT}"
+          sudo mkdir -p "${MNT}"
 
-    - name: 🔧 기본 패키지 & Python 보안툴
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        sudo apt-get update -y
-        sudo apt-get install -y jq curl unzip tar git mysql-client postgresql-client default-jdk scala
-        python3 -m pip install --upgrade pip
-        pip install --no-cache-dir bandit pip-audit
+          echo "[ECHO] Mounting ${LOOP_DEV} -> ${MNT}"
+          sudo mount "${LOOP_DEV}" "${MNT}"
 
-    - name: 🐳 Docker 설치
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        if ! command -v docker >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; fi
-        sudo usermod -aG docker "$USER" || true
-        docker --version | tee .github/echo_logs/docker_version.txt
+          echo "[ECHO] Verifying mount"
+          mount | grep "${MNT}" || (echo "[ERROR] Mount verification failed" && exit 1)
 
-    # ✅ 견고화된 Trivy & Scorecard 설치 (파일명/명령 변동 대응)
-    - name: 🛡️ Trivy & Scorecard 설치(견고)
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        exec > >(tee .github/echo_logs/03_security_tools_install.log) 2>&1
+          echo "[ECHO] Permissions (owner runner) on mount root"
+          sudo chown -R $USER:$USER "${MNT}"
+          ls -al "${MNT}"
 
-        # Trivy
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          | sh -s -- -b /usr/local/bin
-        trivy --version | tee .github/echo_logs/trivy_version.txt
+          echo "[ECHO] Disk usage after mount"
+          df -h "${MNT}"
 
-        # Scorecard (robust)
-        VER="4.10.3"
-        URL="https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz"
-        TMP="$(mktemp -d)"
-        echo "[ECHO] Downloading: $URL"
-        curl -fsSL "$URL" -o "$TMP/scorecard.tgz"
-
-        echo "[ECHO] Extracting to $TMP"
-        tar -xzf "$TMP/scorecard.tgz" -C "$TMP"
-
-        CANDIDATES=(
-          "$TMP/scorecard"
-          "$TMP/scorecard-linux-amd64"
-          $(find "$TMP" -maxdepth 2 -type f -name "scorecard*" 2>/dev/null | head -n 5)
-        )
-        BIN=""
-        for f in "${CANDIDATES[@]}"; do
-          if [ -f "$f" ]; then BIN="$f"; break; fi
-        done
-        if [ -z "$BIN" ]; then
-          echo "::warning ::tar contents:"; tar -tzf "$TMP/scorecard.tgz" || true
-          echo "::error ::Scorecard binary not found after extract"; exit 1
-        fi
-        echo "[ECHO] Installing $BIN -> /usr/local/bin/scorecard"
-        sudo install -m 0755 "$BIN" /usr/local/bin/scorecard
-
-        # ⬅️ --version 대신 하위 명령
-        /usr/local/bin/scorecard version | tee .github/echo_logs/scorecard_version.txt
-
-    # ✅ Apache Spark 설치 (견고 다운로드/검증 + GITHUB_PATH 반영)
-    - name: 🧪 Apache Spark 설치 (견고 다운로드/검증)
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        exec > >(tee .github/echo_logs/04_spark_install.log) 2>&1
-
-        VER="${SPARK_VERSION}"
-        PKG="spark-${VER}-bin-hadoop3.tgz"
-        BASE="spark-${VER}-bin-hadoop3"
-        TMP="$(mktemp -d)"
-
-        URLS=(
-          "https://dlcdn.apache.org/spark/spark-${VER}/${PKG}"
-          "https://downloads.apache.org/spark/spark-${VER}/${PKG}"
-          "https://archive.apache.org/dist/spark/spark-${VER}/${PKG}"
-        )
-
-        got=""
-        for u in "${URLS[@]}"; do
-          echo "[ECHO] Try download: $u"
-          if curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 -o "${TMP}/${PKG}" "$u"; then
-            if file -b --mime-type "${TMP}/${PKG}" | grep -q 'gzip'; then
-              if tar -tzf "${TMP}/${PKG}" >/dev/null 2>&1; then
-                got="${TMP}/${PKG}"
-                echo "[ECHO] Valid tgz downloaded from: $u"
-                break
-              fi
-            fi
-            echo "[WARN] Not a valid gzip tarball from $u — trying next mirror"
+          # Save helper for cleanup
+          cat > "${ECHO_DIR}/umount_and_detach.sh" <<'EOS'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          MNT="${1:-/mnt/gh-disk}"
+          echo "[ECHO] Unmounting ${MNT} (if mounted)"
+          if mount | grep -q " on ${MNT} "; then
+            sudo umount "${MNT}"
           else
-            echo "[WARN] Download failed from $u — trying next mirror"
+            echo "[WARN] ${MNT} not mounted"
           fi
-        done
-        if [ -z "$got" ]; then
-          echo "::error ::Failed to download valid Spark tarball ${PKG} from all mirrors"
-          exit 1
-        fi
+          LOOP_DEV="$(sudo losetup -j disk.img | awk -F: '{print $1}')"
+          if [[ -n "${LOOP_DEV}" ]]; then
+            echo "[ECHO] Detaching loop device ${LOOP_DEV}"
+            sudo losetup -d "${LOOP_DEV}" || true
+          else
+            echo "[WARN] No loop device for disk.img"
+          fi
+          EOS
+          chmod +x "${ECHO_DIR}/umount_and_detach.sh"
 
-        if curl -fsSL -o "${TMP}/${PKG}.sha512" "https://archive.apache.org/dist/spark/spark-${VER}/${PKG}.sha512"; then
-          echo "[ECHO] Verifying sha512 checksum (best-effort)"
-          (cd "${TMP}" && sha512sum -c "${PKG}.sha512") || echo "[WARN] sha512 check failed (continuing)"
-        fi
+      - name: 📁 Create directories (mounted disk + repo)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/30_dirs.log") 2>&1
 
-        tar -xzf "${got}" -C "${TMP}"
-        sudo rm -rf /opt/spark || true
-        sudo mv "${TMP}/${BASE}" /opt/spark
-        echo "/opt/spark/bin" >> "${GITHUB_PATH}"
-        echo "[ECHO] Spark ${VER} 설치 완료 (PATH=/opt/spark/bin)"
+          MNT="${{ inputs.mount_point }}"
+          IFS=',' read -ra DIRS <<< "${{ inputs.dir_list }}"
 
-    - name: 🐳 Pull & Run Containers (echo scripts)
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        source site/templates/mysql.env
-        source site/templates/postgres.env
-        source site/templates/redis.env
-        source site/templates/vault.env
-        .github/echo_containers/pull.sh
-        .github/echo_containers/run.sh
-        .github/echo_containers/health.sh
+          echo "[ECHO] Target mount: ${MNT}"
+          echo "[ECHO] Directories to create: ${DIRS[*]}"
 
-    - name: 🚀 Apply init + backup (echo script)
-      shell: bash
-      env:
-        DB_USER: ${{ env.DB_USER }}
-        DB_PASS: ${{ env.DB_PASS }}
-        DB_NAME: ${{ env.DB_NAME }}
-        MYSQL_HOST: 127.0.0.1
-        MYSQL_PORT: 3306
-        POSTGRES_HOST: 127.0.0.1
-        POSTGRES_PORT: 5432
-        REDIS_PORT: 6379
-      run: |
-        set -Eeuo pipefail
-        .github/echo_services/apply_and_backup.sh
+          for d in "${DIRS[@]}"; do
+            CLEAN="$(echo "$d" | xargs)"  # trim
+            [[ -z "$CLEAN" ]] && continue
 
-    # ▶️ 실행 데모: Kafka / Vault / Spark / Camunda
-    - name: ▶️ Service Demos (Kafka/Vault/Spark/Camunda)
-      shell: bash
-      env:
-        VAULT_ADDR: http://127.0.0.1:8200
-      run: |
-        set -Eeuo pipefail
-        exec > >(tee .github/echo_logs/10_service_demos.log) 2>&1
-        mkdir -p site/containers
+            # On mounted disk
+            echo "[ECHO] mkdir -p ${MNT}/${CLEAN}"
+            mkdir -p "${MNT}/${CLEAN}"
 
-        echo "=== Kafka Demo ==="
-        docker exec kafka_ci bash -lc "kafka-topics.sh --create --topic demo-topic --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1" || true
-        docker exec -i kafka_ci bash -lc "kafka-console-producer.sh --bootstrap-server localhost:9092 --topic demo-topic" <<'MSG'
-        hello
-        world
-        kafka-demo
-        MSG
-        docker exec kafka_ci bash -lc "kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic demo-topic --from-beginning --timeout-ms 5000" | tee site/containers/kafka_demo.log || true
-        { echo "<html><body><h3>Kafka Demo Output</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/kafka_demo.log; echo "</pre></body></html>"; } > site/html/kafka_demo.html
+            # Also in repository workspace
+            echo "[ECHO] mkdir -p ./${CLEAN}"
+            mkdir -p "./${CLEAN}"
 
-        echo "=== Vault Demo (KV v2) ==="
-        source site/templates/vault.env
-        curl -s -H "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID}" --request POST \
-          --data '{"data":{"message":"hello-vault","ts":"'$(date -u +%FT%TZ)'"}}' \
-          ${VAULT_ADDR}/v1/secret/data/demo | tee site/containers/vault_put.json || true
-        curl -s -H "X-Vault-Token: ${VAULT_DEV_ROOT_TOKEN_ID}" ${VAULT_ADDR}/v1/secret/data/demo \
-          | tee site/containers/vault_get.json || true
-        { echo "<html><body><h3>Vault KV Demo</h3><h4>PUT</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/vault_put.json; echo "</pre><h4>GET</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/vault_get.json; echo "</pre></body></html>"; } > site/html/vault_demo.html
+            # Write an echo script per directory for reproducibility
+            echo "#!/usr/bin/env bash" > "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
+            echo "set -Eeuo pipefail" >> "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
+            echo "mkdir -p \"${MNT}/${CLEAN}\" \"./${CLEAN}\"" >> "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
+            chmod +x "${ECHO_DIR}/mkdir_${CLEAN//\//_}.sh"
+          done
 
-        echo "=== Spark Demo (local[*]) ==="
-        /opt/spark/bin/spark-submit --master local[*] /opt/spark/examples/src/main/python/pi.py 200 \
-          | tee site/containers/spark_demo.log || true
-        { echo "<html><body><h3>Spark Demo Output</h3><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/spark_demo.log; echo "</pre></body></html>"; } > site/html/spark_demo.html
+          echo "[ECHO] Result in mount:"
+          find "${MNT}" -maxdepth 2 -type d -print | sort
 
-        echo "=== Camunda Demo (deploy + start) ==="
-        CAM_BASE="http://127.0.0.1:8081/engine-rest"
-        curl -s -X POST "${CAM_BASE}/deployment/create" \
-          -F "deployment-name=demo-deploy" \
-          -F "enable-duplicate-filtering=true" \
-          -F "deploy-changed-only=true" \
-          -F "data=@.github/services/camunda/demo.bpmn;type=application/octet-stream" \
-          | tee site/containers/camunda_deploy.json || true
-        if ! jq -e . site/containers/camunda_deploy.json >/dev/null 2>&1; then
-          curl -s -u demo:demo -X POST "${CAM_BASE}/deployment/create" \
-            -F "deployment-name=demo-deploy" \
-            -F "enable-duplicate-filtering=true" \
-            -F "deploy-changed-only=true" \
-            -F "data=@.github/services/camunda/demo.bpmn;type=application/octet-stream" \
-            | tee site/containers/camunda_deploy.json || true
-        fi
-        curl -s -X POST "${CAM_BASE}/process-definition/key/DemoProcess/start" \
-          -H "Content-Type: application/json" -d '{}' \
-          | tee site/containers/camunda_start.json || true
-        curl -s "${CAM_BASE}/process-instance?processDefinitionKey=DemoProcess" \
-          | tee site/containers/camunda_instances.json || true
-        { echo "<html><body><h3>Camunda Demo</h3><h4>Deploy</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_deploy.json; \
-          echo "</pre><h4>Start</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_start.json; \
-          echo "</pre><h4>Instances</h4><pre>"; sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' site/containers/camunda_instances.json; \
-          echo "</pre></body></html>"; } > site/html/camunda_demo.html
+          echo "[ECHO] Result in repo:"
+          find . -maxdepth 2 -type d -name "${DIRS[0]}" -o -name "${DIRS[1]}" -o -name "${DIRS[2]}" -o -name "${DIRS[3]}" 2>/dev/null | sort || true
 
-        echo "[ECHO] 서비스 데모 완료 (Kafka/Vault/Spark/Camunda)"
+      - name: 📦 Archive logs & echo scripts
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-and-dirs-logs
+          path: |
+            .github/echo_logs/**
+            .github/echo_scripts/**
+            disk.img
 
-    # ✅ Scorecard 실행 시 --no-upload 제거
-    - name: 🔎 보안 스캔 (Scorecard / CodeQL / Bandit / pip-audit / Trivy)
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        scorecard --repo="${{ github.repository }}" --format sarif > site/security/scorecard.sarif || true
-        scorecard --repo="${{ github.repository }}" --format json  > site/security/scorecard.json  || true
-        pip-audit -f json -o site/security/pip-audit.json || true
-        bandit -r . -f json -o site/security/bandit.json || true
-        trivy fs . --format json --output site/security/trivy.json || true
-
-    - name: 🧰 CodeQL Init
-      uses: github/codeql-action/init@v3
-      with:
-        languages: javascript
-
-    - name: 📊 CodeQL Analyze
-      uses: github/codeql-action/analyze@v3
-      with:
-        output: site/security/codeql-results.sarif
-        category: codeql-security-scan
-
-    - name: ⬆️ 업그레이드 사전 목록 수집
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        mkdir -p site/upgrade .github/echo_upgrade
-        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.before.txt
-        pip list --outdated --format=columns > site/upgrade/pip-upgradable.before.txt || true
-        docker images --format '{{.Repository}}:{{.Tag}}' > site/upgrade/docker-images.before.txt || true
-
-    - name: ⬆️ 시스템/파이썬/Docker 풀 업그레이드
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        sudo apt-get update -y && sudo apt-get upgrade -y && sudo apt-get autoremove -y && sudo apt-get clean
-        pip install --upgrade pip
-        pip list --outdated --format=freeze | cut -d= -f1 | xargs -n1 -r pip install -U || true
-        while read -r img; do [ -n "$img" ] && docker pull "$img" || true; done < site/upgrade/docker-images.before.txt
-        echo "[ECHO] 전체 업그레이드 완료" | tee -a .github/echo_upgrade/upgrade.log
-
-    - name: ⬆️ 업그레이드 사후 목록 & HTML 리포트
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        apt list --upgradable 2>/dev/null | tee site/upgrade/upgradable.after.txt
-        pip list --outdated --format=columns > site/upgrade/pip-upgradable.after.txt || true
-        docker images --format '{{.Repository}}:{{.Tag}}' > site/upgrade/docker-images.after.txt || true
-        {
-          echo "<html><body><h2>Upgrade Diff</h2><h3>APT</h3><pre>"
-          diff -u site/upgrade/upgradable.before.txt site/upgrade/upgradable.after.txt || true
-          echo "</pre><h3>PIP</h3><pre>"
-          diff -u site/upgrade/pip-upgradable.before.txt site/upgrade/pip-upgradable.after.txt || true
-          echo "</pre><h3>Docker Images</h3><pre>"
-          diff -u site/upgrade/docker-images.before.txt site/upgrade/docker-images.after.txt || true
-          echo "</pre></body></html>"
-        } > site/upgrade/report.html
-
-    - name: 🔁 업그레이드 자동 PR (변경 있을 때만)
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      shell: bash
-      run: |
-        set -Eeuo pipefail
-        if [ -s site/upgrade/upgradable.after.txt ] || [ -s site/upgrade/pip-upgradable.after.txt ]; then
-          git config --global user.email "actions@github.com"
-          git config --global user.name "github-actions"
-          git checkout -b "auto/upgrade-$(date -u +%Y%m%d%H%M%S)" || git checkout -B auto/upgrade
-          git add site/upgrade/ .github/echo_upgrade/ .github/echo_logs/ site/accounts/ || true
-          git commit -m "chore: auto upgrade artifacts (Pages + Echo logs)" || true
-          git push -u origin HEAD || true
-          gh pr create --title "⬆️ Auto Upgrade" --body "자동 업그레이드 산출물 커밋/페이지 반영" || true
-        fi
-
-    - name: 📦 아티팩트 업로드(다운로드 가능)
-      uses: actions/upload-artifact@v4
-      with:
-        name: mega-artifacts
-        path: |
-          site/**
-          .github/echo_logs/**
-          .github/echo_upgrade/**
-          .github/echo_services/**
-          .github/echo_accounts/**
-          .github/echo_containers/**
-          .github/permissions/**
-          .github/echo_permissions/**
-          .github/services/camunda/demo.bpmn
-
-    - name: 🌐 Upload Pages Artifact
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: site/
-
-    - name: 🚀 Deploy to GitHub Pages
-      uses: actions/deploy-pages@v4
+      - name: 🧹 Cleanup (umount + detach)
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a "$LOG_DIR/99_cleanup.log") 2>&1
+          bash "${ECHO_DIR}/umount_and_detach.sh" "${{ inputs.mount_point }}"
+          echo "[ECHO] Cleanup done"
