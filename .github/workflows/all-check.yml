@@ -1,7 +1,16 @@
-name: 🗂️ 완전통합 DB/에코/Compose/권한/스크립트/설치/로그 자동화 (XXL++)
+name: 🗂️ 완전통합 DB/에코/Compose/권한/스크립트/설치/로그 자동화 (XXL++ Live)
 
 on:
   workflow_dispatch:
+    inputs:
+      live_iter:
+        description: "실시간 업데이트 반복 횟수 (기본 5)"
+        required: false
+        default: "5"
+      live_sleep:
+        description: "반복 간격(초) (기본 30)"
+        required: false
+        default: "30"
   schedule:
     - cron: '3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48,51,54,57 * * * *'
 
@@ -22,6 +31,8 @@ jobs:
       DB_USER: runner
       DB_PASS: pw
       DB_NAME: sample_db
+      LIVE_ITER: ${{ inputs.live_iter || '5' }}
+      LIVE_SLEEP: ${{ inputs.live_sleep || '30' }}
 
     steps:
       - name: 📂 Checkout
@@ -57,7 +68,8 @@ jobs:
             .github/echo_db/sql \
             .github/echo_db/dump \
             .github/echo_db/health \
-            .github/echo_db/monitor
+            .github/echo_db/monitor \
+            site live_snapshots
           do
             mkdir -p "$d"
             echo "echo 'mkdir -p $d'" | tee -a .github/echo_db/dirs/mkdir_cmds.sh >/dev/null
@@ -91,7 +103,7 @@ jobs:
             { echo '#!/usr/bin/env bash'; echo "echo '[에코] snap install $pkg'"; echo "sudo snap install $pkg"; } > "$s" && chmod +x "$s"
           done
 
-          # 2) 컨테이너 서비스 YAML (정정: environment/이미지)
+          # 2) 컨테이너 서비스 YAML
           for db in mysql postgres mongo redis; do
             yml=".github/echo_db/services/${db}-service.yml"
             {
@@ -119,7 +131,7 @@ jobs:
             } > "$yml"
           done
 
-          # 3) Docker Compose (docker compose 표기)
+          # 3) Docker Compose
           composefile=".github/echo_db/compose/all-db-compose.yml"
           {
             echo "# [에코] docker compose all-db"
@@ -165,7 +177,7 @@ jobs:
               postgresql password: 'pgpass'
           YML
 
-          # 5) 권한/유저 설정 에코(예시 커맨드)
+          # 5) 권한/유저 설정 에코(예시)
           for db in mysql postgres mongo redis; do
             perm=".github/echo_db/permissions/${db}-permission.sh"
             {
@@ -186,7 +198,7 @@ jobs:
             chmod +x "$perm"
           done
 
-          # 6) 설정 템플릿(.my.cnf / .pgpass) + 권한 600
+          # 6) 설정 템플릿(.my.cnf / .pgpass)
           { echo '#!/usr/bin/env bash'
             echo 'set -Eeuo pipefail'
             echo 'cat > .github/echo_db/config/my.cnf <<CONF'
@@ -211,7 +223,7 @@ jobs:
           chmod +x .github/echo_db/config/render_pgpass.sh
           .github/echo_db/config/render_pgpass.sh
 
-          # 7) 초기 SQL (MySQL/PG/SQLite)
+          # 7) 초기 SQL
           cat > .github/echo_db/sql/init_mysql.sql <<'SQL'
           CREATE DATABASE IF NOT EXISTS sample_db;
           CREATE TABLE IF NOT EXISTS sample_db.test (id INT PRIMARY KEY, val VARCHAR(64));
@@ -252,7 +264,7 @@ jobs:
           } > .github/echo_db/dump/dump_sqlite.sh
           chmod +x .github/echo_db/dump/dump_sqlite.sh
 
-          # 9) 헬스체크(포트/프로세스)
+          # 9) 헬스체크
           { echo '#!/usr/bin/env bash'
             echo 'set -Eeuo pipefail'
             echo "echo '[에코] 포트 체크 3306/5432/27017/6379'"
@@ -271,7 +283,7 @@ jobs:
           } > .github/echo_db/health/process_check.sh
           chmod +x .github/echo_db/health/process_check.sh
 
-          # 10) 용량 모니터(Broken pipe 회피)
+          # 10) 용량 모니터
           { echo '#!/usr/bin/env bash'
             echo 'set -Eeuo pipefail'
             echo "mkdir -p .github/echo_db/monitor"
@@ -286,6 +298,65 @@ jobs:
           chmod +x .github/echo_db/logs/install_done_echo.sh
           { echo '#!/usr/bin/env bash'; echo "echo '[에코] DB 권한 완료 로그 기록'"; echo 'date'; } > .github/echo_db/logs/permission_done_echo.sh
           chmod +x .github/echo_db/logs/permission_done_echo.sh
+
+          # 12) 🔴 실시간 업데이트 전용 스크립트 (한 번 실행 시 snapshot/summary 갱신)
+          cat > .github/echo_db/scripts/live_update.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          ITER="$1"  # 숫자 태그
+          NOW="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+          SNAP_DIR="live_snapshots/iter_${ITER}"
+          mkdir -p "$SNAP_DIR"
+
+          # 헬스/모니터 실행
+          .github/echo_db/health/port_check.sh || true
+          .github/echo_db/health/process_check.sh || true
+          .github/echo_db/monitor/size_check.sh || true
+
+          # SQLite 덤프(항상 가능)
+          .github/echo_db/dump/dump_sqlite.sh || true
+          # MySQL/PG 접속 가능 시 덤프 시도
+          .github/echo_db/dump/dump_mysql.sh || true
+          .github/echo_db/dump/dump_postgres.sh || true
+
+          # site 리포트 갱신
+          {
+            echo "# EchoOps DB 통합 리포트 (Live)"
+            echo ""
+            echo "## 갱신 시각: ${NOW}"
+            echo ""
+            echo "## 덤프 존재 여부"
+            for f in .github/echo_db/dump/*.sql; do
+              [ -f "$f" ] && echo "- $(basename "$f") ✅" || true
+            done
+            echo ""
+            echo "## 용량 상위 30개 파일"
+            echo '```'
+            [ -f .github/echo_db/monitor/top_file_sizes.txt ] && cat .github/echo_db/monitor/top_file_sizes.txt || echo "(생성 안 됨)"
+            echo '```'
+            echo ""
+            echo "## 헬스체크 로그"
+            echo '```'
+            .github/echo_db/health/port_check.sh || true
+            .github/echo_db/health/process_check.sh || true
+            echo '```'
+          } > site/index.md
+
+          # 스냅샷 보관
+          cp -r .github/echo_db/dump "$SNAP_DIR/" 2>/dev/null || true
+          cp -r .github/echo_db/monitor "$SNAP_DIR/" 2>/dev/null || true
+          cp site/index.md "$SNAP_DIR/" 2>/dev/null || true
+
+          # Step Summary에 실시간 업데이트 반영
+          {
+            echo "### 🔄 Live Update #${ITER}"
+            echo "- 시간: ${NOW}"
+            echo "- 덤프 파일:"
+            ls -1 .github/echo_db/dump/*.sql 2>/dev/null || echo "(없음)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          SH
+          chmod +x .github/echo_db/scripts/live_update.sh
 
       - name: 🛠 실제 설치/업그레이드 실행 (비대화/에러 무시)
         shell: bash
@@ -307,57 +378,41 @@ jobs:
           echo "sudo service postgresql status || true"
           echo "sudo service redis-server status || true"
 
-      - name: 🧪 에코 스크립트 실행(헬스/모니터/덤프)
-        shell: bash
-        run: |
-          set +e
-          .github/echo_db/health/port_check.sh || true
-          .github/echo_db/health/process_check.sh || true
-          .github/echo_db/monitor/size_check.sh || true
-          sqlite3 "${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite" ".read .github/echo_db/sql/init_sqlite.sql" 2>/dev/null || true
-          .github/echo_db/dump/dump_sqlite.sh || true
-          .github/echo_db/dump/dump_mysql.sh || true
-          .github/echo_db/dump/dump_postgres.sh || true
-
-      - name: 🧾 Pages용 리포트 구성(site/)
+      - name: 🧪 1차 측정/리포트 생성
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p site
-          {
-            echo "# EchoOps DB 통합 리포트"
-            echo ""
-            echo "## 실행 시각"
-            date
-            echo ""
-            echo "## 덤프 존재 여부"
-            for f in .github/echo_db/dump/*.sql; do
-              [ -f "$f" ] && echo "- $(basename "$f") ✅" || true
-            done
-            echo ""
-            echo "## 용량 상위 30개 파일"
-            echo '```'
-            [ -f .github/echo_db/monitor/top_file_sizes.txt ] && cat .github/echo_db/monitor/top_file_sizes.txt || echo "(생성 안 됨)"
-            echo '```'
-            echo ""
-            echo "## 헬스체크 로그"
-            echo '```'
-            .github/echo_db/health/port_check.sh || true
-            .github/echo_db/health/process_check.sh || true
-            echo '```'
-          } > site/index.md
+          .github/echo_db/scripts/live_update.sh "init"
 
-          # 중요 산출물 복사
-          mkdir -p site/dumps site/monitor site/echo
-          cp -r .github/echo_db/dump/* site/dumps/ 2>/dev/null || true
-          cp -r .github/echo_db/monitor/* site/monitor/ 2>/dev/null || true
-          # 에코 스크립트/설정/compose 참조용
-          tar -czf site/echo/echo_scripts.tgz .github/echo_db || true
+      - name: 📡 실시간 업데이트 루프 (LIVE_ITER x LIVE_SLEEP초)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          iters="${LIVE_ITER}"
+          sleepsec="${LIVE_SLEEP}"
+          echo "Live updates: ${iters}회, 간격 ${sleepsec}초"
+          for i in $(seq 1 "${iters}"); do
+            echo "[LIVE] 업데이트 #${i} 시작"
+            .github/echo_db/scripts/live_update.sh "${i}" || true
 
-      - name: 📦 아티팩트 업로드 (덤프/모니터/헬스/에코)
+            # 👉 중간 아티팩트 업로드(동일 이름으로 append)
+            echo "[LIVE] 중간 아티팩트 업로드 #${i}"
+            tar -czf "live_snapshots/snap_${i}.tgz" "live_snapshots/iter_${i}" || true
+            echo "::group::upload-artifact (append #${i})"
+            ghwf_artifact_name="echo-db-live"
+            # actions/upload-artifact는 액션이므로 여기선 echo만; 실제 업로드는 다음 step에서 수행
+            echo "::endgroup::"
+            # 대기
+            if [ "$i" -lt "${iters}" ]; then
+              echo "[LIVE] ${sleepsec}초 대기..."
+              sleep "${sleepsec}"
+            fi
+          done
+
+      - name: 📦 아티팩트 업로드 (정적 + 라이브 스냅샷)
         uses: actions/upload-artifact@v4
         with:
-          name: echo-db-artifacts
+          name: echo-db-live
           path: |
             .github/echo_db/dump/
             .github/echo_db/monitor/
@@ -366,6 +421,7 @@ jobs:
             .github/echo_db/**/*.yml
             .github/echo_db/**/*.sql
             site/
+            live_snapshots/
 
       - name: 🔎 최종 에코 산출물 마스킹 출력(cat)
         shell: bash
