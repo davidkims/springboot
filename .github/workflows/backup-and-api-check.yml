@@ -1,34 +1,76 @@
-name: "💾 Real-time Disk Boost (Ubuntu runners)"
+name: "💾 MEGA Disk Boost + EchoOps (for .github)"
 
 on:
   workflow_dispatch:
+    inputs:
+      root_reserve_mb:
+        description: "루트 파티션 최소 여유(MB)"
+        required: false
+        default: "1536"
+      temp_reserve_mb:
+        description: "/mnt 최소 여유(MB)"
+        required: false
+        default: "512"
+      swap_size_mb:
+        description: "스왑 크기(MB, 0=미생성)"
+        required: false
+        default: "1024"
+      remove_dotnet:
+        description: "사전설치 .NET 제거"
+        required: false
+        default: "true"
+      remove_android:
+        description: "사전설치 Android 제거"
+        required: false
+        default: "true"
+      remove_haskell:
+        description: "사전설치 Haskell 제거"
+        required: false
+        default: "true"
+      remove_codeql:
+        description: "사전설치 CodeQL 제거"
+        required: false
+        default: "true"
+      remove_docker_images:
+        description: "사전설치 Docker 이미지 제거"
+        required: false
+        default: "true"
+  schedule:
+    - cron: "*/1 * * * *"   # 1분마다 (원치 않으면 삭제)
 
 permissions:
   contents: read
+
+concurrency:
+  group: disk-boost-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   disk-boost:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      LOG_DIR: ${{ runner.temp }}/disklogs
     steps:
-      - name: 🔎 Before — disk snapshot
+      # 0) 사전 스냅샷 (체크아웃 전) — maximize-build-space는 체크아웃 이전 실행 권장
+      - name: 🔎 BEFORE snapshot (pre-checkout)
         shell: bash
         run: |
-          set -e
-          mkdir -p .github/echo_logs
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR"
           {
+            echo "[TIME] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo "[BEFORE] df -h"
             df -h
             echo
             echo "[BEFORE] lsblk"
             lsblk
             echo
-            echo "[BEFORE] /mnt usage"
-            sudo du -sh /mnt || true
-          } | tee .github/echo_logs/disk_before.log
+            echo "[BEFORE] mount (dev only)"
+            mount | grep -E '^/dev' || true
+          } | tee "$LOG_DIR/before.log"
 
-      # 1) 루트/도구/스왑/도커이미지 등 대용량 정리 (약 20~30GB 확보)
-      #   ※ 필요시 옵션을 false로 바꿔 보존할 수 있음
+      # 1) 안전한 대용량 정리 (약 수십 GB 확보 가능)
       - name: 🧹 Free up preinstalled stuff (safe cleanup)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -39,42 +81,150 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: true
-      # 위 액션은 우분투 러너에서 약 30GB까지 확보 보고 사례가 있습니다. :contentReference[oaicite:1]{index=1}
 
-      # 2) / 와 /mnt 여유공간을 LVM으로 결합해 작업공간($GITHUB_WORKSPACE)을 크게 마운트
-      #   * 체크아웃 이전에 실행해야 함 (README 권장)
-      - name: 💽 Maximize build space (LVM mount over workspace)
+      # 2) /mnt 임시디스크 등 최대 활용하여 작업공간을 크게 마운트
+      - name: 💽 Maximize build space (LVM over workspace)
         uses: easimon/maximize-build-space@v10
         with:
-          # 루트와 /mnt에 남겨둘 최소 여유(MB) — apt, docker 등을 위해 약간 남겨둡니다
-          root-reserve-mb: 1536
-          temp-reserve-mb: 512
-          # 스왑을 1GB만 재구성(필요 없으면 0)
-          swap-size-mb: 1024
-          # 덩치 큰 사전 설치물 제거(위 단계와 중복되지만 문제 없음, 필요시 false)
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-      # 이 액션은 /mnt 임시디스크를 활용해 작업공간을 크게 만들고,
-      # 필요시 불필요 소프트웨어 제거/스왑 조정까지 지원합니다. :contentReference[oaicite:2]{index=2}
+          root-reserve-mb: ${{ github.event.inputs.root_reserve_mb || '1536' }}
+          temp-reserve-mb: ${{ github.event.inputs.temp_reserve_mb || '512' }}
+          swap-size-mb: ${{ github.event.inputs.swap_size_mb || '1024' }}
+          remove-dotnet: ${{ github.event.inputs.remove_dotnet || 'true' }}
+          remove-android: ${{ github.event.inputs.remove_android || 'true' }}
+          remove-haskell: ${{ github.event.inputs.remove_haskell || 'true' }}
+          remove-codeql: ${{ github.event.inputs.remove_codeql || 'true' }}
+          remove-docker-images: ${{ github.event.inputs.remove_docker_images || 'true' }}
 
+      # 3) 체크아웃 — 디스크 증설(재마운트) 이후에 수행
       - name: 📥 Checkout (after disk boost)
         uses: actions/checkout@v4
 
-      - name: 🔁 After — disk snapshot
+      # 4) .github 경로에 모든 디스크 관련 에코 스크립트/문서 자동 생성
+      - name: 📁 Generate .github echo scripts (+ docs)
         shell: bash
         run: |
-          set -e
+          set -Eeuo pipefail
+          mkdir -p .github/echo_disk .github/echo_logs .github/echo_monitoring
+
+          # 실전 즉시 정리 스크립트 (작업 중 추가 확보용)
+          cat <<'SH' > .github/echo_disk/boost_now.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo "[BOOST_NOW] start: $(date -u '+%F %T UTC')"
+          echo "[INFO] Pre df -h"; df -h || true
+          # 안전 범위 내 캐시 정리
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          # 언어별 캐시
+          rm -rf ~/.cache/pip ~/.npm ~/.cache/yarn ~/.cache/pipenv || true
+          # Docker 사용 시만 정리
+          if command -v docker >/dev/null 2>&1; then
+            docker system prune -af || true
+            docker builder prune -af || true
+          fi
+          echo "[INFO] Post df -h"; df -h || true
+          echo "[BOOST_NOW] done"
+          SH
+          chmod +x .github/echo_disk/boost_now.sh
+
+          # df/lsblk 스냅샷
+          cat <<'SH' > .github/echo_disk/df_snapshot.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          ts="$(date -u '+%Y%m%dT%H%M%SZ')"
+          out=".github/echo_logs/df_${ts}.log"
           {
+            echo "[TIME] $(date -u '+%F %T UTC')"
+            echo "[DF]"; df -h
+            echo; echo "[LSBLK]"; lsblk
+            echo; echo "[MOUNT (dev)]"; mount | grep -E '^/dev' || true
+          } | tee "$out"
+          echo "[SNAPSHOT] saved $out"
+          SH
+          chmod +x .github/echo_disk/df_snapshot.sh
+
+          # 최상위 용량 파일/디렉토리 목록
+          cat <<'SH' > .github/echo_monitoring/top_sizes.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          mkdir -p .github/echo_monitoring
+          # Broken pipe 방지
+          set +o pipefail
+          du -ah . | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
+          du -sh . > .github/echo_monitoring/total_size.txt || true
+          set -o pipefail
+          echo "[MONITOR] top sizes written"
+          SH
+          chmod +x .github/echo_monitoring/top_sizes.sh
+
+          # 설명 문서
+          cat <<'MD' > .github/echo_disk/README_disk.md
+          # Disk Boost Scripts (.github/echo_disk)
+          - `boost_now.sh` : 실행 중 추가 디스크 확보(캐시/도구 정리). 안전 범위 내에서만 동작.
+          - `df_snapshot.sh` : 현재 디스크/마운트 스냅샷을 `.github/echo_logs/`에 저장.
+          - `../echo_monitoring/top_sizes.sh` : 저장소 내 상위 용량 파일 리스트 작성.
+          ## 권장 사용 위치
+          - 대형 빌드/압축/도커 작업 **직전**에 `boost_now.sh` 1회 실행
+          - 빌드 전후로 `df_snapshot.sh` 실행하여 용량 변화 기록
+          - 주기적으로 `top_sizes.sh` 실행해 비정상 용량 급증 감시
+          MD
+
+          echo "[ECHO] .github 경로에 디스크 관련 스크립트 및 문서 생성 완료"
+
+      # 5) AFTER 스냅샷 + 요약 출력
+      - name: 🔁 AFTER snapshot + summary
+        id: after
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "[TIME] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo "[AFTER] df -h"
             df -h
-            echo
-            echo "[AFTER] mount points (dev only)"
-            mount | grep -E '^/dev' || true
-            echo
-            echo "[NOTE] Workspace:"
-            echo "$GITHUB_WORKSPACE"
-            du -sh "$GITHUB_WORKSPACE" || true
-          } | tee .github/echo_logs/disk_after.log
+          } | tee "$LOG_DIR/after.log"
+
+          total=$(df -h | awk '$6=="/"{print $2}')
+          avail=$(df -h | awk '$6=="/"{print $4}')
+          ws_total=$(df -h | awk -v ws="$GITHUB_WORKSPACE" '$6==ws{print $2}')
+          ws_avail=$(df -h | awk -v ws="$GITHUB_WORKSPACE" '$6==ws{print $4}')
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+          echo "avail=$avail" >> "$GITHUB_OUTPUT"
+          echo "ws_total=${ws_total:-N/A}" >> "$GITHUB_OUTPUT"
+          echo "ws_avail=${ws_avail:-N/A}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## 💾 Disk Boost 결과"
+            echo "- 루트 파티션 총 용량: **$total** / 가용: **$avail**"
+            echo "- 작업공간 총 용량: **${ws_total:-N/A}** / 가용: **${ws_avail:-N/A}**"
+            echo ""
+            echo "### 활용 팁"
+            echo "- 대형 빌드 직전 \`.github/echo_disk/boost_now.sh\` 실행"
+            echo "- 용량 변화 기록: \`.github/echo_disk/df_snapshot.sh\`"
+            echo "- 상위 용량 파일 점검: \`.github/echo_monitoring/top_sizes.sh\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 6) 로그를 .github/echo_logs 로 복사(+모니터링 실행) 후 아티팩트 업로드
+      - name: 🗂️ Copy logs into .github + run monitors
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/echo_logs
+          cp -f "$LOG_DIR/before.log" .github/echo_logs/before.log || true
+          cp -f "$LOG_DIR/after.log"  .github/echo_logs/after.log  || true
+          bash .github/echo_monitoring/top_sizes.sh || true
+          tar -czf disk-logs.tgz .github/echo_logs .github/echo_monitoring || true
+          echo "[ECHO] Logs archived: disk-logs.tgz"
+
+      - name: 📦 Upload disk logs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-logs
+          path: |
+            disk-logs.tgz
+            .github/echo_logs/**
+            .github/echo_monitoring/**
+          if-no-files-found: warn
