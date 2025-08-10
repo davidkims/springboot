@@ -1,4 +1,4 @@
-name: "💾 MEGA Disk Boost + EchoOps + Service AutoUpgrade + 24x7 Watchdog (≤10 inputs)"
+name: "💾 MEGA Disk Boost + EchoOps + Service AutoUpgrade + 24x7 Watchdog (forced upgrades)"
 
 on:
   workflow_dispatch:
@@ -8,13 +8,13 @@ on:
         required: false
         default: "safe"
       disk:
-        description: "디스크 파라미터: root=1536,temp=512,swap=1024,rm_dotnet=1,rm_android=1,rm_haskell=1,rm_codeql=1,rm_docker=1"
+        description: "디스크: root=1536,temp=512,swap=1024,rm_dotnet=1,rm_android=1,rm_haskell=1,rm_codeql=1,rm_docker=1"
         required: false
         default: "root=1536,temp=512,swap=1024,rm_dotnet=1,rm_android=1,rm_haskell=1,rm_codeql=1,rm_docker=1"
       upgrade:
-        description: "업그레이드 옵션: os=false,docker=false"
+        description: "업그레이드(무시됨; 항상 실행): os=true,docker=true"
         required: false
-        default: "os=false,docker=false"
+        default: "os=true,docker=true"
       services:
         description: "업그레이드 대상(쉼표): mysql,postgres,redis,mongo,kafka,rabbitmq,vault,minio,airflow,spark,camunda"
         required: false
@@ -24,14 +24,12 @@ on:
         required: false
         default: "minutes=300,interval=60,ws=20480,root=8192,auto=1"
 
-  # 24x7 근접 커버리지(5분 간격 재기동). 실제 스케줄 지연/큐잉 가능.
   schedule:
     - cron: "*/5 * * * *"
 
 permissions:
   contents: read
 
-# 진행중인 감시 잡을 유지(연속 커버리지), 새 트리거는 큐 대기
 concurrency:
   group: disk-boost-${{ github.ref }}
   cancel-in-progress: false
@@ -39,10 +37,9 @@ concurrency:
 jobs:
   disk-boost:
     runs-on: ubuntu-latest
-    timeout-minutes: 355  # watchdog 300분 + 여유
+    timeout-minutes: 355
 
     steps:
-      # 0) 러너 잡힌 뒤에만 가능한 컨텍스트
       - name: ♻️ Init env & LOG_DIR
         shell: bash
         run: |
@@ -50,7 +47,6 @@ jobs:
           echo "LOG_DIR=$RUNNER_TEMP/disklogs" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/disklogs" .github/echo_logs
 
-      # 1) 입력 파싱(≤10 inputs로 압축된 문자열을 key=value로 분해)
       - name: 🔧 Parse compact inputs → $GITHUB_ENV
         shell: bash
         env:
@@ -61,31 +57,16 @@ jobs:
           WATCHDOG: ${{ github.event.inputs.watchdog }}
         run: |
           set -Eeuo pipefail
+          kv() { local s="$1" k="$2" def="$3" v; v="$(printf '%s\n' "$s" | tr ', ' '\n\n' | awk -F= -v k="$2" '$1==k{print $2}' | tail -n1)"; [ -n "$v" ] && printf '%s\n' "$v" || printf '%s\n' "$def"; }
+          bnorm(){ case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) echo true;; *) echo false;; esac; }
 
-          # helpers
-          kv() { # kv "a=1,b=2" b 0  => 2
-            local s="$1" k="$2" def="$3" v
-            v="$(printf '%s\n' "$s" | tr ', ' '\n\n' | awk -F= -v k="$2" '$1==k{print $2}' | tail -n1)"
-            [ -n "$v" ] && printf '%s\n' "$v" || printf '%s\n' "$def"
-          }
-          bnorm() { # normalize booleanish to true/false
-            case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-              1|true|yes|on)  echo true ;;
-              0|false|no|off|'') echo false ;;
-              *) echo false ;;
-            esac
-          }
-
-          # presets
           case "$PRESET" in
             aggressive)
               DISK="${DISK:-root=1024,temp=256,swap=512,rm_dotnet=1,rm_android=1,rm_haskell=1,rm_codeql=1,rm_docker=1}"
               WATCHDOG="${WATCHDOG:-minutes=330,interval=30,ws=25600,root=10240,auto=1}"
-              ;;
-            *) : ;;
+            ;;
           esac
 
-          # disk
           ROOT_MB="$(kv "${DISK}" root 1536)"
           TEMP_MB="$(kv "${DISK}" temp 512)"
           SWAP_MB="$(kv "${DISK}" swap 1024)"
@@ -95,18 +76,16 @@ jobs:
           RM_CODEQL="$(bnorm "$(kv "${DISK}" rm_codeql 1)")"
           RM_DOCKER="$(bnorm "$(kv "${DISK}" rm_docker 1)")"
 
-          # upgrade
-          UPG_OS="$(bnorm "$(kv "${UPGRADE}" os false)")"
-          UPG_DKR="$(bnorm "$(kv "${UPGRADE}" docker false)")"
+          # 항상 실행(입력값 무시)
+          UPG_OS=true
+          UPG_DKR=true
 
-          # watchdog
           WD_MIN="$(kv "${WATCHDOG}" minutes 300)"
           WD_INT="$(kv "${WATCHDOG}" interval 60)"
           WD_WS_MB="$(kv "${WATCHDOG}" ws 20480)"
           WD_RT_MB="$(kv "${WATCHDOG}" root 8192)"
           WD_AUTO="$(bnorm "$(kv "${WATCHDOG}" auto 1)")"
 
-          # expose
           {
             echo "ROOT_RESERVE_MB=${ROOT_MB}"
             echo "TEMP_RESERVE_MB=${TEMP_MB}"
@@ -128,7 +107,6 @@ jobs:
             echo "WATCH_AUTO=${WD_AUTO}"
           } >> "$GITHUB_ENV"
 
-      # 2) BEFORE 스냅샷(체크아웃 전)
       - name: 🔎 BEFORE snapshot (pre-checkout)
         shell: bash
         run: |
@@ -140,7 +118,6 @@ jobs:
             echo; echo "[BEFORE] mount(dev)"; mount | grep -E '^/dev' || true
           } | tee "$LOG_DIR/before.log"
 
-      # 3) 안전 정리
       - name: 🧹 Free up preinstalled stuff (safe cleanup)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -152,7 +129,6 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      # 4) /mnt 임시디스크 결합(체크아웃 전 권장)
       - name: 💽 Maximize build space (LVM over workspace)
         uses: easimon/maximize-build-space@v10
         with:
@@ -165,11 +141,9 @@ jobs:
           remove-codeql: ${{ env.REMOVE_CODEQL }}
           remove-docker-images: ${{ env.REMOVE_DOCKER_IMAGES }}
 
-      # 5) 체크아웃 — 재마운트 이후
       - name: 📥 Checkout (after disk boost)
         uses: actions/checkout@v4
 
-      # 6) .github 유틸/업그레이드/워치독 스크립트 생성
       - name: 📁 Generate scripts (.github/echo_*)
         shell: bash
         env:
@@ -310,8 +284,8 @@ jobs:
           THRESH_ROOT_MB="${4:-8192}"
           AUTO_BOOST="${5:-true}"
           SRVS="${6:-mysql,postgres,redis,mongo,kafka,rabbitmq,vault,minio,airflow,spark,camunda}"
-          RUN_OS_UP="${7:-false}"
-          RUN_DKR_UP="${8:-false}"
+          RUN_OS_UP=true
+          RUN_DKR_UP=true
           end_ts=$(( $(date +%s) + DURATION_MIN*60 ))
           log=".github/echo_logs/watchdog_$(date -u '+%Y%m%dT%H%M%SZ').log"
           echo "[WATCHDOG] start $(date -u '+%F %T UTC')" | tee -a "$log"
@@ -328,8 +302,8 @@ jobs:
               echo "[WD] threshold crossed → boost_now.sh" | tee -a "$log"
               bash .github/echo_disk/boost_now.sh | tee -a "$log" || true
               bash .github/echo_disk/df_snapshot.sh || true
-              [ "$RUN_OS_UP"  = "true" ] && bash .github/echo_upgrade/os_autoup.sh | tee -a "$log" || true
-              [ "$RUN_DKR_UP" = "true" ] && bash .github/echo_upgrade/docker_upgrade.sh "$SRVS" | tee -a "$log" || true
+              bash .github/echo_upgrade/os_autoup.sh | tee -a "$log" || true
+              bash .github/echo_upgrade/docker_upgrade.sh "$SRVS" | tee -a "$log" || true
             fi
             sleep "$INTERVAL_SEC"
           done
@@ -337,25 +311,21 @@ jobs:
           SH
           chmod +x .github/echo_disk/watchdog.sh
 
-      # 7) 조건부 업그레이드(버튼 실행 시)
-      - name: 🔄 Run OS package autoupgrade (conditional)
-        if: ${{ env.UPGRADE_OS == 'true' }}
+      # 🔵 여기부터 "필수 실행"
+      - name: 🔄 OS 패키지 자동 업그레이드 실행(필수)
         shell: bash
         run: bash .github/echo_upgrade/os_autoup.sh
 
-      - name: 🐳 Run Docker/Compose upgrades (conditional)
-        if: ${{ env.UPGRADE_DOCKER == 'true' }}
+      - name: 🐳 Docker/Compose 업그레이드 실행(필수)
         shell: bash
         run: bash .github/echo_upgrade/docker_upgrade.sh "${{ env.UPGRADE_SERVICES }}"
 
-      # 8) 24x7 워치독 루프(시간 제한 내)
       - name: 🕒 Start 24x7 watchdog loop (bounded)
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash .github/echo_disk/watchdog.sh "${WATCH_MIN}" "${WATCH_INT}" "${WATCH_WS_MB}" "${WATCH_RT_MB}" "${WATCH_AUTO}" "${UPGRADE_SERVICES}" "${UPGRADE_OS}" "${UPGRADE_DOCKER}"
+          bash .github/echo_disk/watchdog.sh "${WATCH_MIN}" "${WATCH_INT}" "${WATCH_WS_MB}" "${WATCH_RT_MB}" "${WATCH_AUTO}" "${UPGRADE_SERVICES}"
 
-      # 9) AFTER 스냅샷 + 요약
       - name: 🔁 AFTER snapshot + summary
         shell: bash
         run: |
@@ -369,17 +339,14 @@ jobs:
           ws_total=$(df -h | awk -v ws="$GITHUB_WORKSPACE" '$6==ws{print $2}')
           ws_avail=$(df -h | awk -v ws="$GITHUB_WORKSPACE" '$6==ws{print $4}')
           {
-            echo "## 💾 Disk Boost + 24x7 Watchdog 결과"
+            echo "## 💾 Disk Boost + 강제 Service Upgrade + 24x7 Watchdog 결과"
             echo "- 루트: **$total** (가용 **$avail**)"
             echo "- 작업공간: **${ws_total:-N/A}** (가용 **${ws_avail:-N/A}**)"
             echo ""
-            echo "### 적용 설정"
-            echo "- DISK=${{ github.event.inputs.disk }}"
-            echo "- UPGRADE=${{ github.event.inputs.upgrade }}, SERVICES=${{ github.event.inputs.services }}"
-            echo "- WATCHDOG=${{ github.event.inputs.watchdog }}"
+            echo "### 대상 서비스"
+            echo "- ${UPGRADE_SERVICES}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 10) 로그 업로드
       - name: 📦 Upload logs artifact
         uses: actions/upload-artifact@v4
         with:
