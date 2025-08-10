@@ -1,4 +1,4 @@
-name: "🛠️ Workflows Mass Upgrade — .github/workflows 일괄 보강(permissions/concurrency/checkout/inputs) + 보고서 + 안전푸시"
+name: "🛠️ Workflows Mass Upgrade — .github/workflows 일괄 보강 + 리포트 + 안전푸시/PR"
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
         default: "true"
         required: true
       compress_over_inputs:
-        description: "workflow_dispatch inputs가 10개 초과 시 tail을 extra_spec(k=v,comma)으로 압축"
+        description: "workflow_dispatch inputs>10 → tail을 extra_spec(k=v,comma)으로 압축"
         default: "true"
         required: true
       commit_message:
@@ -36,6 +36,8 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  workflows: write
 
 concurrency:
   group: workflows-mass-upgrade
@@ -55,6 +57,7 @@ jobs:
       FIX_INPUTS: ${{ inputs.compress_over_inputs }}
       GIT_USER_NAME: gh-actions-bot
       GIT_USER_EMAIL: gh-actions-bot@example.com
+      WF_PR_BRANCH_PREFIX: actions/workflows-upgrade
 
     steps:
       - name: 📥 Checkout (full history for safe rebase)
@@ -112,7 +115,7 @@ jobs:
             new_inputs={k:inputs[k] for k in head}
             new_inputs["extra_spec"]={
               "description":"Compressed extra inputs as k=v pairs (comma-separated)",
-              "default":",".join(kv),
+              "default":",".join(kvs for kvs in kv),
               "required": False,
             }
             return new_inputs, tail
@@ -128,7 +131,6 @@ jobs:
               add(f"- ❌ {path}: YAML parse error: {e}")
               continue
 
-            # permissions.contents=write
             if FORCE_PERM:
               perms=data.get("permissions")
               if not isinstance(perms, dict):
@@ -138,7 +140,6 @@ jobs:
                 perms["contents"]="write"
                 changed.append("permissions.contents=write")
 
-            # concurrency
             if ADD_CONC:
               if "concurrency" not in data or not isinstance(data["concurrency"], dict):
                 data["concurrency"]={"group":os.path.splitext(os.path.basename(path))[0],"cancel-in-progress":False}
@@ -152,7 +153,6 @@ jobs:
                   c["cancel-in-progress"]=False
                   changed.append("concurrency.cancel-in-progress=false")
 
-            # workflow_dispatch inputs >10 → compress to extra_spec
             if FIX_INPUTS:
               on=data.get("on")
               if isinstance(on, dict) and "workflow_dispatch" in on:
@@ -163,7 +163,6 @@ jobs:
                     wd["inputs"]=new_inputs
                     changed.append(f"compress inputs(>{len(new_inputs)})→extra_spec")
 
-            # checkout hardening
             if FIX_CO:
               jobs=data.get("jobs")
               if isinstance(jobs, dict):
@@ -199,7 +198,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           python .github/workflows/_mass_upgrade.py
-          echo "----- REPORT -----"
+          echo "----- REPORT (head) -----"
           sed -n '1,200p' "$REPORT" || true
 
       - name: ✅ Lint (actionlint) — advisory
@@ -208,23 +207,14 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-check
           level: warning
-          fail_on_error: "false"
+          fail_level: none           # ✅ fail_on_error → fail_level 로 교체 (advisory 모드)
+          # reviewdog_flags: ""      # 필요 시 추가
+          # actionlint_flags: ""     # 필요 시 추가
 
       - name: ✅ Lint (yamllint) — advisory
         run: |
           set -Eeuo pipefail
           yamllint -f standard -d "{extends: default, rules: {line-length: {max: 160}}}" .github/workflows || true
-
-      - name: 📝 .gitignore update for backups + report
-        run: |
-          set -Eeuo pipefail
-          {
-            echo ""
-            echo "# mass-upgrade auto-generated"
-            echo "${{ inputs.backup_dir }}/"
-            echo ".github/workflows/_mass_upgrade.py"
-            echo ".github/workflows_upgrade_report.md"
-          } >> .gitignore || true
 
       - name: 🔐 Configure git
         run: |
@@ -233,39 +223,77 @@ jobs:
           git config user.email "${GIT_USER_EMAIL}"
           git config pull.rebase true
 
-      - name: 🧾 Commit & push (rebase fallback + backup branch)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 🧾 Commit non-workflow changes
+        id: commit_nonwf
         run: |
           set -Eeuo pipefail
-          git add .github/workflows .github/workflows_upgrade_report.md .gitignore || true
+          git add -A ':!.github/workflows/*'
+          git add -f .github/workflows_upgrade_report.md || true
           if git diff --cached --quiet; then
-            echo "[ECHO] No changes to commit."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "[ECHO] Non-workflow: nothing to commit."
             exit 0
           fi
-          git commit -m "${{ inputs.commit_message }}"
+          git commit -m "${{ inputs.commit_message }} (non-workflow)"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: ⬆️ Push non-workflow (rebase fallback)
+        if: steps.commit_nonwf.outputs.has_changes == 'true'
+        run: |
+          set -Eeuo pipefail
           TARGET="${GITHUB_REF_NAME}"
           git fetch origin --prune
           if git push origin "$TARGET"; then
-            echo "[ECHO] Pushed to origin/$TARGET"
+            echo "[ECHO] Non-workflow pushed to origin/$TARGET"
             exit 0
           fi
-          echo "[ECHO] Push rejected — rebase retry"
+          echo "[ECHO] Push rejected — rebase retry (non-workflow)"
           git rebase "origin/$TARGET" || { git rebase --abort || true; }
-          if git push origin "$TARGET"; then
-            echo "[ECHO] Pushed after rebase"
+          git push origin "$TARGET" || echo "[WARN] Non-workflow push still failed (continuing)"
+
+      - name: 🧾 Stage workflow changes (if any)
+        id: stage_wf
+        run: |
+          set -Eeuo pipefail
+          git reset
+          git add .github/workflows || true
+          if git diff --cached --quiet; then
+            echo "has_wf=false" >> "$GITHUB_OUTPUT"
+            echo "[ECHO] Workflow: no changes."
             exit 0
           fi
-          BK="actions/mass-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
-          echo "[ECHO] fallback → $BK"
-          git checkout -B "$BK"
-          git push -u origin "$BK"
+          echo "has_wf=true" >> "$GITHUB_OUTPUT"
 
-      - name: 📦 Upload artifacts (report + backups)
+      - name: 🧪 Dry commit for PR (not pushed)
+        if: steps.stage_wf.outputs.has_wf == 'true'
+        run: |
+          set -Eeuo pipefail
+          git commit -m "${{ inputs.commit_message }} (workflows)"
+          git format-patch -1 --stdout > .github/workflows_workflow_changes.patch || true
+
+      - name: 📤 Create PR for workflow changes (requires GH_PAT_WORKFLOWS)
+        if: steps.stage_wf.outputs.has_wf == 'true'
+        uses: peter-evans/create-pull-request@v6
+        continue-on-error: true
+        with:
+          token: ${{ secrets.GH_PAT_WORKFLOWS }}
+          commit-message: ${{ inputs.commit_message }} (workflows)
+          title: "chore: mass-upgrade workflows (auto)"
+          body: |
+            This PR contains updates to `.github/workflows/**`.
+            - Generated by **workflows-mass-upgrade**
+            - Requires repository reviewers to merge.
+          branch: ${{ env.WF_PR_BRANCH_PREFIX }}-${{ github.run_id }}
+          base: ${{ github.ref_name }}
+          add-paths: |
+            .github/workflows/**
+
+      - name: 📦 Upload artifacts (report + backups + wf patch)
         uses: actions/upload-artifact@v4
         with:
           name: workflows-mass-upgrade
           path: |
             .github/workflows_upgrade_report.md
+            .github/workflows_workflow_changes.patch
             ${{ inputs.backup_dir }}/**
           retention-days: 7
