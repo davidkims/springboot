@@ -1,26 +1,26 @@
-name: "💽 SpringBoot Disk+Dirs — Online Resize + Echo + Commit/Push (no unmount)"
+name: "💽 SpringBoot Disk+Dirs — 1min Cron + Multi-Partition + Live .github Echo (no unmount)"
 
 on:
   workflow_dispatch:
     inputs:
       disk_size_mb:
         description: "Initial disk image size (MB)"
-        default: "1024"
+        default: "2048"
         required: true
       resize_to_mb:
-        description: "Online grow to this size (MB). Leave blank to keep current"
+        description: "Grow whole image to this size (MB). Leave blank to keep current"
         default: ""
         required: false
       fs_type:
-        description: "Filesystem: ext4 | xfs | btrfs"
+        description: "Filesystem for partitions: ext4 | xfs | btrfs"
         default: "ext4"
         required: true
       mount_point:
-        description: "Mount point on runner"
+        description: "Mount point for partition #1 (partition #2 mounts at <mount_point>/part2)"
         default: "/mnt/gh-disk"
         required: true
       dir_list:
-        description: "Extra dirs (comma-separated) to create on mount+repo"
+        description: "Extra dirs to create on repo+mount (comma-separated)"
         default: "logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts"
         required: true
       owner:
@@ -41,8 +41,11 @@ on:
         required: true
       commit_message:
         description: "Commit message"
-        default: "chore: add disk image + spring dirs + echo logs (auto)"
+        default: "chore: disk+dirs + multi-partition + live .github echo (auto)"
         required: true
+
+  schedule:
+    - cron: "*/1 * * * *"   # every minute
 
 permissions:
   contents: write
@@ -50,19 +53,21 @@ permissions:
 jobs:
   springboot-disk-dirs:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
     env:
       DISK_IMG: disk.img
       LOG_DIR: .github/echo_logs
       ECHO_DIR: .github/echo_scripts
+      MOUNT_P1_NAME: p1
+      MOUNT_P2_NAME: p2    # will mount at <mount_point>/part2
       GIT_USER_NAME: gh-actions-bot
       GIT_USER_EMAIL: gh-actions-bot@example.com
 
     steps:
-      - name: 📂 Checkout (springboot)
+      - name: 📂 Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: true   # allow push with GITHUB_TOKEN
+          persist-credentials: true
 
       - name: 🧰 Init — FULL ECHO bootstrap
         shell: bash
@@ -97,7 +102,7 @@ jobs:
             '  chmod +x "$target"; echo "[ECHO] Wrote echo script: $target"' \
             '}'
 
-      - name: 📦 Ensure FS tools (xfsprogs, btrfs-progs)
+      - name: 📦 Ensure FS tools (xfsprogs, btrfs-progs, parted)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -105,138 +110,168 @@ jobs:
           exec > >(tee -a "$LOG_DIR/05_fs_tools.log") 2>&1
           set -x
           FST="${{ inputs.fs_type }}"
+          run_cmd "sudo apt-get update -y"
+          run_cmd "sudo apt-get install -y parted"
           if [[ "$FST" == "xfs" ]]; then
-            run_cmd "sudo apt-get update -y"
             run_cmd "sudo apt-get install -y xfsprogs"
           elif [[ "$FST" == "btrfs" ]]; then
-            run_cmd "sudo apt-get update -y"
             run_cmd "sudo apt-get install -y btrfs-progs"
           else
             echo "[ECHO] ext4 selected — e2fsprogs present on runners"
           fi
 
-      - name: 🧱 Create disk image + mkfs (EXT4/XFS/Btrfs) — FULL ECHO
+      - name: 🧱 Create disk image (sparse) + setup loop
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/10_mkfs.log") 2>&1
+          exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
           set -x
           SIZE_MB="${{ inputs.disk_size_mb }}"
-          FST="${{ inputs.fs_type }}"
           run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\""
-          case "$FST" in
-            ext4)  run_cmd "sudo mkfs.ext4 -F \"${DISK_IMG}\"" ;;
-            xfs)   run_cmd "sudo mkfs.xfs -f \"${DISK_IMG}\"" ;;
-            btrfs) run_cmd "sudo mkfs.btrfs -f \"${DISK_IMG}\"" ;;
-            *) echo "[ERROR] Unsupported fs_type: $FST"; exit 1 ;;
-          esac
-          run_cmd "ls -lh \"${DISK_IMG}\""
-          write_echo "$ECHO_DIR/create_disk_${FST}.sh" \
-            "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\"" \
-            "sudo mkfs.${FST} ${FST:+'-f'} \"${DISK_IMG}\"" \
-            "ls -lh \"${DISK_IMG}\""
-
-      - name: 🔗 losetup + mount (no unmount later) — FULL ECHO
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/20_mount.log") 2>&1
-          set -x
-          MNT="${{ inputs.mount_point }}"
-          OWNER="${{ inputs.owner }}"
-          GROUP="${{ inputs.group }}"
           run_cmd "sudo losetup -fP \"${DISK_IMG}\""
           LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
           [[ -z "$LOOP_DEV" ]] && { echo "[ERROR] loop device not found"; exit 1; }
           echo "[ECHO] LOOP_DEV=$LOOP_DEV"
-          run_cmd "sudo mkdir -p \"${MNT}\""
-          run_cmd "sudo mount \"${LOOP_DEV}\" \"${MNT}\""
-          run_cmd "mount | grep ' on ${MNT} '"
-          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}\""
-          run_cmd "ls -al \"${MNT}\""
-          run_cmd "df -h \"${MNT}\""
-          write_echo "$ECHO_DIR/_note_no_unmount.sh" \
-            "echo '[NOTE] This run intentionally leaves ${MNT} mounted (no unmount per request).'" 
 
-      - name: 📁 Create Spring Boot standard dirs (repo + mount) — FULL ECHO
+      - name: 🧭 Partition with GPT (p1=60%, p2=rest) via parted
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/30_spring_dirs.log") 2>&1
+          exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"
-          OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"; MODE="${{ inputs.dir_mode }}"
-          # Spring Boot standard structure + common dirs
-          SB_DIRS=(
-            "src/main/java"
-            "src/main/resources"
-            "src/test/java"
-            "src/test/resources"
-            "logs" "tmp" "backup" "data" "site"
-            ".github/echo_logs" ".github/echo_scripts"
-          )
-          # Extra user-provided
+          [[ -z "$LOOP_DEV" ]] && LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60%"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P2_NAME} 60% 100%"
+          run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
+          run_cmd "ls -l ${LOOP_DEV}*"
+
+      - name: 🧪 Make filesystems on /dev/loopXp1 and /dev/loopXp2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
+          set -x
+          FST="${{ inputs.fs_type }}"
+          [[ -z "$LOOP_DEV" ]] && LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          case "$FST" in
+            ext4)  run_cmd "sudo mkfs.ext4 -F \"$P1\""; run_cmd "sudo mkfs.ext4 -F \"$P2\"" ;;
+            xfs)   run_cmd "sudo mkfs.xfs -f \"$P1\"";  run_cmd "sudo mkfs.xfs -f \"$P2\"" ;;
+            btrfs) run_cmd "sudo mkfs.btrfs -f \"$P1\"";run_cmd "sudo mkfs.btrfs -f \"$P2\"" ;;
+            *) echo "[ERROR] Unsupported fs_type: $FST"; exit 1 ;;
+          esac
+
+      - name: 🔗 Mount both partitions (p1 at mount_point, p2 at mount_point/part2)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
+          set -x
+          MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"
+          [[ -z "$LOOP_DEV" ]] && LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          run_cmd "sudo mkdir -p \"${MNT}\" \"${MNT}/part2\""
+          run_cmd "sudo mount \"$P1\" \"${MNT}\""
+          run_cmd "sudo mount \"$P2\" \"${MNT}/part2\""
+          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}\""
+          run_cmd "mount | grep -E \" on ${MNT} | on ${MNT}/part2 \" || true"
+          run_cmd "df -h | grep -E \"loop|Filesystem\" || true"
+
+      - name: 📁 Create Spring Boot + extra dirs on repo + both mounts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
+          set -x
+          MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"; MODE="${{ inputs.dir_mode }}"
+          SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" )
           IFS=',' read -ra EXTRA <<< "${{ inputs.dir_list }}"
           for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
-
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
+
           while IFS= read -r d; do
-            run_cmd "mkdir -p \"${d}\""
-            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\""
-            run_cmd "sudo chmod \"${MODE}\" \"${d}\""
-            run_cmd "mkdir -p \"${MNT}/${d}\""
-            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/${d}\""
-            run_cmd "sudo chmod \"${MODE}\" \"${MNT}/${d}\""
-            # ensure empty dirs get committed (gitkeep)
-            if [ ! -e "${d}/.gitkeep" ]; then echo "" > "${d}/.gitkeep"; fi
+            run_cmd "mkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
+            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
+            run_cmd "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
+            [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
             write_echo "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh" \
-              "mkdir -p \"${d}\" \"${MNT}/${d}\"" \
-              "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\"" \
-              "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\"" \
+              "mkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" \
+              "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" \
+              "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" \
               "[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\""
           done < "$ECHO_DIR/.all_dirs.txt"
 
-          echo "[ECHO] Created $(wc -l < "$ECHO_DIR/.all_dirs.txt") directories (repo+mount)"
-
-      - name: 📏 Online resize — ALWAYS (no skip) — FULL ECHO
+      - name: 📏 Online resize (image) + grow p2 to 100% — ALWAYS
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/40_resize.log") 2>&1
+          exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
           set -x
           MNT="${{ inputs.mount_point }}"; FST="${{ inputs.fs_type }}"
-          CUR_BYTES="$(stat -c%s "${DISK_IMG}")"
-          CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
-          REQ_MB="${{ inputs.resize_to_mb }}"
-          if [[ -z "$REQ_MB" ]]; then NEW_MB="$CUR_MB"; else NEW_MB="$REQ_MB"; fi
+          CUR_BYTES="$(stat -c%s "${DISK_IMG}")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
+          REQ_MB="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ_MB:-$CUR_MB}"
           echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
           if (( NEW_MB > CUR_MB )); then run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\""; else echo "[ECHO] No file growth needed"; fi
           LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
-          [[ -z "$LOOP_DEV" ]] && { echo "[ERROR] loop device not found"; exit 1; }
           run_cmd "sudo losetup -c \"${LOOP_DEV}\""
+          # p2를 전체로 확장
+          run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100%"
+          run_cmd "sudo partprobe \"${LOOP_DEV}\" || true"
+          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
-            ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}\"" ;;
-            xfs)   run_cmd "sudo xfs_growfs \"${MNT}\"" ;;
-            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}\"" ;;
-            *) echo "[ERROR] Unsupported fs_type: $FST"; exit 1 ;;
+            ext4)  run_cmd "sudo resize2fs \"$P2\"";;
+            xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"";;
+            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}/part2\"";;
           esac
-          run_cmd "df -h \"${MNT}\""
-          write_echo "$ECHO_DIR/resize_${FST}.sh" \
-            "CUR_BYTES=\$(stat -c%s \"${DISK_IMG}\")" \
-            "CUR_MB=\$(( (CUR_BYTES + 1048575) / 1048576 ))" \
-            "NEW_MB=${NEW_MB}" \
-            "[[ \$NEW_MB -gt \$CUR_MB ]] && truncate -s \${NEW_MB}M \"${DISK_IMG}\" || true" \
-            "LOOP_DEV=\$(sudo losetup -j disk.img | awk -F: '{print \$1}')" \
-            "sudo losetup -c \"\${LOOP_DEV}\"" \
-            $([ "${{ inputs.fs_type }}" = "ext4" ] && echo "\"sudo resize2fs \\\"\${LOOP_DEV}\\\"\"" || true) \
-            $([ "${{ inputs.fs_type }}" = "xfs" ] && echo "\"sudo xfs_growfs \\\"${MNT}\\\"\"" || true) \
-            $([ "${{ inputs.fs_type }}" = "btrfs" ] && echo "\"sudo btrfs filesystem resize max \\\"${MNT}\\\"\"" || true)
+          run_cmd "df -h | grep -E \"${MNT}(/part2)?\" || true"
 
-      - name: 📊 Size reports (no broken-pipe) — FULL ECHO
+      - name: 👀 Live .github watcher — mirror new dirs to both mounts (5 min)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/40_live_github_watch.log") 2>&1
+          set -x
+          MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"; MODE="${{ inputs.dir_mode }}"
+          SNAP="$ECHO_DIR/.github_dirs.snap"
+          # initial snapshot
+          find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
+
+          for i in $(seq 1 60); do   # ~5분(5s*60)
+            sleep 5
+            NEW_SNAP="$ECHO_DIR/.github_dirs.new"
+            find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$NEW_SNAP" || true
+            DIFF="$ECHO_DIR/.github_dirs.diff"
+            comm -13 "$SNAP" "$NEW_SNAP" > "$DIFF" || true
+            if [ -s "$DIFF" ]; then
+              echo "[ECHO] Detected new .github directories:"
+              cat "$DIFF"
+              while IFS= read -r rel; do
+                [[ -z "$rel" ]] && continue
+                # mirror to mounts under same relative path
+                run_cmd "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
+                run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
+                run_cmd "sudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
+                # echo script per new dir
+                write_echo "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh" \
+                  "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" \
+                  "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" \
+                  "sudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
+              done < "$DIFF"
+              mv "$NEW_SNAP" "$SNAP"
+            else
+              echo "[ECHO] No new .github directories (iteration $i)"
+            fi
+          done
+
+      - name: 📊 Size reports (safe)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -244,15 +279,9 @@ jobs:
           exec > >(tee -a "$LOG_DIR/45_sizes.log") 2>&1
           set -x
           mkdir -p .github/echo_monitoring
-          # avoid broken pipe: guard with || true and use head safely
           run_cmd "du -ah . | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true"
           run_cmd "du -sh . > .github/echo_monitoring/total_size.txt || true"
           run_cmd "df -h > .github/echo_monitoring/df_all.txt || true"
-          write_echo "$ECHO_DIR/size_reports.sh" \
-            "mkdir -p .github/echo_monitoring" \
-            "du -ah . | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true" \
-            "du -sh . > .github/echo_monitoring/total_size.txt || true" \
-            "df -h > .github/echo_monitoring/df_all.txt || true"
 
       - name: 📝 .gitignore (avoid committing disk.img, logs)
         shell: bash
@@ -266,7 +295,7 @@ jobs:
           write_echo "$ECHO_DIR/add_gitignore.sh" \
             "echo -e \"\\n# auto-generated\\n${DISK_IMG}\\n*.img\\n.github/echo_logs/*.log\\n\" >> .gitignore"
 
-      - name: ✅ Commit & (optional) push — FULL ECHO
+      - name: ✅ Commit & (optional) push
         if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
@@ -284,7 +313,6 @@ jobs:
             git fetch origin "$TARGET_BR" || true
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
-          # add all created dirs (gitkeep ensures non-empty)
           mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt"
           git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring "${DIRS[@]/#/.\/}"
           if git diff --cached --quiet; then
@@ -305,4 +333,4 @@ jobs:
             .github/echo_monitoring/**
           retention-days: 7
 
-      # Per request: NO unmount/losetup detach step
+      # NOTE: per request, NO unmount/losetup detach step
