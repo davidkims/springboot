@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-export PS4='+ [2025-08-10 07:46:52] _helpers.sh:9:write_echo ▶ '
+export PS4='+ [2025-08-10 08:11:22] _helpers.sh:8:write_echo ▶ '
 set -x
-mkdir -p "backup" "/mnt/gh-disk/backup"
-sudo chown -R "runner:runner" "backup" "/mnt/gh-disk/backup"
-sudo chmod "0755" "backup" "/mnt/gh-disk/backup"
+mkdir -p "backup" "/mnt/gh-disk/backup" "/mnt/gh-disk/part2/backup"
+sudo chown -R "runner:runner" "backup" "/mnt/gh-disk/backup" "/mnt/gh-disk/part2/backup"
+sudo chmod "0755" "backup" "/mnt/gh-disk/backup" "/mnt/gh-disk/part2/backup"
 [ -e "backup/.gitkeep" ] || : > "backup/.gitkeep"
