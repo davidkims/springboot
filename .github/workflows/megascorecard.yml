@@ -45,12 +45,11 @@ on:
         required: true
 
   schedule:
-    - cron: "*/1 * * * *"   # every minute
+    - cron: "*/1 * * * *"
 
 permissions:
   contents: write
 
-# prevent overlapping runs (cron + manual)
 concurrency:
   group: springboot-disk-dirs
   cancel-in-progress: false
@@ -73,9 +72,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: true
-          fetch-depth: 0   # allow rebase/pull
+          fetch-depth: 0
 
-      - name: 🧰 Init — FULL ECHO bootstrap (+helpers)
+      - name: 🧰 Init — FULL ECHO bootstrap (+helpers, heredoc safe)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -83,44 +82,47 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
+          set +H   # history expansion off (for '!' chars)
+
           run_cmd() { echo "[CMD] $*"; eval "$@"; }
-          write_echo() {
-            local target="$1"; shift
-            mkdir -p "$(dirname "$target")"
-            {
-              echo '#!/usr/bin/env bash'
-              echo 'set -Eeuo pipefail'
-              echo 'export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\'''
-              echo 'set -x'
-              for line in "$@"; do echo "$line"; done
-            } > "$target"
-            chmod +x "$target"
-            echo "[ECHO] Wrote echo script: $target"
-          }
-          # Safe loop-device getter (idempotent)
+
+          cat > "$ECHO_DIR/_helpers.sh" <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
+          set -x
+
+          run_cmd() { echo "[CMD] $*"; eval "$@"; }
+
+          # Idempotent loop device fetch/attach
           get_loop() {
             local dev
             dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "$dev" ]]; then
+            if [[ -z "${dev}" ]]; then
               sudo losetup -fP "$DISK_IMG"
               dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
             fi
-            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
+            [[ -z "${dev}" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
-          # Parse owner:group
+
           parse_owner_group() {
-            local og="$1"
+            local og="${1:-runner:runner}"
             local u="${og%%:*}"
             local g="${og#*:}"
+            [[ -z "$u" ]] && u="runner"
+            [[ -z "$g" ]] && g="runner"
             echo "$u" "$g"
           }
-          export -f run_cmd write_echo get_loop parse_owner_group
-          write_echo "$ECHO_DIR/_helpers.sh" \
-            'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
-            'get_loop() { local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; fi; [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }; printf "%s" "$dev"; }' \
-            'parse_owner_group(){ local og="$1"; local u="${og%%:*}"; local g="${og#*:}"; echo "$u" "$g"; }' \
-            'write_echo() { local target="$1"; shift; mkdir -p "$(dirname "$target")"; { echo "#!/usr/bin/env bash"; echo "set -Eeuo pipefail"; echo "export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\''"; echo "set -x"; for line in "$@"; do echo "$line"; done; } > "$target"; chmod +x "$target"; echo "[ECHO] Wrote echo script: $target"; }'
+
+          # Safe defaults when workflow_dispatch inputs are empty (e.g. on schedule)
+          default_mount()      { echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
+          default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
+          default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
+          default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
+          default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
+          BASH
+          chmod +x "$ECHO_DIR/_helpers.sh"
 
       - name: 📦 Ensure FS tools (xfsprogs, btrfs-progs, parted)
         shell: bash
@@ -129,7 +131,8 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/05_fs_tools.log") 2>&1
           set -x
-          FST="${{ inputs.fs_type }}"
+          FST_RAW="${{ inputs.fs_type }}"
+          FST="$(INPUT_FS_TYPE="$FST_RAW" default_fs)"
           run_cmd "sudo apt-get update -y"
           run_cmd "sudo apt-get install -y parted"
           if [[ "$FST" == "xfs" ]]; then
@@ -137,7 +140,7 @@ jobs:
           elif [[ "$FST" == "btrfs" ]]; then
             run_cmd "sudo apt-get install -y btrfs-progs"
           else
-            echo "[ECHO] ext4 selected — e2fsprogs present on runners"
+            echo "[ECHO] ext4 selected — e2fsprogs present"
           fi
 
       - name: 🧱 Create disk image (sparse) + attach loop
@@ -147,8 +150,21 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
           set -x
-          SIZE_MB="${{ inputs.disk_size_mb }}"
-          run_cmd "dd if=/dev/zero of=\"$DISK_IMG\" bs=1M count=0 seek=\"$SIZE_MB\""
+
+          RAW_SIZE_MB="${{ inputs.disk_size_mb }}"
+          if [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]]; then
+            RAW_SIZE_MB="2048"
+            echo "[ECHO] inputs.disk_size_mb empty/invalid → default 2048MB"
+          fi
+
+          CUR_BYTES="$(stat -c%s "$DISK_IMG" 2>/dev/null || echo 0)"
+          if (( CUR_BYTES == 0 )); then
+            run_cmd "truncate -s ${RAW_SIZE_MB}M \"$DISK_IMG\""
+            echo "[ECHO] Created sparse image: ${RAW_SIZE_MB}MB"
+          else
+            echo "[ECHO] Existing image: ${CUR_BYTES} bytes → keep"
+          fi
+
           LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
           run_cmd "ls -lh \"$DISK_IMG\""
 
@@ -174,7 +190,8 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
           set -x
-          FST="${{ inputs.fs_type }}"
+          FST_RAW="${{ inputs.fs_type }}"
+          FST="$(INPUT_FS_TYPE="$FST_RAW" default_fs)"
           LOOP_DEV="$(get_loop)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
@@ -190,17 +207,19 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"
-          read OWNER GROUP < <(parse_owner_group "$OG")
+          MNT_RAW="${{ inputs.mount_point }}"
+          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
+          OG_RAW="${{ inputs.owner_group }}"
+          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
           LOOP_DEV="$(get_loop)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+
           run_cmd "sudo mkdir -p \"${MNT}\""
           if mount | grep -q " on ${MNT} "; then
             echo "[ECHO] ${MNT} already mounted"
           else
             run_cmd "sudo mount \"$P1\" \"${MNT}\""
           fi
-          # important: create part2 after p1 mount (p1 hides pre-created dirs)
           run_cmd "sudo mkdir -p \"${MNT}/part2\""
           if mount | grep -q " on ${MNT}/part2 "; then
             echo "[ECHO] ${MNT}/part2 already mounted"
@@ -218,10 +237,15 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
-          read OWNER GROUP < <(parse_owner_group "$OG")
+          MNT_RAW="${{ inputs.mount_point }}"
+          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
+          OG_RAW="${{ inputs.owner_group }}"
+          MODE_RAW="${{ inputs.dir_mode }}"
+          MODE="$(INPUT_DIR_MODE="$MODE_RAW" default_dir_mode)"
+          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
           SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" )
-          IFS=',' read -ra EXTRA <<< "${{ inputs.dir_list }}"
+          DL_RAW="${{ inputs.dir_list }}"
+          IFS=',' read -ra EXTRA <<< "$(INPUT_DIR_LIST="$DL_RAW" default_dir_list)"
           for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
           while IFS= read -r d; do
@@ -229,11 +253,8 @@ jobs:
             run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
             run_cmd "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
-            write_echo "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh" \
-              "mkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" \
-              "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" \
-              "sudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"" \
-              "[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\""
+            echo -e "#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\nmkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"\nsudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"\nsudo chmod \"${MODE}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\"\n[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\"" > "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh"
+            chmod +x "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh"
           done < "$ECHO_DIR/.all_dirs.txt"
 
       - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart 2 → grow FS)
@@ -243,15 +264,33 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; FST="${{ inputs.fs_type }}"
-          CUR_BYTES="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
-          REQ_MB="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ_MB:-$CUR_MB}"
+          MNT_RAW="${{ inputs.mount_point }}"
+          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
+          FST_RAW="${{ inputs.fs_type }}"
+          FST="$(INPUT_FS_TYPE="$FST_RAW" default_fs)"
+
+          CUR_BYTES="$(stat -c%s "$DISK_IMG")"
+          CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
+
+          REQ_MB_RAW="${{ inputs.resize_to_mb }}"
+          if [[ -n "${REQ_MB_RAW:-}" && "${REQ_MB_RAW}" =~ ^[0-9]+$ ]]; then
+            NEW_MB="$REQ_MB_RAW"
+          else
+            NEW_MB="$CUR_MB"
+          fi
           echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
-          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"$DISK_IMG\"" || echo "[ECHO] No file growth needed"
+
+          if (( NEW_MB > CUR_MB )); then
+            run_cmd "truncate -s ${NEW_MB}M \"$DISK_IMG\""
+          else
+            echo "[ECHO] No file growth needed"
+          fi
+
           LOOP_DEV="$(get_loop)"
           run_cmd "sudo losetup -c \"$LOOP_DEV\""
           run_cmd "sudo parted -s \"$LOOP_DEV\" resizepart 2 100% || true"
           run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
+
           case "$FST" in
             ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}p2\"" ;;
             xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"" ;;
@@ -266,33 +305,36 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
           set -x
-          # Parse bulk_spec "dirs=100,files=10,size_kb=4,prefix=gen"
-          SPEC="${{ inputs.bulk_spec }}"
+          SPEC_RAW="${{ inputs.bulk_spec }}"
+          SPEC="$(INPUT_BULK_SPEC="$SPEC_RAW" default_bulk_spec)"
           getv(){ echo "$SPEC" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}'; }
           NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"
           : "${NUM_DIRS:=100}" ; : "${NUM_FILES:=10}" ; : "${SIZE_KB:=4}" ; : "${PREFIX:=gen}"
           echo "[ECHO] bulk_spec → dirs=$NUM_DIRS files=$NUM_FILES size_kb=$SIZE_KB prefix=$PREFIX"
-          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
-          read OWNER GROUP < <(parse_owner_group "$OG")
+
+          MNT_RAW="${{ inputs.mount_point }}"
+          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
+          OG_RAW="${{ inputs.owner_group }}"
+          MODE_RAW="${{ inputs.dir_mode }}"
+          MODE="$(INPUT_DIR_MODE="$MODE_RAW" default_dir_mode)"
+          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
+
           ROOT_REPO="bulk/${PREFIX}"
           ROOT_P1="${MNT}/bulk/${PREFIX}"
           ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
           run_cmd "mkdir -p \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
           run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
           run_cmd "sudo chmod -R \"${MODE}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
+
           create_or_upgrade_dir() {
-            local base="$1"
-            local i="$2"
-            local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
+            local base="$1"; local i="$2"; local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
             mkdir -p "$d"
             for n in $(seq 1 "$NUM_FILES"); do
               local f="${d}/file-$(printf '%04d' "$n").bin"
               if [ -f "$f" ]; then
                 local cur; cur="$(stat -c%s "$f" || echo 0)"
                 local need=$(( SIZE_KB * 1024 ))
-                if (( cur < need )); then
-                  truncate -s "${need}" "$f"
-                fi
+                (( cur < need )) && truncate -s "${need}" "$f" || true
               else
                 truncate -s "$(( SIZE_KB * 1024 ))" "$f"
               fi
@@ -304,17 +346,29 @@ jobs:
             create_or_upgrade_dir "$ROOT_P1"   "$i"
             create_or_upgrade_dir "$ROOT_P2"   "$i"
           done
+
           run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
           run_cmd "sudo chmod -R \"${MODE}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
-          write_echo "$ECHO_DIR/bulk_gen_upgrade.sh" \
-            "SPEC='${SPEC}'" \
-            'getv(){ echo "$SPEC" | tr "," "\n" | awk -F= -v k="$1" '\''$1==k{print $2}'\''; }' \
-            'NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"; : "${NUM_DIRS:=100}"; : "${NUM_FILES:=10}"; : "${SIZE_KB:=4}"; : "${PREFIX:=gen}"' \
-            'MNT="${{ inputs.mount_point }}"; OWNER="${OWNER}"; GROUP="${GROUP}"; MODE="${MODE}"' \
-            'ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"' \
-            'create_or_upgrade_dir() { local base="$1"; local i="$2"; local d="${base}/$(printf "%s-%06d" "$PREFIX" "$i")"; mkdir -p "$d"; for n in $(seq 1 "$NUM_FILES"); do local f="${d}/file-$(printf "%04d" "$n").bin"; if [ -f "$f" ]; then cur="$(stat -c%s "$f" || echo 0)"; need=$(( SIZE_KB * 1024 )); if (( cur < need )); then truncate -s "${need}" "$f"; fi; else truncate -s "$(( SIZE_KB * 1024 ))" "$f"; fi; done; }' \
-            'for i in $(seq 1 "$NUM_DIRS"); do create_or_upgrade_dir "$ROOT_REPO" "$i"; create_or_upgrade_dir "$ROOT_P1" "$i"; create_or_upgrade_dir "$ROOT_P2" "$i"; done' \
-            'sudo chown -R "$OWNER:$GROUP" "bulk" "$MNT/bulk" "$MNT/part2/bulk"; sudo chmod -R "$MODE" "bulk" "$MNT/bulk" "$MNT/part2/bulk"'
+
+          cat > "$ECHO_DIR/bulk_gen_upgrade.sh" <<BASH
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          set -x
+          SPEC='${SPEC}'
+          getv(){ echo "\$SPEC" | tr "," "\n" | awk -F= -v k="\$1" '\$1==k{print \$2}'; }
+          NUM_DIRS="\$(getv dirs)"; NUM_FILES="\$(getv files)"; SIZE_KB="\$(getv size_kb)"; PREFIX="\$(getv prefix)"
+          : "\${NUM_DIRS:=100}"; : "\${NUM_FILES:=10}"; : "\${SIZE_KB:=4}"; : "\${PREFIX:=gen}"
+          MNT="${MNT}"; OWNER="${OWNER}"; GROUP="${GROUP}"; MODE="${MODE}"
+          ROOT_REPO="bulk/\${PREFIX}"; ROOT_P1="\${MNT}/bulk/\${PREFIX}"; ROOT_P2="\${MNT}/part2/bulk/\${PREFIX}"
+          create_or_upgrade_dir() { local base="\$1"; local i="\$2"; local d="\${base}/\$(printf "%s-%06d" "\$PREFIX" "\$i")"; mkdir -p "\$d";
+            for n in \$(seq 1 "\$NUM_FILES"); do f="\${d}/file-\$(printf "%04d" "\$n").bin";
+              if [ -f "\$f" ]; then cur="\$(stat -c%s "\$f" || echo 0)"; need=\$(( SIZE_KB * 1024 )); (( cur < need )) && truncate -s "\${need}" "\$f" || true;
+              else truncate -s "\$(( SIZE_KB * 1024 ))" "\$f"; fi; done; }
+          for i in \$(seq 1 "\$NUM_DIRS"); do create_or_upgrade_dir "\$ROOT_REPO" "\$i"; create_or_upgrade_dir "\$ROOT_P1" "\$i"; create_or_upgrade_dir "\$ROOT_P2" "\$i"; done
+          sudo chown -R "\$OWNER:\$GROUP" "bulk" "\$MNT/bulk" "\$MNT/part2/bulk"
+          sudo chmod -R "\$MODE" "bulk" "\$MNT/bulk" "\$MNT/part2/bulk"
+          BASH
+          chmod +x "$ECHO_DIR/bulk_gen_upgrade.sh"
 
       - name: 👀 Live .github watcher — mirror new dirs to both mounts (5 min)
         shell: bash
@@ -323,8 +377,12 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/40_live_github_watch.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
-          read OWNER GROUP < <(parse_owner_group "$OG")
+          MNT_RAW="${{ inputs.mount_point }}"
+          MNT="$(INPUT_MOUNT_POINT="$MNT_RAW" default_mount)"
+          OG_RAW="${{ inputs.owner_group }}"
+          MODE_RAW="${{ inputs.dir_mode }}"
+          MODE="$(INPUT_DIR_MODE="$MODE_RAW" default_dir_mode)"
+          read OWNER GROUP < <(parse_owner_group "${OG_RAW:-runner:runner}")
           SNAP="$ECHO_DIR/.github_dirs.snap"
           find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
           for i in $(seq 1 60); do
@@ -334,17 +392,14 @@ jobs:
             DIFF="$ECHO_DIR/.github_dirs.diff"
             comm -13 "$SNAP" "$NEW_SNAP" > "$DIFF" || true
             if [ -s "$DIFF" ]; then
-              echo "[ECHO] Detected new .github directories:"
-              cat "$DIFF"
+              echo "[ECHO] Detected new .github directories:"; cat "$DIFF"
               while IFS= read -r rel; do
                 [[ -z "$rel" ]] && continue
                 run_cmd "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
                 run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
                 run_cmd "sudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
-                write_echo "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh" \
-                  "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" \
-                  "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" \
-                  "sudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
+                echo -e "#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\nmkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"\nsudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"\nsudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" > "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh"
+                chmod +x "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh"
               done < "$DIFF"
               mv "$NEW_SNAP" "$SNAP"
             else
@@ -359,16 +414,7 @@ jobs:
           exec > >(tee -a ".github/echo_logs/42_generate_workflows.log") 2>&1
           set -x
           mkdir -p .github/workflows
-          gen() {
-            local path="$1"; shift
-            local content="$*"
-            if [ ! -f "$path" ]; then
-              printf "%s\n" "$content" > "$path"
-              echo "[ECHO] created workflow: $path"
-            else
-              echo "[ECHO] exists (skip): $path"
-            fi
-          }
+          gen() { local path="$1"; shift; local content="$*"; if [ ! -f "$path" ]; then printf "%s\n" "$content" > "$path"; echo "[ECHO] created workflow: $path"; else echo "[ECHO] exists (skip): $path"; fi; }
           gen ".github/workflows/diskdirs-resize-only.yml" "$(cat <<'YAML'
           name: "🧩 DiskDirs — Resize Only (manual)"
           on: { workflow_dispatch: {} }
@@ -378,8 +424,7 @@ jobs:
               steps:
                 - uses: actions/checkout@v4
                 - name: Echo Resize Hint
-                  run: |
-                    echo "[ECHO] Use main workflow inputs.resize_to_mb to grow disk.img"
+                  run: echo "[ECHO] Use main workflow inputs.resize_to_mb to grow disk.img"
           YAML
           )"
           gen ".github/workflows/pages-size-report.yml" "$(cat <<'YAML'
@@ -470,11 +515,11 @@ jobs:
           set -x
           echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
           run_cmd "tail -n 20 .gitignore || true"
-          write_echo "$ECHO_DIR/add_gitignore.sh" \
-            "echo -e \"\\n# auto-generated\\n${DISK_IMG}\\n*.img\\n.github/echo_logs/*.log\\n\" >> .gitignore"
+          printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nset -x\necho -e "\\n# auto-generated\\n%s\\n*.img\\n.github/echo_logs/*.log\\n" >> .gitignore\n' "${DISK_IMG}" > "$ECHO_DIR/add_gitignore.sh"
+          chmod +x "$ECHO_DIR/add_gitignore.sh"
 
       - name: ✅ Commit & (optional) push (with rebase fallback + backup branch)
-        if: ${{ inputs.commit_and_push == 'true' }}
+        if: ${{ inputs.commit_and_push == 'true' || github.event_name == 'schedule' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -505,7 +550,7 @@ jobs:
             echo "[ECHO] No changes to commit."
             exit 0
           fi
-          git commit -m "${{ inputs.commit_message }}"
+          git commit -m "${{ inputs.commit_message || 'chore: disk+dirs auto (cron)' }}"
           if git push origin "$TARGET_BR"; then
             echo "[ECHO] Pushed to origin/$TARGET_BR (fast-forward)"
             exit 0
