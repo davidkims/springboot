@@ -35,32 +35,15 @@ on:
         description: "Directory permission (octal)"
         default: "0755"
         required: true
-      commit_enable:
-        description: "Commit generated files to repo? true|false"
+      commit_and_push:
+        description: "Commit and push generated files? true|false"
         default: "true"
-        required: true
-      push_enable:
-        description: "Push commit to remote? true|false"
-        default: "true"
-        required: true
-      push_branch:
-        description: "Branch to commit/push (default: current)"
-        default: ""
-        required: false
-      git_user_name:
-        description: "Git user.name for commit"
-        default: "gh-actions-bot"
-        required: true
-      git_user_email:
-        description: "Git user.email for commit"
-        default: "gh-actions-bot@example.com"
         required: true
       commit_message:
         description: "Commit message"
         default: "chore: echo-created disk/dirs/logs (auto)"
         required: true
 
-# 커밋/푸시를 위해 write 권한 필요
 permissions:
   contents: write
 
@@ -72,12 +55,14 @@ jobs:
       DISK_IMG: disk.img
       LOG_DIR: .github/echo_logs
       ECHO_DIR: .github/echo_scripts
+      GIT_USER_NAME: gh-actions-bot
+      GIT_USER_EMAIL: gh-actions-bot@example.com
 
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: true  # GITHUB_TOKEN으로 push 허용
+          persist-credentials: true
 
       - name: 🧰 Init — FULL ECHO bootstrap
         shell: bash
@@ -130,7 +115,7 @@ jobs:
             run_cmd "sudo apt-get update -y"
             run_cmd "sudo apt-get install -y btrfs-progs"
           else
-            echo "[ECHO] ext4 selected — e2fsprogs already present on runners"
+            echo "[ECHO] ext4 selected — e2fsprogs present on runners"
           fi
 
       - name: 🧱 Create disk image + mkfs (EXT4/XFS/Btrfs) — FULL ECHO
@@ -171,7 +156,6 @@ jobs:
           MNT="${{ inputs.mount_point }}"
           OWNER="${{ inputs.owner }}"
           GROUP="${{ inputs.group }}"
-          FST="${{ inputs.fs_type }}"
 
           run_cmd "sudo losetup -fP \"${DISK_IMG}\""
           LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
@@ -185,7 +169,6 @@ jobs:
           run_cmd "ls -al \"${MNT}\""
           run_cmd "df -h \"${MNT}\""
 
-          # cleanup helper intentionally NOT used later (no unmount by request)
           write_echo "$ECHO_DIR/_note_no_unmount.sh" \
             "echo '[NOTE] This run intentionally leaves ${MNT} mounted (no unmount per request).'" 
 
@@ -244,26 +227,15 @@ jobs:
           FST="${{ inputs.fs_type }}"
           run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\""
 
-          # loop device size 재인식 (no detach)
           LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
           [[ -z "$LOOP_DEV" ]] && { echo "[ERROR] loop device not found"; exit 1; }
           run_cmd "sudo losetup -c \"${LOOP_DEV}\""
 
           case "$FST" in
-            ext4)
-              # ext4는 온라인 grow 지원
-              run_cmd "sudo resize2fs \"${LOOP_DEV}\""
-              ;;
-            xfs)
-              # xfs는 mount된 상태에서 xfs_growfs <mountpoint>
-              run_cmd "sudo xfs_growfs \"${MNT}\""
-              ;;
-            btrfs)
-              # btrfs는 mountpoint 기준으로 max까지 확장
-              run_cmd "sudo btrfs filesystem resize max \"${MNT}\""
-              ;;
-            *)
-              echo "[ERROR] Unsupported fs_type for resize: $FST"; exit 1 ;;
+            ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}\"" ;;
+            xfs)   run_cmd "sudo xfs_growfs \"${MNT}\"" ;;
+            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}\"" ;;
+            *) echo "[ERROR] Unsupported fs_type for resize: $FST"; exit 1 ;;
           esac
 
           run_cmd "df -h \"${MNT}\""
@@ -289,7 +261,7 @@ jobs:
             "echo -e \"\\n# auto-generated\\n${DISK_IMG}\\n*.img\\n.github/echo_logs/*.log\\n\" >> .gitignore"
 
       - name: ✅ Commit & (optional) push — FULL ECHO
-        if: ${{ inputs.commit_enable == 'true' }}
+        if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -300,40 +272,28 @@ jobs:
           exec > >(tee -a "$LOG_DIR/60_commit_push.log") 2>&1
           set -x
 
-          git config user.name "${{ inputs.git_user_name }}"
-          git config user.email "${{ inputs.git_user_email }}"
+          git config user.name "${GIT_USER_NAME}"
+          git config user.email "${GIT_USER_EMAIL}"
 
-          # 대상 브랜치 결정
-          TARGET_BR="${{ inputs.push_branch }}"
-          if [[ -z "$TARGET_BR" ]]; then
-            TARGET_BR="${GITHUB_REF_NAME}"
-          fi
+          TARGET_BR="${GITHUB_REF_NAME}"
           echo "[ECHO] Target branch: $TARGET_BR"
 
-          # 브랜치 전환 (필요시 생성)
           CURRENT="$(git rev-parse --abbrev-ref HEAD)"
           if [[ "$CURRENT" != "$TARGET_BR" ]]; then
             git fetch origin "$TARGET_BR" || true
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
 
-          # 스테이징(생성 디렉토리/스크립트/로그)
           git add .gitignore .github/echo_scripts .github/echo_logs \
                   $(echo "${{ inputs.dir_list }}" | tr ',' ' ' | xargs -n1 -I{} echo "./{}")
 
-          # 변경 없으면 종료
           if git diff --cached --quiet; then
             echo "[ECHO] No changes to commit."
           else
             git commit -m "${{ inputs.commit_message }}"
             echo "[ECHO] Commit created."
-            if [[ "${{ inputs.push_enable }}" == "true" ]]; then
-              # checkout@v4 persist-credentials=true 이므로 https remote에 토큰이 이미 세팅됨
-              git push origin "$TARGET_BR"
-              echo "[ECHO] Pushed to origin/$TARGET_BR"
-            else
-              echo "[ECHO] Push skipped by input."
-            fi
+            git push origin "$TARGET_BR"
+            echo "[ECHO] Pushed to origin/$TARGET_BR"
           fi
 
       - name: 📦 Upload artifacts (logs + echo scripts)
@@ -345,4 +305,4 @@ jobs:
             .github/echo_scripts/**
           retention-days: 7
 
-      # ⚠️ 요청에 따라 언마운트/losetup 해제 단계 없음 (의도적으로 생략)
+      # Per request: NO unmount/losetup detach step
