@@ -50,6 +50,11 @@ on:
 permissions:
   contents: write
 
+# 동시 실행 방지(1분 크론과 수동 실행이 겹칠 때 안전)
+concurrency:
+  group: springboot-disk-dirs
+  cancel-in-progress: false
+
 jobs:
   springboot-disk-dirs:
     runs-on: ubuntu-latest
@@ -69,7 +74,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: 🧰 Init — FULL ECHO bootstrap
+      - name: 🧰 Init — FULL ECHO bootstrap (+helpers: run_cmd/get_loop/write_echo)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -79,6 +84,7 @@ jobs:
           set -x
 
           run_cmd() { echo "[CMD] $*"; eval "$@"; }
+
           write_echo() {
             local target="$1"; shift
             mkdir -p "$(dirname "$target")"
@@ -92,13 +98,41 @@ jobs:
             chmod +x "$target"
             echo "[ECHO] Wrote echo script: $target"
           }
-          export -f run_cmd write_echo
+
+          # get_loop: 매 스텝마다 안전하게 loop 장치를 조회/부착
+          get_loop() {
+            local dev
+            dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
+            if [[ -z "$dev" ]]; then
+              sudo losetup -fP "$DISK_IMG"
+              dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
+            fi
+            if [[ -z "$dev" ]]; then
+              echo "[ERROR] loop device not found for $DISK_IMG" >&2
+              return 1
+            fi
+            printf "%s" "$dev"
+          }
+
+          export -f run_cmd write_echo get_loop
+
+          # helpers 파일도 생성(후속 스텝에서 source)
           write_echo "$ECHO_DIR/_helpers.sh" \
             'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
+            'get_loop() {' \
+            '  local dev' \
+            '  dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""' \
+            '  if [[ -z "$dev" ]]; then' \
+            '    sudo losetup -fP "$DISK_IMG"' \
+            '    dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""' \
+            '  fi' \
+            '  if [[ -z "$dev" ]]; then echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; fi' \
+            '  printf "%s" "$dev"' \
+            '}' \
             'write_echo() {' \
             '  local target="$1"; shift' \
             '  mkdir -p "$(dirname "$target")"' \
-            '  { echo "#!/usr/bin/env bash"; echo "set -Eeuo pipefail"; echo "export PS4='"'"'+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '"'"'"; echo "set -x"; for line in "$@"; do echo "$line"; done; } > "$target"' \
+            '  { echo "#!/usr/bin/env bash"; echo "set -Eeuo pipefail"; echo "export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\''"; echo "set -x"; for line in "$@"; do echo "$line"; done; } > "$target"' \
             '  chmod +x "$target"; echo "[ECHO] Wrote echo script: $target"' \
             '}'
 
@@ -120,7 +154,7 @@ jobs:
             echo "[ECHO] ext4 selected — e2fsprogs present on runners"
           fi
 
-      - name: 🧱 Create disk image (sparse) + setup loop
+      - name: 🧱 Create disk image (sparse) + attach loop
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -129,26 +163,29 @@ jobs:
           set -x
           SIZE_MB="${{ inputs.disk_size_mb }}"
           run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\""
-          run_cmd "sudo losetup -fP \"${DISK_IMG}\""
-          LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
-          [[ -z "$LOOP_DEV" ]] && { echo "[ERROR] loop device not found"; exit 1; }
+          # attach (idempotent via get_loop)
+          LOOP_DEV="$(get_loop)"
           echo "[ECHO] LOOP_DEV=$LOOP_DEV"
+          run_cmd "ls -lh \"${DISK_IMG}\""
 
-      - name: 🧭 Partition with GPT (p1=60%, p2=rest) via parted
+      - name: 🧭 Partition with GPT (p1=60%, p2=rest) via parted (idempotent)
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
           set -x
-          [[ -z "$LOOP_DEV" ]] && LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60%"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P2_NAME} 60% 100%"
+          LOOP_DEV="$(get_loop)"
+          echo "[ECHO] LOOP_DEV=$LOOP_DEV"
+          # print first; then (re)label gpt, tolerate if already labeled
+          run_cmd "sudo parted -s \"$LOOP_DEV\" print || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60% || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P2_NAME} 60% 100% || true"
           run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
-          run_cmd "ls -l ${LOOP_DEV}*"
+          run_cmd "ls -l ${LOOP_DEV}* || true"
 
-      - name: 🧪 Make filesystems on /dev/loopXp1 and /dev/loopXp2
+      - name: 🧪 Make filesystems on p1/p2
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -156,13 +193,12 @@ jobs:
           exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
           set -x
           FST="${{ inputs.fs_type }}"
-          [[ -z "$LOOP_DEV" ]] && LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          LOOP_DEV="$(get_loop)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
             ext4)  run_cmd "sudo mkfs.ext4 -F \"$P1\""; run_cmd "sudo mkfs.ext4 -F \"$P2\"" ;;
             xfs)   run_cmd "sudo mkfs.xfs -f \"$P1\"";  run_cmd "sudo mkfs.xfs -f \"$P2\"" ;;
             btrfs) run_cmd "sudo mkfs.btrfs -f \"$P1\"";run_cmd "sudo mkfs.btrfs -f \"$P2\"" ;;
-            *) echo "[ERROR] Unsupported fs_type: $FST"; exit 1 ;;
           esac
 
       - name: 🔗 Mount both partitions (p1 at mount_point, p2 at mount_point/part2)
@@ -173,7 +209,7 @@ jobs:
           exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
           set -x
           MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"
-          [[ -z "$LOOP_DEV" ]] && LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+          LOOP_DEV="$(get_loop)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           run_cmd "sudo mkdir -p \"${MNT}\" \"${MNT}/part2\""
           run_cmd "sudo mount \"$P1\" \"${MNT}\""
@@ -207,7 +243,7 @@ jobs:
               "[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\""
           done < "$ECHO_DIR/.all_dirs.txt"
 
-      - name: 📏 Online resize (image) + grow p2 to 100% — ALWAYS
+      - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart p2 → grow FS)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -219,16 +255,17 @@ jobs:
           REQ_MB="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ_MB:-$CUR_MB}"
           echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
           if (( NEW_MB > CUR_MB )); then run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\""; else echo "[ECHO] No file growth needed"; fi
-          LOOP_DEV="$(sudo losetup -j "${DISK_IMG}" | awk -F: '{print $1}')"
+
+          LOOP_DEV="$(get_loop)"
           run_cmd "sudo losetup -c \"${LOOP_DEV}\""
-          # p2를 전체로 확장
-          run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100%"
+          run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100% || true"
           run_cmd "sudo partprobe \"${LOOP_DEV}\" || true"
-          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+
+          P2="${LOOP_DEV}p2"
           case "$FST" in
-            ext4)  run_cmd "sudo resize2fs \"$P2\"";;
-            xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"";;
-            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}/part2\"";;
+            ext4)  run_cmd "sudo resize2fs \"$P2\"" ;;
+            xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"" ;;
+            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}/part2\"" ;;
           esac
           run_cmd "df -h | grep -E \"${MNT}(/part2)?\" || true"
 
@@ -241,7 +278,6 @@ jobs:
           set -x
           MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"; MODE="${{ inputs.dir_mode }}"
           SNAP="$ECHO_DIR/.github_dirs.snap"
-          # initial snapshot
           find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
 
           for i in $(seq 1 60); do   # ~5분(5s*60)
@@ -255,11 +291,9 @@ jobs:
               cat "$DIFF"
               while IFS= read -r rel; do
                 [[ -z "$rel" ]] && continue
-                # mirror to mounts under same relative path
                 run_cmd "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
                 run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
                 run_cmd "sudo chmod \"${MODE}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\""
-                # echo script per new dir
                 write_echo "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh" \
                   "mkdir -p \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" \
                   "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}/.github/${rel}\" \"${MNT}/part2/.github/${rel}\"" \
@@ -333,4 +367,4 @@ jobs:
             .github/echo_monitoring/**
           retention-days: 7
 
-      # NOTE: per request, NO unmount/losetup detach step
+      # Per request: NO unmount/losetup detach step
