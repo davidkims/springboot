@@ -1,8 +1,9 @@
-name: "💾 MEGA Disk Boost + EchoOps (for .github)"
+name: "💾 MEGA Disk Boost + EchoOps + Service AutoUpgrade + 24x7 Watchdog"
 
 on:
   workflow_dispatch:
     inputs:
+      # Disk boost params
       root_reserve_mb:
         description: "루트 파티션 최소 여유(MB)"
         required: false
@@ -16,41 +17,80 @@ on:
         required: false
         default: "1024"
       remove_dotnet:
-        description: "사전설치 .NET 제거"
+        description: ".NET 제거"
         required: false
         default: "true"
       remove_android:
-        description: "사전설치 Android 제거"
+        description: "Android 제거"
         required: false
         default: "true"
       remove_haskell:
-        description: "사전설치 Haskell 제거"
+        description: "Haskell 제거"
         required: false
         default: "true"
       remove_codeql:
-        description: "사전설치 CodeQL 제거"
+        description: "CodeQL 제거"
         required: false
         default: "true"
       remove_docker_images:
-        description: "사전설치 Docker 이미지 제거"
+        description: "Docker 이미지 제거"
         required: false
         default: "true"
+
+      # Upgrade controls
+      upgrade_os:
+        description: "OS 패키지 자동 업그레이드 실행"
+        required: false
+        default: "false"
+      upgrade_docker:
+        description: "Docker/Compose 업그레이드 실행"
+        required: false
+        default: "false"
+      services:
+        description: "업그레이드 대상(쉼표 구분)"
+        required: false
+        default: "mysql,postgres,redis,mongo,kafka,rabbitmq,vault,minio,airflow,spark,camunda"
+
+      # 24x7 Watchdog controls
+      monitor_minutes:
+        description: "워치독 지속 시간(분, 300=5시간)"
+        required: false
+        default: "300"
+      monitor_interval_sec:
+        description: "점검 주기(초)"
+        required: false
+        default: "60"
+      threshold_ws_mb:
+        description: "작업공간 임계치(MB) 미만시 자동 증설"
+        required: false
+        default: "20480" # 20GB
+      threshold_root_mb:
+        description: "루트 파티션 임계치(MB)"
+        required: false
+        default: "8192"  # 8GB
+      auto_boost_in_watchdog:
+        description: "워치독이 임계치 미만시 boost_now.sh 자동 실행"
+        required: false
+        default: "true"
+
+  # 스케줄: 5분마다 트리거(플랫폼 특성상 실제 기동은 지연/큐잉 가능)
   schedule:
-    - cron: "*/1 * * * *"   # 1분마다 (GitHub이 실제로는 최소 5분 주기로 트리거)
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
 
+# 한 번에 1개만 실행. 진행 중일 때 새 스케줄은 큐에 대기(취소 안 함)
 concurrency:
   group: disk-boost-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   disk-boost:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 355  # 워치독 300분 + 여유
     steps:
-      # 0) 러너가 잡힌 뒤에 LOG_DIR를 안전하게 정의(모든 후속 스텝에서 사용 가능)
+      # 0) 러너가 잡힌 다음에 LOG_DIR 정의
       - name: ♻️ Set LOG_DIR from $RUNNER_TEMP
         shell: bash
         run: |
@@ -58,7 +98,7 @@ jobs:
           echo "LOG_DIR=$RUNNER_TEMP/disklogs" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/disklogs"
 
-      # 1) 사전 스냅샷 (체크아웃 전)
+      # 1) BEFORE 스냅샷(체크아웃 전)
       - name: 🔎 BEFORE snapshot (pre-checkout)
         shell: bash
         run: |
@@ -66,17 +106,12 @@ jobs:
           mkdir -p "$LOG_DIR"
           {
             echo "[TIME] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "[BEFORE] df -h"
-            df -h
-            echo
-            echo "[BEFORE] lsblk"
-            lsblk
-            echo
-            echo "[BEFORE] mount (dev only)"
-            mount | grep -E '^/dev' || true
+            echo "[BEFORE] df -h"; df -h
+            echo; echo "[BEFORE] lsblk"; lsblk
+            echo; echo "[BEFORE] mount (dev only)"; mount | grep -E '^/dev' || true
           } | tee "$LOG_DIR/before.log"
 
-      # 2) 안전한 대용량 정리
+      # 2) 안전 정리
       - name: 🧹 Free up preinstalled stuff (safe cleanup)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -88,7 +123,7 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      # 3) /mnt 임시디스크 결합하여 작업공간 최대화 (체크아웃 이전이 권장)
+      # 3) /mnt 임시디스크 결합(체크아웃 전 권장)
       - name: 💽 Maximize build space (LVM over workspace)
         uses: easimon/maximize-build-space@v10
         with:
@@ -101,17 +136,30 @@ jobs:
           remove-codeql: ${{ github.event.inputs.remove_codeql || 'true' }}
           remove-docker-images: ${{ github.event.inputs.remove_docker_images || 'true' }}
 
-      # 4) 체크아웃 — 디스크 증설(재마운트) 이후에 수행
+      # 4) 체크아웃 — 재마운트 이후
       - name: 📥 Checkout (after disk boost)
         uses: actions/checkout@v4
 
-      # 5) .github 경로에 디스크 에코 스크립트/문서 생성
-      - name: 📁 Generate .github echo scripts (+ docs)
+      # 5) .github 유틸(디스크/모니터링) + 업그레이드 스크립트 생성
+      - name: 📁 Generate .github scripts (disk / monitoring / upgrade)
         shell: bash
+        env:
+          DOCKER_IMAGE_MYSQL: mysql:8
+          DOCKER_IMAGE_POSTGRES: postgres:16
+          DOCKER_IMAGE_REDIS: redis:7
+          DOCKER_IMAGE_MONGO: mongo:7
+          DOCKER_IMAGE_KAFKA: bitnami/kafka:latest
+          DOCKER_IMAGE_RABBITMQ: rabbitmq:3-management
+          DOCKER_IMAGE_VAULT: hashicorp/vault:latest
+          DOCKER_IMAGE_MINIO: minio/minio:latest
+          DOCKER_IMAGE_AIRFLOW: apache/airflow:latest
+          DOCKER_IMAGE_SPARK: bitnami/spark:latest
+          DOCKER_IMAGE_CAMUNDA: camunda/camunda-bpm-platform:latest
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/echo_disk .github/echo_logs .github/echo_monitoring
+          mkdir -p .github/echo_disk .github/echo_logs .github/echo_monitoring .github/echo_upgrade
 
+          # 즉시 증설 스크립트
           cat <<'SH' > .github/echo_disk/boost_now.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -130,21 +178,17 @@ jobs:
           SH
           chmod +x .github/echo_disk/boost_now.sh
 
+          # 스냅샷
           cat <<'SH' > .github/echo_disk/df_snapshot.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          ts="$(date -u '+%Y%m%dT%H%M%SZ')"
-          out=".github/echo_logs/df_${ts}.log"
-          {
-            echo "[TIME] $(date -u '+%F %T UTC')"
-            echo "[DF]"; df -h
-            echo; echo "[LSBLK]"; lsblk
-            echo; echo "[MOUNT (dev)]"; mount | grep -E '^/dev' || true
-          } | tee "$out"
+          ts="$(date -u '+%Y%m%dT%H%M%SZ')"; out=".github/echo_logs/df_${ts}.log"
+          { echo "[TIME] $(date -u '+%F %T UTC')"; echo "[DF]"; df -h; echo; echo "[LSBLK]"; lsblk; echo; echo "[MOUNT(dev)]"; mount | grep -E '^/dev' || true; } | tee "$out"
           echo "[SNAPSHOT] saved $out"
           SH
           chmod +x .github/echo_disk/df_snapshot.sh
 
+          # 상위 용량 파일
           cat <<'SH' > .github/echo_monitoring/top_sizes.sh
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -157,69 +201,198 @@ jobs:
           SH
           chmod +x .github/echo_monitoring/top_sizes.sh
 
-          cat <<'MD' > .github/echo_disk/README_disk.md
-          # Disk Boost Scripts (.github/echo_disk)
-          - `boost_now.sh` : 실행 중 추가 디스크 확보(캐시/도구 정리).
-          - `df_snapshot.sh` : 현재 디스크/마운트 스냅샷을 `.github/echo_logs/`에 저장.
-          - `../echo_monitoring/top_sizes.sh` : 저장소 내 상위 용량 파일 리스트 작성.
-          ## 권장 사용
-          - 대형 빌드 **직전** `boost_now.sh` 1회 실행
-          - 빌드 전후 `df_snapshot.sh` 실행
-          - 주기적으로 `top_sizes.sh` 실행
-          MD
+          # OS 업그레이드
+          cat <<'SH' > .github/echo_upgrade/os_autoup.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo "[OS-UP] start: $(date -u '+%F %T UTC')"
+          sudo apt-get update -y
+          mkdir -p .github/echo_upgrade
+          (apt list --upgradable 2>/dev/null | tail -n +2 || true) > .github/echo_upgrade/autoup_targets.txt || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confnew" dist-upgrade
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean || true
+          echo "[OS-UP] done"
+          SH
+          chmod +x .github/echo_upgrade/os_autoup.sh
 
-          echo "[ECHO] .github 경로에 디스크 관련 스크립트/문서 생성 완료"
+          # Docker/Compose 업그레이드
+          cat <<'SH' > .github/echo_upgrade/docker_upgrade.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          SERVICES_CSV="${1:-mysql,postgres,redis,mongo,kafka,rabbitmq,vault,minio,airflow,spark,camunda}"
+          IFS=',' read -r -a SRVS <<< "$SERVICES_CSV"
+          echo "[DKR-UP] services: ${SRVS[*]}"
 
-      # 6) AFTER 스냅샷 + 요약 출력
+          image_for() {
+            svc="$1"; key="DOCKER_IMAGE_${svc^^}"; eval "img=\${$key:-}"
+            if [ -n "$img" ]; then echo "$img"; return 0; fi
+            case "$svc" in
+              mysql) echo "mysql:8" ;;
+              postgres) echo "postgres:16" ;;
+              redis) echo "redis:7" ;;
+              mongo) echo "mongo:7" ;;
+              kafka) echo "bitnami/kafka:latest" ;;
+              rabbitmq) echo "rabbitmq:3-management" ;;
+              vault) echo "hashicorp/vault:latest" ;;
+              minio) echo "minio/minio:latest" ;;
+              airflow) echo "apache/airflow:latest" ;;
+              spark) echo "bitnami/spark:latest" ;;
+              camunda) echo "camunda/camunda-bpm-platform:latest" ;;
+              *) echo ""; return 1 ;;
+            esac
+          }
+
+          has_compose() { command -v docker >/dev/null 2>&1 || return 1; command -v docker compose >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; }
+
+          for svc in "${SRVS[@]}"; do
+            svc_trim="$(echo "$svc" | xargs)"; [ -z "$svc_trim" ] && continue
+            img="$(image_for "$svc_trim" || true)"
+            echo "[DKR-UP] >>> $svc_trim (image=$img)"
+
+            if command -v docker >/dev/null 2>&1; then
+              [ -n "$img" ] && docker pull "$img" || true
+              if has_compose && { [ -f docker-compose.yml ] || [ -f compose.yml ]; }; then
+                if docker compose version >/dev/null 2>&1; then
+                  docker compose pull "$svc_trim" || true
+                  docker compose up -d "$svc_trim" || true
+                else
+                  docker-compose pull "$svc_trim" || true
+                  docker-compose up -d "$svc_trim" || true
+                fi
+              else
+                found="$(docker ps -a --format '{{.Names}}' | grep -iE "\\b$svc_trim\\b" || true)"
+                [ -n "$found" ] && echo "[DKR-UP] container(s) exist: $found (image refreshed; re-create not attempted)"
+              fi
+            else
+              echo "[DKR-UP] docker not available — skipped"
+            fi
+          done
+          echo "[DKR-UP] done"
+          SH
+          chmod +x .github/echo_upgrade/docker_upgrade.sh
+
+          # 단일 서비스 래퍼
+          for s in mysql postgres redis mongo kafka rabbitmq vault minio airflow spark camunda; do
+            cat <<SH > ".github/echo_upgrade/upgrade_${s}.sh"
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          ./.github/echo_upgrade/docker_upgrade.sh "$s"
+          SH
+            chmod +x ".github/echo_upgrade/upgrade_${s}.sh"
+          done
+
+          # 24x7 워치독(임계치 하회시 자동 증설/스냅샷/선택적 업그레이드)
+          cat <<'SH' > .github/echo_disk/watchdog.sh
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          DURATION_MIN="${1:-300}"
+          INTERVAL_SEC="${2:-60}"
+          THRESH_WS_MB="${3:-20480}"
+          THRESH_ROOT_MB="${4:-8192}"
+          AUTO_BOOST="${5:-true}"
+          SRVS="${6:-mysql,postgres,redis,mongo,kafka,rabbitmq,vault,minio,airflow,spark,camunda}"
+          RUN_OS_UP="${7:-false}"
+          RUN_DKR_UP="${8:-false}"
+
+          end_ts=$(( $(date +%s) + DURATION_MIN*60 ))
+          log=".github/echo_logs/watchdog_$(date -u '+%Y%m%dT%H%M%SZ').log"
+          echo "[WATCHDOG] start $(date -u '+%F %T UTC')" | tee -a "$log"
+          echo "[WATCHDOG] interval=${INTERVAL_SEC}s ws=${THRESH_WS_MB}MB root=${THRESH_ROOT_MB}MB auto=${AUTO_BOOST}" | tee -a "$log"
+
+          while [ "$(date +%s)" -lt "$end_ts" ]; do
+            ws="${GITHUB_WORKSPACE:-.}"
+            avail_ws=$(df -Pm "$ws"  | awk 'NR==2{print $4+0}')
+            avail_rt=$(df -Pm /      | awk 'NR==2{print $4+0}')
+            echo "[WD] $(date -u '+%H:%M:%S') avail_ws=${avail_ws}MB avail_root=${avail_rt}MB" | tee -a "$log"
+
+            need_boost="false"
+            [ "$avail_ws"  -lt "$THRESH_WS_MB" ]  && need_boost="true"
+            [ "$avail_rt"  -lt "$THRESH_ROOT_MB" ] && need_boost="true"
+
+            if [ "$AUTO_BOOST" = "true" ] && [ "$need_boost" = "true" ]; then
+              echo "[WD] threshold crossed → boost_now.sh" | tee -a "$log"
+              bash .github/echo_disk/boost_now.sh | tee -a "$log" || true
+              bash .github/echo_disk/df_snapshot.sh || true
+              # 선택적으로 업그레이드(환경 안정 목적, 기본 꺼짐)
+              [ "$RUN_OS_UP" = "true" ]  && bash .github/echo_upgrade/os_autoup.sh | tee -a "$log" || true
+              [ "$RUN_DKR_UP" = "true" ] && bash .github/echo_upgrade/docker_upgrade.sh "$SRVS" | tee -a "$log" || true
+            fi
+
+            sleep "$INTERVAL_SEC"
+          done
+          echo "[WATCHDOG] end $(date -u '+%F %T UTC')" | tee -a "$log"
+          SH
+          chmod +x .github/echo_disk/watchdog.sh
+
+          echo "[ECHO] Scripts generated under .github/ (disk/monitoring/upgrade)"
+
+      # 6) 조건부 즉시 업그레이드(버튼 실행 시)
+      - name: 🔄 Run OS package autoupgrade (conditional)
+        if: ${{ github.event.inputs.upgrade_os == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash .github/echo_upgrade/os_autoup.sh
+
+      - name: 🐳 Run Docker/Compose upgrades (conditional)
+        if: ${{ github.event.inputs.upgrade_docker == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash .github/echo_upgrade/docker_upgrade.sh "${{ github.event.inputs.services }}"
+
+      # 7) 24x7 워치독 실행(시간 제한 내 루프) — 이 스텝이 러너를 붙잡고 상시 감시합니다
+      - name: 🕒 Start 24x7 watchdog loop (bounded)
+        shell: bash
+        env:
+          MON_MIN: ${{ github.event.inputs.monitor_minutes || '300' }}
+          MON_INT: ${{ github.event.inputs.monitor_interval_sec || '60' }}
+          TH_WS:   ${{ github.event.inputs.threshold_ws_mb || '20480' }}
+          TH_RT:   ${{ github.event.inputs.threshold_root_mb || '8192' }}
+          AUTO:    ${{ github.event.inputs.auto_boost_in_watchdog || 'true' }}
+          SRVS:    ${{ github.event.inputs.services }}
+          RUN_OS:  ${{ github.event.inputs.upgrade_os || 'false' }}
+          RUN_DKR: ${{ github.event.inputs.upgrade_docker || 'false' }}
+        run: |
+          set -Eeuo pipefail
+          bash .github/echo_disk/watchdog.sh "$MON_MIN" "$MON_INT" "$TH_WS" "$TH_RT" "$AUTO" "$SRVS" "$RUN_OS" "$RUN_DKR"
+
+      # 8) AFTER 스냅샷 + 요약
       - name: 🔁 AFTER snapshot + summary
-        id: after
         shell: bash
         run: |
           set -Eeuo pipefail
           {
             echo "[TIME] $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "[AFTER] df -h"
-            df -h
+            echo "[AFTER] df -h"; df -h
           } | tee "$LOG_DIR/after.log"
 
           total=$(df -h | awk '$6=="/"{print $2}')
           avail=$(df -h | awk '$6=="/"{print $4}')
           ws_total=$(df -h | awk -v ws="$GITHUB_WORKSPACE" '$6==ws{print $2}')
           ws_avail=$(df -h | awk -v ws="$GITHUB_WORKSPACE" '$6==ws{print $4}')
-          echo "total=$total" >> "$GITHUB_OUTPUT"
-          echo "avail=$avail" >> "$GITHUB_OUTPUT"
-          echo "ws_total=${ws_total:-N/A}" >> "$GITHUB_OUTPUT"
-          echo "ws_avail=${ws_avail:-N/A}" >> "$GITHUB_OUTPUT"
-
           {
-            echo "## 💾 Disk Boost 결과"
-            echo "- 루트 파티션 총 용량: **$total** / 가용: **$avail**"
-            echo "- 작업공간 총 용량: **${ws_total:-N/A}** / 가용: **${ws_avail:-N/A}**"
+            echo "## 💾 24x7 Watchdog 결과"
+            echo "- 루트: **$total** (가용 **$avail**)"
+            echo "- 작업공간: **${ws_total:-N/A}** (가용 **${ws_avail:-N/A}**)"
             echo ""
-            echo "### 활용 팁"
-            echo "- 대형 빌드 직전 \`.github/echo_disk/boost_now.sh\` 실행"
-            echo "- 용량 변화 기록: \`.github/echo_disk/df_snapshot.sh\`"
-            echo "- 상위 용량 파일 점검: \`.github/echo_monitoring/top_sizes.sh\`"
+            echo "### 설정"
+            echo "- 임계치(WS/ROOT): ${{ github.event.inputs.threshold_ws_mb }}MB / ${{ github.event.inputs.threshold_root_mb }}MB"
+            echo "- 주기: ${{ github.event.inputs.monitor_interval_sec }}초, 실행: ${{ github.event.inputs.monitor_minutes }}분"
+            echo "- 자동증설: ${{ github.event.inputs.auto_boost_in_watchdog }}"
+            echo "- 업그레이드(OS/DKR): ${{ github.event.inputs.upgrade_os }} / ${{ github.event.inputs.upgrade_docker }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 7) 로그 아카이브 & 업로드
-      - name: 🗂️ Copy logs into .github + run monitors
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p .github/echo_logs
-          cp -f "$LOG_DIR/before.log" .github/echo_logs/before.log || true
-          cp -f "$LOG_DIR/after.log"  .github/echo_logs/after.log  || true
-          bash .github/echo_monitoring/top_sizes.sh || true
-          tar -czf disk-logs.tgz .github/echo_logs .github/echo_monitoring || true
-          echo "[ECHO] Logs archived: disk-logs.tgz"
-
-      - name: 📦 Upload disk logs artifact
+      # 9) 로그 업로드
+      - name: 📦 Upload logs artifact
         uses: actions/upload-artifact@v4
         with:
-          name: disk-logs
+          name: disk-24x7-logs
           path: |
-            disk-logs.tgz
+            ${{ env.LOG_DIR }}/before.log
+            ${{ env.LOG_DIR }}/after.log
             .github/echo_logs/**
             .github/echo_monitoring/**
+            .github/echo_upgrade/**
           if-no-files-found: warn
