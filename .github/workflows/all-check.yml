@@ -1,760 +1,271 @@
-name: "🗂️ 완전통합 DB/에코/Compose/권한/스크립트/설치/로그 자동화 (XXL++ Live) + Disk/Partitions/Bulk"
+name: "🛠️ Workflows Mass Upgrade — .github/workflows 일괄 보강(permissions/concurrency/checkout/inputs) + 보고서 + 안전푸시"
 
 on:
   workflow_dispatch:
     inputs:
-      disk_plan:
-        description: "디스크 계획: init_mb=<MB>,resize_mb=<MB|blank>,fs=<ext4|xfs|btrfs>"
-        default: "init_mb=2048,resize_mb=,fs=ext4"
+      apply_changes:
+        description: "실제 파일을 덮어쓸까요? true=적용 / false=리포트만"
+        default: "true"
         required: true
-      mount_point:
-        description: "p1 마운트 지점 (p2는 <mount_point>/part2)"
-        default: "/mnt/gh-disk"
+      backup_dir:
+        description: "백업 저장 경로"
+        default: ".github/workflows_backup"
         required: true
-      dir_list:
-        description: "레포+양 파티션에 생성할 추가 디렉토리(쉼표구분)"
-        default: "logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts"
+      add_concurrency:
+        description: "concurrency 미존재시 추가 (group=<파일명>, cancel-in-progress=false)"
+        default: "true"
         required: true
-      owner_group:
-        description: "소유자:그룹 (예: runner:runner)"
-        default: "runner:runner"
+      force_contents_write:
+        description: "permissions.contents=write 강제 보강"
+        default: "true"
         required: true
-      dir_mode:
-        description: "디렉토리 권한(8진수)"
-        default: "0755"
+      fix_checkout_fetch_depth:
+        description: "actions/checkout@* 에 fetch-depth: 0, persist-credentials: true 주입"
+        default: "true"
         required: true
-      bulk_spec:
-        description: "대량 생성 스펙: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
-        default: "dirs=100,files=10,size_kb=4,prefix=gen"
-        required: true
-      live_spec:
-        description: "라이브 반복: iter=<횟수>,sleep=<초>"
-        default: "iter=5,sleep=30"
-        required: true
-      commit_and_push:
-        description: "생성물 커밋/푸시? true|false"
+      compress_over_inputs:
+        description: "workflow_dispatch inputs가 10개 초과 시 tail을 extra_spec(k=v,comma)으로 압축"
         default: "true"
         required: true
       commit_message:
         description: "커밋 메시지"
-        default: "chore: XXL live disk+partitions+echo+db+bulk+pages (auto)"
+        default: "chore: mass-upgrade .github/workflows (perm/concurrency/checkout/inputs) [auto]"
         required: true
-      pages_publish:
-        description: "GitHub Pages 게시? true|false"
-        default: "true"
-        required: true
-
   schedule:
-    # 요청안의 분단위 스케줄 유지
-    - cron: "3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48,51,54,57 * * * *"
+    - cron: "*/5 * * * *"  # 5분마다 점검/수정
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
-# 크론/수동 동시 실행 충돌 방지
 concurrency:
-  group: xxl-live-disk-db-echo
+  group: workflows-mass-upgrade
   cancel-in-progress: false
 
 jobs:
-  build-and-echo:
+  mass-upgrade:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
     env:
-      DEBIAN_FRONTEND: noninteractive
-      DISK_IMG: disk.img
-      LOG_DIR: .github/echo_logs
-      ECHO_DIR: .github/echo_scripts
-      MYSQL_ROOT_PASSWORD: rootpass123
-      POSTGRES_PASSWORD: pgpass123
-      DB_USER: runner
-      DB_PASS: pw
-      DB_NAME: sample_db
-      MOUNT_P1_NAME: p1
-      MOUNT_P2_NAME: p2
+      REPORT: .github/workflows_upgrade_report.md
+      BACKUP_DIR: ${{ inputs.backup_dir }}
+      APPLY: ${{ inputs.apply_changes }}
+      ADD_CONC: ${{ inputs.add_concurrency }}
+      FORCE_PERM: ${{ inputs.force_contents_write }}
+      FIX_CO: ${{ inputs.fix_checkout_fetch_depth }}
+      FIX_INPUTS: ${{ inputs.compress_over_inputs }}
       GIT_USER_NAME: gh-actions-bot
       GIT_USER_EMAIL: gh-actions-bot@example.com
 
     steps:
-      - name: 📂 Checkout
+      - name: 📥 Checkout (full history for safe rebase)
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: 🧰 Init — FULL ECHO bootstrap (+helpers)
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: 📦 Install tooling (ruamel.yaml, yamllint)
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --upgrade pip
+          pip install "ruamel.yaml==0.18.6" "yamllint==1.35.1"
+
+      - name: ✍️ Patch script (ruamel.yaml)
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ECHO_DIR"
-          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
-          exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
-          set -x
+          cat > .github/workflows/_mass_upgrade.py <<'PY'
+          import os, glob, shutil
+          from ruamel.yaml import YAML
+          yaml = YAML()
+          yaml.preserve_quotes = True
+          yaml.indent(mapping=2, sequence=2, offset=2)
 
-          run_cmd() { echo "[CMD] $*"; eval "$@"; }
+          APPLY        = os.environ.get("APPLY","true").lower()=="true"
+          ADD_CONC     = os.environ.get("ADD_CONC","true").lower()=="true"
+          FORCE_PERM   = os.environ.get("FORCE_PERM","true").lower()=="true"
+          FIX_CO       = os.environ.get("FIX_CO","true").lower()=="true"
+          FIX_INPUTS   = os.environ.get("FIX_INPUTS","true").lower()=="true"
+          BACKUP_DIR   = os.environ.get("BACKUP_DIR",".github/workflows_backup")
+          REPORT       = os.environ.get("REPORT",".github/workflows_upgrade_report.md")
 
-          write_echo() {
-            local target="$1"; shift
-            mkdir -p "$(dirname "$target")"
-            {
-              echo '#!/usr/bin/env bash'
-              echo 'set -Eeuo pipefail'
-              echo 'export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\'''
-              echo 'set -x'
-              for line in "$@"; do echo "$line"; done
-            } > "$target"
-            chmod +x "$target"
-            echo "[ECHO] Wrote echo script: $target"
-          }
+          os.makedirs(BACKUP_DIR, exist_ok=True)
+          files = sorted(glob.glob(".github/workflows/*.yml")+glob.glob(".github/workflows/*.yaml"))
+          report=[]
+          def add(line=""): report.append(line)
 
-          # Key=Value 추출 (CSV 'k=v' 목록에서)
-          getv() {
-            local spec="$1" key="$2"
-            echo "$spec" | tr ',' '\n' | awk -F= -v k="$key" '$1==k{print $2}'
-          }
+          def compress_inputs(inputs: dict):
+            keys=list(inputs.keys())
+            if len(keys)<=10: return inputs, None
+            head=keys[:9]; tail=keys[9:]
+            kv=[]
+            for k in tail:
+              v=inputs[k]
+              default=""
+              if isinstance(v, dict):
+                default = v.get("default") or v.get("Default") or v.get("기본값") or v.get("기본") or ""
+              kv.append(f"{k}={default}")
+            new_inputs={k:inputs[k] for k in head}
+            new_inputs["extra_spec"]={
+              "description":"Compressed extra inputs as k=v pairs (comma-separated)",
+              "default":",".join(kv),
+              "required": False,
+            }
+            return new_inputs, tail
 
-          # loop-device getter (idempotent)
-          get_loop() {
-            local dev
-            dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "$dev" ]]; then
-              sudo losetup -fP "$DISK_IMG"
-              dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            fi
-            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
-            printf "%s" "$dev"
-          }
+          changed_any=False
+          add("# Workflows Mass Upgrade Report\n")
+          for path in files:
+            changed=[]
+            try:
+              with open(path,"r",encoding="utf-8") as f:
+                data=yaml.load(f) or {}
+            except Exception as e:
+              add(f"- ❌ {path}: YAML parse error: {e}")
+              continue
 
-          # owner:group 파싱
-          parse_owner_group() {
-            local og="$1"
-            local u="${og%%:*}"
-            local g="${og#*:}"
-            echo "$u" "$g"
-          }
+            # permissions.contents=write
+            if FORCE_PERM:
+              perms=data.get("permissions")
+              if not isinstance(perms, dict):
+                data["permissions"]=perms={}
+                changed.append("add permissions:{}")
+              if perms.get("contents")!="write":
+                perms["contents"]="write"
+                changed.append("permissions.contents=write")
 
-          export -f run_cmd write_echo getv get_loop parse_owner_group
+            # concurrency
+            if ADD_CONC:
+              if "concurrency" not in data or not isinstance(data["concurrency"], dict):
+                data["concurrency"]={"group":os.path.splitext(os.path.basename(path))[0],"cancel-in-progress":False}
+                changed.append("add concurrency{group=fileName,cancel=false}")
+              else:
+                c=data["concurrency"]
+                if "group" not in c:
+                  c["group"]=os.path.splitext(os.path.basename(path))[0]
+                  changed.append("concurrency.group=fileName")
+                if "cancel-in-progress" not in c:
+                  c["cancel-in-progress"]=False
+                  changed.append("concurrency.cancel-in-progress=false")
 
-          # helpers 파일 생성(후속 스텝에서 source)
-          write_echo "$ECHO_DIR/_helpers.sh" \
-            'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
-            'getv(){ spec="$1"; key="$2"; echo "$spec" | tr "," "\n" | awk -F= -v k="$key" '\''$1==k{print $2}'\''; }' \
-            'get_loop(){ local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; fi; [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }; printf "%s" "$dev"; }' \
-            'parse_owner_group(){ local og="$1"; local u="${og%%:*}"; local g="${og#*:}"; echo "$u" "$g"; }'
+            # workflow_dispatch inputs >10 → compress to extra_spec
+            if FIX_INPUTS:
+              on=data.get("on")
+              if isinstance(on, dict) and "workflow_dispatch" in on:
+                wd=on["workflow_dispatch"]
+                if isinstance(wd, dict) and isinstance(wd.get("inputs"), dict):
+                  new_inputs, tail=compress_inputs(wd["inputs"])
+                  if tail:
+                    wd["inputs"]=new_inputs
+                    changed.append(f"compress inputs(>{len(new_inputs)})→extra_spec")
 
-      - name: 🔧 Parse inputs → runtime env
-        shell: bash
+            # checkout hardening
+            if FIX_CO:
+              jobs=data.get("jobs")
+              if isinstance(jobs, dict):
+                for jn,job in jobs.items():
+                  steps=isinstance(job, dict) and job.get("steps")
+                  if not isinstance(steps, list): continue
+                  for st in steps:
+                    if isinstance(st, dict) and isinstance(st.get("uses"), str) and st["uses"].startswith("actions/checkout@"):
+                      wd=st.get("with")
+                      if not isinstance(wd, dict): st["with"]=wd={}
+                      if wd.get("fetch-depth")!=0:
+                        wd["fetch-depth"]=0; changed.append(f"{jn}:checkout.fetch-depth=0")
+                      if wd.get("persist-credentials") is not True:
+                        wd["persist-credentials"]=True; changed.append(f"{jn}:checkout.persist-credentials=true")
+
+            if changed:
+              changed_any=True
+              if APPLY:
+                bak=os.path.join(BACKUP_DIR, os.path.basename(path)+".orig")
+                shutil.copy2(path, bak)
+                with open(path,"w",encoding="utf-8") as f: yaml.dump(data, f)
+                add(f"- ✅ {path}: "+", ".join(changed))
+              else:
+                add(f"- 🔎 {path}: (dry-run) "+", ".join(changed))
+            else:
+              add(f"- ➖ {path}: no changes")
+
+          with open(REPORT,"w",encoding="utf-8") as rf: rf.write("\n".join(report))
+          print(f"::notice title=MassUpgrade::Processed {len(files)} workflow(s); changed={changed_any}")
+          PY
+
+      - name: 🚀 Run mass upgrade
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/01_parse.log") 2>&1
-          set -x
-          DISK_PLAN='${{ inputs.disk_plan }}'
-          INIT_MB="$(getv "$DISK_PLAN" init_mb)"
-          RESIZE_MB="$(getv "$DISK_PLAN" resize_mb)"
-          FS_TYPE="$(getv "$DISK_PLAN" fs)"
-          : "${INIT_MB:=2048}"
-          : "${FS_TYPE:=ext4}"
+          python .github/workflows/_mass_upgrade.py
+          echo "----- REPORT -----"
+          sed -n '1,200p' "$REPORT" || true
 
-          LIVE_SPEC='${{ inputs.live_spec }}'
-          LIVE_ITER="$(getv "$LIVE_SPEC" iter)"
-          LIVE_SLEEP="$(getv "$LIVE_SPEC" sleep)"
-          : "${LIVE_ITER:=5}"
-          : "${LIVE_SLEEP:=30}"
+      - name: ✅ Lint (actionlint) — advisory
+        uses: reviewdog/action-actionlint@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-check
+          level: warning
+          fail_on_error: "false"
 
-          echo "INIT_MB=$INIT_MB" >> "$GITHUB_ENV"
-          echo "RESIZE_MB=$RESIZE_MB" >> "$GITHUB_ENV"
-          echo "FS_TYPE=$FS_TYPE" >> "$GITHUB_ENV"
-          echo "LIVE_ITER=$LIVE_ITER" >> "$GITHUB_ENV"
-          echo "LIVE_SLEEP=$LIVE_SLEEP" >> "$GITHUB_ENV"
-          echo "MOUNT_POINT=${{ inputs.mount_point }}" >> "$GITHUB_ENV"
-          echo "OWNER_GROUP=${{ inputs.owner_group }}" >> "$GITHUB_ENV"
-          echo "DIR_MODE=${{ inputs.dir_mode }}" >> "$GITHUB_ENV"
-          echo "DIR_LIST=${{ inputs.dir_list }}" >> "$GITHUB_ENV"
-          echo "BULK_SPEC='${{ inputs.bulk_spec }}'" >> "$GITHUB_ENV"
-
-      - name: 📦 Ensure FS tools (xfsprogs / btrfs-progs / parted)
-        shell: bash
+      - name: ✅ Lint (yamllint) — advisory
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/05_fs_tools.log") 2>&1
-          set -x
-          run_cmd "sudo apt-get update -y"
-          run_cmd "sudo apt-get install -y parted"
-          case "$FS_TYPE" in
-            xfs)   run_cmd "sudo apt-get install -y xfsprogs" ;;
-            btrfs) run_cmd "sudo apt-get install -y btrfs-progs" ;;
-            ext4|*) echo "[ECHO] ext4 선택 — e2fsprogs 기본 탑재" ;;
-          esac
+          yamllint -f standard -d "{extends: default, rules: {line-length: {max: 160}}}" .github/workflows || true
 
-      - name: 💽 Create disk image (sparse) + attach loop
-        shell: bash
+      - name: 📝 .gitignore update for backups + report
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
-          set -x
-          run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${INIT_MB}\""
-          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
-          run_cmd "ls -lh \"${DISK_IMG}\""
-
-      - name: 🧭 Partition GPT (p1=60%, p2=rest) — idempotent
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
-          set -x
-          LOOP_DEV="$(get_loop)"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" print || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60% || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P2_NAME} 60% 100% || true"
-          run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
-          run_cmd "ls -l ${LOOP_DEV}* || true"
-
-      - name: 🧪 Make filesystems on p1/p2
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
-          set -x
-          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          case "$FS_TYPE" in
-            ext4)  run_cmd "sudo mkfs.ext4 -F \"$P1\""; run_cmd "sudo mkfs.ext4 -F \"$P2\"" ;;
-            xfs)   run_cmd "sudo mkfs.xfs -f \"$P1\"";  run_cmd "sudo mkfs.xfs -f \"$P2\"" ;;
-            btrfs) run_cmd "sudo mkfs.btrfs -f \"$P1\"";run_cmd "sudo mkfs.btrfs -f \"$P2\"" ;;
-          esac
-
-      - name: 🔗 Mount p1 & p2 (create part2 AFTER p1 mount)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
-          set -x
-          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
-          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-
-          run_cmd "sudo mkdir -p \"${MOUNT_POINT}\""
-          if mount | grep -q " on ${MOUNT_POINT} "; then
-            echo "[ECHO] ${MOUNT_POINT} already mounted"
-          else
-            run_cmd "sudo mount \"$P1\" \"${MOUNT_POINT}\""
-          fi
-
-          run_cmd "sudo mkdir -p \"${MOUNT_POINT}/part2\""
-          if mount | grep -q " on ${MOUNT_POINT}/part2 "; then
-            echo "[ECHO] ${MOUNT_POINT}/part2 already mounted"
-          else
-            run_cmd "sudo mount \"$P2\" \"${MOUNT_POINT}/part2\""
-          fi
-
-          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MOUNT_POINT}\""
-          run_cmd "mount | grep -E \" on ${MOUNT_POINT} | on ${MOUNT_POINT}/part2 \" || true"
-          run_cmd "df -h | grep -E \"loop|Filesystem\" || true"
-
-      - name: 📁 Create base dirs (repo + both mounts) — Spring + extras
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
-          set -x
-          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
-          SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" )
-          IFS=',' read -ra EXTRA <<< "$DIR_LIST"
-          for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
-          printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
-
-          while IFS= read -r d; do
-            run_cmd "mkdir -p \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\""
-            run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\""
-            run_cmd "sudo chmod \"${DIR_MODE}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\""
-            [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
-            write_echo "$ECHO_DIR/mkdir_$(echo "$d" | tr '/' '_' ).sh" \
-              "mkdir -p \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\"" \
-              "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\"" \
-              "sudo chmod \"${DIR_MODE}\" \"${d}\" \"${MOUNT_POINT}/${d}\" \"${MOUNT_POINT}/part2/${d}\"" \
-              "[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\""
-          done < "$ECHO_DIR/.all_dirs.txt"
-
-      - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart 2 → grow FS)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
-          set -x
-          CUR_BYTES="$(stat -c%s "${DISK_IMG}")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
-          NEW_MB="${RESIZE_MB:-$CUR_MB}"
-          echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
-          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\"" || echo "[ECHO] No file growth needed"
-          LOOP_DEV="$(get_loop)"
-          run_cmd "sudo losetup -c \"${LOOP_DEV}\""
-          run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100% || true"
-          run_cmd "sudo partprobe \"${LOOP_DEV}\" || true"
-          case "$FS_TYPE" in
-            ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}p2\"" ;;
-            xfs)   run_cmd "sudo xfs_growfs \"${MOUNT_POINT}/part2\"" ;;
-            btrfs) run_cmd "sudo btrfs filesystem resize max \"${MOUNT_POINT}/part2\"" ;;
-          esac
-          run_cmd "df -h | grep -E \"${MOUNT_POINT}(/part2)?\" || true"
-
-      - name: 🧨 Bulk generator/upgrade — repo + both mounts
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
-          set -x
-          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
-          NUM_DIRS="$(getv "$BULK_SPEC" dirs)"; NUM_FILES="$(getv "$BULK_SPEC" files)"; SIZE_KB="$(getv "$BULK_SPEC" size_kb)"; PREFIX="$(getv "$BULK_SPEC" prefix)"
-          : "${NUM_DIRS:=100}"; : "${NUM_FILES:=10}"; : "${SIZE_KB:=4}"; : "${PREFIX:=gen}"
-          ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MOUNT_POINT}/bulk/${PREFIX}"; ROOT_P2="${MOUNT_POINT}/part2/bulk/${PREFIX}"
-          run_cmd "mkdir -p \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
-
-          create_or_upgrade_dir() {
-            local base="$1" i="$2" d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
-            mkdir -p "$d"
-            for n in $(seq 1 "$NUM_FILES"); do
-              local f="${d}/file-$(printf '%04d' "$n").bin"
-              if [ -f "$f" ]; then
-                local cur; cur="$(stat -c%s "$f" || echo 0)"
-                local need=$(( SIZE_KB * 1024 ))
-                (( cur < need )) && truncate -s "${need}" "$f" || true
-              else
-                truncate -s "$(( SIZE_KB * 1024 ))" "$f"
-              fi
-            done
-          }
-          export -f create_or_upgrade_dir
-          for i in $(seq 1 "$NUM_DIRS"); do
-            create_or_upgrade_dir "$ROOT_REPO" "$i"
-            create_or_upgrade_dir "$ROOT_P1" "$i"
-            create_or_upgrade_dir "$ROOT_P2" "$i"
-          done
-          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"bulk\" \"${MOUNT_POINT}/bulk\" \"${MOUNT_POINT}/part2/bulk\""
-          run_cmd "sudo chmod -R \"${DIR_MODE}\" \"bulk\" \"${MOUNT_POINT}/bulk\" \"${MOUNT_POINT}/part2/bulk\""
-
-      - name: 👀 Live .github watcher — mirror new dirs to both mounts (5 min)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/40_live_github_watch.log") 2>&1
-          set -x
-          read OWNER GROUP < <(parse_owner_group "$OWNER_GROUP")
-          SNAP="$ECHO_DIR/.github_dirs.snap"
-          find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
-          for i in $(seq 1 60); do
-            sleep 5
-            NEW_SNAP="$ECHO_DIR/.github_dirs.new"
-            find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$NEW_SNAP" || true
-            DIFF="$ECHO_DIR/.github_dirs.diff"
-            comm -13 "$SNAP" "$NEW_SNAP" > "$DIFF" || true
-            if [ -s "$DIFF" ]; then
-              while IFS= read -r rel; do
-                [[ -z "$rel" ]] && continue
-                run_cmd "mkdir -p \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
-                run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
-                run_cmd "sudo chmod \"${DIR_MODE}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
-                write_echo "$ECHO_DIR/mirror_github_$(echo "$rel" | tr '/' '_' ).sh" \
-                  "mkdir -p \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\"" \
-                  "sudo chown -R \"${OWNER}:${GROUP}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\"" \
-                  "sudo chmod \"${DIR_MODE}\" \"${MOUNT_POINT}/.github/${rel}\" \"${MOUNT_POINT}/part2/.github/${rel}\""
-              done < "$DIFF"
-              mv "$NEW_SNAP" "$SNAP"
-            else
-              echo "[ECHO] No new .github directories (iteration $i)"
-            fi
-          done
-
-      # ===================== DB/에코/Compose/권한/설치/로그 (요청안 통합) =====================
-      - name: 📁 에코 디렉토리/파일/스크립트/권한 대량 생성
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/70_echo_db.log") 2>&1
-          set -x
-          mkdir -p .github/echo_db/dirs .github/echo_db/files .github/echo_db/installs .github/echo_db/upgrade \
-                   .github/echo_db/permissions .github/echo_db/scripts .github/echo_db/logs .github/echo_db/services \
-                   .github/echo_db/compose .github/echo_db/homebrew .github/echo_db/choco .github/echo_db/snap \
-                   .github/echo_db/cloud .github/echo_db/marketplace .github/echo_db/config .github/echo_db/sql \
-                   .github/echo_db/dump .github/echo_db/health .github/echo_db/monitor site live_snapshots
-          echo '#!/usr/bin/env bash' > .github/echo_db/dirs/mkdir_cmds.sh && chmod +x .github/echo_db/dirs/mkdir_cmds.sh
-          for d in $(find .github/echo_db -type d); do echo "echo 'mkdir -p $d'"; done >> .github/echo_db/dirs/mkdir_cmds.sh
-
-          DB_LIST="mysql-server mariadb-server postgresql sqlite3 mongodb redis-server"
-          for pkg in $DB_LIST; do
-            f=".github/echo_db/installs/${pkg}-apt-install.sh"
-            u=".github/echo_db/upgrade/${pkg}-apt-upgrade.sh"
-            b=".github/echo_db/homebrew/${pkg}-brew-install.sh"
-            c=".github/echo_db/choco/${pkg}-choco-install.sh"
-            s=".github/echo_db/snap/${pkg}-snap-install.sh"
-            printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
-              "echo '[에코] apt install $pkg'" 'sudo apt-get -yq update' "sudo apt-get -yq install $pkg" > "$f"
-            printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
-              "echo '[에코] apt upgrade $pkg (--only-upgrade)'" 'sudo apt-get -yq update' \
-              "sudo apt-get -yq install --only-upgrade $pkg || true" > "$u"
-            printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] brew install $pkg'" "brew install $pkg" > "$b"
-            printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] choco install $pkg'" "choco install $pkg" > "$c"
-            printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] snap install $pkg'" "sudo snap install $pkg" > "$s"
-            chmod +x "$f" "$u" "$b" "$c" "$s"
-          done
-
-          for db in mysql postgres mongo redis; do
-            yml=".github/echo_db/services/${db}-service.yml"
-            {
-              echo "services:"
-              echo "  ${db}:"
-              if [ "$db" = "mysql" ]; then
-                echo "    image: mysql:8.0"
-                echo "    environment:"; echo "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}"
-                echo "    ports: [ '3306:3306' ]"
-              elif [ "$db" = "postgres" ]; then
-                echo "    image: postgres:15"
-                echo "    environment:"; echo "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"
-                echo "    ports: [ '5432:5432' ]"
-              elif [ "$db" = "mongo" ]; then
-                echo "    image: mongo:7"
-                echo "    ports: [ '27017:27017' ]"
-              elif [ "$db" = "redis" ]; then
-                echo "    image: redis:7"
-                echo "    ports: [ '6379:6379' ]"
-              fi
-            } > "$yml"
-          done
-
-          composefile=".github/echo_db/compose/all-db-compose.yml"
           {
-            echo "version: '3.8'"
-            echo "services:"
-            echo "  mysql:";   echo "    image: mysql:8.0";   echo "    environment:"; echo "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}"; echo "    ports: [ '3306:3306' ]"
-            echo "  postgres:";echo "    image: postgres:15"; echo "    environment:"; echo "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}"; echo "    ports: [ '5432:5432' ]"
-            echo "  mongo:";   echo "    image: mongo:7";     echo "    ports: [ '27017:27017' ]"
-            echo "  redis:";   echo "    image: redis:7";     echo "    ports: [ '6379:6379' ]"
-          } > "$composefile"
-          cat > .github/echo_db/compose/compose_echo.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo '[에코] docker compose up -d 실행 시도(가능한 경우만)'
-          if docker compose version >/dev/null 2>&1; then
-            docker compose -f .github/echo_db/compose/all-db-compose.yml up -d || true
-          else
-            echo '[WARN] docker compose 미탑재: 명령 기록만 수행'
-          fi
-          SH
-          chmod +x .github/echo_db/compose/compose_echo.sh
+            echo ""
+            echo "# mass-upgrade auto-generated"
+            echo "${{ inputs.backup_dir }}/"
+            echo ".github/workflows/_mass_upgrade.py"
+            echo ".github/workflows_upgrade_report.md"
+          } >> .gitignore || true
 
-          cat > .github/echo_db/marketplace/postgresql-action.yml <<'YML'
-          - uses: harmon758/postgresql-action@v1
-            with:
-              postgresql version: '13'
-              postgresql db: 'test_db'
-              postgresql user: 'postgres'
-              postgresql password: 'pgpass'
-          YML
-
-          for db in mysql postgres mongo redis; do
-            perm=".github/echo_db/permissions/${db}-permission.sh"
-            {
-              echo '#!/usr/bin/env bash'; echo 'set -Eeuo pipefail'
-              echo "echo '[에코] $db 권한/유저 설정 예시'"
-              if [ "$db" = "mysql" ]; then
-                echo "echo \"GRANT ALL PRIVILEGES ON *.* TO '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}' WITH GRANT OPTION;\""
-                echo "echo \"FLUSH PRIVILEGES;\""
-              elif [ "$db" = "postgres" ]; then
-                echo "echo \"CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';\""
-                echo "echo \"GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};\""
-              fi
-              echo "echo 'chown -R runner:runner /var/lib/${db} || true'"
-              echo "echo 'chmod 700 /var/lib/${db} || true'"
-            } > "$perm"
-            chmod +x "$perm"
-          done
-
-          cat > .github/echo_db/config/render_mycnf.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          cat > .github/echo_db/config/my.cnf <<CONF
-          [client]
-          user=runner
-          password=pw
-          host=127.0.0.1
-          port=3306
-          CONF
-          chmod 600 .github/echo_db/config/my.cnf
-          SH
-          chmod +x .github/echo_db/config/render_mycnf.sh
-          .github/echo_db/config/render_mycnf.sh
-
-          cat > .github/echo_db/config/render_pgpass.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          cat > .github/echo_db/config/pgpass <<CONF
-          127.0.0.1:5432:sample_db:runner:pw
-          CONF
-          chmod 600 .github/echo_db/config/pgpass
-          SH
-          chmod +x .github/echo_db/config/render_pgpass.sh
-          .github/echo_db/config/render_pgpass.sh
-
-          cat > .github/echo_db/sql/init_mysql.sql <<'SQL'
-          CREATE DATABASE IF NOT EXISTS sample_db;
-          CREATE TABLE IF NOT EXISTS sample_db.test (id INT PRIMARY KEY, val VARCHAR(64));
-          INSERT INTO sample_db.test (id,val) VALUES (1,'hello'),(2,'world')
-            ON DUPLICATE KEY UPDATE val=VALUES(val);
-          SQL
-          cat > .github/echo_db/sql/init_postgres.sql <<'SQL'
-          -- psql -h 127.0.0.1 -U runner -c "CREATE DATABASE sample_db;"
-          SQL
-          cat > .github/echo_db/sql/init_sqlite.sql <<'SQL'
-          CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO test(id,val) VALUES (1,'hello'),(2,'world');
-          SQL
-
-          cat > .github/echo_db/dump/dump_mysql.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo '[에코] mysqldump sample_db > dump/mysql_sample.sql'
-          mysqldump --defaults-file=.github/echo_db/config/my.cnf sample_db > .github/echo_db/dump/mysql_sample.sql || true
-          SH
-          chmod +x .github/echo_db/dump/dump_mysql.sh
-
-          cat > .github/echo_db/dump/dump_postgres.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo '[에코] pg_dump -d sample_db > dump/postgres_sample.sql'
-          PGPASSFILE=.github/echo_db/config/pgpass pg_dump -h 127.0.0.1 -U runner -d sample_db > .github/echo_db/dump/postgres_sample.sql || true
-          SH
-          chmod +x .github/echo_db/dump/dump_postgres.sh
-
-          cat > .github/echo_db/dump/dump_sqlite.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo '[에코] sqlite dump > dump/sqlite_sample.sql'
-          sqlite3 ${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite '.read .github/echo_db/sql/init_sqlite.sql' || true
-          sqlite3 ${GITHUB_WORKSPACE}/.github/echo_db/files/sample.sqlite '.dump' > .github/echo_db/dump/sqlite_sample.sql || true
-          SH
-          chmod +x .github/echo_db/dump/dump_sqlite.sh
-
-          cat > .github/echo_db/health/port_check.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo '[에코] 포트 체크 3306/5432/27017/6379'
-          for p in 3306 5432 27017 6379; do
-            (timeout 1 bash -c "</dev/tcp/127.0.0.1/$p") && echo "[OK] port:$p" || echo "[WAIT] port:$p 닫힘"
-          done
-          SH
-          chmod +x .github/echo_db/health/port_check.sh
-
-          cat > .github/echo_db/health/process_check.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo '[에코] 프로세스 체크 mysqld/postgres/mongo/redis'
-          for n in mysqld postgres mongo redis; do
-            pgrep -laf "$n" >/dev/null 2>&1 && echo "[OK] proc:$n" || echo "[WAIT] proc:$n 미동작"
-          done
-          SH
-          chmod +x .github/echo_db/health/process_check.sh
-
-          cat > .github/echo_db/monitor/size_check.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          mkdir -p .github/echo_db/monitor
-          LC_ALL=C du -ah . | LC_ALL=C sort -hr | head -n 30 > .github/echo_db/monitor/top_file_sizes.txt || true
-          du -sh . > .github/echo_db/monitor/total_size.txt || true
-          echo '[에코] 용량 분석 완료'
-          SH
-          chmod +x .github/echo_db/monitor/size_check.sh
-
-          printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] DB 설치 완료 로그 기록'" 'date' > .github/echo_db/logs/install_done_echo.sh
-          printf '%s\n' '#!/usr/bin/env bash' "echo '[에코] DB 권한 완료 로그 기록'" 'date' > .github/echo_db/logs/permission_done_echo.sh
-          chmod +x .github/echo_db/logs/install_done_echo.sh .github/echo_db/logs/permission_done_echo.sh
-
-          cat > .github/echo_db/scripts/live_update.sh <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          ITER="$1"
-          NOW="$(date +'%Y-%m-%d %H:%M:%S %Z')"
-          SNAP_DIR="live_snapshots/iter_${ITER}"
-          mkdir -p "$SNAP_DIR"
-          .github/echo_db/health/port_check.sh || true
-          .github/echo_db/health/process_check.sh || true
-          .github/echo_db/monitor/size_check.sh || true
-          .github/echo_db/dump/dump_sqlite.sh || true
-          .github/echo_db/dump/dump_mysql.sh || true
-          .github/echo_db/dump/dump_postgres.sh || true
-          {
-            echo "# EchoOps DB 통합 리포트 (Live)"
-            echo ""; echo "## 갱신 시각: ${NOW}"; echo ""
-            echo "## 덤프 존재 여부"
-            for f in .github/echo_db/dump/*.sql; do [ -f "$f" ] && echo "- $(basename "$f") ✅" || true; done
-            echo ""; echo "## 용량 상위 30개 파일"; echo '```'
-            [ -f .github/echo_db/monitor/top_file_sizes.txt ] && cat .github/echo_db/monitor/top_file_sizes.txt || echo "(생성 안 됨)"
-            echo '```'; echo ""; echo "## 헬스체크 로그"; echo '```'
-            .github/echo_db/health/port_check.sh || true
-            .github/echo_db/health/process_check.sh || true
-            echo '```'
-          } > site/index.md
-          cp -r .github/echo_db/dump "$SNAP_DIR/" 2>/dev/null || true
-          cp -r .github/echo_db/monitor "$SNAP_DIR/" 2>/dev/null || true
-          cp site/index.md "$SNAP_DIR/" 2>/dev/null || true
-          {
-            echo "### 🔄 Live Update #${ITER}"
-            echo "- 시간: ${NOW}"
-            echo "- 덤프 파일:"; ls -1 .github/echo_db/dump/*.sql 2>/dev/null || echo "(없음)"; echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-          SH
-          chmod +x .github/echo_db/scripts/live_update.sh
-
-      - name: 🛠 DB 설치/업그레이드 (가능한 경우만, 오류 무시)
-        shell: bash
+      - name: 🔐 Configure git
         run: |
           set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/72_db_install.log") 2>&1
-          set -x
-          sudo apt-get -yq update
-          DB_LIST="mysql-server mariadb-server postgresql sqlite3 mongodb redis-server"
-          for pkg in $DB_LIST; do
-            sudo apt-get -yq install "$pkg" || echo "[$pkg] 설치 오류(무시)"
-            sudo apt-get -yq install --only-upgrade "$pkg" || echo "[$pkg] 업그레이드 오류(무시)"
-          done
+          git config user.name "${GIT_USER_NAME}"
+          git config user.email "${GIT_USER_EMAIL}"
+          git config pull.rebase true
 
-      - name: 🧪 1차 리포트 생성
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/74_live_init.log") 2>&1
-          set -x
-          .github/echo_db/scripts/live_update.sh "init"
-
-      - name: 📡 Live 업데이트 루프
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/75_live_loop.log") 2>&1
-          set -x
-          echo "Live updates: ${LIVE_ITER}회, 간격 ${LIVE_SLEEP}초"
-          for i in $(seq 1 "${LIVE_ITER}"); do
-            .github/echo_db/scripts/live_update.sh "${i}" || true
-            tar -czf "live_snapshots/snap_${i}.tgz" "live_snapshots/iter_${i}" || true
-            if [ "$i" -lt "${LIVE_ITER}" ]; then sleep "${LIVE_SLEEP}"; fi
-          done
-
-      - name: 📊 Size reports (safe)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/80_sizes.log") 2>&1
-          set -x
-          mkdir -p .github/echo_monitoring
-          run_cmd "du -ah . | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true"
-          run_cmd "du -sh . > .github/echo_monitoring/total_size.txt || true"
-          run_cmd "df -h > .github/echo_monitoring/df_all.txt || true"
-
-      - name: 📝 .gitignore 업데이트
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/82_gitignore.log") 2>&1
-          set -x
-          {
-            echo ""; echo "# auto-generated"
-            echo "${DISK_IMG}"; echo "*.img"
-            echo ".github/echo_logs/*.log"
-          } >> .gitignore
-          tail -n 30 .gitignore || true
-
-      - name: ✅ Commit & (optional) push (rebase fallback + backup branch)
-        if: ${{ inputs.commit_and_push == 'true' }}
-        shell: bash
+      - name: 🧾 Commit & push (rebase fallback + backup branch)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/90_commit_push.log") 2>&1
-          set -x
-          git config user.name "${GIT_USER_NAME}"
-          git config user.email "${GIT_USER_EMAIL}"
-          git config pull.rebase true
-          TARGET_BR="${GITHUB_REF_NAME}"
-          CURRENT="$(git rev-parse --abbrev-ref HEAD)"
-          git fetch origin --prune
-          if [[ "$CURRENT" != "$TARGET_BR" ]]; then
-            git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
-          fi
-          mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt" || true
-          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring .github/echo_db site bulk "${DIRS[@]/#/.\/}" 2>/dev/null || true
+          git add .github/workflows .github/workflows_upgrade_report.md .gitignore || true
           if git diff --cached --quiet; then
             echo "[ECHO] No changes to commit."
-          else
-            git commit -m "${{ inputs.commit_message }}"
-            git push origin "$TARGET_BR" || {
-              echo "[ECHO] Push rejected — trying rebase"
-              git fetch origin --prune
-              git rebase "origin/$TARGET_BR" || { git rebase --abort || true; }
-              git push origin "$TARGET_BR" || {
-                BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"
-                echo "[ECHO] Fallback to backup branch: $BK"
-                git checkout -B "$BK"
-                git push -u origin "$BK"
-              }
-            }
+            exit 0
           fi
+          git commit -m "${{ inputs.commit_message }}"
+          TARGET="${GITHUB_REF_NAME}"
+          git fetch origin --prune
+          if git push origin "$TARGET"; then
+            echo "[ECHO] Pushed to origin/$TARGET"
+            exit 0
+          fi
+          echo "[ECHO] Push rejected — rebase retry"
+          git rebase "origin/$TARGET" || { git rebase --abort || true; }
+          if git push origin "$TARGET"; then
+            echo "[ECHO] Pushed after rebase"
+            exit 0
+          fi
+          BK="actions/mass-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "[ECHO] fallback → $BK"
+          git checkout -B "$BK"
+          git push -u origin "$BK"
 
-      - name: 📦 아티팩트 업로드 (logs + echo_db + snapshots)
+      - name: 📦 Upload artifacts (report + backups)
         uses: actions/upload-artifact@v4
         with:
-          name: xxl-live-echo-artifacts
+          name: workflows-mass-upgrade
           path: |
-            .github/echo_logs/**
-            .github/echo_scripts/**
-            .github/echo_monitoring/**
-            .github/echo_db/**
-            site/**
-            live_snapshots/**
+            .github/workflows_upgrade_report.md
+            ${{ inputs.backup_dir }}/**
           retention-days: 7
-
-      - name: 🔎 최종 에코 산출물 마스킹 출력
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/95_masked_cat.log") 2>&1
-          set -x
-          find .github/echo_db -type f -print0 | sort -z | \
-            xargs -0 -I{} sh -c 'echo "------------------"; echo "[에코][파일] {}"; \
-              sed -e "s/${MYSQL_ROOT_PASSWORD}/****/g" -e "s/${POSTGRES_PASSWORD}/****/g" -e "s/${DB_PASS}/****/g" "{}" | cat; echo'
-
-      - name: 🌐 Pages 설정
-        if: ${{ inputs.pages_publish == 'true' }}
-        uses: actions/configure-pages@v5
-
-      - name: ⬆️ Pages 아티팩트 업로드
-        if: ${{ inputs.pages_publish == 'true' }}
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy-pages:
-    if: ${{ inputs.pages_publish == 'true' }}
-    needs: build-and-echo
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: 🚀 Pages 배포
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-      # 요청에 따라 언마운트/losetup detach 단계 없음
