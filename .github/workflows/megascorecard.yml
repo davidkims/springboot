@@ -1,4 +1,4 @@
-name: "💽 SpringBoot Disk+Dirs — 1min Cron + Multi-Partition + Live .github Echo (no unmount)"
+name: "💽 SpringBoot Disk+Dirs — 1min Cron + Multi-Partition + Live .github + Bulk Gen/Upgrade (no unmount)"
 
 on:
   workflow_dispatch:
@@ -20,20 +20,20 @@ on:
         default: "/mnt/gh-disk"
         required: true
       dir_list:
-        description: "Extra dirs to create on repo+mount (comma-separated)"
+        description: "Extra dirs (comma-separated) to create on repo + both mounts"
         default: "logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts"
         required: true
-      owner:
-        description: "Owner (user)"
-        default: "runner"
-        required: true
-      group:
-        description: "Group"
-        default: "runner"
+      owner_group:
+        description: "Owner and group in user:group format"
+        default: "runner:runner"
         required: true
       dir_mode:
         description: "Directory permission (octal)"
         default: "0755"
+        required: true
+      bulk_spec:
+        description: "Bulk generator spec: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
+        default: "dirs=100,files=10,size_kb=4,prefix=gen"
         required: true
       commit_and_push:
         description: "Commit & push generated files? true|false"
@@ -41,7 +41,7 @@ on:
         required: true
       commit_message:
         description: "Commit message"
-        default: "chore: disk+dirs + multi-partition + live .github echo (auto)"
+        default: "chore: disk+dirs + multi-partition + live .github + bulk gen/upgrade (auto)"
         required: true
 
   schedule:
@@ -50,7 +50,7 @@ on:
 permissions:
   contents: write
 
-# 동시 실행 방지(1분 크론과 수동 실행이 겹칠 때 안전)
+# prevent overlapping runs (cron + manual)
 concurrency:
   group: springboot-disk-dirs
   cancel-in-progress: false
@@ -64,7 +64,7 @@ jobs:
       LOG_DIR: .github/echo_logs
       ECHO_DIR: .github/echo_scripts
       MOUNT_P1_NAME: p1
-      MOUNT_P2_NAME: p2    # will mount at <mount_point>/part2
+      MOUNT_P2_NAME: p2
       GIT_USER_NAME: gh-actions-bot
       GIT_USER_EMAIL: gh-actions-bot@example.com
 
@@ -74,7 +74,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: 🧰 Init — FULL ECHO bootstrap (+helpers:run_cmd/get_loop/write_echo)
+      - name: 🧰 Init — FULL ECHO bootstrap (+helpers)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -99,7 +99,7 @@ jobs:
             echo "[ECHO] Wrote echo script: $target"
           }
 
-          # get_loop: 매 스텝마다 안전하게 loop 장치를 조회/부착
+          # Safe loop-device getter (idempotent)
           get_loop() {
             local dev
             dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
@@ -107,34 +107,25 @@ jobs:
               sudo losetup -fP "$DISK_IMG"
               dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
             fi
-            if [[ -z "$dev" ]]; then
-              echo "[ERROR] loop device not found for $DISK_IMG" >&2
-              return 1
-            fi
+            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
 
-          export -f run_cmd write_echo get_loop
+          # Parse owner:group
+          parse_owner_group() {
+            local og="$1"
+            local u="${og%%:*}"
+            local g="${og#*:}"
+            echo "$u" "$g"
+          }
 
-          # helpers 파일도 생성(후속 스텝에서 source)
+          export -f run_cmd write_echo get_loop parse_owner_group
+
           write_echo "$ECHO_DIR/_helpers.sh" \
             'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
-            'get_loop() {' \
-            '  local dev' \
-            '  dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""' \
-            '  if [[ -z "$dev" ]]; then' \
-            '    sudo losetup -fP "$DISK_IMG"' \
-            '    dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""' \
-            '  fi' \
-            '  if [[ -z "$dev" ]]; then echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; fi' \
-            '  printf "%s" "$dev"' \
-            '}' \
-            'write_echo() {' \
-            '  local target="$1"; shift' \
-            '  mkdir -p "$(dirname "$target")"' \
-            '  { echo "#!/usr/bin/env bash"; echo "set -Eeuo pipefail"; echo "export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\''"; echo "set -x"; for line in "$@"; do echo "$line"; done; } > "$target"' \
-            '  chmod +x "$target"; echo "[ECHO] Wrote echo script: $target"' \
-            '}'
+            'get_loop() { local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; fi; [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }; printf "%s" "$dev"; }' \
+            'parse_owner_group(){ local og="$1"; local u="${og%%:*}"; local g="${og#*:}"; echo "$u" "$g"; }' \
+            'write_echo() { local target="$1"; shift; mkdir -p "$(dirname "$target")"; { echo "#!/usr/bin/env bash"; echo "set -Eeuo pipefail"; echo "export PS4='\''+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '\''"; echo "set -x"; for line in "$@"; do echo "$line"; done; } > "$target"; chmod +x "$target"; echo "[ECHO] Wrote echo script: $target"; }'
 
       - name: 📦 Ensure FS tools (xfsprogs, btrfs-progs, parted)
         shell: bash
@@ -163,21 +154,17 @@ jobs:
           set -x
           SIZE_MB="${{ inputs.disk_size_mb }}"
           run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\""
-          # attach (idempotent via get_loop)
-          LOOP_DEV="$(get_loop)"
-          echo "[ECHO] LOOP_DEV=$LOOP_DEV"
+          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
           run_cmd "ls -lh \"${DISK_IMG}\""
 
-      - name: 🧭 Partition with GPT (p1=60%, p2=rest) via parted (idempotent)
+      - name: 🧭 Partition GPT (p1=60%, p2=rest) — idempotent
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
           set -x
-          LOOP_DEV="$(get_loop)"
-          echo "[ECHO] LOOP_DEV=$LOOP_DEV"
-          # print first; then (re)label gpt, tolerate if already labeled
+          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
           run_cmd "sudo parted -s \"$LOOP_DEV\" print || true"
           run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt || true"
           run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60% || true"
@@ -201,31 +188,46 @@ jobs:
             btrfs) run_cmd "sudo mkfs.btrfs -f \"$P1\"";run_cmd "sudo mkfs.btrfs -f \"$P2\"" ;;
           esac
 
-      - name: 🔗 Mount both partitions (p1 at mount_point, p2 at mount_point/part2)
+      - name: 🔗 Mount p1 & p2 (create part2 AFTER p1 mount)
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"
+          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"
+          read OWNER GROUP < <(parse_owner_group "$OG")
           LOOP_DEV="$(get_loop)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          run_cmd "sudo mkdir -p \"${MNT}\" \"${MNT}/part2\""
-          run_cmd "sudo mount \"$P1\" \"${MNT}\""
-          run_cmd "sudo mount \"$P2\" \"${MNT}/part2\""
+
+          run_cmd "sudo mkdir -p \"${MNT}\""
+          if mount | grep -q " on ${MNT} "; then
+            echo "[ECHO] ${MNT} already mounted"
+          else
+            run_cmd "sudo mount \"$P1\" \"${MNT}\""
+          fi
+
+          # 🔧 p1 마운트 후 파티션2 폴더 다시 생성
+          run_cmd "sudo mkdir -p \"${MNT}/part2\""
+          if mount | grep -q " on ${MNT}/part2 "; then
+            echo "[ECHO] ${MNT}/part2 already mounted"
+          else
+            run_cmd "sudo mount \"$P2\" \"${MNT}/part2\""
+          fi
+
           run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}\""
           run_cmd "mount | grep -E \" on ${MNT} | on ${MNT}/part2 \" || true"
           run_cmd "df -h | grep -E \"loop|Filesystem\" || true"
 
-      - name: 📁 Create Spring Boot + extra dirs on repo + both mounts
+      - name: 📁 Create Spring Boot + extra dirs (repo + both mounts)
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"; MODE="${{ inputs.dir_mode }}"
+          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
+          read OWNER GROUP < <(parse_owner_group "$OG")
           SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" )
           IFS=',' read -ra EXTRA <<< "${{ inputs.dir_list }}"
           for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
@@ -243,7 +245,7 @@ jobs:
               "[ -e \"${d}/.gitkeep\" ] || : > \"${d}/.gitkeep\""
           done < "$ECHO_DIR/.all_dirs.txt"
 
-      - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart p2 → grow FS)
+      - name: 📏 Online resize — ALWAYS (grow image → refresh loop → resizepart 2 → grow FS)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -254,20 +256,84 @@ jobs:
           CUR_BYTES="$(stat -c%s "${DISK_IMG}")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
           REQ_MB="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ_MB:-$CUR_MB}"
           echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
-          if (( NEW_MB > CUR_MB )); then run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\""; else echo "[ECHO] No file growth needed"; fi
-
+          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}\"" || echo "[ECHO] No file growth needed"
           LOOP_DEV="$(get_loop)"
           run_cmd "sudo losetup -c \"${LOOP_DEV}\""
           run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100% || true"
           run_cmd "sudo partprobe \"${LOOP_DEV}\" || true"
-
-          P2="${LOOP_DEV}p2"
           case "$FST" in
-            ext4)  run_cmd "sudo resize2fs \"$P2\"" ;;
+            ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}p2\"" ;;
             xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"" ;;
             btrfs) run_cmd "sudo btrfs filesystem resize max \"${MNT}/part2\"" ;;
           esac
           run_cmd "df -h | grep -E \"${MNT}(/part2)?\" || true"
+
+      - name: 🧨 Bulk generator/upgrade — repo + both mounts (idempotent)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$ECHO_DIR/_helpers.sh"
+          exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
+          set -x
+          # Parse bulk_spec "dirs=100,files=10,size_kb=4,prefix=gen"
+          SPEC="${{ inputs.bulk_spec }}"
+          getv(){ echo "$SPEC" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}'; }
+          NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"
+          : "${NUM_DIRS:=100}" ; : "${NUM_FILES:=10}" ; : "${SIZE_KB:=4}" ; : "${PREFIX:=gen}"
+          echo "[ECHO] bulk_spec → dirs=$NUM_DIRS files=$NUM_FILES size_kb=$SIZE_KB prefix=$PREFIX"
+
+          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
+          read OWNER GROUP < <(parse_owner_group "$OG")
+
+          ROOT_REPO="bulk/${PREFIX}"
+          ROOT_P1="${MNT}/bulk/${PREFIX}"
+          ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
+          run_cmd "mkdir -p \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
+          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
+          run_cmd "sudo chmod -R \"${MODE}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
+
+          create_or_upgrade_dir() {
+            local base="$1"
+            local i="$2"
+            local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"
+            mkdir -p "$d"
+            for n in $(seq 1 "$NUM_FILES"); do
+              local f="${d}/file-$(printf '%04d' "$n").bin"
+              if [ -f "$f" ]; then
+                # upgrade: ensure size >= target (truncate to grow)
+                local cur; cur="$(stat -c%s "$f" || echo 0)"
+                local need=$(( SIZE_KB * 1024 ))
+                if (( cur < need )); then
+                  truncate -s "${need}" "$f"
+                fi
+              else
+                # create new with target size
+                truncate -s "$(( SIZE_KB * 1024 ))" "$f"
+              fi
+            done
+          }
+
+          export -f create_or_upgrade_dir
+
+          # Generate/upgrade on repo + both mounts
+          for i in $(seq 1 "$NUM_DIRS"); do
+            create_or_upgrade_dir "$ROOT_REPO" "$i"
+            create_or_upgrade_dir "$ROOT_P1"   "$i"
+            create_or_upgrade_dir "$ROOT_P2"   "$i"
+          done
+
+          run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
+          run_cmd "sudo chmod -R \"${MODE}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
+
+          write_echo "$ECHO_DIR/bulk_gen_upgrade.sh" \
+            "SPEC='${SPEC}'" \
+            'getv(){ echo "$SPEC" | tr "," "\n" | awk -F= -v k="$1" '\''$1==k{print $2}'\''; }' \
+            'NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"; : "${NUM_DIRS:=100}"; : "${NUM_FILES:=10}"; : "${SIZE_KB:=4}"; : "${PREFIX:=gen}"' \
+            'MNT="${{ inputs.mount_point }}"; OWNER="${OWNER}"; GROUP="${GROUP}"; MODE="${MODE}"' \
+            'ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"' \
+            'create_or_upgrade_dir() { local base="$1"; local i="$2"; local d="${base}/$(printf "%s-%06d" "$PREFIX" "$i")"; mkdir -p "$d"; for n in $(seq 1 "$NUM_FILES"); do local f="${d}/file-$(printf "%04d" "$n").bin"; if [ -f "$f" ]; then cur="$(stat -c%s "$f" || echo 0)"; need=$(( SIZE_KB * 1024 )); if (( cur < need )); then truncate -s "${need}" "$f"; fi; else truncate -s "$(( SIZE_KB * 1024 ))" "$f"; fi; done; }' \
+            'for i in $(seq 1 "$NUM_DIRS"); do create_or_upgrade_dir "$ROOT_REPO" "$i"; create_or_upgrade_dir "$ROOT_P1" "$i"; create_or_upgrade_dir "$ROOT_P2" "$i"; done' \
+            'sudo chown -R "$OWNER:$GROUP" "bulk" "$MNT/bulk" "$MNT/part2/bulk"; sudo chmod -R "$MODE" "bulk" "$MNT/bulk" "$MNT/part2/bulk"'
 
       - name: 👀 Live .github watcher — mirror new dirs to both mounts (5 min)
         shell: bash
@@ -276,11 +342,12 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/40_live_github_watch.log") 2>&1
           set -x
-          MNT="${{ inputs.mount_point }}"; OWNER="${{ inputs.owner }}"; GROUP="${{ inputs.group }}"; MODE="${{ inputs.dir_mode }}"
+          MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
+          read OWNER GROUP < <(parse_owner_group "$OG")
           SNAP="$ECHO_DIR/.github_dirs.snap"
           find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
 
-          for i in $(seq 1 60); do   # ~5분(5s*60)
+          for i in $(seq 1 60); do
             sleep 5
             NEW_SNAP="$ECHO_DIR/.github_dirs.new"
             find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$NEW_SNAP" || true
@@ -347,8 +414,9 @@ jobs:
             git fetch origin "$TARGET_BR" || true
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
+          # add created content
           mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt"
-          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring "${DIRS[@]/#/.\/}"
+          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring "${DIRS[@]/#/.\/}" bulk
           if git diff --cached --quiet; then
             echo "[ECHO] No changes to commit."
           else
