@@ -83,9 +83,7 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
-
           run_cmd() { echo "[CMD] $*"; eval "$@"; }
-
           write_echo() {
             local target="$1"; shift
             mkdir -p "$(dirname "$target")"
@@ -99,7 +97,6 @@ jobs:
             chmod +x "$target"
             echo "[ECHO] Wrote echo script: $target"
           }
-
           # Safe loop-device getter (idempotent)
           get_loop() {
             local dev
@@ -111,7 +108,6 @@ jobs:
             [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
-
           # Parse owner:group
           parse_owner_group() {
             local og="$1"
@@ -119,9 +115,7 @@ jobs:
             local g="${og#*:}"
             echo "$u" "$g"
           }
-
           export -f run_cmd write_echo get_loop parse_owner_group
-
           write_echo "$ECHO_DIR/_helpers.sh" \
             'run_cmd() { echo "[CMD] $*"; eval "$@"; }' \
             'get_loop() { local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '\''{print $1}'\'')" || dev=""; fi; [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }; printf "%s" "$dev"; }' \
@@ -154,9 +148,9 @@ jobs:
           exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
           set -x
           SIZE_MB="${{ inputs.disk_size_mb }}"
-          run_cmd "dd if=/dev/zero of=\"${DISK_IMG}\" bs=1M count=0 seek=\"${SIZE_MB}\""
+          run_cmd "dd if=/dev/zero of=\"$DISK_IMG\" bs=1M count=0 seek=\"$SIZE_MB\""
           LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
-          run_cmd "ls -lh \"${DISK_IMG}\""
+          run_cmd "ls -lh \"$DISK_IMG\""
 
       - name: 🧭 Partition GPT (p1=60%, p2=rest) — idempotent
         shell: bash
@@ -168,8 +162,8 @@ jobs:
           LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"
           run_cmd "sudo parted -s \"$LOOP_DEV\" print || true"
           run_cmd "sudo parted -s \"$LOOP_DEV\" mklabel gpt || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P1_NAME} 1 60% || true"
-          run_cmd "sudo parted -s \"$LOOP_DEV\" unit MiB mkpart ${MOUNT_P2_NAME} 60% 100% || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" mkpart ${MOUNT_P1_NAME} 1MiB 60% || true"
+          run_cmd "sudo parted -s \"$LOOP_DEV\" mkpart ${MOUNT_P2_NAME} 60% 100% || true"
           run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
           run_cmd "ls -l ${LOOP_DEV}* || true"
 
@@ -200,14 +194,12 @@ jobs:
           read OWNER GROUP < <(parse_owner_group "$OG")
           LOOP_DEV="$(get_loop)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-
           run_cmd "sudo mkdir -p \"${MNT}\""
           if mount | grep -q " on ${MNT} "; then
             echo "[ECHO] ${MNT} already mounted"
           else
             run_cmd "sudo mount \"$P1\" \"${MNT}\""
           fi
-
           # important: create part2 after p1 mount (p1 hides pre-created dirs)
           run_cmd "sudo mkdir -p \"${MNT}/part2\""
           if mount | grep -q " on ${MNT}/part2 "; then
@@ -215,7 +207,6 @@ jobs:
           else
             run_cmd "sudo mount \"$P2\" \"${MNT}/part2\""
           fi
-
           run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${MNT}\""
           run_cmd "mount | grep -E \" on ${MNT} | on ${MNT}/part2 \" || true"
           run_cmd "df -h | grep -E \"loop|Filesystem\" || true"
@@ -233,7 +224,6 @@ jobs:
           IFS=',' read -ra EXTRA <<< "${{ inputs.dir_list }}"
           for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
-
           while IFS= read -r d; do
             run_cmd "mkdir -p \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
             run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"${d}\" \"${MNT}/${d}\" \"${MNT}/part2/${d}\""
@@ -254,14 +244,14 @@ jobs:
           exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
           set -x
           MNT="${{ inputs.mount_point }}"; FST="${{ inputs.fs_type }}"
-          CUR_BYTES="$(stat -c%s "${DISK_IMG}")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
+          CUR_BYTES="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR_BYTES + 1048575) / 1048576 ))
           REQ_MB="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ_MB:-$CUR_MB}"
           echo "[ECHO] Current=${CUR_MB}MB, Requested=${NEW_MB}MB"
-          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"${DISK_IMG}}\"" || echo "[ECHO] No file growth needed"
+          (( NEW_MB > CUR_MB )) && run_cmd "truncate -s ${NEW_MB}M \"$DISK_IMG\"" || echo "[ECHO] No file growth needed"
           LOOP_DEV="$(get_loop)"
-          run_cmd "sudo losetup -c \"${LOOP_DEV}\""
-          run_cmd "sudo parted -s \"${LOOP_DEV}\" resizepart 2 100% || true"
-          run_cmd "sudo partprobe \"${LOOP_DEV}\" || true"
+          run_cmd "sudo losetup -c \"$LOOP_DEV\""
+          run_cmd "sudo parted -s \"$LOOP_DEV\" resizepart 2 100% || true"
+          run_cmd "sudo partprobe \"$LOOP_DEV\" || true"
           case "$FST" in
             ext4)  run_cmd "sudo resize2fs \"${LOOP_DEV}p2\"" ;;
             xfs)   run_cmd "sudo xfs_growfs \"${MNT}/part2\"" ;;
@@ -282,17 +272,14 @@ jobs:
           NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"
           : "${NUM_DIRS:=100}" ; : "${NUM_FILES:=10}" ; : "${SIZE_KB:=4}" ; : "${PREFIX:=gen}"
           echo "[ECHO] bulk_spec → dirs=$NUM_DIRS files=$NUM_FILES size_kb=$SIZE_KB prefix=$PREFIX"
-
           MNT="${{ inputs.mount_point }}"; OG="${{ inputs.owner_group }}"; MODE="${{ inputs.dir_mode }}"
           read OWNER GROUP < <(parse_owner_group "$OG")
-
           ROOT_REPO="bulk/${PREFIX}"
           ROOT_P1="${MNT}/bulk/${PREFIX}"
           ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
           run_cmd "mkdir -p \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
           run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
           run_cmd "sudo chmod -R \"${MODE}\" \"$ROOT_REPO\" \"$ROOT_P1\" \"$ROOT_P2\""
-
           create_or_upgrade_dir() {
             local base="$1"
             local i="$2"
@@ -301,30 +288,24 @@ jobs:
             for n in $(seq 1 "$NUM_FILES"); do
               local f="${d}/file-$(printf '%04d' "$n").bin"
               if [ -f "$f" ]; then
-                # upgrade: ensure size >= target (truncate to grow)
                 local cur; cur="$(stat -c%s "$f" || echo 0)"
                 local need=$(( SIZE_KB * 1024 ))
                 if (( cur < need )); then
                   truncate -s "${need}" "$f"
                 fi
               else
-                # create new with target size
                 truncate -s "$(( SIZE_KB * 1024 ))" "$f"
               fi
             done
           }
-
           export -f create_or_upgrade_dir
-
           for i in $(seq 1 "$NUM_DIRS"); do
             create_or_upgrade_dir "$ROOT_REPO" "$i"
             create_or_upgrade_dir "$ROOT_P1"   "$i"
             create_or_upgrade_dir "$ROOT_P2"   "$i"
           done
-
           run_cmd "sudo chown -R \"${OWNER}:${GROUP}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
           run_cmd "sudo chmod -R \"${MODE}\" \"bulk\" \"$MNT/bulk\" \"$MNT/part2/bulk\""
-
           write_echo "$ECHO_DIR/bulk_gen_upgrade.sh" \
             "SPEC='${SPEC}'" \
             'getv(){ echo "$SPEC" | tr "," "\n" | awk -F= -v k="$1" '\''$1==k{print $2}'\''; }' \
@@ -346,7 +327,6 @@ jobs:
           read OWNER GROUP < <(parse_owner_group "$OG")
           SNAP="$ECHO_DIR/.github_dirs.snap"
           find .github -type d -printf "%P\n" | sed '/^$/d' | sort -u > "$SNAP" || true
-
           for i in $(seq 1 60); do
             sleep 5
             NEW_SNAP="$ECHO_DIR/.github_dirs.new"
@@ -372,6 +352,103 @@ jobs:
             fi
           done
 
+      - name: 🧾 Generate EXTRA workflows under .github/workflows (bulk, idempotent)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          exec > >(tee -a ".github/echo_logs/42_generate_workflows.log") 2>&1
+          set -x
+          mkdir -p .github/workflows
+          gen() {
+            local path="$1"; shift
+            local content="$*"
+            if [ ! -f "$path" ]; then
+              printf "%s\n" "$content" > "$path"
+              echo "[ECHO] created workflow: $path"
+            else
+              echo "[ECHO] exists (skip): $path"
+            fi
+          }
+          gen ".github/workflows/diskdirs-resize-only.yml" "$(cat <<'YAML'
+          name: "🧩 DiskDirs — Resize Only (manual)"
+          on: { workflow_dispatch: {} }
+          jobs:
+            resize:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Echo Resize Hint
+                  run: |
+                    echo "[ECHO] Use main workflow inputs.resize_to_mb to grow disk.img"
+          YAML
+          )"
+          gen ".github/workflows/pages-size-report.yml" "$(cat <<'YAML'
+          name: "📊 Repo Size Report (manual)"
+          on: { workflow_dispatch: {} }
+          permissions: { contents: read }
+          jobs:
+            report:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Size Snapshot
+                  run: |
+                    set -Eeuo pipefail
+                    mkdir -p .github/echo_monitoring
+                    du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
+                    du -sh . > .github/echo_monitoring/total_size.txt || true
+                - name: Upload artifact
+                  uses: actions/upload-artifact@v4
+                  with:
+                    name: repo-size-report
+                    path: .github/echo_monitoring/**
+          YAML
+          )"
+          gen ".github/workflows/echo-bulkgen-manual.yml" "$(cat <<'YAML'
+          name: "🧨 Echo BulkGen (manual)"
+          on: { workflow_dispatch: {} }
+          jobs:
+            bulk:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Bulk Create (echo only)
+                  run: |
+                    set -Eeuo pipefail
+                    mkdir -p .github/echo_scripts
+                    echo '#!/usr/bin/env bash' > .github/echo_scripts/sample_bulk.sh
+                    echo 'echo "[ECHO] bulk generator placeholder (use main workflow for real gen)"' >> .github/echo_scripts/sample_bulk.sh
+                    chmod +x .github/echo_scripts/sample_bulk.sh
+          YAML
+          )"
+          gen ".github/workflows/dummy-keepalive-1min.yml" "$(cat <<'YAML'
+          name: "⏱️ 1min Keepalive — Echo"
+          on:
+            schedule:
+              - cron: "*/1 * * * *"
+          jobs:
+            ping:
+              runs-on: ubuntu-latest
+              steps:
+                - run: echo "[ECHO] keepalive tick $(date -u +%FT%TZ)"
+          YAML
+          )"
+          gen ".github/workflows/echo-verify-yaml.yml" "$(cat <<'YAML'
+          name: "✅ Echo Verify — YAML Syntax"
+          on: { workflow_dispatch: {} }
+          jobs:
+            lint:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Check workflow files exist
+                  run: |
+                    set -Eeuo pipefail
+                    test -d .github/workflows
+                    ls -la .github/workflows
+          YAML
+          )"
+
       - name: 📊 Size reports (safe)
         shell: bash
         run: |
@@ -380,7 +457,7 @@ jobs:
           exec > >(tee -a "$LOG_DIR/45_sizes.log") 2>&1
           set -x
           mkdir -p .github/echo_monitoring
-          run_cmd "du -ah . | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true"
+          run_cmd "du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true"
           run_cmd "du -sh . > .github/echo_monitoring/total_size.txt || true"
           run_cmd "df -h > .github/echo_monitoring/df_all.txt || true"
 
@@ -406,43 +483,40 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/60_commit_push.log") 2>&1
           set -x
-
           git config user.name "${GIT_USER_NAME}"
           git config user.email "${GIT_USER_EMAIL}"
           git config pull.rebase true
-
           TARGET_BR="${GITHUB_REF_NAME}"
           CURRENT="$(git rev-parse --abbrev-ref HEAD)"
-
           git fetch origin --prune
           if [[ "$CURRENT" != "$TARGET_BR" ]]; then
             git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
           fi
-
           mapfile -t DIRS < "$ECHO_DIR/.all_dirs.txt" || true
-          git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring bulk "${DIRS[@]/#/.\/}" 2>/dev/null || true
-
+          git add \
+            .gitignore \
+            .github/workflows \
+            .github/echo_scripts \
+            .github/echo_logs \
+            .github/echo_monitoring \
+            bulk \
+            "${DIRS[@]/#/.\/}" 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "[ECHO] No changes to commit."
             exit 0
           fi
-
           git commit -m "${{ inputs.commit_message }}"
-
           if git push origin "$TARGET_BR"; then
             echo "[ECHO] Pushed to origin/$TARGET_BR (fast-forward)"
             exit 0
           fi
-
           echo "[ECHO] Push rejected — trying rebase on origin/$TARGET_BR"
           git fetch origin --prune
           git rebase "origin/$TARGET_BR" || { git rebase --abort || true; echo "[ECHO] rebase failed, will fallback"; }
-
           if git push origin "$TARGET_BR"; then
             echo "[ECHO] Pushed to origin/$TARGET_BR after rebase"
             exit 0
           fi
-
           BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"
           echo "[ECHO] Still rejected. Pushing to backup branch: $BK"
           git checkout -B "$BK"
