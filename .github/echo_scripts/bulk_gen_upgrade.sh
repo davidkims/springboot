@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-export PS4='+ [2025-08-10 08:11:50] _helpers.sh:8:write_echo ▶ '
+export PS4='+ [2025-08-10 08:31:22] _helpers.sh:8:write_echo ▶ '
 set -x
 SPEC='dirs=100,files=10,size_kb=4,prefix=gen'
 getv(){ echo "$SPEC" | tr "," "\n" | awk -F= -v k="$1" '$1==k{print $2}'; }

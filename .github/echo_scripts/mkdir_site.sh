@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-export PS4='+ [2025-08-10 08:11:22] _helpers.sh:8:write_echo ▶ '
+export PS4='+ [2025-08-10 08:30:48] _helpers.sh:8:write_echo ▶ '
 set -x
 mkdir -p "site" "/mnt/gh-disk/site" "/mnt/gh-disk/part2/site"
 sudo chown -R "runner:runner" "site" "/mnt/gh-disk/site" "/mnt/gh-disk/part2/site"
