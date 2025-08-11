@@ -1,44 +1,44 @@
-name: "MEGA Disk+Dirs+Massive+Service init/seed+Transfer backup (no 24x365)"
+name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드/업그레이드+전송 백업(24x365 해제)"
 
 on:
   workflow_dispatch:
     inputs:
       disk_size_mb:
-        description: "Initial disk image size (MB)"
+        description: "초기 디스크 이미지 크기(MB)"
         required: true
         default: "2048"
       resize_to_mb:
-        description: "Grow image to this size (MB). Leave blank = no change"
+        description: "전체 이미지를 이 크기(MB)로 확장 (빈칸=확장 안함)"
         required: false
         default: ""
       fs_type:
-        description: "Filesystem: ext4 | xfs | btrfs"
+        description: "파일시스템: ext4 | xfs | btrfs"
         required: true
         default: "ext4"
       mount_point:
-        description: "Mount point for p1 (p2 mounts at <mount_point>/part2)"
+        description: "마운트 지점(p1). p2는 <mount_point>/part2"
         required: true
         default: "/mnt/gh-disk"
       bulk_spec:
-        description: "dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
+        description: "대량: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
         required: true
         default: "dirs=100,files=10,size_kb=4,prefix=gen"
-      services:
-        description: "csv: mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda"
+      service_spec:
+        description: "서비스+DB: services=..., mysql=dbs=a,b;user=u:p, pg=dbs=a,b, mongo=app:users,logs:lines"
         required: false
-        default: "mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda"
+        default: "services=mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda; mysql=dbs=app,logs;user=app:app123!; pg=dbs=app,logs; mongo=app:users,logs:lines"
       seed_spec:
-        description: "dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1"
+        description: "시드: dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1"
         required: false
         default: "dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1"
-      db_spec:
-        description: "mysql=app,logs,metrics;user=app:app123!|pg=app,logs,metrics|mongo=app:users,logs:lines"
-        required: false
-        default: "mysql=app,logs,metrics;user=app:app123!|pg=app,logs,metrics|mongo=app:users,logs:lines"
       commit_and_push:
-        description: "Commit & push generated files"
+        description: "생성물 커밋/푸시 여부"
         required: true
         default: "true"
+      commit_message:
+        description: "커밋 메시지"
+        required: true
+        default: "chore: mega disk+dirs + massive + svc init/seed/upgrade + transfer backup (auto)"
 
 permissions:
   contents: write
@@ -49,16 +49,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  #######################################################################
+  # 1) Disk+Dirs — 이미지/파티션/파일시스템/견고한 마운트 + MASSIVE 생성
+  #######################################################################
   diskdirs:
-    name: "💽 Disk+Dirs + Massive"
+    name: "💽 Disk+Dirs + MASSIVE"
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
       DISK_IMG: disk.img
       LOG_DIR: .github/echo_logs
-      ECHO_DIR: .github/echo_scripts
-      MOUNT_P1_NAME: p1
-      MOUNT_P2_NAME: p2
       MASSIVE_SHARDS: "8"
       MASSIVE_MULTIPLIER: "4"
       PARALLEL_JOBS: "8"
@@ -66,51 +66,17 @@ jobs:
       SWAP_SIZE_MB: "2048"
       RAMDISK_MB: "512"
     steps:
-      - name: Checkout
+      - name: 📂 Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Init helpers
+      - name: 🔧 System prep (swap/ramdisk + tools)
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ECHO_DIR" .github/echo_monitoring
-          exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
-          set -x
-          cat > "$ECHO_DIR/_helpers.sh" <<'BASH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
-          get_loop(){
-            local dev
-            dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "$dev" ]]; then
-              sudo losetup -fP "$DISK_IMG"
-              dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            fi
-            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found"; return 1; }
-            printf "%s" "$dev"
-          }
-          parse_owner_group(){
-            local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"
-            [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"
-          }
-          default_mount(){ echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
-          default_fs(){ echo "${INPUT_FS_TYPE:-ext4}"; }
-          default_dir_mode(){ echo "${INPUT_DIR_MODE:-0755}"; }
-          default_bulk_spec(){ echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
-          BASH
-          chmod +x "$ECHO_DIR/_helpers.sh"
-
-      - name: System prep (swap/ramdisk + tools)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/03_resource_boost.log") 2>&1
-          set -x
+          mkdir -p "${LOG_DIR}" .github/echo_monitoring
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends jq moreutils pigz pv unzip tar curl ca-certificates xz-utils tree rsync parted xfsprogs btrfs-progs
           if [[ "${SWAP_SIZE_MB}" != "0" ]] && ! sudo swapon --show | grep -q .; then
@@ -124,122 +90,114 @@ jobs:
             mount | grep -q " on /mnt/ramdisk " || sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk
           fi
 
-      - name: Create image + attach loop
+      - name: 🧱 Create image + attach loop
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
-          set -x
           RAW_SIZE_MB="${{ inputs.disk_size_mb }}"
           [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]] && RAW_SIZE_MB="2048"
-          if [[ ! -f "$DISK_IMG" ]]; then truncate -s ${RAW_SIZE_MB}M "$DISK_IMG"; fi
-          LOOP_DEV="$(get_loop)"; ls -lh "$DISK_IMG"
+          [[ -f "$DISK_IMG" ]] || truncate -s ${RAW_SIZE_MB}M "$DISK_IMG"
+          sudo losetup -fP "$DISK_IMG" || true
+          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
+          [[ -n "$LOOP_DEV" ]]
 
-      - name: Partition p1=60%, p2=40%
+      - name: 🧭 GPT partition p1=60%, p2=40%
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
-          set -x
-          LOOP_DEV="$(get_loop)"
+          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
           sudo parted -s "$LOOP_DEV" mklabel gpt || true
-          sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P1_NAME} 1MiB 60% || true
-          sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P2_NAME} 60% 100% || true
+          sudo parted -s "$LOOP_DEV" mkpart p1 1MiB 60% || true
+          sudo parted -s "$LOOP_DEV" mkpart p2 60% 100% || true
           sudo partprobe "$LOOP_DEV" || true
-          ls -l ${LOOP_DEV}*
 
-      - name: Make filesystems
+      - name: 🧪 Make filesystems
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/14_mkfs.log") 2>&1
-          set -x
-          FST="$(INPUT_FS_TYPE="${{ inputs.fs_type }}" default_fs)"
-          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          FST="${{ inputs.fs_type }}"
+          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
+          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
             ext4)  sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
             xfs)   sudo mkfs.xfs  -f "$P1"; sudo mkfs.xfs  -f "$P2" ;;
             btrfs) sudo mkfs.btrfs -f "$P1"; sudo mkfs.btrfs -f "$P2" ;;
+            *)     sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
           esac
 
-      - name: Mount p1/p2 (ensure mountpoints)
+      - name: 🔗 Mount p1/p2 (robust)
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/16_mount.log") 2>&1
-          set -x
-          MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
-          read OWNER GROUP < <(parse_owner_group "runner:runner")
-          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          sudo mkdir -p "${MNT}" "${MNT}/part2"
-          mount | grep -q " on ${MNT} "       || sudo mount "$P1" "${MNT}"
-          mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "${MNT}/part2"
-          sudo chown -R "${OWNER}:${GROUP}" "${MNT}"
+          MNT="$(printf '%s' "${{ inputs.mount_point }}" | xargs || true)"
+          [ -z "${MNT:-}" ] && MNT="/mnt/gh-disk"
+          sudo mkdir -p "$MNT" "$MNT/part2"
+          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
+          sudo partprobe "$LOOP_DEV" || true
+          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+          mount | grep -q " on ${MNT} "       || sudo mount "$P1" "$MNT"
+          mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "$MNT/part2"
+          df -h | grep -E "${MNT}(/part2)?"
 
-      - name: Optional online resize p2
+      - name: 📏 Optional online resize p2
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
-          set -x
           REQ="${{ inputs.resize_to_mb }}"
-          [[ -z "${REQ:-}" ]] && exit 0
-          [[ ! "${REQ}" =~ ^[0-9]+$ ]] && exit 0
-          CUR="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR + 1048575)/1048576 ))
+          [[ -n "${REQ:-}" && "${REQ}" =~ ^[0-9]+$ ]] || exit 0
+          CUR_BYTES="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR_BYTES + 1048575)/1048576 ))
           (( REQ > CUR_MB )) && truncate -s ${REQ}M "$DISK_IMG" || true
-          LOOP_DEV="$(get_loop)"
-          sudo losetup -c "$LOOP_DEV"
+          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
+          sudo losetup -c "$LOOP_DEV" || true
           sudo parted -s "$LOOP_DEV" resizepart 2 100% || true
           sudo partprobe "$LOOP_DEV" || true
-          FST="$(INPUT_FS_TYPE="${{ inputs.fs_type }}" default_fs)"
-          MNT="${{ inputs.mount_point }}"
+          FST="${{ inputs.fs_type }}"; MNT="${{ inputs.mount_point }}"
           case "$FST" in
             ext4)  sudo resize2fs "${LOOP_DEV}p2" ;;
             xfs)   sudo xfs_growfs "${MNT}/part2" ;;
             btrfs) sudo btrfs filesystem resize max "${MNT}/part2" ;;
           esac
-          df -h | grep -E "${MNT}(/part2)?"
 
-      - name: Bulk generator (repo + both mounts)
+      - name: 🧨 Bulk generator (repo + both mounts)
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
-          set -x
           SPEC="${{ inputs.bulk_spec }}"
-          getv(){ echo "$SPEC" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}'; }
-          NUM_DIRS="$(getv dirs)"; : "${NUM_DIRS:=100}"
-          NUM_FILES="$(getv files)"; : "${NUM_FILES:=10}"
-          SIZE_KB="$(getv size_kb)"; : "${SIZE_KB:=4}"
-          PREFIX="$(getv prefix)"; : "${PREFIX:=gen}"
-          MNT="${{ inputs.mount_point }}"
+          kv(){ printf '%s' "$SPEC" | tr ', ' '\n\n' | awk -F= -vk="$1" '$1==k{print $2}' | tail -n1; }
+          NUM_DIRS="$(kv dirs)"; : "${NUM_DIRS:=100}"
+          NUM_FILES="$(kv files)"; : "${NUM_FILES:=10}"
+          SIZE_KB="$(kv size_kb)"; : "${SIZE_KB:=4}"
+          PREFIX="$(kv prefix)"; : "${PREFIX:=gen}"
+          MNT="$(printf '%s' "${{ inputs.mount_point }}" | xargs)"; : "${MNT:=/mnt/gh-disk}"
           ROOTS=("bulk/${PREFIX}" "${MNT}/bulk/${PREFIX}" "${MNT}/part2/bulk/${PREFIX}")
           for r in "${ROOTS[@]}"; do mkdir -p "$r"; done
-          for i in $(seq 1 "$NUM_DIRS"); do
-            for r in "${ROOTS[@]}"; do
-              d="${r}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
-              for n in $(seq 1 "$NUM_FILES"); do truncate -s "$(( SIZE_KB*1024 ))" "$d/file-$(printf '%04d' "$n").bin"; done
+          make_dir() {
+            base="$1"; idx="$2"
+            d="${base}/$(printf '%s-%06d' "$PREFIX" "$idx")"; mkdir -p "$d"
+            for n in $(seq 1 "$NUM_FILES"); do
+              f="${d}/file-$(printf '%04d' "$n").bin"
+              [ -f "$f" ] || truncate -s "$(( SIZE_KB*1024 ))" "$f"
             done
+          }
+          for i in $(seq 1 "$NUM_DIRS"); do
+            for r in "${ROOTS[@]}"; do make_dir "$r" "$i"; done
           done
 
-      - name: MASSIVE shards (parallel)
+      - name: 🚀 MASSIVE shards (parallel)
         shell: bash
         run: |
           set -Eeuo pipefail
-          exec > >(tee -a ".github/echo_logs/36_massive.log") 2>&1
-          set -x
           SPEC="${{ inputs.bulk_spec }}"
-          getv(){ echo "$SPEC" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}'; }
-          BASE_DIRS="$(getv dirs)"; : "${BASE_DIRS:=100}"
-          BASE_FILES="$(getv files)"; : "${BASE_FILES:=10}"
-          BASE_KB="$(getv size_kb)"; : "${BASE_KB:=4}"
-          BASE_PREFIX="$(getv prefix)"; : "${BASE_PREFIX:=gen}"
-          SHARDS="${MASSIVE_SHARDS:-8}"; MULT="${MASSIVE_MULTIPLIER:-4}"; PJ="${PARALLEL_JOBS:-8}"
-          MNT="${{ inputs.mount_point }}"
-          gen_one_shard(){
-            local shard="$1" SH_PREFIX="${BASE_PREFIX}-s${shard}" SH_DIRS=$(( BASE_DIRS * MULT ))
-            local ROOTS=("bulk/${SH_PREFIX}" "${MNT}/bulk/${SH_PREFIX}" "${MNT}/part2/bulk/${SH_PREFIX}")
+          kv(){ printf '%s' "$SPEC" | tr ', ' '\n\n' | awk -F= -vk="$1" '$1==k{print $2}' | tail -n1; }
+          BASE_DIRS="$(kv dirs)"; : "${BASE_DIRS:=100}"
+          BASE_FILES="$(kv files)"; : "${BASE_FILES:=10}"
+          BASE_KB="$(kv size_kb)"; : "${BASE_KB:=4}"
+          BASE_PREFIX="$(kv prefix)"; : "${BASE_PREFIX:=gen}"
+          SHARDS="${MASSIVE_SHARDS}"; MULT="${MASSIVE_MULTIPLIER}"; PJ="${PARALLEL_JOBS}"
+          MNT="$(printf '%s' "${{ inputs.mount_point }}" | xargs)"; : "${MNT:=/mnt/gh-disk}"
+          gen_one_shard() {
+            shard="$1"; SH_PREFIX="${BASE_PREFIX}-s${shard}"; SH_DIRS=$(( BASE_DIRS * MULT ))
+            ROOTS=("bulk/${SH_PREFIX}" "${MNT}/bulk/${SH_PREFIX}" "${MNT}/part2/bulk/${SH_PREFIX}")
             for r in "${ROOTS[@]}"; do mkdir -p "$r"; done
             for i in $(seq 1 "$SH_DIRS"); do
               for r in "${ROOTS[@]}"; do
@@ -251,96 +209,176 @@ jobs:
           export -f gen_one_shard
           seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
-      - name: Reports
+      - name: 📊 Size reports
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p .github/echo_monitoring
-          du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
+          du -ah . 2>/dev/null | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
           du -sh . > .github/echo_monitoring/total_size.txt || true
           df -h > .github/echo_monitoring/df_all.txt || true
 
-      - name: .gitignore update
+      - name: 📝 .gitignore update
         shell: bash
         run: |
           set -Eeuo pipefail
           echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
 
-      - name: Commit & push (optional)
+      - name: ✅ Commit & push (optional)
         if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_MSG_IN: ${{ inputs.commit_message }}
         run: |
           set -Eeuo pipefail
           git config user.name "gh-actions-bot"
           git config user.email "gh-actions-bot@example.com"
           git add -A
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "chore: disk+dirs + massive (auto)"
+          if git diff --cached --quiet; then echo "[ECHO] No changes"; exit 0; fi
+          git commit -m "${COMMIT_MSG_IN:-chore: mega disk+dirs auto}"
           git push
 
-      - name: Upload artifacts (logs/scripts/monitoring)
+      - name: 📦 Upload artifacts (logs/reports)
         uses: actions/upload-artifact@v4
         with:
           name: diskdirs-logs-${{ github.run_id }}
           path: |
             .github/echo_logs/**
-            .github/echo_scripts/**
             .github/echo_monitoring/**
           retention-days: 7
 
-  service_init_seed_upgrade:
-    name: "🧩 Service init/seed + process DB + upgrade (parallel)"
+  #######################################################################
+  # 2) Services — init/seed + process DB seeding + image upgrade (parallel)
+  #######################################################################
+  services_init_seed_upgrade:
+    name: "🧩 Services init/seed/upgrade (parallel)"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     needs: [diskdirs]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate init/seed/upgrade script
+      - name: 🧰 Generate init/seed/upgrade script
         shell: bash
         env:
-          SERVICES: ${{ inputs.services }}
-          SEED_SPEC: ${{ inputs.seed_spec }}
-          DB_SPEC: ${{ inputs.db_spec }}
+          SERVICE_SPEC: ${{ inputs.service_spec }}
+          SEED_SPEC:    ${{ inputs.seed_spec }}
         run: |
           set -Eeuo pipefail
           mkdir -p .github/echo_init .github/echo_logs service_data
           cat > .github/echo_init/init_seed_upgrade.sh <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          SERVICES="${SERVICES:-mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda}"
+          # Parse service_spec
+          SERVICE_SPEC="${SERVICE_SPEC:-services=mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda; mysql=dbs=app,logs;user=app:app123!; pg=dbs=app,logs; mongo=app:users,logs:lines}"
+          getk(){ printf '%s' "$1" | tr ';, ' '\n\n\n' | awk -F= -vk="$2" '$1==k{print $2}' | tail -n1; }
+          SERVICES="$(getk "$SERVICE_SPEC" services)"
+          MYSQL_DEF="$(printf '%s\n' "$SERVICE_SPEC" | awk -F'mysql=' 'NF>1{print $2}' | head -n1)"
+          PG_DEF="$(printf '%s\n' "$SERVICE_SPEC" | awk -F'pg=' 'NF>1{print $2}' | head -n1)"
+          MONGO_DEF="$(printf '%s\n' "$SERVICE_SPEC" | awk -F'mongo=' 'NF>1{print $2}' | head -n1)"
+          mysql_kv(){ getk "$MYSQL_DEF" "$1"; }
+          pg_kv(){ getk "$PG_DEF" "$1"; }
+          # Seeds
           SEED_SPEC="${SEED_SPEC:-dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1}"
-          DB_SPEC="${DB_SPEC:-mysql=app,logs,metrics;user=app:app123!|pg=app,logs,metrics|mongo=app:users,logs:lines}"
+          kv(){ printf '%s' "$SEED_SPEC" | tr ', ' '\n\n' | awk -F= -vk="$1" '$1==k{print $2}' | tail -n1; }
+          SD_DIRS="$(kv dirs)"; : "${SD_DIRS:=50}"
+          SD_FILES="$(kv files)"; : "${SD_FILES:=8}"
+          SD_KB="$(kv size_kb)"; : "${SD_KB:=32}"
+          REDIS_KEYS="$(kv redis_keys)"; : "${REDIS_KEYS:=500}"
+          MONGO_DOCS="$(kv mongo_docs)"; : "${MONGO_DOCS:=200}"
+          KAFKA_TP="$(kv kafka_topics)"; : "${KAFKA_TP:=}"
 
-          # parse helpers
-          kv(){ echo "$1" | tr ',; ' '\n\n\n' | awk -F= -v k="$2" '$1==k{print $2}' | tail -n1; }
-          seg(){ echo "$DB_SPEC" | tr '|' '\n' | awk -F= -v k="$1" '$1==k{print $0}' | cut -d= -f2-; }
-
-          MYSQL_DBS="$(seg mysql | cut -d';' -f1)"
-          MYSQL_USERPASS="$(seg mysql | awk -F';' '{for(i=1;i<=NF;i++){if($i~/^user=/){sub(/^user=/,"",$i);print $i}}}')"
-          PG_DBS="$(seg pg)"
-          MONGO_DBCOLS="$(seg mongo)"
-
-          getv(){ echo "$SEED_SPEC" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}' | tail -n1; }
-          SD_DIRS="$(getv dirs)"; : "${SD_DIRS:=50}"
-          SD_FILES="$(getv files)"; : "${SD_FILES:=8}"
-          SD_KB="$(getv size_kb)"; : "${SD_KB:=32}"
-          REDIS_KEYS="$(getv redis_keys)"; : "${REDIS_KEYS:=500}"
-          MONGO_DOCS="$(getv mongo_docs)"; : "${MONGO_DOCS:=200}"
-          KAFKA_TP="$(getv kafka_topics)"
-
-          data_dirs(){ local svc="$1" base="service_data/$svc"; mkdir -p "$base"
-            for i in $(seq 1 "$SD_DIRS"); do d=$(printf "%s/%s-%06d" "$base" "$svc" "$i"); mkdir -p "$d"
+          data_dirs(){
+            svc="$1"; base="service_data/$svc"; mkdir -p "$base"
+            for i in $(seq 1 "$SD_DIRS"); do
+              d=$(printf "%s/%s-%06d" "$base" "$svc" "$i"); mkdir -p "$d"
               for n in $(seq 1 "$SD_FILES"); do truncate -s $((SD_KB*1024)) "$d/file-$(printf '%04d' "$n").bin"; done
-            done; }
-
+            done
+          }
           dps(){ docker ps --format '{{.ID}} {{.Image}} {{.Names}}'; }
-          find_c(){ dps | awk -v r="$1" '$0 ~ r {print $1; exit}'; }
+          find_c(){ dps | awk -vr="$1" '$0 ~ r {print $1; exit}'; }
 
-          # Upgrades
-          upgrade_one(){ local svc="$1"; local img=
+          do_mysql(){
+            cid="$(find_c "(mysql|mariadb)")" || true
+            [ -z "$cid" ] && { echo "[mysql] no container → skip"; return; }
+            MYSQL_DBS="$(mysql_kv dbs)"; MYSQL_USERPASS="$(mysql_kv user)"
+            sql=""
+            if [ -n "$MYSQL_USERPASS" ]; then u="${MYSQL_USERPASS%%:*}"; p="${MYSQL_USERPASS#*:}"; [ -n "$u" ]&&[ -n "$p" ] && sql+="CREATE USER IF NOT EXISTS '$u'@'%' IDENTIFIED BY '$p'; GRANT ALL PRIVILEGES ON *.* TO '$u'@'%' WITH GRANT OPTION; "; fi
+            IFS=',' read -ra DBS <<< "$MYSQL_DBS"
+            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -z "$dbt" ] && continue; sql+="CREATE DATABASE IF NOT EXISTS \`$dbt\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "; done
+            sql+="CREATE DATABASE IF NOT EXISTS \`process\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
+            echo "[mysql] create DBs/process/user"
+            docker exec -i "$cid" sh -lc "mysql -uroot -p\"\$MYSQL_ROOT_PASSWORD\" -e \"$sql\"" || true
+            data_dirs mysql
+          }
+
+          do_postgres(){
+            cid="$(find_c "postgres")" || true
+            [ -z "$cid" ] && { echo "[postgres] no container → skip"; return; }
+            PG_DBS="$(pg_kv dbs)"
+            IFS=',' read -ra DBS <<< "$PG_DBS"
+            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" \"$dbt\"" || true; done
+            docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" process" || true
+            data_dirs postgres
+          }
+
+          do_redis(){
+            cid="$(find_c "redis")" || true
+            [ -z "$cid" ] && { echo "[redis] no container → skip"; return; }
+            echo "[redis] seed ${REDIS_KEYS} keys + process:* space"
+            seq 1 "$REDIS_KEYS" | xargs -I{} -P 8 sh -c 'docker exec -i "$0" sh -lc "redis-cli SET seed:{} \$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) >/dev/null"' "$cid" || true
+            for i in $(seq 1 200); do docker exec -i "$cid" sh -lc "redis-cli HSET process:job:$i status pending" || true; done
+            data_dirs redis
+          }
+
+          do_mongo(){
+            cid="$(find_c "mongo")" || true
+            [ -z "$cid" ] && { echo "[mongo] no container → skip"; return; }
+            MONGO_DEF="${MONGO_DEF:-app:users}"
+            IFS=',' read -ra DCS <<< "$MONGO_DEF"
+            for pair in "${DCS[@]}"; do
+              pair="$(echo "$pair" | xargs)"; [ -z "$pair" ] && continue
+              db="${pair%%:*}"; cols="${pair#*:}"
+              IFS=';' read -ra COLS <<< "$(echo "$cols" | tr ',' ';')"
+              for col in "${COLS[@]}"; do
+                col="$(echo "$col" | xargs)"; [ -z "$col" ] && continue
+                docker exec -i "$cid" mongosh --quiet "$db" --eval "db.createCollection('$col'); docs=[]; for (let i=0;i<${MONGO_DOCS};i++){docs.push({i,ts:new Date(),payload:Math.random().toString(36).slice(2)})}; db.getCollection('$col').insertMany(docs,{ordered:false});" || true
+              done
+            done
+            docker exec -i "$cid" mongosh --quiet process --eval "db.createCollection('jobs'); db.jobs.insertMany(Array.from({length:200}, (_,i)=>({i,ts:new Date(),status:'pending'})),{ordered:false});" || true
+            data_dirs mongo
+          }
+
+          do_kafka(){
+            cid="$(find_c "kafka")" || true
+            [ -z "$cid" ] && { echo "[kafka] no container → skip"; return; }
+            [ -n "$KAFKA_TP" ] && IFS=',' read -ra TPS <<< "$KAFKA_TP" || TPS=()
+            TPS+=("process.jobs:3:1")
+            for t in "${TPS[@]}"; do
+              t="$(echo "$t" | xargs)"; [ -z "$t" ] && continue
+              name="${t%%:*}"; rest="${t#*:}"; parts="${rest%%:*}"; repl="${rest#*:}"
+              docker exec -i "$cid" bash -lc "kafka-topics.sh --create --if-not-exists --topic \"$name\" --bootstrap-server localhost:9092 --partitions ${parts:-3} --replication-factor ${repl:-1}" || true
+            done
+            data_dirs kafka
+          }
+
+          do_rabbit(){
+            cid="$(find_c "rabbit")" || cid="$(find_c "rabbitmq")" || true
+            [ -z "$cid" ] && { echo "[rabbitmq] no container → skip"; return; }
+            docker exec -i "$cid" rabbitmqctl add_vhost /process || true
+            docker exec -i "$cid" rabbitmqctl set_permissions -p /process guest ".*" ".*" ".*" || true
+            docker exec -i "$cid" rabbitmqadmin declare queue name="process.queue" durable=true || true
+            data_dirs rabbitmq
+          }
+
+          do_minio(){
+            cid="$(find_c "minio")" || true
+            [ -z "$cid" ] && { echo "[minio] no container → skip"; return; }
+            docker run --rm --network host -e MC_HOST_minio="http://minioadmin:minioadmin@127.0.0.1:9000" minio/mc mb -p minio/process || true
+            data_dirs minio
+          }
+
+          upgrade_one(){
+            svc="$1"; img=""
             case "$svc" in
               mysql) img="mysql:8" ;;
               postgres) img="postgres:16" ;;
@@ -355,7 +393,7 @@ jobs:
             esac
             if command -v docker >/dev/null 2>&1; then
               [ -n "$img" ] && docker pull "$img" || true
-              if command -v docker compose >/dev/null 2>&1 && { [ -f compose.yml ] || [ -f docker-compose.yml ]; }; then
+              if docker compose version >/dev/null 2>&1 && { [ -f compose.yml ] || [ -f docker-compose.yml ]; }; then
                 docker compose pull "$svc" || true
                 docker compose up -d "$svc" || true
               elif command -v docker-compose >/dev/null 2>&1 && [ -f docker-compose.yml ]; then
@@ -365,95 +403,10 @@ jobs:
             fi
           }
 
-          # MySQL
-          do_mysql(){
-            cid="$(find_c "(mysql|mariadb)")" || true
-            [ -n "$cid" ] || { echo "[mysql] container not found"; return; }
-            local sql=""
-            if [ -n "$MYSQL_USERPASS" ]; then
-              u="${MYSQL_USERPASS%%:*}"; p="${MYSQL_USERPASS#*:}"
-              [ -n "$u" ] && [ -n "$p" ] && sql+="CREATE USER IF NOT EXISTS '$u'@'%' IDENTIFIED BY '$p'; GRANT ALL PRIVILEGES ON *.* TO '$u'@'%' WITH GRANT OPTION; "
-            fi
-            IFS=',' read -ra DBS <<< "$MYSQL_DBS"
-            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && sql+="CREATE DATABASE IF NOT EXISTS \`$dbt\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "; done
-            sql+="CREATE DATABASE IF NOT EXISTS \`process\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
-            docker exec -i "$cid" sh -lc "mysql -uroot -p\"\$MYSQL_ROOT_PASSWORD\" -e \"$sql\"" || true
-            data_dirs mysql
-          }
-
-          # Postgres
-          do_postgres(){
-            cid="$(find_c "postgres")" || true
-            [ -n "$cid" ] || { echo "[postgres] container not found"; return; }
-            IFS=',' read -ra DBS <<< "$PG_DBS"
-            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" \"$dbt\"" || true; done
-            docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" process" || true
-            data_dirs postgres
-          }
-
-          # Redis
-          do_redis(){
-            cid="$(find_c "redis")" || true
-            [ -n "$cid" ] || { echo "[redis] container not found"; return; }
-            seq 1 "$REDIS_KEYS" | xargs -I{} -P 8 sh -c 'docker exec -i "$0" sh -lc "redis-cli SET seed:{} \$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) >/dev/null"' "$cid" || true
-            for i in $(seq 1 200); do docker exec -i "$cid" sh -lc "redis-cli HSET process:job:$i status pending" || true; done
-            data_dirs redis
-          }
-
-          # Mongo
-          do_mongo(){
-            cid="$(find_c "mongo")" || true
-            [ -n "$cid" ] || { echo "[mongo] container not found"; return; }
-            IFS=',' read -ra DCS <<< "$MONGO_DBCOLS"
-            for pair in "${DCS[@]}"; do
-              pair="$(echo "$pair" | xargs)"; [ -z "$pair" ] && continue
-              db="${pair%%:*}"; cols="${pair#*:}"
-              IFS=';' read -ra COLS <<< "$(echo "$cols" | tr ',' ';')"
-              for col in "${COLS[@]}"; do
-                col="$(echo "$col" | xargs)"; [ -z "$col" ] && continue
-                docker exec -i "$cid" mongosh --quiet "$db" --eval "db.createCollection('$col'); docs=[]; for (let i=0;i<${MONGO_DOCS};i++){docs.push({i,ts:new Date(),payload:Math.random().toString(36).slice(2)})}; db.getCollection('$col').insertMany(docs,{ordered:false});" || true
-              done
-            done
-            docker exec -i "$cid" mongosh --quiet process --eval "db.createCollection('jobs'); db.jobs.insertMany(Array.from({length:200}, (_,i)=>({i,ts:new Date(),status:'pending'})),{ordered:false});" || true
-            data_dirs mongo
-          }
-
-          # Kafka
-          do_kafka(){
-            cid="$(find_c "kafka")" || true
-            [ -n "$cid" ] || { echo "[kafka] container not found"; return; }
-            [ -n "$KAFKA_TP" ] && IFS=',' read -ra TPS <<< "$KAFKA_TP" || TPS=()
-            TPS+=("process.jobs:3:1")
-            for t in "${TPS[@]}"; do
-              t="$(echo "$t" | xargs)"; [ -z "$t" ] && continue
-              name="${t%%:*}"; rest="${t#*:}"; parts="${rest%%:*}"; repl="${rest#*:}"
-              docker exec -i "$cid" bash -lc "kafka-topics.sh --create --if-not-exists --topic \"$name\" --bootstrap-server localhost:9092 --partitions ${parts:-3} --replication-factor ${repl:-1}" || true
-            done
-            data_dirs kafka
-          }
-
-          # RabbitMQ
-          do_rabbit(){
-            cid="$(find_c "rabbit")" || true
-            [ -n "$cid" ] || { echo "[rabbitmq] container not found"; return; }
-            docker exec -i "$cid" rabbitmqctl add_vhost /process || true
-            docker exec -i "$cid" rabbitmqctl set_permissions -p /process guest ".*" ".*" ".*" || true
-            docker exec -i "$cid" rabbitmqadmin declare queue name="process.queue" durable=true || true
-            data_dirs rabbitmq
-          }
-
-          # MinIO
-          do_minio(){
-            cid="$(find_c "minio")" || true
-            [ -n "$cid" ] || { echo "[minio] container not found"; return; }
-            docker run --rm --network host -e MC_HOST_minio="http://minioadmin:minioadmin@127.0.0.1:9000" minio/mc mb -p minio/process || true
-            data_dirs minio
-          }
-
-          IFS=',' read -r -a SRVS <<< "$SERVICES"
+          IFS=',' read -r -a SRVS <<< "$(printf '%s' "$SERVICES" | tr '[:upper:]' '[:lower:]')"
           pids=()
           for s in "${SRVS[@]}"; do
-            svc="$(echo "$s" | tr '[:upper:]' '[:lower:]' | xargs)"
+            svc="$(echo "$s" | xargs)"
             [ -z "$svc" ] && continue
             (
               upgrade_one "$svc"
@@ -471,23 +424,22 @@ jobs:
             ) & pids+=($!)
           done
           for p in "${pids[@]}"; do wait "$p" || true; done
-          echo "[INIT/SEED/UPGRADE] completed"
+          echo "[init/seed/upgrade] done"
           SH
           chmod +x .github/echo_init/init_seed_upgrade.sh
 
-      - name: Run service init/seed/upgrade (parallel)
+      - name: 🚀 Run services init/seed/upgrade (parallel)
         shell: bash
         env:
-          SERVICES: ${{ inputs.services }}
-          SEED_SPEC: ${{ inputs.seed_spec }}
-          DB_SPEC: ${{ inputs.db_spec }}
+          SERVICE_SPEC: ${{ inputs.service_spec }}
+          SEED_SPEC:    ${{ inputs.seed_spec }}
         run: |
           set -Eeuo pipefail
           .github/echo_init/init_seed_upgrade.sh
-          echo "### Service init/seed/upgrade done" >> "$GITHUB_STEP_SUMMARY"
-          echo "- services: ${SERVICES}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Services init/seed/upgrade (parallel) 완료" >> "$GITHUB_STEP_SUMMARY"
+          echo "- spec: ${SERVICE_SPEC}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload service seed artifacts
+      - name: 📦 Upload service seed artifacts
         uses: actions/upload-artifact@v4
         with:
           name: service-seed-${{ github.run_id }}
@@ -496,8 +448,11 @@ jobs:
             .github/echo_init/**
           retention-days: 7
 
+  #######################################################################
+  # 3) Transfer Log Backup — 60건 + Provenance (after disk)
+  #######################################################################
   transfer_log_backup:
-    name: "🧾 Transfer log backup + provenance"
+    name: "🧾 Transfer Log Backup + Provenance"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [diskdirs]
@@ -509,14 +464,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare directories
+      - name: 📁 Prepare directories
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
           sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
 
-      - name: Generate 60 transfer logs
+      - name: 📂 Generate 60 transfer logs
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -528,7 +483,7 @@ jobs:
             echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
           done
 
-      - name: Backup logs into timestamped folder
+      - name: 📆 Backup logs into timestamped folder
         id: backup
         shell: bash
         run: |
@@ -539,7 +494,7 @@ jobs:
           sudo mkdir -p "$DEST"
           sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
 
-      - name: Generate provenance.json
+      - name: 📜 Generate provenance.json
         id: genprov
         shell: bash
         run: |
@@ -563,53 +518,58 @@ jobs:
           cp "$PROV_FILE" "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
           echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Build .provenance_index.json
+      - name: 📚 Build .provenance_index.json
         shell: bash
         run: |
           set -Eeuo pipefail
-          INDEX_FILE="provenance/.provenance_index.json"
-          ls provenance/.provenance_transfer_*.json >/dev/null 2>&1 || { echo "[]" > "$INDEX_FILE"; exit 0; }
-          echo "[" > "$INDEX_FILE"; first=1
-          for f in provenance/.provenance_transfer_*.json; do
-            [ $first -eq 0 ] && echo "," >> "$INDEX_FILE"
-            cat "$f" >> "$INDEX_FILE"
-            first=0
-          done
-          echo "]" >> "$INDEX_FILE"
+          INDEX_FILE="${PROVENANCE_DIR}/.provenance_index.json"
+          FILES=$(ls "${PROVENANCE_DIR}"/.provenance_transfer_*.json 2>/dev/null || true)
+          if [ -z "$FILES" ]; then
+            echo "[]" > "$INDEX_FILE"
+          else
+            echo "[" > "$INDEX_FILE"
+            FIRST=1
+            for f in $FILES; do
+              [ $FIRST -eq 0 ] && echo "," >> "$INDEX_FILE"
+              cat "$f" >> "$INDEX_FILE"
+              FIRST=0
+            done
+            echo "]" >> "$INDEX_FILE"
+          fi
 
-      - name: Upload generated logs
+      - name: 📤 Upload generated logs
         uses: actions/upload-artifact@v4
         with:
           name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
           if-no-files-found: error
 
-      - name: Upload backup folder
+      - name: 📤 Upload backup folder
         uses: actions/upload-artifact@v4
         with:
           name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
           if-no-files-found: error
 
-      - name: Upload provenance.json
+      - name: 📤 Upload provenance.json
         uses: actions/upload-artifact@v4
         with:
           name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
           path: ${{ steps.genprov.outputs.prov_path }}
           if-no-files-found: error
 
-      - name: Upload provenance index
+      - name: 📤 Upload provenance index
         uses: actions/upload-artifact@v4
         with:
           name: provenance-index
-          path: provenance/.provenance_index.json
+          path: ${{ env.PROVENANCE_DIR }}/.provenance_index.json
           if-no-files-found: error
 
-      - name: Show backup structure
+      - name: 📂 Show backup structure
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y && sudo apt-get install -y tree || true
           echo "[BACKUP]"; tree ${{ env.BACKUP_DIR }} -L 2 || true
-          echo "[STORE]";  tree ${{ env.PROVENANCE_STORE_DIR }} || true
-          echo "[PROV DIR]"; ls -l provenance || true
+          echo "[STORE]"; tree ${{ env.PROVENANCE_STORE_DIR }} || true
+          echo "[PROV DIR]"; ls -l ${{ env.PROVENANCE_DIR }} || true
