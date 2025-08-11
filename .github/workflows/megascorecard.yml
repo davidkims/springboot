@@ -1,4 +1,4 @@
-name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup + 24x365 Watchdog (Auto-Grow)"
+name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Auto-Grow, no 24x365)"
 
 on:
   workflow_dispatch:
@@ -43,8 +43,9 @@ on:
         description: "Commit message"
         default: "chore: disk+dirs + massive + live .github + bulk gen/upgrade (auto)"
         required: true
+
   schedule:
-    - cron: "*/1 * * * *"   # Disk/Dirs + Watchdog
+    - cron: "*/1 * * * *"   # Disk/Dirs maintenance
     - cron: "*/5 * * * *"   # Transfer log backup
 
 permissions:
@@ -126,6 +127,11 @@ jobs:
           default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
           default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
           default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
+          # 안전 소유/권한 (repo는 실패 무시, 마운트는 sudo)
+          safe_own_mount(){ local u="$1" g="$2"; shift 2; sudo chown -R "$u:$g" "$@" 2>/dev/null || true; }
+          safe_mode_mount(){ local m="$1"; shift; sudo chmod -R "$m" "$@" 2>/dev/null || true; }
+          safe_own_repo(){ local u="$1" g="$2"; shift 2; chown -R "$u:$g" "$@" 2>/dev/null || true; }
+          safe_mode_repo(){ local m="$1"; shift; chmod -R "$m" "$@" 2>/dev/null || true; }
           BASH
           chmod +x "$ECHO_DIR/_helpers.sh"
 
@@ -202,7 +208,7 @@ jobs:
             btrfs) sudo mkfs.btrfs -f "$P1";sudo mkfs.btrfs -f "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1/p2 + chown/chmod
+      - name: 🔗 Mount p1/p2 + chown/chmod (mounts only)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -215,10 +221,10 @@ jobs:
           mount | grep -q " on ${MNT} " || sudo mount "$P1" "${MNT}"
           sudo mkdir -p "${MNT}/part2"
           mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "${MNT}/part2"
-          sudo chown -R "${OWNER}:${GROUP}" "${MNT}"
+          safe_own_mount "$OWNER" "$GROUP" "${MNT}" "${MNT}/part2"
           df -h | grep -E "loop|Filesystem" || true
 
-      - name: 📁 Create SpringBoot + extra dirs
+      - name: 📁 Create SpringBoot + extra dirs (mounts-only own/mode)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -233,12 +239,16 @@ jobs:
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
           while IFS= read -r d; do
             mkdir -p "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
-            sudo chown -R "${OWNER}:${GROUP}" "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
-            sudo chmod "${MODE}" "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
+            # mounts에만 강제 소유/권한
+            safe_own_mount "$OWNER" "$GROUP" "${MNT}/${d}" "${MNT}/part2/${d}"
+            safe_mode_mount "$MODE"          "${MNT}/${d}" "${MNT}/part2/${d}"
+            # repo는 실패 무시(베스트 에포트)
+            safe_own_repo  "$OWNER" "$GROUP" "${d}"
+            safe_mode_repo "$MODE"           "${d}"
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
           done < "$ECHO_DIR/.all_dirs.txt"
 
-      - name: 📏 Online resize p2
+      - name: 📏 Online resize p2 (auto-grow if requested)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -261,7 +271,7 @@ jobs:
           esac
           df -h | grep -E "${MNT}(/part2)?"
 
-      - name: 🧨 Bulk generator/upgrade — repo + both mounts
+      - name: 🧨 Bulk generator/upgrade — repo + both mounts (mounts-only own/mode)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -277,8 +287,11 @@ jobs:
           read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
           ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
           mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-          chown -R "$OWNER:$GROUP" "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-          chmod -R "$MODE" "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
+          # mounts만 강제, repo는 베스트 에포트
+          safe_own_mount "$OWNER" "$GROUP" "$ROOT_P1" "$ROOT_P2"
+          safe_mode_mount "$MODE"          "$ROOT_P1" "$ROOT_P2"
+          safe_own_repo  "$OWNER" "$GROUP" "$ROOT_REPO"
+          safe_mode_repo "$MODE"          "$ROOT_REPO"
           create_or_upgrade_dir(){
             local base="${1-}"; local i="${2-}"; [[ -z "$base" || -z "$i" ]] && return 1
             local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
@@ -294,10 +307,14 @@ jobs:
             create_or_upgrade_dir "$ROOT_P1"   "$i"
             create_or_upgrade_dir "$ROOT_P2"   "$i"
           done
-          chown -R "$OWNER:$GROUP" "bulk" "$MNT/bulk" "$MNT/part2/bulk"
-          chmod -R "$MODE" "bulk" "$MNT/bulk" "$MNT/part2/bulk"
+          # 상위 bulk 폴더에 대해 mounts만 강제
+          safe_own_mount "$OWNER" "$GROUP" "$MNT/bulk" "$MNT/part2/bulk"
+          safe_mode_mount "$MODE"          "$MNT/bulk" "$MNT/part2/bulk"
+          # repo는 실패 무시
+          safe_own_repo  "$OWNER" "$GROUP" "bulk"
+          safe_mode_repo "$MODE"          "bulk"
 
-      - name: 🚀 MASSIVE — shard+parallel bulkgen
+      - name: 🚀 MASSIVE — shard+parallel bulkgen (mounts-only own/mode)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -329,10 +346,14 @@ jobs:
               create_or_upgrade_dir "$ROOT_P1"   "$i"
               create_or_upgrade_dir "$ROOT_P2"   "$i"
             done
-            sudo chown -R "$OWNER:$GROUP" "bulk/${SH_PREFIX}" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
-            sudo chmod -R "$MODE"          "bulk/${SH_PREFIX}" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
+            # mounts만 강제, repo는 실패 무시
+            safe_own_mount "$OWNER" "$GROUP" "$ROOT_P1" "$ROOT_P2"
+            safe_mode_mount "$MODE"          "$ROOT_P1" "$ROOT_P2"
+            safe_own_repo  "$OWNER" "$GROUP" "$ROOT_REPO"
+            safe_mode_repo "$MODE"          "$ROOT_REPO"
           }
-          export -f gen_one_shard; export BASE_DIRS BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE
+          export -f gen_one_shard
+          export BASE_DIRS BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE BASE_PREFIX
           seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
       - name: ⚡ Mirror to RAMDISK + sha256 index
@@ -352,7 +373,7 @@ jobs:
             echo "[ECHO] ramdisk not mounted — skip"
           fi
 
-      - name: 🔧 IO stress:tar+pigz split + top consumers
+      - name: 🔧 IO stress: tar+pigz split + top consumers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -597,182 +618,3 @@ jobs:
           tree ${{ env.BACKUP_DIR }} -L 2 || echo "[⚠️] tree failed"
           echo "[📁] Provenance storage structure:"
           tree ${{ env.PROVENANCE_STORE_DIR }} || echo "[ℹ️] No provenance store yet"
-
-  #######################################################################
-  # 3) 24x365 Resource Watchdog — per-service create+exit, auto-grow+retry
-  #######################################################################
-  resources_24x7:
-    name: "🛡️ 24x365 Resource Watchdog (auto-grow+retry)"
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    if: github.event_name != 'schedule' || contains(github.event.schedule, '*/1')
-    needs: [diskdirs]   # mount/이미지 선행 (동시 실행 원하면 제거)
-    env:
-      LOG_DIR: .github/echo_logs
-      ECHO_DIR: .github/echo_scripts
-      DISK_IMG: disk.img
-      MOUNT_P1_NAME: p1
-      MOUNT_P2_NAME: p2
-      MIN_FREE_MB: "2048"        # 임계 여유 공간
-      GROW_STEP_MB: "4096"       # 확장 단위
-      MAX_GROW_ATTEMPTS: "3"     # 최대 재시도
-      SERVICES: "mysql postgres mongo redis kafka vault minio airflow spark camunda"
-      MNT_ROOT: "/mnt/gh-disk"
-      SVC_SUBDIRS: "data,logs,conf,tmp,backup,site"
-      OWNER_GROUP: "runner:runner"
-      DIR_MODE: "0755"
-
-    steps:
-      - name: 📦 Checkout
-        uses: actions/checkout@v4
-
-      - name: 🧰 Helpers (watchdog)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ECHO_DIR"
-          exec > >(tee -a "$LOG_DIR/70_watchdog.log") 2>&1
-          set -x
-          cat > "$ECHO_DIR/_helpers_watchdog.sh" <<'BASH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          export PS4='+ [$(date "+%F %T")] watchdog:${LINENO}:${FUNCNAME[0]:-main} ▶ '
-          set -x
-          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
-          parse_owner_group(){ local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"; [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"; }
-          get_loop(){
-            local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "$dev" && -f "$DISK_IMG" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""; fi
-            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
-            printf "%s" "$dev"
-          }
-          ensure_mounts(){
-            local mnt="$1"; local loop; loop="$(get_loop)"
-            sudo mkdir -p "$mnt" "$mnt/part2"
-            mount | grep -q " on $mnt "       || sudo mount "${loop}p1" "$mnt"
-            mount | grep -q " on $mnt/part2 " || sudo mount "${loop}p2" "$mnt/part2"
-          }
-          free_mb(){ df -Pm "$1" | awk 'NR==2{print $4}'; }
-          grow_image_and_fs(){
-            local grow_mb="$1" ; local mnt="$2" ; local fs="ext4"; local loop ; loop="$(get_loop)"
-            fs="$(sudo blkid -o value -s TYPE ${loop}p2 2>/dev/null || echo ext4)"
-            echo "[ECHO] Growing disk.img by ${grow_mb}MB (fs=$fs)"
-            run_cmd "truncate -s +${grow_mb}M \"$DISK_IMG\""
-            run_cmd "sudo losetup -c \"$loop\""
-            run_cmd "sudo parted -s \"$loop\" resizepart 2 100% || true"
-            run_cmd "sudo partprobe \"$loop\" || true"
-            case "$fs" in
-              ext4)  run_cmd "sudo resize2fs \"${loop}p2\"" ;;
-              xfs)   run_cmd "sudo xfs_growfs \"${mnt}/part2\"" ;;
-              btrfs) run_cmd "sudo btrfs filesystem resize max \"${mnt}/part2\"" ;;
-              *)     run_cmd "sudo resize2fs \"${loop}p2\"" ;;
-            esac
-            run_cmd "df -h \"$mnt/part2\" || true"
-          }
-          BASH
-          chmod +x "$ECHO_DIR/_helpers_watchdog.sh"
-
-      - name: 🔗 Ensure mounts + pre-space-check (auto-grow if low)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers_watchdog.sh"
-          exec > >(tee -a "$LOG_DIR/71_mount_space.log") 2>&1
-          set -x
-          ensure_mounts "$MNT_ROOT"
-          CUR_FREE="$(free_mb "$MNT_ROOT/part2")"
-          echo "[ECHO] Free on p2: ${CUR_FREE}MB (min ${MIN_FREE_MB}MB)"
-          ATT=0
-          while (( CUR_FREE < MIN_FREE_MB && ATT < MAX_GROW_ATTEMPTS )); do
-            echo "[ECHO] Low space → grow attempt $((ATT+1))/${MAX_GROW_ATTEMPTS}"
-            grow_image_and_fs "$GROW_STEP_MB" "$MNT_ROOT"
-            CUR_FREE="$(free_mb "$MNT_ROOT/part2")"
-            ATT=$((ATT+1))
-          done
-          echo "[ECHO] Free after pre-check: ${CUR_FREE}MB"
-
-      - name: 🧱 Create per-service resources (idempotent, auto-retry on ENOSPC)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers_watchdog.sh"
-          exec > >(tee -a "$LOG_DIR/72_resources.log") 2>&1
-          set -x
-          read OWNER GROUP < <(parse_owner_group "${OWNER_GROUP}")
-          IFS=',' read -ra SUBS <<< "${SVC_SUBDIRS}"
-          mkdir -p status || true
-
-          create_one(){
-            local svc="$1"
-            local base_repo="services/${svc}"
-            local base_p1="${MNT_ROOT}/services/${svc}"
-            local base_p2="${MNT_ROOT}/part2/services/${svc}"
-            if [ -f "status/${svc}.ok" ]; then
-              echo "[SKIP] ${svc} already ok"; return 0
-            fi
-            mkdir -p "$base_repo" "$base_p1" "$base_p2"
-            for d in "${SUBS[@]}"; do
-              mkdir -p "${base_repo}/${d}" "${base_p1}/${d}" "${base_p2}/${d}"
-            done
-            : > "${base_repo}/conf/${svc}.conf" || true
-            : > "${base_repo}/logs/.gitkeep"    || true
-            : > "${base_repo}/data/.gitkeep"    || true
-            sudo chown -R "${OWNER}:${GROUP}" "$base_repo" "$base_p1" "$base_p2"
-            sudo chmod -R "${DIR_MODE}" "$base_repo" "$base_p1" "$base_p2"
-          }
-
-          ensure_service(){
-            local svc="$1"; local att=0
-            while (( att <= MAX_GROW_ATTEMPTS )); do
-              if create_one "$svc"; then
-                echo "[OK] ${svc} resources created"
-                echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "status/${svc}.ok"
-                return 0
-              fi
-              local free="$(df -Pm "$MNT_ROOT/part2" | awk 'NR==2{print $4}')"
-              if (( free < MIN_FREE_MB )); then
-                echo "[ECHO] ENOSPC or low space → grow & retry"
-                grow_image_and_fs "$GROW_STEP_MB" "$MNT_ROOT"
-                att=$((att+1)); continue
-              fi
-              att=$((att+1)); sleep 2
-            done
-            echo "[ERROR] ${svc} creation failed after retries"; return 1
-          }
-
-          export -f ensure_service create_one
-          export MNT_ROOT OWNER GROUP DIR_MODE MIN_FREE_MB MAX_GROW_ATTEMPTS GROW_STEP_MB
-          for svc in ${SERVICES}; do echo "$svc"; done | xargs -I{} -P 6 bash -c 'ensure_service "$@"' _ {}
-
-      - name: 📜 Write provenance for resources (per run)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/73_provenance.log") 2>&1
-          set -x
-          mkdir -p provenance
-          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          OUT="provenance/.provenance_resources_${GITHUB_RUN_ID}.json"
-          {
-            echo '{'
-            echo '  "type": "resources_watchdog",'
-            echo "  \"timestamp\": \"${TS}\","
-            echo "  \"services\": \"${SERVICES}\","
-            echo "  \"mount\": \"${MNT_ROOT}/part2\","
-            echo "  \"min_free_mb\": \"${MIN_FREE_MB}\","
-            echo "  \"grow_step_mb\": \"${GROW_STEP_MB}\""
-            echo '}'
-          } > "$OUT"
-          cat "$OUT"
-
-      - name: 📦 Upload watchdog logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: watchdog-logs-${{ github.run_id }}
-          path: |
-            .github/echo_logs/70_watchdog.log
-            .github/echo_logs/71_mount_space.log
-            .github/echo_logs/72_resources.log
-            .github/echo_logs/73_provenance.log
-            status/**
-          retention-days: 7
