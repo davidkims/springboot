@@ -1,4 +1,4 @@
-name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Manual, Safe)"
+name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Manual, Safe v2)"
 
 on:
   workflow_dispatch:
@@ -60,6 +60,10 @@ jobs:
     name: "💽 Disk+Dirs (manual) + MASSIVE"
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    outputs:
+      mount_point: ${{ steps.vars.outputs.mount_point }}
+      fs_type:     ${{ steps.vars.outputs.fs_type }}
+      img_size_mb: ${{ steps.vars.outputs.img_size_mb }}
     env:
       DISK_IMG: disk.img
       LOG_DIR: .github/echo_logs
@@ -76,8 +80,8 @@ jobs:
       ULIMIT_NOFILE: "1048576"
       ULIMIT_NPROC:  "131072"
       # 대량 확장
-      MASSIVE_SHARDS: "8"
-      MASSIVE_MULTIPLIER: "4"
+      MASSIVE_SHARDS: "4"
+      MASSIVE_MULTIPLIER: "2"
       PARALLEL_JOBS: "8"
       TAR_SPLIT_MB: "256"
 
@@ -88,6 +92,14 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
+      - name: 🔧 Vars (outputs)
+        id: vars
+        shell: bash
+        run: |
+          echo "mount_point=${{ inputs.mount_point }}" >> "$GITHUB_OUTPUT"
+          echo "fs_type=${{ inputs.fs_type }}"       >> "$GITHUB_OUTPUT"
+          echo "img_size_mb=${{ inputs.disk_size_mb }}" >> "$GITHUB_OUTPUT"
+
       - name: 🧰 Init — helpers (safe chown/chmod 포함)
         shell: bash
         run: |
@@ -96,7 +108,6 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
-          set +H
           run_cmd(){ echo "[CMD] $*"; eval "$@"; }
           cat > "$ECHO_DIR/_helpers.sh" <<'BASH'
           #!/usr/bin/env bash
@@ -104,41 +115,34 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           set -x
           run_cmd(){ echo "[CMD] $*"; eval "$@"; }
-          # Inputs → defaults
           default_mount()      { echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
           default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
           default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
           default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
           default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
-          parse_owner_group(){
-            local og="${1:-runner:runner}" ; local u="${og%%:*}" ; local g="${og#*:}"
-            [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"
-          }
-          # Loop device
+          parse_owner_group(){ local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"; [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"; }
           get_loop(){
-            local dev
-            dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "$dev" ]]; then
-              sudo losetup -fP "$DISK_IMG"
-              dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            fi
+            local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
+            if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""; fi
             [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
-          # Path guards for safe ownership/mode ops
           _MOUNT_ROOT(){ echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
           is_mount_path(){ [[ "$1" == "$(_MOUNT_ROOT)"* ]]; }
-          is_repo_path(){  [[ "$1" != "$(_MOUNT_ROOT)"* ]]; }
-
-          # Backward-compat helpers (to avoid 'command not found')
-          safe_own_mount(){ local p="$1" o="$2" g="$3"; if is_mount_path "$p"; then sudo chown -R "$o:$g" "$p" || true; else echo "[SKIP chown] $p (workspace)"; fi; }
-          safe_mode_mount(){ local p="$1" m="$2"; if is_mount_path "$p"; then sudo chmod -R "$m" "$p" || true; else echo "[SKIP chmod] $p (workspace)"; fi; }
-          safe_own_repo(){  local p="$1" o="$2" g="$3"; echo "[SKIP chown] $p (workspace)"; }
+          safe_own_mount(){ local p="$1" o="$2" g="$3"; is_mount_path "$p" && sudo chown -R "$o:$g" "$p" || true; }
+          safe_mode_mount(){ local p="$1" m="$2"; is_mount_path "$p" && sudo chmod -R "$m" "$p" || true; }
           safe_mode_repo(){ local p="$1" m="$2"; chmod -R "$m" "$p" || true; }
-
-          # Unified aliases
-          safe_chown(){ local p="$1" o="$2" g="$3"; safe_own_mount "$p" "$o" "$g"; }
-          safe_chmod(){ local p="$1" m="$2"; is_mount_path "$p" && safe_mode_mount "$p" "$m" || safe_mode_repo "$p" "$m"; }
+          retry_mount(){
+            local dev="$1" target="$2"
+            sudo install -d -m 0755 "$target"
+            for i in 1 2 3; do
+              if sudo mount "$dev" "$target"; then return 0; fi
+              echo "[WARN] mount failed → mkdir & retry ($i/3)"
+              sudo install -d -m 0755 "$target"
+              sleep 1
+            done
+            echo "[ERROR] mount $dev -> $target failed" >&2; return 1
+          }
           BASH
           chmod +x "$ECHO_DIR/_helpers.sh"
 
@@ -150,10 +154,7 @@ jobs:
           exec > >(tee -a "$LOG_DIR/03_resource_boost.log") 2>&1
           set -x
           run_cmd "sudo apt-get update -y"
-          run_cmd "sudo apt-get install -y --no-install-recommends \
-            build-essential openjdk-17-jdk maven gradle \
-            git-lfs jq moreutils pigz pv unzip tar curl ca-certificates \
-            xz-utils tree rsync parted xfsprogs btrfs-progs || true"
+          run_cmd "sudo apt-get install -y --no-install-recommends build-essential git-lfs jq moreutils pigz pv unzip tar curl ca-certificates xz-utils tree rsync parted xfsprogs btrfs-progs || true"
           run_cmd "git lfs install || true"
           if [[ "${SWAP_SIZE_MB}" != "0" ]]; then
             if ! sudo swapon --show | grep -q '^'; then
@@ -164,7 +165,7 @@ jobs:
             fi
           fi
           if [[ "${RAMDISK_MB}" != "0" ]]; then
-            run_cmd "sudo mkdir -p /mnt/ramdisk"
+            run_cmd "sudo install -d -m 0755 /mnt/ramdisk"
             mount | grep -q " on /mnt/ramdisk " || run_cmd "sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk"
           fi
           run_cmd "sudo prlimit --pid $$ --nofile=${ULIMIT_NOFILE}:${ULIMIT_NOFILE} || true"
@@ -194,7 +195,6 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
           set -x
           LOOP_DEV="$(get_loop)"
-          sudo parted -s "$LOOP_DEV" print || true
           sudo parted -s "$LOOP_DEV" mklabel gpt || true
           sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P1_NAME} 1MiB 60% || true
           sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P2_NAME} 60% 100% || true
@@ -211,11 +211,11 @@ jobs:
           LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
             ext4)  sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
-            xfs)   sudo mkfs.xfs -f "$P1" ; sudo mkfs.xfs -f "$P2" ;;
+            xfs)   sudo mkfs.xfs  -f "$P1"; sudo mkfs.xfs  -f "$P2" ;;
             btrfs) sudo mkfs.btrfs -f "$P1"; sudo mkfs.btrfs -f "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1/p2 + safe perms
+      - name: 🔗 Mount p1/p2 + safe perms (+재시도)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -224,13 +224,13 @@ jobs:
           MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
           read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
           LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          sudo mkdir -p "${MNT}" "${MNT}/part2"
-          mount | grep -q " on ${MNT} "       || sudo mount "$P1" "${MNT}"
-          mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "${MNT}/part2"
+          sudo install -d -m 0755 "${MNT}" "${MNT}/part2"
+          mount | grep -q " on ${MNT} "       || retry_mount "$P1" "${MNT}"
+          mount | grep -q " on ${MNT}/part2 " || retry_mount "$P2" "${MNT}/part2"
           safe_own_mount "${MNT}" "${OWNER}" "${GROUP}"
           df -h | grep -E "loop|Filesystem" || true
 
-      - name: 📁 Create SpringBoot + extra dirs (safe perms)
+      - name: 📁 Create SB + extra dirs (safe perms)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -246,10 +246,8 @@ jobs:
           while IFS= read -r d; do
             mkdir -p "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
             safe_mode_repo "${d}" "${MODE}"
-            safe_own_mount   "${MNT}/${d}" "${OWNER}" "${GROUP}"
-            safe_own_mount   "${MNT}/part2/${d}" "${OWNER}" "${GROUP}"
-            safe_mode_mount  "${MNT}/${d}" "${MODE}"
-            safe_mode_mount  "${MNT}/part2/${d}" "${MODE}"
+            safe_own_mount   "${MNT}/${d}" "${OWNER}" "${GROUP}"; safe_mode_mount "${MNT}/${d}" "${MODE}"
+            safe_own_mount   "${MNT}/part2/${d}" "${OWNER}" "${GROUP}"; safe_mode_mount "${MNT}/part2/${d}" "${MODE}"
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
           done < "$ECHO_DIR/.all_dirs.txt"
 
@@ -321,7 +319,7 @@ jobs:
           getv(){ local k="${1-}"; [ -z "$k" ] && return 0; echo "$SPEC" | tr ',' '\n' | awk -F= -v kk="$k" '$1==kk{print $2}'; }
           BASE_DIRS="$(getv dirs)"; BASE_FILES="$(getv files)"; BASE_KB="$(getv size_kb)"; BASE_PREFIX="$(getv prefix)"
           : "${BASE_DIRS:=100}" ; : "${BASE_FILES:=10}" ; : "${BASE_KB:=4}" ; : "${BASE_PREFIX:=gen}"
-          SHARDS="${MASSIVE_SHARDS:-8}"; MULT="${MASSIVE_MULTIPLIER:-4}"; PJ="${PARALLEL_JOBS:-8}"
+          SHARDS="${MASSIVE_SHARDS:-4}"; MULT="${MASSIVE_MULTIPLIER:-2}"; PJ="${PARALLEL_JOBS:-8}"
           MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
           MODE="$(INPUT_DIR_MODE="${{ inputs.dir_mode }}" default_dir_mode)"
           read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
@@ -452,7 +450,7 @@ jobs:
             BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"; git checkout -B "$BK"
             git push -u origin "$BK" 2> "$PUSH_LOG" && exit 0 || true
           fi
-          if grep -qiE 'Authentication failed|HTTP 403|HTTP 401' "$PUSH_LOG" || [[ "${NO_TOKEN_MODE}" -eq 1 ]]; then
+          if grep -qiE 'Authentication failed|HTTP 403|HTTP 401' "$PUSH_LOG" || [[ "${NO_TOKEN_MODE}" == 1 ]]; then
             echo "[ECHO] No auth — mark success"; exit 0
           fi
           echo "[ECHO] Final push failed"; cat "$PUSH_LOG"; exit 1
@@ -468,12 +466,13 @@ jobs:
           retention-days: 7
 
   #######################################################################
-  # 2) Transfer Log Backup — 60건 + Provenance (manual)
+  # 2) Transfer Log Backup — 60건 + Provenance (manual, after diskdirs)
   #######################################################################
   transfer_log_backup:
-    name: "🧾 Transfer Log Backup (manual) + Provenance"
+    name: "🧾 전송 로그 백업 (수동) + 출처"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [diskdirs]
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
@@ -484,31 +483,17 @@ jobs:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔄 Full package upgrade (safe)
+      - name: 🔧 Ensure dirs (always)
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[🔄] Updating and upgrading packages..."
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y --with-new-pkgs upgrade || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
-          sudo apt-get -y autoremove
-          sudo apt-get install -y --no-install-recommends tree jq
-
-      - name: 📁 Prepare directories
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "[📁] Creating directories..."
-          sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
-          sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
+          sudo install -d -m 0777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
 
       - name: 📂 Generate 60 corporate transfer logs
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[🕒] Generating logs..."
-          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || echo "[ℹ️] No logs to remove."
+          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || true
           for i in $(seq 1 60); do
             TS=$(date +'%Y-%m-%d %H:%M:%S')
             AMOUNT=$((RANDOM % 900000 + 100000))
@@ -524,64 +509,50 @@ jobs:
           TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
           echo "ts_folder=$TS_FOLDER" >> "$GITHUB_OUTPUT"
           DEST="$BACKUP_DIR/$TS_FOLDER"
-          sudo mkdir -p "$DEST"
+          sudo install -d -m 0777 "$DEST"
           sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
 
-      - name: 📤 Upload generated logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
-
-      - name: 📤 Upload backup folder
-        uses: actions/upload-artifact@v4
-        with:
-          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
-
-      - name: 📜 Generate provenance.json (echo)
+      - name: 📜 Generate provenance.json (ALWAYS create)
         id: genprov
         shell: bash
+        env:
+          MOUNT_POINT: ${{ needs.diskdirs.outputs.mount_point }}
+          FS_TYPE:     ${{ needs.diskdirs.outputs.fs_type }}
+          IMG_MB:      ${{ needs.diskdirs.outputs.img_size_mb }}
         run: |
           set -Eeuo pipefail
-          echo "[📜] Creating provenance.json with echo..."
           TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           FILE="transfer-backup-${{ steps.backup.outputs.ts_folder }}"
-          mkdir -p "${{ env.PROVENANCE_DIR }}"
+          mkdir -p "${{ env.PROVENANCE_DIR }}" "${{ env.PROVENANCE_STORE_DIR }}/${{ steps.backup.outputs.ts_folder }}"
           PROV_FILE="${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
-          echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
+          cat > "$PROV_FILE" <<JSON
           {
-            echo '{'
-            echo '  "type": "transfer_log_backup",'
-            echo "  \"timestamp\": \"$TS\","
-            echo '  "status": "completed",'
-            echo "  \"backup_file\": \"$FILE\","
-            echo "  \"workflow\": \"${{ github.workflow }}\","
-            echo "  \"repository\": \"${{ github.repository }}\","
-            echo "  \"run_id\": \"${{ github.run_id }}\","
-            echo "  \"run_number\": \"${{ github.run_number }}\""
-            echo '}'
-          } > "$PROV_FILE"
-          echo "[📁] Copying to: $PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
-          mkdir -p "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}"
-          cp "$PROV_FILE" "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
-          echo "[📄] File contents:"; cat "$PROV_FILE"
+            "type": "transfer_log_backup",
+            "timestamp": "$TS",
+            "status": "completed",
+            "backup_file": "$FILE",
+            "workflow": "${{ github.workflow }}",
+            "repository": "${{ github.repository }}",
+            "run_id": "${{ github.run_id }}",
+            "run_number": "${{ github.run_number }}",
+            "disk": {
+              "mount_point": "${MOUNT_POINT}",
+              "fs_type": "${FS_TYPE}",
+              "img_size_mb": "${IMG_MB}"
+            }
+          }
+          JSON
+          cp "$PROV_FILE" "${{ env.PROVENANCE_STORE_DIR }}/${{ steps.backup.outputs.ts_folder }}/"
+          echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
+          echo "[OK] provenance: $PROV_FILE"
 
-      - name: 📤 Upload provenance.json
-        if: ${{ hashFiles(steps.genprov.outputs.prov_path) != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ steps.genprov.outputs.prov_path }}
-
-      - name: 📚 Generate .provenance_index.json
+      - name: 📚 Generate .provenance_index.json (ALWAYS exists)
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[📚] Building .provenance_index.json..."
-          mkdir -p provenance
-          INDEX_FILE="provenance/.provenance_index.json"
-          FILES=$(ls provenance/.provenance_transfer_*.json 2>/dev/null || true)
+          INDEX_FILE="${{ env.PROVENANCE_DIR }}/.provenance_index.json"
+          mkdir -p "${{ env.PROVENANCE_DIR }}"
+          FILES=$(ls "${{ env.PROVENANCE_DIR }}"/.provenance_transfer_*.json 2>/dev/null || true)
           if [ -z "$FILES" ]; then
             echo "[]" > "$INDEX_FILE"
           else
@@ -595,14 +566,31 @@ jobs:
             done
             echo "]" >> "$INDEX_FILE"
           fi
-          echo "[📄] Final .provenance_index.json:"; cat "$INDEX_FILE"
+          echo "[OK] index: $INDEX_FILE"
 
-      - name: 📤 Upload provenance index
-        if: ${{ hashFiles('provenance/.provenance_index.json') != '' }}
+      - name: 📤 Upload generated logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
+
+      - name: 📤 Upload backup folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
+
+      - name: 📤 Upload provenance.json (no fragile IF)
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
+          path: ${{ steps.genprov.outputs.prov_path }}
+
+      - name: 📤 Upload provenance index (always present)
         uses: actions/upload-artifact@v4
         with:
           name: provenance-index
-          path: provenance/.provenance_index.json
+          path: ${{ env.PROVENANCE_DIR }}/.provenance_index.json
 
       - name: 📂 Show backup structure
         shell: bash
