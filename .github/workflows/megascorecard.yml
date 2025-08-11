@@ -1,4 +1,4 @@
-name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Auto-Grow, no 24x365)"
+name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Manual, Safe)"
 
 on:
   workflow_dispatch:
@@ -44,10 +44,6 @@ on:
         default: "chore: disk+dirs + massive + live .github + bulk gen/upgrade (auto)"
         required: true
 
-  schedule:
-    - cron: "*/1 * * * *"   # Disk/Dirs maintenance
-    - cron: "*/5 * * * *"   # Transfer log backup
-
 permissions:
   contents: write
   security-events: write
@@ -61,7 +57,7 @@ jobs:
   # 1) Disk+Dirs — Multi-Partition + MASSIVE BulkGen + Live Mirror
   #######################################################################
   diskdirs:
-    name: "💽 Disk+Dirs (1min) + MASSIVE"
+    name: "💽 Disk+Dirs (manual) + MASSIVE"
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
@@ -92,11 +88,11 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: 🧰 Init — helpers
+      - name: 🧰 Init — helpers (safe chown/chmod 포함)
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ECHO_DIR"
+          mkdir -p "$LOG_DIR" "$ECHO_DIR" .github/echo_monitoring
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
@@ -108,6 +104,17 @@ jobs:
           export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           set -x
           run_cmd(){ echo "[CMD] $*"; eval "$@"; }
+          # Inputs → defaults
+          default_mount()      { echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
+          default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
+          default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
+          default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
+          default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
+          parse_owner_group(){
+            local og="${1:-runner:runner}" ; local u="${og%%:*}" ; local g="${og#*:}"
+            [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"
+          }
+          # Loop device
           get_loop(){
             local dev
             dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
@@ -118,20 +125,20 @@ jobs:
             [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
-          parse_owner_group(){
-            local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"
-            [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"
-          }
-          default_mount()      { echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
-          default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
-          default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
-          default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
-          default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
-          # 안전 소유/권한 (repo는 실패 무시, 마운트는 sudo)
-          safe_own_mount(){ local u="$1" g="$2"; shift 2; sudo chown -R "$u:$g" "$@" 2>/dev/null || true; }
-          safe_mode_mount(){ local m="$1"; shift; sudo chmod -R "$m" "$@" 2>/dev/null || true; }
-          safe_own_repo(){ local u="$1" g="$2"; shift 2; chown -R "$u:$g" "$@" 2>/dev/null || true; }
-          safe_mode_repo(){ local m="$1"; shift; chmod -R "$m" "$@" 2>/dev/null || true; }
+          # Path guards for safe ownership/mode ops
+          _MOUNT_ROOT(){ echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
+          is_mount_path(){ [[ "$1" == "$(_MOUNT_ROOT)"* ]]; }
+          is_repo_path(){  [[ "$1" != "$(_MOUNT_ROOT)"* ]]; }
+
+          # Backward-compat helpers (to avoid 'command not found')
+          safe_own_mount(){ local p="$1" o="$2" g="$3"; if is_mount_path "$p"; then sudo chown -R "$o:$g" "$p" || true; else echo "[SKIP chown] $p (workspace)"; fi; }
+          safe_mode_mount(){ local p="$1" m="$2"; if is_mount_path "$p"; then sudo chmod -R "$m" "$p" || true; else echo "[SKIP chmod] $p (workspace)"; fi; }
+          safe_own_repo(){  local p="$1" o="$2" g="$3"; echo "[SKIP chown] $p (workspace)"; }
+          safe_mode_repo(){ local p="$1" m="$2"; chmod -R "$m" "$p" || true; }
+
+          # Unified aliases
+          safe_chown(){ local p="$1" o="$2" g="$3"; safe_own_mount "$p" "$o" "$g"; }
+          safe_chmod(){ local p="$1" m="$2"; is_mount_path "$p" && safe_mode_mount "$p" "$m" || safe_mode_repo "$p" "$m"; }
           BASH
           chmod +x "$ECHO_DIR/_helpers.sh"
 
@@ -204,11 +211,11 @@ jobs:
           LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           case "$FST" in
             ext4)  sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
-            xfs)   sudo mkfs.xfs -f "$P1";  sudo mkfs.xfs -f "$P2" ;;
-            btrfs) sudo mkfs.btrfs -f "$P1";sudo mkfs.btrfs -f "$P2" ;;
+            xfs)   sudo mkfs.xfs -f "$P1" ; sudo mkfs.xfs -f "$P2" ;;
+            btrfs) sudo mkfs.btrfs -f "$P1"; sudo mkfs.btrfs -f "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1/p2 + chown/chmod (mounts only)
+      - name: 🔗 Mount p1/p2 + safe perms
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -217,14 +224,13 @@ jobs:
           MNT="$(INPUT_MOUNT_POINT="${{ inputs.mount_point }}" default_mount)"
           read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
           LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          sudo mkdir -p "${MNT}"
-          mount | grep -q " on ${MNT} " || sudo mount "$P1" "${MNT}"
-          sudo mkdir -p "${MNT}/part2"
+          sudo mkdir -p "${MNT}" "${MNT}/part2"
+          mount | grep -q " on ${MNT} "       || sudo mount "$P1" "${MNT}"
           mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "${MNT}/part2"
-          safe_own_mount "$OWNER" "$GROUP" "${MNT}" "${MNT}/part2"
+          safe_own_mount "${MNT}" "${OWNER}" "${GROUP}"
           df -h | grep -E "loop|Filesystem" || true
 
-      - name: 📁 Create SpringBoot + extra dirs (mounts-only own/mode)
+      - name: 📁 Create SpringBoot + extra dirs (safe perms)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -239,16 +245,15 @@ jobs:
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
           while IFS= read -r d; do
             mkdir -p "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
-            # mounts에만 강제 소유/권한
-            safe_own_mount "$OWNER" "$GROUP" "${MNT}/${d}" "${MNT}/part2/${d}"
-            safe_mode_mount "$MODE"          "${MNT}/${d}" "${MNT}/part2/${d}"
-            # repo는 실패 무시(베스트 에포트)
-            safe_own_repo  "$OWNER" "$GROUP" "${d}"
-            safe_mode_repo "$MODE"           "${d}"
+            safe_mode_repo "${d}" "${MODE}"
+            safe_own_mount   "${MNT}/${d}" "${OWNER}" "${GROUP}"
+            safe_own_mount   "${MNT}/part2/${d}" "${OWNER}" "${GROUP}"
+            safe_mode_mount  "${MNT}/${d}" "${MODE}"
+            safe_mode_mount  "${MNT}/part2/${d}" "${MODE}"
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
           done < "$ECHO_DIR/.all_dirs.txt"
 
-      - name: 📏 Online resize p2 (auto-grow if requested)
+      - name: 📏 Online resize p2 (optional)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -271,7 +276,7 @@ jobs:
           esac
           df -h | grep -E "${MNT}(/part2)?"
 
-      - name: 🧨 Bulk generator/upgrade — repo + both mounts (mounts-only own/mode)
+      - name: 🧨 Bulk generator/upgrade — repo + both mounts (safe perms)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -287,11 +292,9 @@ jobs:
           read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
           ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
           mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-          # mounts만 강제, repo는 베스트 에포트
-          safe_own_mount "$OWNER" "$GROUP" "$ROOT_P1" "$ROOT_P2"
-          safe_mode_mount "$MODE"          "$ROOT_P1" "$ROOT_P2"
-          safe_own_repo  "$OWNER" "$GROUP" "$ROOT_REPO"
-          safe_mode_repo "$MODE"          "$ROOT_REPO"
+          safe_mode_repo "$ROOT_REPO" "$MODE"
+          safe_own_mount "$ROOT_P1" "$OWNER" "$GROUP"; safe_mode_mount "$ROOT_P1" "$MODE"
+          safe_own_mount "$ROOT_P2" "$OWNER" "$GROUP"; safe_mode_mount "$ROOT_P2" "$MODE"
           create_or_upgrade_dir(){
             local base="${1-}"; local i="${2-}"; [[ -z "$base" || -z "$i" ]] && return 1
             local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
@@ -307,14 +310,8 @@ jobs:
             create_or_upgrade_dir "$ROOT_P1"   "$i"
             create_or_upgrade_dir "$ROOT_P2"   "$i"
           done
-          # 상위 bulk 폴더에 대해 mounts만 강제
-          safe_own_mount "$OWNER" "$GROUP" "$MNT/bulk" "$MNT/part2/bulk"
-          safe_mode_mount "$MODE"          "$MNT/bulk" "$MNT/part2/bulk"
-          # repo는 실패 무시
-          safe_own_repo  "$OWNER" "$GROUP" "bulk"
-          safe_mode_repo "$MODE"          "bulk"
 
-      - name: 🚀 MASSIVE — shard+parallel bulkgen (mounts-only own/mode)
+      - name: 🚀 MASSIVE — shard+parallel bulkgen (safe perms)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -346,14 +343,11 @@ jobs:
               create_or_upgrade_dir "$ROOT_P1"   "$i"
               create_or_upgrade_dir "$ROOT_P2"   "$i"
             done
-            # mounts만 강제, repo는 실패 무시
-            safe_own_mount "$OWNER" "$GROUP" "$ROOT_P1" "$ROOT_P2"
-            safe_mode_mount "$MODE"          "$ROOT_P1" "$ROOT_P2"
-            safe_own_repo  "$OWNER" "$GROUP" "$ROOT_REPO"
-            safe_mode_repo "$MODE"          "$ROOT_REPO"
+            safe_mode_repo "bulk/${SH_PREFIX}" "$MODE"
+            safe_own_mount "$MNT/bulk/${SH_PREFIX}" "$OWNER" "$GROUP"; safe_mode_mount "$MNT/bulk/${SH_PREFIX}" "$MODE"
+            safe_own_mount "$MNT/part2/bulk/${SH_PREFIX}" "$OWNER" "$GROUP"; safe_mode_mount "$MNT/part2/bulk/${SH_PREFIX}" "$MODE"
           }
-          export -f gen_one_shard
-          export BASE_DIRS BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE BASE_PREFIX
+          export -f gen_one_shard; export BASE_DIRS BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE
           seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
       - name: ⚡ Mirror to RAMDISK + sha256 index
@@ -373,7 +367,7 @@ jobs:
             echo "[ECHO] ramdisk not mounted — skip"
           fi
 
-      - name: 🔧IO stress:tar+pigz split + top consumers
+      - name: 🔧 IO stress: tar+pigz split + top consumers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -385,7 +379,6 @@ jobs:
           tar -cf "$TAR_PATH" bulk
           pigz -p "$(nproc)" -f "$TAR_PATH"
           split -b "${TAR_SPLIT_MB}M" -d "$TGZ_PATH" "$SPLIT_PREFIX"
-          mkdir -p .github/echo_monitoring
           du -ah bulk 2>/dev/null | sort -hr 2>/dev/null | head -n 200 > .github/echo_monitoring/top200_bulk.txt || true
           echo "[SUMMARY] tgz=$(du -h "$TGZ_PATH" | awk '{print $1}'), parts=$(ls -1 ${SPLIT_PREFIX}* 2>/dev/null | wc -l | tr -d ' ')"
 
@@ -405,8 +398,8 @@ jobs:
           echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
           tail -n 20 .gitignore || true
 
-      - name: ✅ Commit & push (token optional)
-        if: ${{ inputs.commit_and_push == 'true' || github.event_name == 'schedule' }}
+      - name: ✅ Commit & push (manual only)
+        if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
           WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
@@ -428,7 +421,7 @@ jobs:
           fi
           git add -A
           if git diff --cached --quiet; then echo "[ECHO] No changes"; exit 0; fi
-          COMMIT_MSG="${COMMIT_MSG_IN:-chore: disk+dirs auto (cron)}"
+          COMMIT_MSG="${COMMIT_MSG_IN:-chore: disk+dirs auto}"
           git commit -m "$COMMIT_MSG"
           PUSH_LOG=".github/echo_scripts/.push_err.txt"
           NO_TOKEN_MODE=0
@@ -475,18 +468,18 @@ jobs:
           retention-days: 7
 
   #######################################################################
-  # 2) Transfer Log Backup — 60건 Infinite + Provenance (5min cron)
+  # 2) Transfer Log Backup — 60건 + Provenance (manual)
   #######################################################################
   transfer_log_backup:
-    name: "🧾 Transfer Log Backup (5min) + Provenance"
+    name: "🧾 Transfer Log Backup (manual) + Provenance"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'schedule' || contains(github.event.schedule, '*/5')
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
       PROVENANCE_DIR: provenance
       PROVENANCE_STORE_DIR: provenance/store
+
     steps:
       - name: 📦 Checkout repository
         uses: actions/checkout@v4
