@@ -1,4 +1,4 @@
-name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Manual, Safe v2)"
+name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Manual, Safe v3)"
 
 on:
   workflow_dispatch:
@@ -53,9 +53,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  #######################################################################
-  # 1) Disk+Dirs — Multi-Partition + MASSIVE BulkGen + Live Mirror
-  #######################################################################
   diskdirs:
     name: "💽 Disk+Dirs (manual) + MASSIVE"
     runs-on: ubuntu-latest
@@ -72,14 +69,12 @@ jobs:
       MOUNT_P2_NAME: p2
       GIT_USER_NAME: gh-actions-bot
       GIT_USER_EMAIL: gh-actions-bot@example.com
-      # 리소스 증설
-      SWAP_SIZE_MB: "4096"      # 0=off
-      RAMDISK_MB: "512"         # 0=off
+      SWAP_SIZE_MB: "4096"
+      RAMDISK_MB: "512"
       SYS_MAX_MAP_COUNT: "262144"
       SYS_INOTIFY_WATCHES: "1048576"
       ULIMIT_NOFILE: "1048576"
       ULIMIT_NPROC:  "131072"
-      # 대량 확장
       MASSIVE_SHARDS: "4"
       MASSIVE_MULTIPLIER: "2"
       PARALLEL_JOBS: "8"
@@ -100,45 +95,34 @@ jobs:
           echo "fs_type=${{ inputs.fs_type }}"       >> "$GITHUB_OUTPUT"
           echo "img_size_mb=${{ inputs.disk_size_mb }}" >> "$GITHUB_OUTPUT"
 
-      - name: 🧰 Init — helpers (safe chown/chmod 포함)
+      - name: 🧰 Init — helpers (필요 최소만 유지)
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "$LOG_DIR" "$ECHO_DIR" .github/echo_monitoring
-          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
           exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
           set -x
-          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
           cat > "$ECHO_DIR/_helpers.sh" <<'BASH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          export PS4='+ [$(date "+%F %T")] ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main} ▶ '
-          set -x
-          run_cmd(){ echo "[CMD] $*"; eval "$@"; }
-          default_mount()      { echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
+          MNT_DEFAULT="/mnt/gh-disk"
+          default_mount()      { echo "${INPUT_MOUNT_POINT:-$MNT_DEFAULT}"; }
           default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
           default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
           default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
           default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
-          parse_owner_group(){ local og="${1:-runner:runner}"; local u="${og%%:*}"; local g="${og#*:}"; [[ -z "$u" ]] && u="runner"; [[ -z "$g" ]] && g="runner"; echo "$u" "$g"; }
+          parse_owner_group(){ local og="${1:-runner:runner}"; echo "${og%%:*} ${og#*:}"; }
           get_loop(){
             local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
             if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""; fi
             [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
             printf "%s" "$dev"
           }
-          _MOUNT_ROOT(){ echo "${INPUT_MOUNT_POINT:-/mnt/gh-disk}"; }
-          is_mount_path(){ [[ "$1" == "$(_MOUNT_ROOT)"* ]]; }
-          safe_own_mount(){ local p="$1" o="$2" g="$3"; is_mount_path "$p" && sudo chown -R "$o:$g" "$p" || true; }
-          safe_mode_mount(){ local p="$1" m="$2"; is_mount_path "$p" && sudo chmod -R "$m" "$p" || true; }
-          safe_mode_repo(){ local p="$1" m="$2"; chmod -R "$m" "$p" || true; }
           retry_mount(){
             local dev="$1" target="$2"
             sudo install -d -m 0755 "$target"
             for i in 1 2 3; do
-              if sudo mount "$dev" "$target"; then return 0; fi
-              echo "[WARN] mount failed → mkdir & retry ($i/3)"
-              sudo install -d -m 0755 "$target"
+              sudo mount "$dev" "$target" && return 0 || true
               sleep 1
             done
             echo "[ERROR] mount $dev -> $target failed" >&2; return 1
@@ -153,34 +137,31 @@ jobs:
           source "$ECHO_DIR/_helpers.sh"
           exec > >(tee -a "$LOG_DIR/03_resource_boost.log") 2>&1
           set -x
-          run_cmd "sudo apt-get update -y"
-          run_cmd "sudo apt-get install -y --no-install-recommends build-essential git-lfs jq moreutils pigz pv unzip tar curl ca-certificates xz-utils tree rsync parted xfsprogs btrfs-progs || true"
-          run_cmd "git lfs install || true"
-          if [[ "${SWAP_SIZE_MB}" != "0" ]]; then
-            if ! sudo swapon --show | grep -q '^'; then
-              run_cmd "sudo fallocate -l ${SWAP_SIZE_MB}M /swapfile"
-              run_cmd "sudo chmod 600 /swapfile"
-              run_cmd "sudo mkswap /swapfile"
-              run_cmd "sudo swapon /swapfile"
-            fi
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends build-essential git-lfs jq pigz pv unzip tar curl ca-certificates xz-utils tree rsync parted xfsprogs btrfs-progs || true
+          git lfs install || true
+          if [[ "${SWAP_SIZE_MB}" != "0" ]] && ! sudo swapon --show | grep -q '^'; then
+            sudo fallocate -l ${SWAP_SIZE_MB}M /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
           fi
           if [[ "${RAMDISK_MB}" != "0" ]]; then
-            run_cmd "sudo install -d -m 0755 /mnt/ramdisk"
-            mount | grep -q " on /mnt/ramdisk " || run_cmd "sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk"
+            sudo install -d -m 0755 /mnt/ramdisk
+            mount | grep -q " on /mnt/ramdisk " || sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk
           fi
-          run_cmd "sudo prlimit --pid $$ --nofile=${ULIMIT_NOFILE}:${ULIMIT_NOFILE} || true"
-          run_cmd "sudo prlimit --pid $$ --nproc=${ULIMIT_NPROC}:${ULIMIT_NPROC} || true"
+          sudo prlimit --pid $$ --nofile=${ULIMIT_NOFILE}:${ULIMIT_NOFILE} || true
+          sudo prlimit --pid $$ --nproc=${ULIMIT_NPROC}:${ULIMIT_NPROC} || true
           echo "fs.inotify.max_user_watches=${SYS_INOTIFY_WATCHES}" | sudo tee /etc/sysctl.d/99-echo-inotify.conf >/dev/null
           echo "vm.max_map_count=${SYS_MAX_MAP_COUNT}"              | sudo tee /etc/sysctl.d/99-echo-mapcount.conf >/dev/null
           echo "vm.swappiness=10"                                   | sudo tee /etc/sysctl.d/99-echo-swap.conf >/dev/null
-          run_cmd "sudo sysctl --system || sudo sysctl -p || true"
+          sudo sysctl --system || sudo sysctl -p || true
 
       - name: 🧱 Create image + attach loop
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
+          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
           set -x
           RAW_SIZE_MB="${{ inputs.disk_size_mb }}"
           [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]] && RAW_SIZE_MB="2048"
@@ -215,7 +196,7 @@ jobs:
             btrfs) sudo mkfs.btrfs -f "$P1"; sudo mkfs.btrfs -f "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1/p2 + safe perms (+재시도)
+      - name: 🔗 Mount p1/p2 + perms (재시도 포함)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -227,10 +208,11 @@ jobs:
           sudo install -d -m 0755 "${MNT}" "${MNT}/part2"
           mount | grep -q " on ${MNT} "       || retry_mount "$P1" "${MNT}"
           mount | grep -q " on ${MNT}/part2 " || retry_mount "$P2" "${MNT}/part2"
-          safe_own_mount "${MNT}" "${OWNER}" "${GROUP}"
+          sudo chown -R "${OWNER}:${GROUP}" "${MNT}" "${MNT}/part2"
+          sudo chmod -R "${{ inputs.dir_mode }}" "${MNT}" "${MNT}/part2"
           df -h | grep -E "loop|Filesystem" || true
 
-      - name: 📁 Create SB + extra dirs (safe perms)
+      - name: 📁 Create SB + extra dirs (모두에 적용)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -245,9 +227,9 @@ jobs:
           printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
           while IFS= read -r d; do
             mkdir -p "${d}" "${MNT}/${d}" "${MNT}/part2/${d}"
-            safe_mode_repo "${d}" "${MODE}"
-            safe_own_mount   "${MNT}/${d}" "${OWNER}" "${GROUP}"; safe_mode_mount "${MNT}/${d}" "${MODE}"
-            safe_own_mount   "${MNT}/part2/${d}" "${OWNER}" "${GROUP}"; safe_mode_mount "${MNT}/part2/${d}" "${MODE}"
+            chmod -R "${MODE}" "${d}" || true
+            sudo chown -R "${OWNER}:${GROUP}" "${MNT}/${d}" "${MNT}/part2/${d}"
+            sudo chmod -R "${MODE}" "${MNT}/${d}" "${MNT}/part2/${d}"
             [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
           done < "$ECHO_DIR/.all_dirs.txt"
 
@@ -274,7 +256,7 @@ jobs:
           esac
           df -h | grep -E "${MNT}(/part2)?"
 
-      - name: 🧨 Bulk generator/upgrade — repo + both mounts (safe perms)
+      - name: 🧨 Bulk generator — repo + both mounts
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -290,11 +272,11 @@ jobs:
           read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
           ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
           mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-          safe_mode_repo "$ROOT_REPO" "$MODE"
-          safe_own_mount "$ROOT_P1" "$OWNER" "$GROUP"; safe_mode_mount "$ROOT_P1" "$MODE"
-          safe_own_mount "$ROOT_P2" "$OWNER" "$GROUP"; safe_mode_mount "$ROOT_P2" "$MODE"
+          chmod -R "$MODE" "$ROOT_REPO" || true
+          sudo chown -R "$OWNER:$GROUP" "$ROOT_P1" "$ROOT_P2"
+          sudo chmod -R "$MODE" "$ROOT_P1" "$ROOT_P2"
           create_or_upgrade_dir(){
-            local base="${1-}"; local i="${2-}"; [[ -z "$base" || -z "$i" ]] && return 1
+            local base="$1" i="$2"
             local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
             for n in $(seq 1 "$NUM_FILES"); do
               local f="${d}/file-$(printf '%04d' "$n").bin"
@@ -309,7 +291,7 @@ jobs:
             create_or_upgrade_dir "$ROOT_P2"   "$i"
           done
 
-      - name: 🚀 MASSIVE — shard+parallel bulkgen (safe perms)
+      - name: 🚀 MASSIVE — shard+parallel bulkgen
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -328,7 +310,7 @@ jobs:
             local ROOT_REPO="bulk/${SH_PREFIX}"; local ROOT_P1="${MNT}/bulk/${SH_PREFIX}"; local ROOT_P2="${MNT}/part2/bulk/${SH_PREFIX}"
             mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
             create_or_upgrade_dir(){
-              local base="${1-}"; local i="${2-}"; [[ -z "$base" || -z "$i" ]] && return 1
+              local base="$1" i="$2"
               local d="${base}/$(printf '%s-%06d' "$SH_PREFIX" "$i")"; mkdir -p "$d"
               for n in $(seq 1 "$BASE_FILES"); do
                 local f="${d}/file-$(printf '%04d' "$n").bin"
@@ -341,11 +323,12 @@ jobs:
               create_or_upgrade_dir "$ROOT_P1"   "$i"
               create_or_upgrade_dir "$ROOT_P2"   "$i"
             done
-            safe_mode_repo "bulk/${SH_PREFIX}" "$MODE"
-            safe_own_mount "$MNT/bulk/${SH_PREFIX}" "$OWNER" "$GROUP"; safe_mode_mount "$MNT/bulk/${SH_PREFIX}" "$MODE"
-            safe_own_mount "$MNT/part2/bulk/${SH_PREFIX}" "$OWNER" "$GROUP"; safe_mode_mount "$MNT/part2/bulk/${SH_PREFIX}" "$MODE"
+            chmod -R "$MODE" "bulk/${SH_PREFIX}" || true
+            sudo chown -R "$OWNER:$GROUP" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
+            sudo chmod -R "$MODE" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
           }
-          export -f gen_one_shard; export BASE_DIRS BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE
+          export -f gen_one_shard
+          export BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE
           seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
       - name: ⚡ Mirror to RAMDISK + sha256 index
@@ -465,9 +448,6 @@ jobs:
             .github/echo_monitoring/**
           retention-days: 7
 
-  #######################################################################
-  # 2) Transfer Log Backup — 60건 + Provenance (manual, after diskdirs)
-  #######################################################################
   transfer_log_backup:
     name: "🧾 전송 로그 백업 (수동) + 출처"
     runs-on: ubuntu-latest
@@ -544,7 +524,6 @@ jobs:
           JSON
           cp "$PROV_FILE" "${{ env.PROVENANCE_STORE_DIR }}/${{ steps.backup.outputs.ts_folder }}/"
           echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
-          echo "[OK] provenance: $PROV_FILE"
 
       - name: 📚 Generate .provenance_index.json (ALWAYS exists)
         shell: bash
@@ -580,13 +559,13 @@ jobs:
           name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
 
-      - name: 📤 Upload provenance.json (no fragile IF)
+      - name: 📤 Upload provenance.json
         uses: actions/upload-artifact@v4
         with:
           name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
           path: ${{ steps.genprov.outputs.prov_path }}
 
-      - name: 📤 Upload provenance index (always present)
+      - name: 📤 Upload provenance index
         uses: actions/upload-artifact@v4
         with:
           name: provenance-index
