@@ -1,4 +1,4 @@
-name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드+전송 백업(24x365 불가)"
+name: "MEGA Disk+Dirs+Massive+Service init/seed+Transfer backup (no 24x365)"
 
 on:
   workflow_dispatch:
@@ -24,25 +24,17 @@ on:
         required: true
         default: "dirs=100,files=10,size_kb=4,prefix=gen"
       services:
-        description: "services(csv): mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda"
+        description: "csv: mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda"
         required: false
         default: "mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda"
       seed_spec:
         description: "dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1"
         required: false
         default: "dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1"
-      db_mysql:
-        description: "mysql: dbs + user:pass (e.g., dbs=app,logs;user=app:app123!)"
+      db_spec:
+        description: "mysql=app,logs,metrics;user=app:app123!|pg=app,logs,metrics|mongo=app:users,logs:lines"
         required: false
-        default: "dbs=app,logs,metrics;user=app:app123!"
-      db_pg:
-        description: "postgres: dbs (e.g., dbs=app,logs,metrics)"
-        required: false
-        default: "dbs=app,logs,metrics"
-      db_mongo:
-        description: "mongo: db:collections (csv) (e.g., app:users,logs:lines)"
-        required: false
-        default: "app:users,logs:lines"
+        default: "mysql=app,logs,metrics;user=app:app123!|pg=app,logs,metrics|mongo=app:users,logs:lines"
       commit_and_push:
         description: "Commit & push generated files"
         required: true
@@ -57,7 +49,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 1) 디스크 이미지 + 파티션 + 마운트 + 대량 생성(병렬) + 리포트
   diskdirs:
     name: "💽 Disk+Dirs + Massive"
     runs-on: ubuntu-latest
@@ -75,13 +66,13 @@ jobs:
       SWAP_SIZE_MB: "2048"
       RAMDISK_MB: "512"
     steps:
-      - name: 📂 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: 🧰 Init helpers
+      - name: Init helpers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -113,7 +104,7 @@ jobs:
           BASH
           chmod +x "$ECHO_DIR/_helpers.sh"
 
-      - name: 🔋 System prep (swap/ramdisk + tools)
+      - name: System prep (swap/ramdisk + tools)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -133,7 +124,7 @@ jobs:
             mount | grep -q " on /mnt/ramdisk " || sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk
           fi
 
-      - name: 🧱 Create image + attach loop
+      - name: Create image + attach loop
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -143,9 +134,9 @@ jobs:
           RAW_SIZE_MB="${{ inputs.disk_size_mb }}"
           [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]] && RAW_SIZE_MB="2048"
           if [[ ! -f "$DISK_IMG" ]]; then truncate -s ${RAW_SIZE_MB}M "$DISK_IMG"; fi
-          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"; ls -lh "$DISK_IMG"
+          LOOP_DEV="$(get_loop)"; ls -lh "$DISK_IMG"
 
-      - name: 🧭 GPT partition p1=60%, p2=40%
+      - name: Partition p1=60%, p2=40%
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -158,7 +149,7 @@ jobs:
           sudo partprobe "$LOOP_DEV" || true
           ls -l ${LOOP_DEV}*
 
-      - name: 🧪 Make filesystems
+      - name: Make filesystems
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -172,7 +163,7 @@ jobs:
             btrfs) sudo mkfs.btrfs -f "$P1"; sudo mkfs.btrfs -f "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1/p2 (create mount points first)
+      - name: Mount p1/p2 (ensure mountpoints)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -186,15 +177,15 @@ jobs:
           mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "${MNT}/part2"
           sudo chown -R "${OWNER}:${GROUP}" "${MNT}"
 
-      - name: 📏 Optional online resize p2
+      - name: Optional online resize p2
         shell: bash
         run: |
           set -Eeuo pipefail
           source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
           set -x
           REQ="${{ inputs.resize_to_mb }}"
-          [[ -z "${REQ:-}" ]] && { echo "[ECHO] skip resize"; exit 0; }
-          [[ ! "${REQ}" =~ ^[0-9]+$ ]] && { echo "[ECHO] invalid resize_to_mb"; exit 0; }
+          [[ -z "${REQ:-}" ]] && exit 0
+          [[ ! "${REQ}" =~ ^[0-9]+$ ]] && exit 0
           CUR="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR + 1048575)/1048576 ))
           (( REQ > CUR_MB )) && truncate -s ${REQ}M "$DISK_IMG" || true
           LOOP_DEV="$(get_loop)"
@@ -210,7 +201,7 @@ jobs:
           esac
           df -h | grep -E "${MNT}(/part2)?"
 
-      - name: 🧨 Bulk generator (repo + both mounts)
+      - name: Bulk generator (repo + both mounts)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -223,25 +214,16 @@ jobs:
           SIZE_KB="$(getv size_kb)"; : "${SIZE_KB:=4}"
           PREFIX="$(getv prefix)"; : "${PREFIX:=gen}"
           MNT="${{ inputs.mount_point }}"
-          ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
-          mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-          create_or_upgrade_dir(){
-            local base="$1" i="$2" d f
-            d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
-            for n in $(seq 1 "$NUM_FILES"); do
-              f="${d}/file-$(printf '%04d' "$n").bin"
-              [ -f "$f" ] && { cur="$(stat -c%s "$f" || echo 0)"; need=$(( SIZE_KB*1024 )); (( cur < need )) && truncate -s "${need}" "$f" || true; } \
-                           || truncate -s "$(( SIZE_KB*1024 ))" "$f"
-            done
-          }
-          export -f create_or_upgrade_dir PREFIX NUM_FILES SIZE_KB
+          ROOTS=("bulk/${PREFIX}" "${MNT}/bulk/${PREFIX}" "${MNT}/part2/bulk/${PREFIX}")
+          for r in "${ROOTS[@]}"; do mkdir -p "$r"; done
           for i in $(seq 1 "$NUM_DIRS"); do
-            create_or_upgrade_dir "$ROOT_REPO" "$i"
-            create_or_upgrade_dir "$ROOT_P1" "$i"
-            create_or_upgrade_dir "$ROOT_P2" "$i"
+            for r in "${ROOTS[@]}"; do
+              d="${r}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
+              for n in $(seq 1 "$NUM_FILES"); do truncate -s "$(( SIZE_KB*1024 ))" "$d/file-$(printf '%04d' "$n").bin"; done
+            done
           done
 
-      - name: 🚀 MASSIVE shards (parallel)
+      - name: MASSIVE shards (parallel)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -269,7 +251,7 @@ jobs:
           export -f gen_one_shard
           seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
-      - name: 📊 Size reports
+      - name: Reports
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -278,29 +260,27 @@ jobs:
           du -sh . > .github/echo_monitoring/total_size.txt || true
           df -h > .github/echo_monitoring/df_all.txt || true
 
-      - name: 📝 .gitignore update
+      - name: .gitignore update
         shell: bash
         run: |
           set -Eeuo pipefail
           echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
 
-      - name: ✅ Commit & push (optional)
+      - name: Commit & push (optional)
         if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
-          GH_ACTOR: ${{ github.actor }}
-          GH_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           git config user.name "gh-actions-bot"
           git config user.email "gh-actions-bot@example.com"
           git add -A
-          if git diff --cached --quiet; then echo "[ECHO] No changes"; exit 0; fi
+          if git diff --cached --quiet; then exit 0; fi
           git commit -m "chore: disk+dirs + massive (auto)"
           git push
 
-      - name: 📦 Upload artifacts (logs/scripts/monitoring)
+      - name: Upload artifacts (logs/scripts/monitoring)
         uses: actions/upload-artifact@v4
         with:
           name: diskdirs-logs-${{ github.run_id }}
@@ -310,23 +290,20 @@ jobs:
             .github/echo_monitoring/**
           retention-days: 7
 
-  # 2) 서비스 초기화/시드 + process DB/리소스 + 서비스 업그레이드 (병렬)
   service_init_seed_upgrade:
-    name: "🧩 Service Init/Seed + process DB + Upgrade (parallel)"
+    name: "🧩 Service init/seed + process DB + upgrade (parallel)"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     needs: [diskdirs]
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🧰 Generate init/seed/upgrade script
+      - name: Generate init/seed/upgrade script
         shell: bash
         env:
           SERVICES: ${{ inputs.services }}
           SEED_SPEC: ${{ inputs.seed_spec }}
-          MYSQL_DEF: ${{ inputs.db_mysql }}
-          PG_DEF: ${{ inputs.db_pg }}
-          MONGO_DEF: ${{ inputs.db_mongo }}
+          DB_SPEC: ${{ inputs.db_spec }}
         run: |
           set -Eeuo pipefail
           mkdir -p .github/echo_init .github/echo_logs service_data
@@ -335,86 +312,98 @@ jobs:
           set -Eeuo pipefail
           SERVICES="${SERVICES:-mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda}"
           SEED_SPEC="${SEED_SPEC:-dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1}"
-          MYSQL_DEF="${MYSQL_DEF:-dbs=app,logs,metrics;user=app:app123!}"
-          PG_DEF="${PG_DEF:-dbs=app,logs,metrics}"
-          MONGO_DEF="${MONGO_DEF:-app:users,logs:lines}"
+          DB_SPEC="${DB_SPEC:-mysql=app,logs,metrics;user=app:app123!|pg=app,logs,metrics|mongo=app:users,logs:lines}"
 
+          # parse helpers
           kv(){ echo "$1" | tr ',; ' '\n\n\n' | awk -F= -v k="$2" '$1==k{print $2}' | tail -n1; }
-          getv(){ echo "$1" | tr ', ' '\n' | awk -F= -v k="$2" '$1==k{print $2}' | tail -n1; }
+          seg(){ echo "$DB_SPEC" | tr '|' '\n' | awk -F= -v k="$1" '$1==k{print $0}' | cut -d= -f2-; }
 
-          SD_DIRS="$(getv "$SEED_SPEC" dirs)"; : "${SD_DIRS:=50}"
-          SD_FILES="$(getv "$SEED_SPEC" files)"; : "${SD_FILES:=8}"
-          SD_KB="$(getv "$SEED_SPEC" size_kb)"; : "${SD_KB:=32}"
-          REDIS_KEYS="$(getv "$SEED_SPEC" redis_keys)"; : "${REDIS_KEYS:=500}"
-          MONGO_DOCS="$(getv "$SEED_SPEC" mongo_docs)"; : "${MONGO_DOCS:=200}"
-          KAFKA_TP="$(getv "$SEED_SPEC" kafka_topics)"
+          MYSQL_DBS="$(seg mysql | cut -d';' -f1)"
+          MYSQL_USERPASS="$(seg mysql | awk -F';' '{for(i=1;i<=NF;i++){if($i~/^user=/){sub(/^user=/,"",$i);print $i}}}')"
+          PG_DBS="$(seg pg)"
+          MONGO_DBCOLS="$(seg mongo)"
 
-          MYSQL_DBS="$(kv "$MYSQL_DEF" dbs)"; MYSQL_USERPASS="$(kv "$MYSQL_DEF" user)"
-          PG_DBS="$(kv "$PG_DEF" dbs)"
-          MONGO_DBCOLS="$MONGO_DEF"
+          getv(){ echo "$SEED_SPEC" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}' | tail -n1; }
+          SD_DIRS="$(getv dirs)"; : "${SD_DIRS:=50}"
+          SD_FILES="$(getv files)"; : "${SD_FILES:=8}"
+          SD_KB="$(getv size_kb)"; : "${SD_KB:=32}"
+          REDIS_KEYS="$(getv redis_keys)"; : "${REDIS_KEYS:=500}"
+          MONGO_DOCS="$(getv mongo_docs)"; : "${MONGO_DOCS:=200}"
+          KAFKA_TP="$(getv kafka_topics)"
 
-          data_dirs(){
-            local svc="$1" base="service_data/$svc"
-            mkdir -p "$base"
-            for i in $(seq 1 "$SD_DIRS"); do
-              d=$(printf "%s/%s-%06d" "$base" "$svc" "$i"); mkdir -p "$d"
-              for n in $(seq 1 "$SD_FILES"); do
-                truncate -s $((SD_KB*1024)) "$d/file-$(printf '%04d' "$n").bin"
-              done
-            done
-          }
+          data_dirs(){ local svc="$1" base="service_data/$svc"; mkdir -p "$base"
+            for i in $(seq 1 "$SD_DIRS"); do d=$(printf "%s/%s-%06d" "$base" "$svc" "$i"); mkdir -p "$d"
+              for n in $(seq 1 "$SD_FILES"); do truncate -s $((SD_KB*1024)) "$d/file-$(printf '%04d' "$n").bin"; done
+            done; }
 
-          has(){ command -v "$1" >/dev/null 2>&1; }
           dps(){ docker ps --format '{{.ID}} {{.Image}} {{.Names}}'; }
           find_c(){ dps | awk -v r="$1" '$0 ~ r {print $1; exit}'; }
 
-          # MySQL: DB들 + process DB + user
+          # Upgrades
+          upgrade_one(){ local svc="$1"; local img=
+            case "$svc" in
+              mysql) img="mysql:8" ;;
+              postgres) img="postgres:16" ;;
+              redis) img="redis:7" ;;
+              mongo) img="mongo:7" ;;
+              kafka) img="bitnami/kafka:latest" ;;
+              rabbitmq) img="rabbitmq:3-management" ;;
+              minio) img="minio/minio:latest" ;;
+              airflow) img="apache/airflow:latest" ;;
+              spark) img="bitnami/spark:latest" ;;
+              camunda) img="camunda/camunda-bpm-platform:latest" ;;
+            esac
+            if command -v docker >/dev/null 2>&1; then
+              [ -n "$img" ] && docker pull "$img" || true
+              if command -v docker compose >/dev/null 2>&1 && { [ -f compose.yml ] || [ -f docker-compose.yml ]; }; then
+                docker compose pull "$svc" || true
+                docker compose up -d "$svc" || true
+              elif command -v docker-compose >/dev/null 2>&1 && [ -f docker-compose.yml ]; then
+                docker-compose pull "$svc" || true
+                docker-compose up -d "$svc" || true
+              fi
+            fi
+          }
+
+          # MySQL
           do_mysql(){
             cid="$(find_c "(mysql|mariadb)")" || true
-            [ -z "$cid" ] && { echo "[mysql] container not found → skip"; return; }
+            [ -n "$cid" ] || { echo "[mysql] container not found"; return; }
             local sql=""
             if [ -n "$MYSQL_USERPASS" ]; then
               u="${MYSQL_USERPASS%%:*}"; p="${MYSQL_USERPASS#*:}"
               [ -n "$u" ] && [ -n "$p" ] && sql+="CREATE USER IF NOT EXISTS '$u'@'%' IDENTIFIED BY '$p'; GRANT ALL PRIVILEGES ON *.* TO '$u'@'%' WITH GRANT OPTION; "
             fi
             IFS=',' read -ra DBS <<< "$MYSQL_DBS"
-            for db in "${DBS[@]}"; do
-              dbt="$(echo "$db" | xargs)"; [ -z "$dbt" ] && continue
-              sql+="CREATE DATABASE IF NOT EXISTS \`$dbt\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
-            done
+            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && sql+="CREATE DATABASE IF NOT EXISTS \`$dbt\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "; done
             sql+="CREATE DATABASE IF NOT EXISTS \`process\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
-            echo "[mysql] creating: ${MYSQL_DBS}, process"
             docker exec -i "$cid" sh -lc "mysql -uroot -p\"\$MYSQL_ROOT_PASSWORD\" -e \"$sql\"" || true
             data_dirs mysql
           }
 
-          # Postgres: DB들 + process DB
+          # Postgres
           do_postgres(){
             cid="$(find_c "postgres")" || true
-            [ -z "$cid" ] && { echo "[postgres] container not found → skip"; return; }
+            [ -n "$cid" ] || { echo "[postgres] container not found"; return; }
             IFS=',' read -ra DBS <<< "$PG_DBS"
-            for db in "${DBS[@]}"; do
-              dbt="$(echo "$db" | xargs)"; [ -z "$dbt" ] && continue
-              docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" \"$dbt\"" || true
-            done
+            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" \"$dbt\"" || true; done
             docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" process" || true
             data_dirs postgres
           }
 
-          # Redis: 대량 키 + process:* 네임스페이스 시드
+          # Redis
           do_redis(){
             cid="$(find_c "redis")" || true
-            [ -z "$cid" ] && { echo "[redis] container not found → skip"; return; }
-            echo "[redis] seeding $REDIS_KEYS keys"
+            [ -n "$cid" ] || { echo "[redis] container not found"; return; }
             seq 1 "$REDIS_KEYS" | xargs -I{} -P 8 sh -c 'docker exec -i "$0" sh -lc "redis-cli SET seed:{} \$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) >/dev/null"' "$cid" || true
             for i in $(seq 1 200); do docker exec -i "$cid" sh -lc "redis-cli HSET process:job:$i status pending" || true; done
             data_dirs redis
           }
 
-          # Mongo: DB/Collection + process.jobs 시드
+          # Mongo
           do_mongo(){
             cid="$(find_c "mongo")" || true
-            [ -z "$cid" ] && { echo "[mongo] container not found → skip"; return; }
+            [ -n "$cid" ] || { echo "[mongo] container not found"; return; }
             IFS=',' read -ra DCS <<< "$MONGO_DBCOLS"
             for pair in "${DCS[@]}"; do
               pair="$(echo "$pair" | xargs)"; [ -z "$pair" ] && continue
@@ -429,10 +418,10 @@ jobs:
             data_dirs mongo
           }
 
-          # Kafka: 토픽 생성 + process 토픽
+          # Kafka
           do_kafka(){
             cid="$(find_c "kafka")" || true
-            [ -z "$cid" ] && { echo "[kafka] container not found → skip"; return; }
+            [ -n "$cid" ] || { echo "[kafka] container not found"; return; }
             [ -n "$KAFKA_TP" ] && IFS=',' read -ra TPS <<< "$KAFKA_TP" || TPS=()
             TPS+=("process.jobs:3:1")
             for t in "${TPS[@]}"; do
@@ -443,62 +432,31 @@ jobs:
             data_dirs kafka
           }
 
-          # RabbitMQ: vhost/queue + process vhost/queue
+          # RabbitMQ
           do_rabbit(){
             cid="$(find_c "rabbit")" || true
-            [ -z "$cid" ] && { echo "[rabbitmq] container not found → skip"; return; }
+            [ -n "$cid" ] || { echo "[rabbitmq] container not found"; return; }
             docker exec -i "$cid" rabbitmqctl add_vhost /process || true
             docker exec -i "$cid" rabbitmqctl set_permissions -p /process guest ".*" ".*" ".*" || true
             docker exec -i "$cid" rabbitmqadmin declare queue name="process.queue" durable=true || true
             data_dirs rabbitmq
           }
 
-          # MinIO: bucket + process 버킷
+          # MinIO
           do_minio(){
             cid="$(find_c "minio")" || true
-            [ -z "$cid" ] && { echo "[minio] container not found → skip"; return; }
+            [ -n "$cid" ] || { echo "[minio] container not found"; return; }
             docker run --rm --network host -e MC_HOST_minio="http://minioadmin:minioadmin@127.0.0.1:9000" minio/mc mb -p minio/process || true
             data_dirs minio
           }
 
-          # Upgrade: 최신 이미지 풀/컴포즈 업
-          upgrade_one(){
-            local svc="$1"
-            command -v docker >/dev/null 2>&1 || { echo "[upgrade] docker not present"; return 0; }
-            case "$svc" in
-              mysql) img="mysql:8" ;;
-              postgres) img="postgres:16" ;;
-              redis) img="redis:7" ;;
-              mongo) img="mongo:7" ;;
-              kafka) img="bitnami/kafka:latest" ;;
-              rabbitmq) img="rabbitmq:3-management" ;;
-              minio) img="minio/minio:latest" ;;
-              airflow) img="apache/airflow:latest" ;;
-              spark) img="bitnami/spark:latest" ;;
-              camunda) img="camunda/camunda-bpm-platform:latest" ;;
-              *) img="" ;;
-            esac
-            [ -n "$img" ] && docker pull "$img" || true
-            if command -v docker compose >/dev/null 2>&1; then
-              if [ -f compose.yml ] || [ -f docker-compose.yml ]; then
-                docker compose pull "$svc" || true
-                docker compose up -d "$svc" || true
-              fi
-            elif command -v docker-compose >/dev/null 2>&1; then
-              if [ -f docker-compose.yml ]; then
-                docker-compose pull "$svc" || true
-                docker-compose up -d "$svc" || true
-              fi
-            fi
-          }
-
           IFS=',' read -r -a SRVS <<< "$SERVICES"
-          # 병렬 실행: 업그레이드 → 초기화/시드
           pids=()
           for s in "${SRVS[@]}"; do
             svc="$(echo "$s" | tr '[:upper:]' '[:lower:]' | xargs)"
             [ -z "$svc" ] && continue
-            ( upgrade_one "$svc"
+            (
+              upgrade_one "$svc"
               case "$svc" in
                 mysql) do_mysql ;;
                 postgres) do_postgres ;;
@@ -517,21 +475,19 @@ jobs:
           SH
           chmod +x .github/echo_init/init_seed_upgrade.sh
 
-      - name: 🚀 Run service init/seed/upgrade (parallel)
+      - name: Run service init/seed/upgrade (parallel)
         shell: bash
         env:
           SERVICES: ${{ inputs.services }}
           SEED_SPEC: ${{ inputs.seed_spec }}
-          MYSQL_DEF: ${{ inputs.db_mysql }}
-          PG_DEF: ${{ inputs.db_pg }}
-          MONGO_DEF: ${{ inputs.db_mongo }}
+          DB_SPEC: ${{ inputs.db_spec }}
         run: |
           set -Eeuo pipefail
           .github/echo_init/init_seed_upgrade.sh
-          echo "### 서비스 초기화/시드/업그레이드 완료" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Service init/seed/upgrade done" >> "$GITHUB_STEP_SUMMARY"
           echo "- services: ${SERVICES}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 📦 Upload service seed artifacts
+      - name: Upload service seed artifacts
         uses: actions/upload-artifact@v4
         with:
           name: service-seed-${{ github.run_id }}
@@ -540,9 +496,8 @@ jobs:
             .github/echo_init/**
           retention-days: 7
 
-  # 3) 전송 로그 백업 + provenance (디스크/마운트 후 실행)
   transfer_log_backup:
-    name: "🧾 전송 로그 백업 + 출처"
+    name: "🧾 Transfer log backup + provenance"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [diskdirs]
@@ -554,14 +509,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 📁 Prepare directories
+      - name: Prepare directories
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
           sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
 
-      - name: 📂 Generate 60 transfer logs
+      - name: Generate 60 transfer logs
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -573,7 +528,7 @@ jobs:
             echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
           done
 
-      - name: 📆 Backup logs into timestamped folder
+      - name: Backup logs into timestamped folder
         id: backup
         shell: bash
         run: |
@@ -584,7 +539,7 @@ jobs:
           sudo mkdir -p "$DEST"
           sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
 
-      - name: 📜 Generate provenance.json
+      - name: Generate provenance.json
         id: genprov
         shell: bash
         run: |
@@ -608,14 +563,13 @@ jobs:
           cp "$PROV_FILE" "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
           echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: 📚 Build .provenance_index.json
+      - name: Build .provenance_index.json
         shell: bash
         run: |
           set -Eeuo pipefail
           INDEX_FILE="provenance/.provenance_index.json"
           ls provenance/.provenance_transfer_*.json >/dev/null 2>&1 || { echo "[]" > "$INDEX_FILE"; exit 0; }
-          echo "[" > "$INDEX_FILE"
-          first=1
+          echo "[" > "$INDEX_FILE"; first=1
           for f in provenance/.provenance_transfer_*.json; do
             [ $first -eq 0 ] && echo "," >> "$INDEX_FILE"
             cat "$f" >> "$INDEX_FILE"
@@ -623,35 +577,35 @@ jobs:
           done
           echo "]" >> "$INDEX_FILE"
 
-      - name: 📤 Upload generated logs
+      - name: Upload generated logs
         uses: actions/upload-artifact@v4
         with:
           name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
           if-no-files-found: error
 
-      - name: 📤 Upload backup folder
+      - name: Upload backup folder
         uses: actions/upload-artifact@v4
         with:
           name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
           path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
           if-no-files-found: error
 
-      - name: 📤 Upload provenance.json
+      - name: Upload provenance.json
         uses: actions/upload-artifact@v4
         with:
           name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
           path: ${{ steps.genprov.outputs.prov_path }}
           if-no-files-found: error
 
-      - name: 📤 Upload provenance index
+      - name: Upload provenance index
         uses: actions/upload-artifact@v4
         with:
           name: provenance-index
           path: provenance/.provenance_index.json
           if-no-files-found: error
 
-      - name: 📂 Show backup structure
+      - name: Show backup structure
         shell: bash
         run: |
           set -Eeuo pipefail
