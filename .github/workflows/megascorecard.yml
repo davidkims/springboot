@@ -1,4 +1,4 @@
-name: "♾️ MEGA Disk+Dirs + Massive + Transfer Backup (Manual, Safe v3)"
+name: "💽 MEGA Disk+Dir+p2Resize+압축2종+병렬업로드+병렬다운로드+Provenance+EchoLogs"
 
 on:
   workflow_dispatch:
@@ -8,716 +8,176 @@ on:
         default: "2048"
         required: true
       resize_to_mb:
-        description: "Grow whole image to this size (MB). Leave blank to keep current"
+        description: "Resize image to this size (MB, optional)"
         default: ""
         required: false
       fs_type:
-        description: "Filesystem: ext4 | xfs | btrfs"
+        description: "Filesystem: ext4|xfs|btrfs"
         default: "ext4"
         required: true
       mount_point:
-        description: "Mount point for partition #1 (partition #2 mounts at <mount_point>/part2)"
+        description: "Base mount point"
         default: "/mnt/gh-disk"
         required: true
-      dir_list:
-        description: "Extra dirs (comma-separated) for repo + both mounts"
-        default: "logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts"
-        required: true
-      owner_group:
-        description: "Owner:Group"
-        default: "runner:runner"
-        required: true
-      dir_mode:
-        description: "Directory chmod (octal)"
-        default: "0755"
-        required: true
-      bulk_spec:
-        description: "Bulk spec: dirs=<N>,files=<M>,size_kb=<K>,prefix=<name>"
-        default: "dirs=100,files=10,size_kb=4,prefix=gen"
-        required: true
-      commit_and_push:
-        description: "Commit & push files? true|false"
-        default: "true"
-        required: true
-      commit_message:
-        description: "Commit message"
-        default: "chore: disk+dirs + massive + live .github + bulk gen/upgrade (auto)"
-        required: true
   schedule:
-    - cron: "*/5 * * * *"   # 5분마다 실행
-
-permissions:
-  contents: write
-  security-events: write
-
-# 중복 실행 차단(레퍼런스별로 1개만 실행)
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    - cron: "*/1 * * * *"
 
 jobs:
-  diskdirs:
-    name: "💽 Disk+Dirs (manual=MASSIVE / cron=LIGHT)"
+  mega-disk-backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    outputs:
-      mount_point: ${{ steps.vars.outputs.mount_point }}
-      fs_type:     ${{ steps.vars.outputs.fs_type }}
-      img_size_mb: ${{ steps.vars.outputs.img_size_mb }}
     env:
       DISK_IMG: disk.img
-      LOG_DIR: .github/echo_logs
       ECHO_DIR: .github/echo_scripts
-      MOUNT_P1_NAME: p1
-      MOUNT_P2_NAME: p2
-      GIT_USER_NAME: gh-actions-bot
-      GIT_USER_EMAIL: gh-actions-bot@example.com
-      SWAP_SIZE_MB: "4096"
-      RAMDISK_MB: "512"
-      SYS_MAX_MAP_COUNT: "262144"
-      SYS_INOTIFY_WATCHES: "1048576"
-      ULIMIT_NOFILE: "1048576"
-      ULIMIT_NPROC:  "131072"
-      MASSIVE_SHARDS: "4"
-      MASSIVE_MULTIPLIER: "2"
-      PARALLEL_JOBS: "8"
-      TAR_SPLIT_MB: "256"
-      # 스케줄 경량 모드 플래그
-      SCHEDULED_MODE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
-
-    steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-          fetch-depth: 0
-
-      - name: 🔧 Vars (outputs)
-        id: vars
-        shell: bash
-        run: |
-          echo "mount_point=${{ inputs.mount_point || '/mnt/gh-disk' }}"   >> "$GITHUB_OUTPUT"
-          echo "fs_type=${{ inputs.fs_type || 'ext4' }}"                   >> "$GITHUB_OUTPUT"
-          echo "img_size_mb=${{ inputs.disk_size_mb || '2048' }}"          >> "$GITHUB_OUTPUT"
-
-      - name: 🧰 Init — helpers (필요 최소만 유지)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ECHO_DIR" .github/echo_monitoring .github/echo_keep
-          printf "" > .github/echo_keep/.gitkeep
-          exec > >(tee -a "$LOG_DIR/00_full.log") 2>&1
-          set -x
-          cat > "$ECHO_DIR/_helpers.sh" <<'BASH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          MNT_DEFAULT="/mnt/gh-disk"
-          default_mount()      { echo "${INPUT_MOUNT_POINT:-$MNT_DEFAULT}"; }
-          default_fs()         { echo "${INPUT_FS_TYPE:-ext4}"; }
-          default_dir_mode()   { echo "${INPUT_DIR_MODE:-0755}"; }
-          default_dir_list()   { echo "${INPUT_DIR_LIST:-logs,tmp,backup,data,site,.github/echo_logs,.github/echo_scripts}"; }
-          default_bulk_spec()  { echo "${INPUT_BULK_SPEC:-dirs=100,files=10,size_kb=4,prefix=gen}"; }
-          parse_owner_group(){ local og="${1:-runner:runner}"; echo "${og%%:*} ${og#*:}"; }
-          get_loop(){
-            local dev; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""
-            if [[ -z "$dev" ]]; then sudo losetup -fP "$DISK_IMG"; dev="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}')" || dev=""; fi
-            [[ -z "$dev" ]] && { echo "[ERROR] loop device not found for $DISK_IMG" >&2; return 1; }
-            printf "%s" "$dev"
-          }
-          retry_mount(){
-            local dev="$1" target="$2"
-            sudo install -d -m 0755 "$target"
-            for i in 1 2 3; do
-              sudo mount "$dev" "$target" && return 0 || true
-              sleep 1
-            done
-            echo "[ERROR] mount $dev -> $target failed" >&2; return 1
-          }
-          BASH
-          chmod +x "$ECHO_DIR/_helpers.sh"
-
-      - name: 🔋 Resource boost (swap/ramdisk/ulimit/sysctl + toolchain)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"
-          exec > >(tee -a "$LOG_DIR/03_resource_boost.log") 2>&1
-          set -x
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends build-essential git-lfs jq pigz pv unzip tar curl ca-certificates xz-utils tree rsync parted xfsprogs btrfs-progs || true
-          git lfs install || true
-          if [[ "${SWAP_SIZE_MB}" != "0" ]] && ! sudo swapon --show | grep -q '^'; then
-            sudo fallocate -l ${SWAP_SIZE_MB}M /swapfile
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
-          fi
-          if [[ "${RAMDISK_MB}" != "0" ]]; then
-            sudo install -d -m 0755 /mnt/ramdisk
-            mount | grep -q " on /mnt/ramdisk " || sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk
-          fi
-          sudo prlimit --pid $$ --nofile=${ULIMIT_NOFILE}:${ULIMIT_NOFILE} || true
-          sudo prlimit --pid $$ --nproc=${ULIMIT_NPROC}:${ULIMIT_NPROC} || true
-          echo "fs.inotify.max_user_watches=${SYS_INOTIFY_WATCHES}" | sudo tee /etc/sysctl.d/99-echo-inotify.conf >/dev/null
-          echo "vm.max_map_count=${SYS_MAX_MAP_COUNT}"              | sudo tee /etc/sysctl.d/99-echo-mapcount.conf >/dev/null
-          echo "vm.swappiness=10"                                   | sudo tee /etc/sysctl.d/99-echo-swap.conf >/dev/null
-          sudo sysctl --system || sudo sysctl -p || true
-
-      # === 스케줄(크론)에서는 고IO 단계 생략(과부하 방지) ===
-      - name: 🧱 Create image + attach loop
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/10_image_loop.log") 2>&1
-          set -x
-          RAW_SIZE_MB="${{ inputs.disk_size_mb }}"
-          [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]] && RAW_SIZE_MB="2048"
-          CUR_BYTES="$(stat -c%s "$DISK_IMG" 2>/dev/null || echo 0)"
-          if (( CUR_BYTES == 0 )); then truncate -s ${RAW_SIZE_MB}M "$DISK_IMG"; fi
-          LOOP_DEV="$(get_loop)"; echo "[ECHO] LOOP_DEV=$LOOP_DEV"; ls -lh "$DISK_IMG"
-
-      - name: 🧭 GPT partition p1=60%, p2=rest
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/12_parted.log") 2>&1
-          set -x
-          LOOP_DEV="$(get_loop)"
-          sudo parted -s "$LOOP_DEV" mklabel gpt || true
-          sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P1_NAME} 1MiB 60% || true
-          sudo parted -s "$LOOP_DEV" mkpart ${MOUNT_P2_NAME} 60% 100% || true
-          sudo partprobe "$LOOP_DEV" || true
-          ls -l ${LOOP_DEV}* || true
-
-      - name: 🧪 Make filesystems + 🔗Mount p1/p2 + perms
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/14_mkfs_mount.log") 2>&1
-          set -x
-          FST="$(INPUT_FS_TYPE="${{ inputs.fs_type }}" default_fs)"
-          LOOP_DEV="$(get_loop)"; P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          case "$FST" in
-            ext4)  sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
-            xfs)   sudo mkfs.xfs  -f "$P1"; sudo mkfs.xfs  -f "$P2" ;;
-            btrfs) sudo mkfs.btrfs -f "$P1"; sudo mkfs.btrfs -f "$P2" ;;
-          esac
-          MNT="${{ inputs.mount_point || '/mnt/gh-disk' }}"
-          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
-          sudo install -d -m 0755 "${MNT}" "${MNT}/part2"
-          mount | grep -q " on ${MNT} "       || retry_mount "$P1" "${MNT}"
-          mount | grep -q " on ${MNT}/part2 " || retry_mount "$P2" "${MNT}/part2"
-          sudo chown -R "${OWNER}:${GROUP}" "${MNT}" "${MNT}/part2"
-          sudo chmod -R "${{ inputs.dir_mode || '0755' }}" "${MNT}" "${MNT}/part2"
-          df -h | grep -E "loop|Filesystem" || true
-
-      - name: 📁 Create SB + extra dirs (repo + mounts)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/20_dirs.log") 2>&1
-          set -x
-          MNT="${{ inputs.mount_point || '/mnt/gh-disk' }}"
-          MODE="$(INPUT_DIR_MODE="${{ inputs.dir_mode }}" default_dir_mode)"
-          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
-          SB_DIRS=( "src/main/java" "src/main/resources" "src/test/java" "src/test/resources" "logs" "tmp" "backup" "data" "site" ".github/echo_logs" ".github/echo_scripts" ".github/echo_monitoring" ".github/echo_keep" )
-          IFS=',' read -ra EXTRA <<< "$(INPUT_DIR_LIST="${{ inputs.dir_list }}" default_dir_list)"
-          for x in "${EXTRA[@]}"; do SB_DIRS+=("$(echo "$x" | xargs)"); done
-          printf '%s\n' "${SB_DIRS[@]}" | sed '/^$/d' | sort -u > "$ECHO_DIR/.all_dirs.txt"
-          while IFS= read -r d; do
-            mkdir -p "${d}"
-            [ -e "${d}/.gitkeep" ] || : > "${d}/.gitkeep"
-            if [[ "${SCHEDULED_MODE}" != "true" ]]; then
-              mkdir -p "${MNT}/${d}" "${MNT}/part2/${d}"
-              sudo chown -R "${OWNER}:${GROUP}" "${MNT}/${d}" "${MNT}/part2/${d}"
-              sudo chmod -R "${MODE}" "${MNT}/${d}" "${MNT}/part2/${d}"
-            fi
-          done < "$ECHO_DIR/.all_dirs.txt"
-          chmod -R "${MODE}" .github || true
-
-      - name: 📏 Online resize p2 (optional)
-        if: ${{ env.SCHEDULED_MODE != 'true' && inputs.resize_to_mb != '' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/30_resize.log") 2>&1
-          set -x
-          MNT="${{ inputs.mount_point || '/mnt/gh-disk' }}"
-          FST="$(INPUT_FS_TYPE="${{ inputs.fs_type }}" default_fs)"
-          CUR_BYTES="$(stat -c%s "$DISK_IMG")"; CUR_MB=$(( (CUR_BYTES + 1048575)/1048576 ))
-          REQ="${{ inputs.resize_to_mb }}"; NEW_MB="${REQ:-$CUR_MB}"
-          if [[ -n "${REQ:-}" && ! "${REQ}" =~ ^[0-9]+$ ]]; then NEW_MB="$CUR_MB"; fi
-          (( NEW_MB > CUR_MB )) && truncate -s ${NEW_MB}M "$DISK_IMG" || true
-          LOOP_DEV="$(get_loop)"
-          sudo losetup -c "$LOOP_DEV"
-          sudo parted -s "$LOOP_DEV" resizepart 2 100% || true
-          sudo partprobe "$LOOP_DEV" || true
-          case "$FST" in
-            ext4)  sudo resize2fs "${LOOP_DEV}p2" ;;
-            xfs)   sudo xfs_growfs "${MNT}/part2" ;;
-            btrfs) sudo btrfs filesystem resize max "${MNT}/part2" ;;
-          esac
-          df -h | grep -E "${MNT}(/part2)?"
-
-      - name: 🧨 Bulk generator — repo + both mounts
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/35_bulkgen.log") 2>&1
-          set -x
-          SPEC_RAW="${{ inputs.bulk_spec }}"
-          SPEC="$(INPUT_BULK_SPEC="$SPEC_RAW" default_bulk_spec)"
-          getv(){ local k="${1-}"; [ -z "$k" ] && return 0; echo "$SPEC" | tr ',' '\n' | awk -F= -v kk="$k" '$1==kk{print $2}'; }
-          NUM_DIRS="$(getv dirs)"; NUM_FILES="$(getv files)"; SIZE_KB="$(getv size_kb)"; PREFIX="$(getv prefix)"
-          : "${NUM_DIRS:=100}" ; : "${NUM_FILES:=10}" ; : "${SIZE_KB:=4}" ; : "${PREFIX:=gen}"
-          MNT="${{ inputs.mount_point || '/mnt/gh-disk' }}"
-          MODE="${{ inputs.dir_mode || '0755' }}"
-          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
-          ROOT_REPO="bulk/${PREFIX}"; ROOT_P1="${MNT}/bulk/${PREFIX}"; ROOT_P2="${MNT}/part2/bulk/${PREFIX}"
-          mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-          chmod -R "$MODE" "$ROOT_REPO" || true
-          sudo chown -R "$OWNER:$GROUP" "$ROOT_P1" "$ROOT_P2"
-          sudo chmod -R "$MODE" "$ROOT_P1" "$ROOT_P2"
-          create_or_upgrade_dir(){
-            local base="$1" i="$2"
-            local d="${base}/$(printf '%s-%06d' "$PREFIX" "$i")"; mkdir -p "$d"
-            for n in $(seq 1 "$NUM_FILES"); do
-              local f="${d}/file-$(printf '%04d' "$n").bin"
-              [ -f "$f" ] && { cur="$(stat -c%s "$f" || echo 0)"; need=$(( SIZE_KB*1024 )); (( cur < need )) && truncate -s "${need}" "$f" || true; } \
-                          || truncate -s "$(( SIZE_KB*1024 ))" "$f"
-            done
-          }
-          export -f create_or_upgrade_dir
-          for i in $(seq 1 "$NUM_DIRS"); do
-            create_or_upgrade_dir "$ROOT_REPO" "$i"
-            create_or_upgrade_dir "$ROOT_P1"   "$i"
-            create_or_upgrade_dir "$ROOT_P2"   "$i"
-          done
-
-      - name: 🚀 MASSIVE — shard+parallel bulkgen
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "$ECHO_DIR/_helpers.sh"; exec > >(tee -a "$LOG_DIR/36_massive_sharded_bulkgen.log") 2>&1
-          set -x
-          SPEC_RAW="${{ inputs.bulk_spec }}"; SPEC="$(INPUT_BULK_SPEC="$SPEC_RAW" default_bulk_spec)"
-          getv(){ local k="${1-}"; [ -z "$k" ] && return 0; echo "$SPEC" | tr ',' '\n' | awk -F= -v kk="$k" '$1==kk{print $2}'; }
-          BASE_DIRS="$(getv dirs)"; BASE_FILES="$(getv files)"; BASE_KB="$(getv size_kb)"; BASE_PREFIX="$(getv prefix)"
-          : "${BASE_DIRS:=100}" ; : "${BASE_FILES:=10}" ; : "${BASE_KB:=4}" ; : "${BASE_PREFIX:=gen}"
-          SHARDS="${MASSIVE_SHARDS:-4}"; MULT="${MASSIVE_MULTIPLIER:-2}"; PJ="${PARALLEL_JOBS:-8}"
-          MNT="${{ inputs.mount_point || '/mnt/gh-disk' }}"
-          MODE="${{ inputs.dir_mode || '0755' }}"
-          read OWNER GROUP < <(parse_owner_group "${{ inputs.owner_group }}")
-          gen_one_shard(){
-            local shard="$1"; local SH_PREFIX="${BASE_PREFIX}-s${shard}"; local SH_DIRS=$(( BASE_DIRS * MULT ))
-            local ROOT_REPO="bulk/${SH_PREFIX}"; local ROOT_P1="${MNT}/bulk/${SH_PREFIX}"; local ROOT_P2="${MNT}/part2/bulk/${SH_PREFIX}"
-            mkdir -p "$ROOT_REPO" "$ROOT_P1" "$ROOT_P2"
-            create_or_upgrade_dir(){
-              local base="$1" i="$2"
-              local d="${base}/$(printf '%s-%06d' "$SH_PREFIX" "$i")"; mkdir -p "$d"
-              for n in $(seq 1 "$BASE_FILES"); do
-                local f="${d}/file-$(printf '%04d' "$n").bin"
-                [ -f "$f" ] && { cur="$(stat -c%s "$f" || echo 0)"; need=$(( BASE_KB*1024 )); (( cur < need )) && truncate -s "${need}" "$f" || true; } \
-                            || truncate -s "$(( BASE_KB*1024 ))" "$f"
-              done
-            }
-            for i in $(seq 1 "$SH_DIRS"); do
-              create_or_upgrade_dir "$ROOT_REPO" "$i"
-              create_or_upgrade_dir "$ROOT_P1"   "$i"
-              create_or_upgrade_dir "$ROOT_P2"   "$i"
-            done
-            chmod -R "$MODE" "bulk/${SH_PREFIX}" || true
-            sudo chown -R "$OWNER:$GROUP" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
-            sudo chmod -R "$MODE" "$MNT/bulk/${SH_PREFIX}" "$MNT/part2/bulk/${SH_PREFIX}"
-          }
-          export -f gen_one_shard
-          export BASE_FILES BASE_KB MULT MNT OWNER GROUP MODE
-          seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
-
-      - name: ⚡ Mirror to RAMDISK + sha256 index
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/37_ramdisk_mirror.log") 2>&1
-          set -x
-          if mount | grep -q " on /mnt/ramdisk "; then
-            mkdir -p /mnt/ramdisk/bulk_mirror
-            rsync -a --delete bulk/ /mnt/ramdisk/bulk_mirror/
-            find /mnt/ramdisk/bulk_mirror -type f -name '*.bin' -print0 \
-              | xargs -0 -n 64 -P "${PARALLEL_JOBS:-8}" sha256sum \
-              | tee .github/echo_monitoring/sha256_bulk_ramdisk.txt > /dev/null
-            wc -l .github/echo_monitoring/sha256_bulk_ramdisk.txt || true
-          else
-            echo "[ECHO] ramdisk not mounted — skip"
-          fi
-
-      - name: 🔧 IO stress:tar+pigz split + top consumers
-        if: ${{ env.SCHEDULED_MODE != 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a "$LOG_DIR/38_io_stress.log") 2>&1
-          set -x
-          OUT_BASE="/mnt/ramdisk"; [ -d "$OUT_BASE" ] || OUT_BASE="."
-          TAR_SPLIT_MB="${TAR_SPLIT_MB:-256}"
-          TAR_PATH="${OUT_BASE}/bulk_full.tar"; TGZ_PATH="${OUT_BASE}/bulk_full.tar.gz"; SPLIT_PREFIX="${OUT_BASE}/bulk_full.part."
-          tar -cf "$TAR_PATH" bulk
-          pigz -p "$(nproc)" -f "$TAR_PATH"
-          split -b "${TAR_SPLIT_MB}M" -d "$TGZ_PATH" "$SPLIT_PREFIX"
-          du -ah bulk 2>/dev/null | sort -hr 2>/dev/null | head -n 200 > .github/echo_monitoring/top200_bulk.txt || true
-          echo "[SUMMARY] tgz=$(du -h "$TGZ_PATH" | awk '{print $1}'), parts=$(ls -1 ${SPLIT_PREFIX}* 2>/dev/null | wc -l | tr -d ' ')"
-
-      - name: 📊 Size reports (always)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p .github/echo_monitoring
-          du -ah . 2>/dev/null | sort -hr 2>/dev/null | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
-          du -sh . > .github/echo_monitoring/total_size.txt || true
-          df -h > .github/echo_monitoring/df_all.txt || true
-
-      - name: 📝 .gitignore update (always)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
-          tail -n 20 .gitignore || true
-
-      - name: ✅ Commit & push (manual only)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_and_push == 'true' }}
-        shell: bash
-        env:
-          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
-          GH_ACTOR: ${{ github.actor }}
-          GH_REPO: ${{ github.repository }}
-          COMMIT_MSG_IN: ${{ inputs.commit_message }}
-        run: |
-          set -Eeuo pipefail
-          exec > >(tee -a ".github/echo_logs/60_commit_push.log") 2>&1
-          set -x
-          git config user.name "${GIT_USER_NAME}"
-          git config user.email "${GIT_USER_EMAIL}"
-          git config pull.rebase true
-          TARGET_BR="${GITHUB_REF_NAME}"
-          CURRENT="$(git rev-parse --abbrev-ref HEAD || echo main)"
-          git fetch origin --prune || true
-          if [[ "$CURRENT" != "$TARGET_BR" ]]; then
-            git checkout -B "$TARGET_BR" "origin/$TARGET_BR" 2>/dev/null || git checkout -B "$TARGET_BR"
-          fi
-          git add -A
-          if git diff --cached --quiet; then echo "[ECHO] No changes"; exit 0; fi
-          COMMIT_MSG="${COMMIT_MSG_IN:-chore: disk+dirs auto}"
-          git commit -m "$COMMIT_MSG"
-          PUSH_LOG=".github/echo_scripts/.push_err.txt"
-          NO_TOKEN_MODE=0
-          set +x
-          if [[ -n "${WORKFLOW_PAT:-}" ]]; then
-            echo "[ECHO] Using WORKFLOW_PAT"; git remote set-url origin "https://${GH_ACTOR}:${WORKFLOW_PAT}@github.com/${GH_REPO}.git"
-          elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            echo "[ECHO] Using GITHUB_TOKEN"; git remote set-url origin "https://${GH_ACTOR}:${GITHUB_TOKEN}@github.com/${GH_REPO}.git"
-          else
-            echo "[ECHO] NO TOKEN — will try push anyway"; NO_TOKEN_MODE=1
-          fi
-          set -x
-          git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
-          git fetch origin --prune || true
-          git rebase "origin/$TARGET_BR" || { git rebase --abort || true; }
-          git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
-          if grep -q 'Repository rule violations' "$PUSH_LOG"; then
-            grep -o 'path: .*' "$PUSH_LOG" | sed 's/^path: //' | while read -r p; do p="${p%%:*}"; sed -i '/GITHUB_TOKEN:/d' "$p" || true; done
-            git add -A; git commit -m "$COMMIT_MSG (sanitized)" || true
-            git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
-          fi
-          if grep -qi 'without `workflows` permission' "$PUSH_LOG"; then
-            git reset --soft HEAD~1 || true; git restore --staged .
-            git add .gitignore .github/echo_scripts .github/echo_logs .github/echo_monitoring bulk || true
-            git commit -m "$COMMIT_MSG (no workflows)"; git push origin "$TARGET_BR" 2> "$PUSH_LOG" && exit 0 || true
-          fi
-          if [[ "${NO_TOKEN_MODE}" -eq 0 ]]; then
-            BK="actions/autocommit-$(date -u +%Y%m%dT%H%M%SZ)"; git checkout -B "$BK"
-            git push -u origin "$BK" 2> "$PUSH_LOG" && exit 0 || true
-          fi
-          if grep -qiE 'Authentication failed|HTTP 403|HTTP 401' "$PUSH_LOG" || [[ "${NO_TOKEN_MODE}" == 1 ]]; then
-            echo "[ECHO] No auth — mark success"; exit 0
-          fi
-          echo "[ECHO] Final push failed"; cat "$PUSH_LOG"; exit 1
-
-      - name: 📦 Upload artifacts (logs/scripts/monitoring)
-        uses: actions/upload-artifact@v4
-        with:
-          name: diskdirs-logs-${{ github.run_id }}
-          path: |
-            .github/echo_logs/**
-            .github/echo_scripts/**
-            .github/echo_monitoring/**
-          retention-days: 7
-
-  transfer_log_backup:
-    name: "🧾 전송 로그 백업 (디스크/디렉토리 스냅샷 + 출처 보장)"
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    needs: [diskdirs]
-    env:
+      LOG_DIR: .github/echo_logs
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
       PROVENANCE_DIR: provenance
       PROVENANCE_STORE_DIR: provenance/store
-      SNAPSHOT_DIR: snapshot   # 디스크/디렉토리/메타 스냅샷 보관
-      DOWNLOAD_DIR: downloads  # curl 다운로드 보관
-      CURL_LIST_FILE: .github/download_urls.txt
-      CURL_RETRIES: "3"
-      CURL_TIMEOUT: "30"
-      PARALLEL_JOBS: "6"
-
+      UPLOAD_URLS: "https://server1.example.com/upload https://server2.example.com/upload https://server3.example.com/upload https://server4.example.com/upload https://server5.example.com/upload https://server6.example.com/upload https://server7.example.com/upload https://server8.example.com/upload https://server9.example.com/upload https://server10.example.com/upload"
     steps:
-      - name: 📦 Checkout repository
+      - name: 📂 Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: 🔧 Ensure dirs (always)
-        shell: bash
+      - name: 📦 필수 패키지 설치
         run: |
           set -Eeuo pipefail
-          sudo install -d -m 0777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR"
-          mkdir -p "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR" "$SNAPSHOT_DIR" "$DOWNLOAD_DIR" .github/echo_logs .github/echo_scripts
+          sudo apt-get update -y
+          sudo apt-get install -y pigz zstd curl parted xfsprogs btrfs-progs sysstat
+          mkdir -p "$LOG_DIR"
+          echo "[ECHO] pigz/zstd/sysstat 설치 완료" | tee -a "$LOG_DIR/install.log"
 
-      - name: 🌐 (옵션) 공식 URL 다운로드(curl, 재시도)
-        shell: bash
+      - name: 📁 필수 디렉토리 및 placeholder 파일 생성
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] curl download start"
-          if [[ -f "$CURL_LIST_FILE" ]]; then
-            i=0
-            while IFS= read -r url; do
-              url="$(echo "$url" | xargs)"
-              [[ -z "$url" || "$url" =~ ^# ]] && continue
-              i=$((i+1))
-              fname="$DOWNLOAD_DIR/$(printf 'dl-%03d' "$i")-$(basename "${url%%\?*}")"
-              for r in $(seq 1 "$CURL_RETRIES"); do
-                echo "[ECHO] curl ($r/$CURL_RETRIES): $url -> $fname"
-                if curl -fsSL --max-time "$CURL_TIMEOUT" -o "$fname" "$url"; then
-                  break
-                fi
-                sleep 1
-              done
-            done < "$CURL_LIST_FILE"
-          else
-            curl -fsSL --max-time "$CURL_TIMEOUT" -o "$DOWNLOAD_DIR/example.txt" https://www.rfc-editor.org/rfc/rfc864.txt || true
-          fi
-          ls -la "$DOWNLOAD_DIR" || true
+          mkdir -p "$ECHO_DIR" "$LOG_DIR" "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
+          PROV_FILE="$PROVENANCE_DIR/.provenance_transfer_${{ github.run_id }}.json"
+          echo '{"status":"init"}' > "$PROV_FILE"
+          echo "[ECHO] 디렉토리 및 provenance placeholder 생성 완료" | tee -a "$LOG_DIR/init.log"
 
-      - name: 📂 Generate 60 corporate transfer logs
-        shell: bash
+      - name: 🗂 전송로그 1만 개 생성
         run: |
           set -Eeuo pipefail
-          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || true
-          for i in $(seq 1 60); do
-            TS=$(date +'%Y-%m-%d %H:%M:%S')
-            AMOUNT=$((RANDOM % 900000 + 100000))
-            LOG="[TRANSFER] $TS | 기업거래ID:$i | 송금금액:₩$AMOUNT 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
-            echo "$LOG" | sudo tee "$TRANSFER_LOG_DIR/transfer-log-$i.txt" >/dev/null
+          for i in $(seq 1 10000); do
+            echo "Log entry $i - $(date +%s)" > "$TRANSFER_LOG_DIR/log_$i.txt"
           done
+          echo "[ECHO] 전송로그 10,000개 생성 완료" | tee -a "$LOG_DIR/transfer_gen.log"
 
-      - name: 🧾 Disk/Dirs snapshot (I/O 안전:ionice+nice)
-        shell: bash
+      - name: 📏 p2 증설 및 마운트
         run: |
           set -Eeuo pipefail
-          TS=$(date +'%Y%m%d_%H%M%S')
-          SNAP="$SNAPSHOT_DIR/$TS"
-          mkdir -p "$SNAP"
-          (ionice -c2 -n7 nice -n 10 df -h) > "$SNAP/df.txt" 2>&1 || true
-          (ionice -c2 -n7 nice -n 10 ls -la) > "$SNAP/repo_ls.txt" 2>&1 || true
-          (ionice -c2 -n7 nice -n 10 find . -maxdepth 4 -type d | sort) > "$SNAP/repo_dirs.txt" 2>&1 || true
-          (ionice -c2 -n7 nice -n 10 du -ah . 2>/dev/null | sort -hr | head -n 200) > "$SNAP/repo_top200.txt" || true
-          echo "$TS" > "$SNAP/.timestamp"
-          echo "snapshot_ts=$TS" >> "$GITHUB_OUTPUT"
+          exec > >(tee -a "$LOG_DIR/resize.log") 2>&1
+          MNT="${{ inputs.mount_point }}"
+          FST="${{ inputs.fs_type }}"
+          REQ="${{ inputs.resize_to_mb }}"
+          DEF_MB="${{ inputs.disk_size_mb }}"
 
-      - name: 📦 Zip snapshot (pigz, split)
-        shell: bash
-        env:
-          TAR_SPLIT_MB: "128"
-        run: |
-          set -Eeuo pipefail
-          TS=$(cat "$SNAPSHOT_DIR"/*/.timestamp | tail -n1)
-          SNAP="$SNAPSHOT_DIR/$TS"
-          TAR="$SNAPSHOT_DIR/snap-$TS.tar"
-          TGZ="$SNAPSHOT_DIR/snap-$TS.tar.gz"
-          ionice -c2 -n7 nice -n 10 tar -cf "$TAR" -C "$SNAPSHOT_DIR" "$TS"
-          command -v pigz >/dev/null && ionice -c2 -n7 nice -n 10 pigz -p "$(nproc)" -f "$TAR" || gzip -f "$TAR"
-          split -b "${TAR_SPLIT_MB}M" -d "$TGZ" "$SNAPSHOT_DIR/snap-$TS.part." || true
+          [[ -f "$DISK_IMG" ]] || truncate -s ${DEF_MB}M "$DISK_IMG"
+          LOOP_DEV=$(sudo losetup -f --show "$DISK_IMG")
+          sudo partprobe "$LOOP_DEV" || true
 
-      - name: 📆 Backup logs into timestamped folder
-        id: backup
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
-          echo "ts_folder=$TS_FOLDER" >> "$GITHUB_OUTPUT"
-          DEST="$BACKUP_DIR/$TS_FOLDER"
-          sudo install -d -m 0777 "$DEST"
-          sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
-          sudo cp -r "$SNAPSHOT_DIR" "$DEST/_snapshot" || true
-          sudo cp -r "$DOWNLOAD_DIR" "$DEST/_downloads" || true
-
-      - name: 🧬 Build manifest.json (전체 산출물 메타)
-        id: manifest
-        shell: bash
-        env:
-          MOUNT_POINT: ${{ needs.diskdirs.outputs.mount_point }}
-          FS_TYPE:     ${{ needs.diskdirs.outputs.fs_type }}
-          IMG_MB:      ${{ needs.diskdirs.outputs.img_size_mb }}
-        run: |
-          set -Eeuo pipefail
-          TS="${{ steps.backup.outputs.ts_folder }}"
-          DEST="$BACKUP_DIR/$TS"
-          mkdir -p "$DEST"
-          COUNT_LOGS=$(ls -1 "$TRANSFER_LOG_DIR"/*.txt 2>/dev/null | wc -l || echo 0)
-          COUNT_DL=$(ls -1 "$DOWNLOAD_DIR"/* 2>/dev/null | wc -l || echo 0)
-          COUNT_SNAP=$(find "$SNAPSHOT_DIR" -type f 2>/dev/null | wc -l || echo 0)
-          cat > "$DEST/manifest.json" <<JSON
-          {
-            "created_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-            "mount_point": "${MOUNT_POINT}",
-            "fs_type": "${FS_TYPE}",
-            "img_size_mb": "${IMG_MB}",
-            "log_count": $COUNT_LOGS,
-            "download_count": $COUNT_DL,
-            "snapshot_file_count": $COUNT_SNAP
-          }
-          JSON
-          echo "manifest_path=$DEST/manifest.json" >> "$GITHUB_OUTPUT"
-
-      - name: 📜 Generate provenance.json (ALWAYS create; 누락 시 강제 생성)
-        id: genprov
-        shell: bash
-        env:
-          MOUNT_POINT: ${{ needs.diskdirs.outputs.mount_point }}
-          FS_TYPE:     ${{ needs.diskdirs.outputs.fs_type }}
-          IMG_MB:      ${{ needs.diskdirs.outputs.img_size_mb }}
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "${{ env.PROVENANCE_DIR }}" "${{ env.PROVENANCE_STORE_DIR }}/${{ steps.backup.outputs.ts_folder }}"
-          PROV_FILE="${{ env.PROVENANCE_DIR }}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
-          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          cat > "$PROV_FILE" <<'JSON'
-          {
-            "type": "transfer_log_backup",
-            "timestamp": "__TS__",
-            "status": "completed",
-            "backup_file": "__FILE__",
-            "workflow": "__WF__",
-            "repository": "__REPO__",
-            "run_id": "__RUNID__",
-            "run_number": "__RUNNUM__",
-            "disk": {
-              "mount_point": "__MNT__",
-              "fs_type": "__FS__",
-              "img_size_mb": "__IMG__"
-            }
-          }
-          JSON
-          sed -i \
-            -e "s|__TS__|$TS|g" \
-            -e "s|__FILE__|transfer-backup-${{ steps.backup.outputs.ts_folder }}|g" \
-            -e "s|__WF__|${{ github.workflow }}|g" \
-            -e "s|__REPO__|${{ github.repository }}|g" \
-            -e "s|__RUNID__|${{ github.run_id }}|g" \
-            -e "s|__RUNNUM__|${{ github.run_number }}|g" \
-            -e "s|__MNT__|${MOUNT_POINT}|g" \
-            -e "s|__FS__|${FS_TYPE}|g" \
-            -e "s|__IMG__|${IMG_MB}|g" \
-            "$PROV_FILE"
-          # manifest 병합(있으면)
-          MAN="${{ steps.manifest.outputs.manifest_path }}"
-          if [[ -f "$MAN" ]]; then
-            jq -s '.[0] * { "manifest": .[1] }' "$PROV_FILE" "$MAN" > "$PROV_FILE.tmp" 2>/dev/null || cp "$PROV_FILE" "$PROV_FILE.tmp"
-            mv "$PROV_FILE.tmp" "$PROV_FILE"
+          if ! sudo parted -s "$LOOP_DEV" print | grep -q p2; then
+            sudo parted -s "$LOOP_DEV" mklabel gpt
+            sudo parted -s "$LOOP_DEV" mkpart primary 1MiB 60%
+            sudo parted -s "$LOOP_DEV" mkpart primary 60% 100%
           fi
-          # 비어있으면 최소 JSON으로 강제 생성
-          [[ -s "$PROV_FILE" ]] || echo '{"type":"transfer_log_backup","status":"completed"}' > "$PROV_FILE"
-          cp "$PROV_FILE" "${{ env.PROVENANCE_STORE_DIR }}/${{ steps.backup.outputs.ts_folder }}/"
-          echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
+          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
 
-      - name: 📚 Generate/refresh .provenance_index.json (ALWAYS exists)
-        id: provindex
-        shell: bash
+          format_if_needed() {
+            local dev=$1; local type=$2
+            blkid "$dev" >/dev/null 2>&1 || case "$type" in
+              ext4) sudo mkfs.ext4 -F "$dev" ;;
+              xfs) sudo mkfs.xfs -f "$dev" ;;
+              btrfs) sudo mkfs.btrfs -f "$dev" ;;
+            esac
+          }
+          format_if_needed "$P1" "$FST"
+          format_if_needed "$P2" "$FST"
+
+          [[ -n "$REQ" && "$REQ" =~ ^[0-9]+$ ]] && {
+            CUR_MB=$(( $(stat -c%s "$DISK_IMG") / 1048576 ))
+            (( REQ > CUR_MB )) && truncate -s ${REQ}M "$DISK_IMG"
+          }
+
+          sudo parted -s "$LOOP_DEV" resizepart 2 100%
+          sudo partprobe "$LOOP_DEV"
+
+          sudo mkdir -p "$MNT" "$MNT/part2"
+          sudo mount "$P1" "$MNT" || true
+          sudo mount "$P2" "$MNT/part2" || true
+
+          case "$FST" in
+            ext4)  sudo resize2fs "$P2" ;;
+            xfs)   sudo xfs_growfs "$MNT/part2" ;;
+            btrfs) sudo btrfs filesystem resize max "$MNT/part2" ;;
+          esac
+
+          df -h | grep -E "${MNT}(/part2)?"
+          echo "[ECHO] p2 증설 완료" | tee -a "$LOG_DIR/resize.log"
+
+      - name: 📊 디스크 I/O 모니터링 시작
         run: |
           set -Eeuo pipefail
-          INDEX_FILE="${{ env.PROVENANCE_DIR }}/.provenance_index.json"
-          mkdir -p "${{ env.PROVENANCE_DIR }}"
-          FILES=$(ls "${{ env.PROVENANCE_DIR }}"/.provenance_transfer_*.json 2>/dev/null || true)
-          if [ -z "$FILES" ]; then
-            echo "[]" > "$INDEX_FILE"
+          iostat -xm 2 5 > "$LOG_DIR/iostat_before.log" &
+          echo $! > "$LOG_DIR/iostat_pid.txt"
+          echo "[ECHO] I/O 모니터링 시작" | tee -a "$LOG_DIR/iostat.log"
+
+      - name: 📦 이중 압축 (pigz + zstd 비교)
+        run: |
+          set -Eeuo pipefail
+          TS=$(date +%Y%m%d_%H%M%S)
+          PIGZ_FILE="$BACKUP_DIR/transfer_$TS.tar.gz"
+          ZSTD_FILE="$BACKUP_DIR/transfer_$TS.tar.zst"
+          tar -I "pigz -p $(nproc)" -cf "$PIGZ_FILE" -C "$TRANSFER_LOG_DIR" .
+          tar --use-compress-program="zstd -T0 -19" -cf "$ZSTD_FILE" -C "$TRANSFER_LOG_DIR" .
+
+          SIZE_PIGZ=$(stat -c%s "$PIGZ_FILE")
+          SIZE_ZSTD=$(stat -c%s "$ZSTD_FILE")
+
+          if (( SIZE_ZSTD < SIZE_PIGZ )); then
+            FINAL_FILE="$ZSTD_FILE"
+            COMP_TYPE="zstd"
           else
-            { echo "["; i=0; for f in $FILES; do
-                [ $i -gt 0 ] && echo ","
-                cat "$f"
-                i=$((i+1))
-              done; echo "]"; } > "$INDEX_FILE"
+            FINAL_FILE="$PIGZ_FILE"
+            COMP_TYPE="pigz"
           fi
-          echo "index_path=$INDEX_FILE" >> "$GITHUB_OUTPUT"
-          echo "[OK] index built at: $INDEX_FILE"
 
-      - name: 🔎 Verify before upload (강제 보장)
-        shell: bash
+          SHA256=$(sha256sum "$FINAL_FILE" | awk '{print $1}')
+          echo "{\"status\":\"ready\",\"compression\":\"$COMP_TYPE\",\"sha256\":\"$SHA256\",\"size_bytes\":$(stat -c%s "$FINAL_FILE")}" \
+            > "$PROVENANCE_DIR/.provenance_transfer_${{ github.run_id }}.json"
+
+          echo "[ECHO] 압축 완료: $FINAL_FILE (선택된 형식: $COMP_TYPE)" | tee -a "$LOG_DIR/compression.log"
+
+      - name: 🌐 병렬 업로드 (10개 서버)
         run: |
           set -Eeuo pipefail
-          echo "::group::tree"
-          ls -la
-          echo "[provenance]"; ls -la provenance || true
-          echo "[backups]";   ls -la "$BACKUP_DIR" || true
-          echo "[downloads]"; ls -la "$DOWNLOAD_DIR" || true
-          echo "[snapshots]"; ls -la "$SNAPSHOT_DIR" || true
-          echo "::endgroup::"
-          [[ -s "${{ steps.genprov.outputs.prov_path }}" ]] || echo '{"type":"transfer_log_backup","status":"completed"}' > "${{ steps.genprov.outputs.prov_path }}"
-          [[ -s "${{ steps.provindex.outputs.index_path }}" ]] || echo '[]' > "${{ steps.provindex.outputs.index_path }}"
+          START=$(date +%s)
+          for url in $UPLOAD_URLS; do
+            {
+              for i in {1..3}; do
+                curl -T "$FINAL_FILE" "$url" && break || sleep 5
+              done
+              echo "[ECHO] 업로드 완료: $url" | tee -a "$LOG_DIR/curl_upload.log"
+            } &
+          done
+          wait
+          END=$(date +%s)
+          echo "[ECHO] 업로드 소요: $((END-START))초" | tee -a "$LOG_DIR/curl_upload.log"
 
-      - name: 📤 Upload transfer logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: transfer-logs-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ env.TRANSFER_LOG_DIR }}/*.txt
-          if-no-files-found: warn
-          compression-level: 6
-
-      - name: 📤 Upload backup folder (with snapshot & downloads)
-        uses: actions/upload-artifact@v4
-        with:
-          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ env.BACKUP_DIR }}/${{ steps.backup.outputs.ts_folder }}
-          if-no-files-found: warn
-          compression-level: 6
-
-      - name: 📤 Upload provenance.json (must exist)
-        uses: actions/upload-artifact@v4
-        with:
-          name: provenance-transfer-${{ steps.backup.outputs.ts_folder }}
-          path: ${{ steps.genprov.outputs.prov_path }}
-          if-no-files-found: error
-          compression-level: 6
-          include-hidden-files: true
-
-      - name: 📤 Upload provenance index (must exist)
-        uses: actions/upload-artifact@v4
-        with:
-          name: provenance-index
-          path: ${{ steps.provindex.outputs.index_path }}
-          if-no-files-found: error
-          compression-level: 6
-          include-hidden-files: true
-
-      - name: 📂 Show backup structure
-        shell: bash
+      - name: 🌐 병렬 다운로드 및 복원
         run: |
           set -Eeuo pipefail
-          echo "[📁] BACKUP_DIR:"
-          tree ${{ env.BACKUP_DIR }} -L 2 || echo "[ℹ️] tree not installed"
-          echo "[📁] Provenance store:"
-          tree ${{ env.PROVENANCE_STORE_DIR }} || echo "[ℹ️] tree not installed"
+          mkdir -p "$BACKUP_DIR/restored"
+          for url in $UPLOAD_URLS; do
+            {
+              curl -o "$BACKUP_DIR/restored/$(basename $FINAL_FILE)" "$url" || true
+            } &
+          done
+          wait
+          echo "[ECHO] 병렬 다운로드 완료" | tee -a "$LOG_DIR/curl_download.log"
+
+      - name: 📤 GitHub Artifact 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-transfer-${{ github.run_id }}
+          path: provenance/.provenance_transfer_${{ github.run_id }}.json
+          if-no-files-found: error
