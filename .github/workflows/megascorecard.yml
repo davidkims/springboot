@@ -1,141 +1,91 @@
-name: "🧾 전송 로그 백업 + 대량 확장 + AutoUpgrade + I/O 모니터링 (FULL)"
+name: "📦 Transfer Log Backup + Disk IO + Auto Upgrade (FULL-OPS)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *" # 5분마다 실행
-
-permissions:
-  contents: write
+    - cron: "*/5 * * * *"
 
 jobs:
-  transfer_log_backup_full:
+  full-transfer-backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
     env:
       TRANSFER_LOG_DIR: /opt/logs/transfer
       BACKUP_DIR: /opt/backup/transfer
       PROVENANCE_DIR: provenance
       PROVENANCE_STORE_DIR: provenance/store
-      EXT_URL_BASE: "https://raw.githubusercontent.com/davidkims/springboot/main/sample_logs"
-      UPGRADE_LOG_DIR: /opt/logs/upgrade
-      DISK_MONITOR_LOG: /opt/logs/disk_io.log
+      CURL_SOURCE_URL: "https://example.com/provenance/latest.json" # 정식 다운로드 경로
+      PKG_LIST: "sysstat curl wget coreutils"
 
     steps:
-      - name: 📦 Checkout repository
-        uses: actions/checkout@v4
+    - name: 📂 Checkout
+      uses: actions/checkout@v4
 
-      - name: 📂 필수 디렉토리·파일 선생성 (에코)
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO] 필수 디렉토리 생성 중..."
-          sudo install -d -m 0777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$UPGRADE_LOG_DIR"
-          mkdir -p "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
-          touch "$PROVENANCE_DIR/.provenance_index.json"
-          echo "[]" > "$PROVENANCE_DIR/.provenance_index.json"
-          echo "[OK] 필수 디렉토리 및 파일 생성 완료"
+    - name: 📁 디렉토리 및 권한 생성
+      run: |
+        set -Eeuo pipefail
+        echo "[ECHO] 필수 디렉토리 생성"
+        sudo mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
+        sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
+        ls -ld "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
 
-      - name: 🔄 시스템 패키지 자동 업그레이드 (AutoUpgrade)
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO] 패키지 업그레이드 시작"
-          sudo apt-get update -y
-          sudo apt-get upgrade -y | tee "$UPGRADE_LOG_DIR/upgrade_$(date +%Y%m%d_%H%M%S).log"
-          echo "[OK] 패키지 업그레이드 완료"
+    - name: 🔄 필수 패키지 설치 및 업그레이드
+      run: |
+        set -Eeuo pipefail
+        echo "[ECHO] 패키지 설치 및 업그레이드"
+        sudo apt-get update -y
+        sudo apt-get install -y $PKG_LIST
+        sudo apt-get upgrade -y
 
-      - name: 📂 외부 샘플 로그 대량 다운로드 (curl)
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO] 외부 샘플 로그 다운로드"
-          for i in $(seq 1 10); do
-            curl -fsSL "$EXT_URL_BASE/sample-$i.txt" -o "$TRANSFER_LOG_DIR/ext-sample-$i.txt" || echo "[WARN] 샘플 $i 다운로드 실패"
-          done
-          echo "[OK] 외부 로그 다운로드 완료"
+    - name: 📝 전송 로그 파일 생성 또는 다운로드
+      run: |
+        set -Eeuo pipefail
+        FILE_NAME=".provenance_transfer_$(date +%Y%m%d_%H%M%S).json"
+        FILE_PATH="$PROVENANCE_DIR/$FILE_NAME"
 
-      - name: 🏦 내부 전송 로그 대량 생성 (100개)
-        run: |
-          set -Eeuo pipefail
-          sudo rm -f "$TRANSFER_LOG_DIR"/*.txt || true
-          for i in $(seq 1 100); do
-            TS=$(date +'%Y-%m-%d %H:%M:%S')
-            AMOUNT=$((RANDOM % 900000 + 100000))
-            LOG="[TRANSFER] $TS | 기업거래ID:$i | 송금금액:₩$AMOUNT 완료 | 계좌:110-123-4567$(printf '%02d' $i)"
-            echo "$LOG" > "$TRANSFER_LOG_DIR/transfer-log-$i.txt"
-          done
-          echo "[OK] 내부 전송 로그 생성 완료"
+        echo "[ECHO] 전송 로그 생성 시작: $FILE_PATH"
+        # curl로 다운로드 시도
+        if curl -fsSL "$CURL_SOURCE_URL" -o "$FILE_PATH"; then
+          echo "[ECHO] 원격 전송 로그 다운로드 성공"
+        else
+          echo "[ECHO] 원격 다운로드 실패 → 로컬에서 더미 로그 생성"
+          echo "{\"status\":\"generated\",\"timestamp\":\"$(date)\"}" > "$FILE_PATH"
+        fi
+        ls -lh "$FILE_PATH"
 
-      - name: 📦 백업 및 구조 유지
-        id: backup
-        run: |
-          set -Eeuo pipefail
-          TS_FOLDER=$(date +'%Y%m%d_%H%M%S')
-          echo "ts_folder=$TS_FOLDER" >> "$GITHUB_OUTPUT"
-          DEST="$BACKUP_DIR/$TS_FOLDER"
-          sudo install -d -m 0777 "$DEST"
-          sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[WARN] 백업할 로그 없음"
-          echo "[OK] 백업 완료"
+    - name: 📊 디스크 I/O 상태 기록
+      run: |
+        set -Eeuo pipefail
+        LOG_FILE="$TRANSFER_LOG_DIR/disk_io_$(date +%Y%m%d_%H%M%S).log"
+        echo "[ECHO] 디스크 I/O 상태 수집: $LOG_FILE"
+        iostat -x 1 3 | tee "$LOG_FILE" || echo "[WARN] iostat 실행 실패"
+        df -h | tee -a "$LOG_FILE"
+        lsblk | tee -a "$LOG_FILE"
 
-      - name: 📜 provenance.json 생성
-        id: genprov
-        run: |
-          set -Eeuo pipefail
-          PROV_FILE="${PROVENANCE_DIR}/.provenance_transfer_${{ steps.backup.outputs.ts_folder }}.json"
-          mkdir -p "${PROVENANCE_STORE_DIR}/${{ steps.backup.outputs.ts_folder }}"
-          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          cat > "$PROV_FILE" <<JSON
-          {
-            "type": "transfer_log_backup",
-            "timestamp": "$TS",
-            "status": "completed",
-            "backup_file": "transfer-backup-${{ steps.backup.outputs.ts_folder }}",
-            "workflow": "${{ github.workflow }}",
-            "repository": "${{ github.repository }}",
-            "run_id": "${{ github.run_id }}",
-            "run_number": "${{ github.run_number }}"
-          }
-          JSON
-          cp "$PROV_FILE" "${PROVENANCE_STORE_DIR}/${{ steps.backup.outputs.ts_folder }}/"
-          echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
+    - name: 💾 대량 데이터 생성 (I/O 테스트)
+      run: |
+        set -Eeuo pipefail
+        echo "[ECHO] 대량 파일 생성 시작 (/tmp/io_test)"
+        mkdir -p /tmp/io_test
+        for i in $(seq 1 5); do
+          dd if=/dev/zero of=/tmp/io_test/testfile_$i bs=10M count=10 status=progress
+        done
+        ls -lh /tmp/io_test
 
-      - name: 📚 provenance 인덱스 업데이트
-        id: provindex
-        run: |
-          set -Eeuo pipefail
-          INDEX_FILE="${PROVENANCE_DIR}/.provenance_index.json"
-          FILES=$(ls "${PROVENANCE_DIR}"/.provenance_transfer_*.json 2>/dev/null || true)
-          if [ -z "$FILES" ]; then
-            echo "[]" > "$INDEX_FILE"
-          else
-            { echo "["; i=0; for f in $FILES; do
-                [ $i -gt 0 ] && echo ","
-                cat "$f"
-                i=$((i+1))
-              done; echo "]"; } > "$INDEX_FILE"
-          fi
-          echo "index_path=$INDEX_FILE" >> "$GITHUB_OUTPUT"
+    - name: 📤 전송 로그 및 디스크 I/O 로그 백업
+      uses: actions/upload-artifact@v4
+      with:
+        name: "transfer-backup-logs"
+        path: |
+          ${{ env.TRANSFER_LOG_DIR }}
+          ${{ env.PROVENANCE_DIR }}
+        if-no-files-found: warn
+        compression-level: 6
 
-      - name: 📈 디스크 I/O 모니터링 (성능 로그)
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO] 디스크 I/O 상태 기록"
-          iostat -xz 1 3 | tee "$DISK_MONITOR_LOG" || echo "[WARN] iostat 설치 필요"
-          df -h | tee -a "$DISK_MONITOR_LOG"
-          echo "[OK] 디스크 상태 기록 완료"
-
-      - name: 📤 업로드 (로그, 백업, provenance, 모니터링)
-        uses: actions/upload-artifact@v4
-        with:
-          name: transfer-backup-${{ steps.backup.outputs.ts_folder }}
-          path: |
-            ${{ env.TRANSFER_LOG_DIR }}/*.txt
-            ${{ steps.genprov.outputs.prov_path }}
-            ${{ steps.provindex.outputs.index_path }}
-            ${{ env.UPGRADE_LOG_DIR }}/*.log
-            ${{ env.DISK_MONITOR_LOG }}
-          if-no-files-found: error
-
-      - name: 📂 백업 구조 확인
-        run: |
-          set -Eeuo pipefail
-          tree ${{ env.BACKUP_DIR }} -L 2 || echo "[WARN] tree 미설치"
-          tree ${{ env.PROVENANCE_STORE_DIR }} || echo "[WARN] tree 미설치"
+    - name: 📦 전송 로그 백업 → /opt/backup
+      run: |
+        set -Eeuo pipefail
+        echo "[ECHO] 백업 디렉토리에 복사"
+        sudo cp -r "$TRANSFER_LOG_DIR"/* "$BACKUP_DIR"/ || echo "[WARN] 로그 복사 실패"
+        sudo cp -r "$PROVENANCE_DIR"/* "$BACKUP_DIR"/ || echo "[WARN] 전송 로그 복사 실패"
+        ls -lh "$BACKUP_DIR"
