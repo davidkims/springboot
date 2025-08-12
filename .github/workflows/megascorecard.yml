@@ -1,4 +1,4 @@
-name: "📦 Transfer Log Backup + Disk IO + Auto Upgrade (FULL-OPS)"
+name: "📦 Transfer Log Backup + Disk IO + Auto Upgrade (FULL-OPS EXTENDED)"
 
 on:
   workflow_dispatch:
@@ -14,14 +14,14 @@ jobs:
       BACKUP_DIR: /opt/backup/transfer
       PROVENANCE_DIR: provenance
       PROVENANCE_STORE_DIR: provenance/store
-      CURL_SOURCE_URL: "https://example.com/provenance/latest.json" # 정식 다운로드 경로
-      PKG_LIST: "sysstat curl wget coreutils"
+      CURL_SOURCE_URLS: "https://example.com/provenance/latest.json https://mirror.example.com/provenance/latest.json"
+      PKG_LIST: "sysstat curl wget coreutils pv tar"
 
     steps:
     - name: 📂 Checkout
       uses: actions/checkout@v4
 
-    - name: 📁 디렉토리 및 권한 생성
+    - name: 📁 필수 디렉토리 생성 및 권한 부여
       run: |
         set -Eeuo pipefail
         echo "[ECHO] 필수 디렉토리 생성"
@@ -29,7 +29,7 @@ jobs:
         sudo chmod -R 777 "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
         ls -ld "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
 
-    - name: 🔄 필수 패키지 설치 및 업그레이드
+    - name: 🔄 패키지 설치 및 업그레이드
       run: |
         set -Eeuo pipefail
         echo "[ECHO] 패키지 설치 및 업그레이드"
@@ -37,20 +37,30 @@ jobs:
         sudo apt-get install -y $PKG_LIST
         sudo apt-get upgrade -y
 
-    - name: 📝 전송 로그 파일 생성 또는 다운로드
+    - name: 📝 전송 로그 다중 경로 다운로드 또는 생성
       run: |
         set -Eeuo pipefail
         FILE_NAME=".provenance_transfer_$(date +%Y%m%d_%H%M%S).json"
         FILE_PATH="$PROVENANCE_DIR/$FILE_NAME"
+        echo "[ECHO] 전송 로그 다운로드 시도: $FILE_PATH"
 
-        echo "[ECHO] 전송 로그 생성 시작: $FILE_PATH"
-        # curl로 다운로드 시도
-        if curl -fsSL "$CURL_SOURCE_URL" -o "$FILE_PATH"; then
-          echo "[ECHO] 원격 전송 로그 다운로드 성공"
-        else
-          echo "[ECHO] 원격 다운로드 실패 → 로컬에서 더미 로그 생성"
+        SUCCESS=false
+        for URL in $CURL_SOURCE_URLS; do
+          echo "[ECHO] 시도: $URL"
+          if curl -fsSL --retry 3 "$URL" -o "$FILE_PATH"; then
+            echo "[ECHO] 다운로드 성공: $URL"
+            SUCCESS=true
+            break
+          else
+            echo "[WARN] 다운로드 실패: $URL"
+          fi
+        done
+
+        if [ "$SUCCESS" = false ]; then
+          echo "[ECHO] 모든 다운로드 실패 → 로컬 더미 로그 생성"
           echo "{\"status\":\"generated\",\"timestamp\":\"$(date)\"}" > "$FILE_PATH"
         fi
+
         ls -lh "$FILE_PATH"
 
     - name: 📊 디스크 I/O 상태 기록
@@ -68,24 +78,37 @@ jobs:
         echo "[ECHO] 대량 파일 생성 시작 (/tmp/io_test)"
         mkdir -p /tmp/io_test
         for i in $(seq 1 5); do
-          dd if=/dev/zero of=/tmp/io_test/testfile_$i bs=10M count=10 status=progress
+          dd if=/dev/zero | pv -s 100M > /tmp/io_test/testfile_$i bs=10M count=10
         done
         ls -lh /tmp/io_test
 
-    - name: 📤 전송 로그 및 디스크 I/O 로그 백업
+    - name: 📦 로그 및 데이터 압축
+      run: |
+        set -Eeuo pipefail
+        DATE_DIR=$(date +%Y%m%d)
+        DEST_DIR="$BACKUP_DIR/$DATE_DIR"
+        mkdir -p "$DEST_DIR"
+        echo "[ECHO] 백업 데이터 디렉토리: $DEST_DIR"
+
+        tar -czf "$DEST_DIR/transfer_logs_$DATE_DIR.tar.gz" -C "$TRANSFER_LOG_DIR" . || true
+        tar -czf "$DEST_DIR/provenance_logs_$DATE_DIR.tar.gz" -C "$PROVENANCE_DIR" . || true
+
+        echo "[ECHO] 압축 완료"
+        ls -lh "$DEST_DIR"
+
+    - name: 🧹 오래된 백업 정리 (최근 7일 유지)
+      run: |
+        set -Eeuo pipefail
+        echo "[ECHO] 오래된 백업 삭제"
+        find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \;
+        echo "[ECHO] 현재 보관 중인 백업:"
+        ls -1 "$BACKUP_DIR"
+
+    - name: 📤 전송 로그 및 디스크 I/O 로그 아티팩트 업로드
       uses: actions/upload-artifact@v4
       with:
         name: "transfer-backup-logs"
         path: |
-          ${{ env.TRANSFER_LOG_DIR }}
-          ${{ env.PROVENANCE_DIR }}
+          ${{ env.BACKUP_DIR }}
         if-no-files-found: warn
         compression-level: 6
-
-    - name: 📦 전송 로그 백업 → /opt/backup
-      run: |
-        set -Eeuo pipefail
-        echo "[ECHO] 백업 디렉토리에 복사"
-        sudo cp -r "$TRANSFER_LOG_DIR"/* "$BACKUP_DIR"/ || echo "[WARN] 로그 복사 실패"
-        sudo cp -r "$PROVENANCE_DIR"/* "$BACKUP_DIR"/ || echo "[WARN] 전송 로그 복사 실패"
-        ls -lh "$BACKUP_DIR"
