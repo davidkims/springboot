@@ -1,155 +1,117 @@
-name: "🚀 MEGA FULL Transfer + Servers + DB + Backup + Monitoring (NO SECRETS)"
+name: "🚀 MEGA Extended CI + Docker Fix + DB Servers + TransferLog + AutoUpgrade"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *" # 5분마다 실행
+
+permissions:
+  contents: write
 
 jobs:
-  mega-full-env:
+  mega-ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
-      LOG_DIR: /opt/logs
-      BACKUP_DIR: /opt/backup
-      TMP_DIR: /tmp/io_test
+      TRANSFER_LOG_DIR: /opt/logs/transfer
+      BACKUP_DIR: /opt/backup/transfer
       PROVENANCE_DIR: provenance
-      HTTP_PORT: "8000"
-      FTP_PORT: "2121"
-      MINIO_PORT: "9000"
-      MYSQL_PORT: "3306"
-      POSTGRES_PORT: "5432"
-      REDIS_PORT: "6379"
-      MINIO_BUCKET: "testbucket"
+      PROVENANCE_STORE_DIR: provenance/store
 
     steps:
-    - name: 📂 Checkout
-      uses: actions/checkout@v4
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: 📦 필수 패키지 설치
-      run: |
-        set -Eeuo pipefail
-        sudo apt-get update -y
-        sudo apt-get install -y sysstat pv vsftpd curl docker.io postgresql-client mysql-client redis-tools net-tools lsof
+      - name: 🐳 Install Docker (containerd 충돌 방지)
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] 기존 containerd.io 제거"
+          sudo apt-get remove -y containerd.io || true
+          echo "[ECHO] Docker 설치 시작"
+          curl -fsSL https://get.docker.com | sh
+          sudo systemctl enable docker
+          sudo systemctl start docker
+          docker --version
 
-    - name: 📁 디렉토리 준비
-      run: |
-        set -Eeuo pipefail
-        sudo mkdir -p $LOG_DIR $BACKUP_DIR $TMP_DIR $PROVENANCE_DIR
-        sudo chmod -R 777 $LOG_DIR $BACKUP_DIR $TMP_DIR $PROVENANCE_DIR
+      - name: 🛠 Install PostgreSQL/MySQL/Redis
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] DB 서버 설치 시작"
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql mysql-server redis-server
+          sudo systemctl start postgresql mysql redis
+          sudo systemctl enable postgresql mysql redis
+          echo "[ECHO] DB 서버 상태 확인"
+          systemctl status postgresql --no-pager || true
+          systemctl status mysql --no-pager || true
+          systemctl status redis --no-pager || true
 
-    - name: 🌐 HTTP 서버 실행
-      run: |
-        nohup python3 -m http.server $HTTP_PORT --directory $BACKUP_DIR >/dev/null 2>&1 &
-        echo "[ECHO] HTTP 서버 실행 완료 (포트: $HTTP_PORT)"
+      - name: 📜 Create Directories for TransferLog
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] 필수 디렉토리 생성"
+          mkdir -p "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR" "$PROVENANCE_STORE_DIR"
+          ls -alh "$TRANSFER_LOG_DIR" "$BACKUP_DIR" "$PROVENANCE_DIR"
 
-    - name: 📡 FTP 서버 실행
-      run: |
-        echo "listen=YES" | sudo tee /etc/vsftpd.conf
-        echo "anonymous_enable=YES" | sudo tee -a /etc/vsftpd.conf
-        echo "anon_root=$BACKUP_DIR" | sudo tee -a /etc/vsftpd.conf
-        sudo service vsftpd restart
-        echo "[ECHO] FTP 서버 실행 완료 (포트: $FTP_PORT)"
-
-    - name: 🗄️ MinIO 서버 실행
-      run: |
-        docker run -d --name minio \
-          -p $MINIO_PORT:9000 \
-          -e MINIO_ACCESS_KEY=minioadmin \
-          -e MINIO_SECRET_KEY=minioadmin \
-          -v $BACKUP_DIR:/data \
-          minio/minio server /data
-        sleep 5
-        echo "[ECHO] MinIO 서버 실행 완료 (포트: $MINIO_PORT)"
-        curl -sSfL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc
-        chmod +x mc
-        ./mc alias set local http://127.0.0.1:$MINIO_PORT minioadmin minioadmin
-        ./mc mb local/$MINIO_BUCKET || true
-        echo "Test file for MinIO" > /tmp/minio_test.txt
-        ./mc cp /tmp/minio_test.txt local/$MINIO_BUCKET/
-
-    - name: 🛢️ MySQL 서버 실행 및 초기화
-      run: |
-        docker run -d --name mysql_test \
-          -e MYSQL_ROOT_PASSWORD=rootpass \
-          -p $MYSQL_PORT:3306 \
-          mysql:8
-        sleep 20
-        docker exec -i mysql_test mysql -uroot -prootpass -e "CREATE DATABASE IF NOT EXISTS sample_db; CREATE TABLE sample_db.test(id INT PRIMARY KEY, val VARCHAR(64)); INSERT INTO sample_db.test VALUES (1,'hello'),(2,'world');"
-
-    - name: 🛢️ PostgreSQL 서버 실행 및 초기화
-      run: |
-        docker run -d --name postgres_test \
-          -e POSTGRES_PASSWORD=pgpass \
-          -p $POSTGRES_PORT:5432 \
-          postgres:15
-        sleep 15
-        docker exec -i postgres_test psql -U postgres -c "CREATE DATABASE sample_db;"
-        docker exec -i postgres_test psql -U postgres -d sample_db -c "CREATE TABLE test(id SERIAL PRIMARY KEY, val TEXT); INSERT INTO test(val) VALUES('hello'),('world');"
-
-    - name: ⚡ Redis 서버 실행
-      run: |
-        docker run -d --name redis_test \
-          -p $REDIS_PORT:6379 \
-          redis:7
-        sleep 5
-        redis-cli -h 127.0.0.1 -p $REDIS_PORT SET testkey "redis_up"
-
-    - name: 📥 전송 로그 다운로드 (Fallback 지원)
-      run: |
-        set -Eeuo pipefail
-        TS=$(date +%Y%m%d_%H%M%S)
-        FILE_PATH="$PROVENANCE_DIR/.provenance_transfer_${TS}.json"
-        URLS=("https://example.com/provenance/latest.json" "https://mirror.example.com/provenance/latest.json")
-        SUCCESS=false
-        for url in "${URLS[@]}"; do
-          if curl -sSfL "$url" -o "$FILE_PATH"; then
-            SUCCESS=true
-            break
-          else
-            echo "[WARN] 실패: $url"
+      - name: 📥 Download TransferLog with curl fallback
+        run: |
+          set -Eeuo pipefail
+          FILE_NAME=".provenance_transfer_$(date +%Y%m%d_%H%M%S).json"
+          FILE_PATH="$PROVENANCE_DIR/$FILE_NAME"
+          echo "[ECHO] 전송 로그 다운로드 시도: $FILE_PATH"
+          URLS=(
+            "https://example.com/provenance/latest.json"
+            "https://mirror.example.com/provenance/latest.json"
+            "https://backup.example.org/provenance/latest.json"
+          )
+          SUCCESS=false
+          for URL in "${URLS[@]}"; do
+            echo "[ECHO] 시도: $URL"
+            if curl -sSfL "$URL" -o "$FILE_PATH"; then
+              echo "[ECHO] 다운로드 성공: $URL"
+              SUCCESS=true
+              break
+            else
+              echo "[WARN] 다운로드 실패: $URL"
+            fi
+          done
+          if [ "$SUCCESS" = false ]; then
+            echo "[ECHO] 모든 다운로드 실패 → 로컬 더미 로그 생성"
+            echo "{\"status\":\"dummy\"}" > "$FILE_PATH"
           fi
-        done
-        if [ "$SUCCESS" = false ]; then
-          echo "{\"status\":\"dummy\",\"timestamp\":\"$TS\"}" > "$FILE_PATH"
-        fi
+          ls -l "$FILE_PATH"
 
-    - name: 📄 대량 파일 생성 테스트
-      run: |
-        pv -s 100M < /dev/zero | dd of=$TMP_DIR/testfile.bin bs=10M count=10 conv=fsync
-        ls -lh $TMP_DIR
+      - name: 💾 Disk I/O Test (no pv dependency)
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] 대량 파일 생성 시작 (/tmp/io_test)"
+          mkdir -p /tmp/io_test
+          fallocate -l 100M /tmp/io_test/testfile1.bin
+          dd if=/dev/zero of=/tmp/io_test/testfile2.bin bs=10M count=10 status=progress
+          echo "[ECHO] Disk I/O Test 완료"
+          ls -lh /tmp/io_test
 
-    - name: 💾 DB 백업
-      run: |
-        mysqldump -h 127.0.0.1 -P $MYSQL_PORT -uroot -prootpass sample_db > $BACKUP_DIR/mysql_backup.sql || true
-        PGPASSWORD=pgpass pg_dump -h 127.0.0.1 -p $POSTGRES_PORT -U postgres sample_db > $BACKUP_DIR/postgres_backup.sql || true
-        redis-cli -h 127.0.0.1 -p $REDIS_PORT save
-        docker cp redis_test:/data/dump.rdb $BACKUP_DIR/redis_backup.rdb || true
+      - name: 🔄 AutoUpgrade Packages
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] 시스템 패키지 자동 업데이트 시작"
+          sudo apt-get update -y
+          sudo apt-get upgrade -y
+          sudo apt-get autoremove -y
+          echo "[ECHO] 업데이트 완료"
 
-    - name: 🔍 상태 모니터링 & 로그
-      run: |
-        netstat -tulnp > $LOG_DIR/ports.log || ss -tulnp > $LOG_DIR/ports.log
-        ps aux > $LOG_DIR/processes.log
-        du -ah $BACKUP_DIR | sort -hr | head -n 30 > $LOG_DIR/backup_dir_top.txt
-        echo "[ECHO] 모니터링 로그 저장 완료"
+      - name: 📤 Simulated External Server Transfer (No Secrets)
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] 외부 서버 전송 시뮬레이션 시작"
+          mkdir -p /tmp/external_server
+          cp -v "$PROVENANCE_DIR"/*.json /tmp/external_server/
+          echo "[ECHO] 외부 서버 전송 시뮬레이션 완료: /tmp/external_server"
 
-    - name: 📦 아티팩트 업로드
-      uses: actions/upload-artifact@v4
-      with:
-        name: mega-full-backup-${{ github.run_id }}
-        path: |
-          ${{ env.BACKUP_DIR }}
-          ${{ env.LOG_DIR }}
-          ${{ env.PROVENANCE_DIR }}
-          ${{ env.TMP_DIR }}
-        compression-level: 6
-        if-no-files-found: warn
-
-    - name: 📜 URL 안내
-      run: |
-        echo "HTTP 서버: http://localhost:${HTTP_PORT}"
-        echo "FTP 서버: ftp://localhost:${FTP_PORT}"
-        echo "MinIO 서버: http://localhost:${MINIO_PORT}"
-        echo "MySQL 포트: ${MYSQL_PORT}"
-        echo "PostgreSQL 포트: ${POSTGRES_PORT}"
-        echo "Redis 포트: ${REDIS_PORT}"
+      - name: 📦 Upload TransferLog Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-transfer-${{ github.run_id }}
+          path: provenance/*.json
+          if-no-files-found: warn
+          compression-level: 6
