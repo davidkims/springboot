@@ -1,4 +1,4 @@
-name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드/업그레이드+전송 백업+대량권한/컨테이너+메타스냅샷"
+name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드/업그레이드+전송 백업+대량권한/컨테이너+메타스냅샷 (I/O 튜닝)"
 
 on:
   workflow_dispatch:
@@ -42,7 +42,7 @@ on:
       commit_message:
         description: "커밋 메시지"
         required: true
-        default: "chore: mega disk+dirs + massive + svc init/seed/upgrade + transfer backup + mass perms/containers + meta snapshot"
+        default: "chore: mega disk+dirs + massive + svc init/seed/upgrade + transfer backup + mass perms/containers + meta snapshot + io tune"
 
 permissions:
   contents: write
@@ -54,10 +54,10 @@ concurrency:
 
 jobs:
   #######################################################################
-  # 1) Disk+Dirs — 이미지/파티션/파일시스템/견고한 마운트 + MASSIVE + 메타
+  # 1) Disk+Dirs — 이미지/파티션/파일시스템/견고한 마운트 + MASSIVE + 메타 (+ I/O 튜닝)
   #######################################################################
   diskdirs:
-    name: "💽 Disk+Dirs + MASSIVE + 메타"
+    name: "💽 Disk+Dirs + MASSIVE + 메타 (I/O 튜닝)"
     runs-on: ubuntu-latest
     timeout-minutes: 55
     env:
@@ -67,8 +67,12 @@ jobs:
       MASSIVE_MULTIPLIER: "4"
       PARALLEL_JOBS: "8"
       TAR_SPLIT_MB: "256"
-      SWAP_SIZE_MB: "2048"
-      RAMDISK_MB: "512"
+      # I/O 튜닝
+      SWAP_SIZE_MB: "4096"
+      RAMDISK_MB: "1024"
+      IO_CLASS: "2"      # ionice class (2=best-effort)
+      IO_PRIO: "0"       # ionice priority (0=highest)
+      CPU_NICE: "5"      # nice (낮을수록 우선순위 높음)
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
@@ -76,25 +80,31 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: 🔧 System prep (swap/ramdisk + tools)
+      - name: 🔧 System prep (swap/ramdisk + tools + limits)
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" .github/echo_monitoring
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            jq moreutils pigz pv unzip tar curl ca-certificates xz-utils tree rsync \
-            parted xfsprogs btrfs-progs acl util-linux
+            jq moreutils pigz pv unzip tar curl ca-certificates xz-utils tree rsync parallel \
+            parted xfsprogs btrfs-progs acl util-linux coreutils
+          # 파일 핸들 상향
+          ulimit -n 131072 || true
+          echo "[ULIMIT] open files: $(ulimit -n)" | tee -a .github/echo_monitoring/io_tuning.txt
+          # 스왑 확장
           if [[ "${SWAP_SIZE_MB}" != "0" ]] && ! sudo swapon --show | grep -q .; then
             sudo fallocate -l ${SWAP_SIZE_MB}M /swapfile
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
             sudo swapon /swapfile
           fi
+          # RAM 디스크
           if [[ "${RAMDISK_MB}" != "0" ]]; then
             sudo mkdir -p /mnt/ramdisk
             mount | grep -q " on /mnt/ramdisk " || sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk
           fi
+          echo "[RAMDISK] $(df -h /mnt/ramdisk || true)" | tee -a .github/echo_monitoring/io_tuning.txt
 
       - name: 🧱 Create image + attach loop (retry-safe)
         shell: bash
@@ -136,7 +146,7 @@ jobs:
             *)     sudo mkfs.ext4 -F "$P1"; sudo mkfs.ext4 -F "$P2" ;;
           esac
 
-      - name: 🔗 Mount p1/p2 (robust)
+      - name: 🔗 Mount p1/p2 (robust, noatime)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -150,9 +160,16 @@ jobs:
             [[ -b "$P1" && -b "$P2" ]] && break || sleep 0.5
           done
           [[ -b "$P1" && -b "$P2" ]]
-          mount | grep -q " on ${MNT} " || sudo mount "$P1" "$MNT"
+          FST="${{ inputs.fs_type }}"
+          case "$FST" in
+            ext4)  OPTS="noatime,nodiratime,commit=60" ;;
+            xfs)   OPTS="noatime,nodiratime" ;;
+            btrfs) OPTS="noatime,compress=zstd:3" ;;
+            *)     OPTS="noatime,nodiratime" ;;
+          esac
+          mount | grep -q " on ${MNT} " || sudo mount -o "$OPTS" "$P1" "$MNT"
           sudo mkdir -p "$MNT/part2"
-          mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "$MNT/part2"
+          mount | grep -q " on ${MNT}/part2 " || sudo mount -o "$OPTS" "$P2" "$MNT/part2"
           df -h | grep -E "${MNT}(/part2)?"
 
       - name: 🔑 Grant write perms on mounts (runner)
@@ -194,32 +211,52 @@ jobs:
             for r in "${ROOTS[@]}"; do make_dir "$r" "$i"; done
           done
 
-      - name: 🚀 MASSIVE shards (parallel)
+      - name: 🚀 MASSIVE shards (parallel, fixed + I/O tuned)
         shell: bash
+        env:
+          IO_CLASS: "2"   # ionice class(2=best-effort)
+          IO_PRIO:  "0"   # ionice prio(0=highest)
+          CPU_NICE: "5"   # nice(낮을수록 우선)
         run: |
           set -Eeuo pipefail
           SPEC="${{ inputs.bulk_spec }}"
           kv(){ printf '%s' "$SPEC" | tr ', ' '\n\n' | awk -F= -vk="$1" '$1==k{print $2}' | tail -n1; }
+
           BASE_DIRS="$(kv dirs)"; : "${BASE_DIRS:=100}"
           BASE_FILES="$(kv files)"; : "${BASE_FILES:=10}"
           BASE_KB="$(kv size_kb)"; : "${BASE_KB:=4}"
           BASE_PREFIX="$(kv prefix)"; : "${BASE_PREFIX:=gen}"
-          SHARDS="${MASSIVE_SHARDS}"; MULT="${MASSIVE_MULTIPLIER}"; PJ="${PARALLEL_JOBS}"
+
+          SHARDS="${MASSIVE_SHARDS}"
+          MULT="${MASSIVE_MULTIPLIER}"
+          PJ="${PARALLEL_JOBS}"
+
           MNT="$(printf '%s' "${{ inputs.mount_point }}" | xargs)"; : "${MNT:=/mnt/gh-disk}"
+
           gen_one_shard() {
-            shard="$1"; SH_PREFIX="${BASE_PREFIX}-s${shard}"; SH_DIRS=$(( BASE_DIRS * MULT ))
+            shard="$1"
+            SH_PREFIX="${BASE_PREFIX}-s${shard}"
+            SH_DIRS=$(( BASE_DIRS * MULT ))
             ROOTS=("bulk/${SH_PREFIX}" "${MNT}/bulk/${SH_PREFIX}" "${MNT}/part2/bulk/${SH_PREFIX}")
-            for r in "${ROOTS[@]}"; do mkdir -p "$r"; done
+            for r in "${ROOTS[@]}"; do
+              mkdir -p "$r"
+            done
             for i in $(seq 1 "$SH_DIRS"); do
               for r in "${ROOTS[@]}"; do
-                d="${r}/$(printf '%s-%06d' "$SH_PREFIX" "$i")"; mkdir -p "$d"
-                for n in $(seq 1 "$BASE_FILES"); do truncate -s "$(( BASE_KB*1024 ))" "$d/file-$(printf '%04d' "$n").bin"; done
+                d="${r}/$(printf '%s-%06d' "$SH_PREFIX" "$i")"
+                mkdir -p "$d"
+                for n in $(seq 1 "$BASE_FILES"); do
+                  truncate -s "$(( BASE_KB*1024 ))" "$d/file-$(printf '%04d' "$n").bin"
+                done
               done
-            end
+            done
           }
+
           export -f gen_one_shard
-          export BASE_DIRS BASE_FILES BASE_KB BASE_PREFIX MULT PJ MNT
-          seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
+          export BASE_DIRS BASE_FILES BASE_KB BASE_PREFIX MULT MNT
+
+          seq 1 "$SHARDS" \
+            | xargs -I{} -P "$PJ" bash -lc 'ionice -c'"$IO_CLASS"' -n'"$IO_PRIO"' nice -n '"$CPU_NICE"' gen_one_shard "$@"' _ {}
 
       - name: 📊 Size reports
         shell: bash
@@ -696,7 +733,6 @@ jobs:
           }
           JSON
           cp "$PROV_FILE" "$PROVENANCE_STORE_DIR/${{ steps.backup.outputs.ts_folder }}/"
-          # 생성 확인
           ls -l "$PROV_FILE"
           echo "prov_path=$PROV_FILE" >> "$GITHUB_OUTPUT"
 
