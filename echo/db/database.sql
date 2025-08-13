@@ -1,0 +1,2 @@
+-- Placeholder SQL managed by Defender Bot.
+-- Define schema and migrations here.
