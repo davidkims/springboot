@@ -3,6 +3,10 @@ name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드/�
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: "푸시할 브랜치"
+        required: true
+        default: "main"
       disk_size_mb:
         description: "초기 디스크 이미지 크기(MB)"
         required: true
@@ -50,7 +54,7 @@ concurrency:
 
 jobs:
   #######################################################################
-  # 1) Disk+Dirs — 이미지/파티션/파일시스템/견고한 마운트 + MASSIVE 생성 + 메타스냅샷
+  # 1) Disk+Dirs — 이미지/파티션/파일시스템/견고한 마운트 + MASSIVE 생성 + 메타
   #######################################################################
   diskdirs:
     name: "💽 Disk+Dirs + MASSIVE + 메타"
@@ -69,7 +73,7 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
+          persist-credentials: false      # 토큰 푸시와 충돌 방지
           fetch-depth: 0
 
       - name: 🔧 System prep (swap/ramdisk + tools)
@@ -80,7 +84,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             jq moreutils pigz pv unzip tar curl ca-certificates xz-utils tree rsync \
-            parted xfsprogs btrfs-progs acl util-linux # acl/blkid 포함
+            parted xfsprogs btrfs-progs acl util-linux
           if [[ "${SWAP_SIZE_MB}" != "0" ]] && ! sudo swapon --show | grep -q .; then
             sudo fallocate -l ${SWAP_SIZE_MB}M /swapfile
             sudo chmod 600 /swapfile
@@ -151,7 +155,6 @@ jobs:
           mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "$MNT/part2"
           df -h | grep -E "${MNT}(/part2)?"
 
-      # ⬇️ Permission denied 방지: 소유권/권한/ACL 부여
       - name: 🔑 Grant write perms on mounts (runner)
         shell: bash
         run: |
@@ -227,7 +230,6 @@ jobs:
           du -sh . > .github/echo_monitoring/total_size.txt || true
           df -h > .github/echo_monitoring/df_all.txt || true
 
-      # ⬇️ 디스크/디렉토리/마운트/권한 메타 스냅샷 파일 필수 생성
       - name: 📑 Disk/Dir/Perm snapshot (JSON/TXT)
         shell: bash
         run: |
@@ -236,11 +238,9 @@ jobs:
           LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1 || true)"
           P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
           mkdir -p .github/echo_monitoring .github/mass_meta
-          # 텍스트 스냅샷
           ls -ld "$MNT" "$MNT/part2" > .github/echo_monitoring/mount_owners.txt || true
           mount | grep -E " on ${MNT}(/part2)? " > .github/echo_monitoring/mount_lines.txt || true
           (sudo blkid "$P1" "$P2" || true) > .github/echo_monitoring/blkid.txt
-          # JSON 메타
           {
             echo '{'
             echo "  \"loop_device\": \"${LOOP_DEV}\","
@@ -257,19 +257,58 @@ jobs:
           set -Eeuo pipefail
           echo -e "\n# auto-generated\n${DISK_IMG}\n*.img\n.github/echo_logs/*.log\n" >> .gitignore
 
+      # ✅ 새로 추가: push 전 원격 동기화 (rebase→merge fallback)
+      - name: 🔄 Sync with remote before push (rebase→merge fallback)
+        if: ${{ inputs.commit_and_push == 'true' }}
+        shell: bash
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/echo_monitoring
+          echo "[GIT] pre-sync snapshot" | tee .github/echo_monitoring/git_sync_log.txt
+          git remote -v | tee -a .github/echo_monitoring/git_sync_log.txt
+          git status -sb | tee -a .github/echo_monitoring/git_sync_log.txt
+          echo "--- recent local commits ---" >> .github/echo_monitoring/git_sync_log.txt
+          git log --oneline -n 10 --decorate >> .github/echo_monitoring/git_sync_log.txt || true
+          git fetch origin "$BRANCH"
+          if git pull --rebase origin "$BRANCH"; then
+            echo "[GIT] rebase-pull OK" | tee -a .github/echo_monitoring/git_sync_log.txt
+          else
+            echo "[GIT] rebase 충돌 → merge -X theirs" | tee -a .github/echo_monitoring/git_sync_log.txt
+            git rebase --abort || true
+            git merge -X theirs "origin/${BRANCH}" || true
+          fi
+          echo "--- post-pull commits ---" >> .github/echo_monitoring/git_sync_log.txt
+          git log --oneline -n 10 --decorate >> .github/echo_monitoring/git_sync_log.txt || true
+
+      # ✅ 교체: 토큰 URL로 안전 푸시 + 푸시 로그 남기기
       - name: ✅ Commit & push (optional)
         if: ${{ inputs.commit_and_push == 'true' }}
         shell: bash
         env:
           COMMIT_MSG_IN: ${{ inputs.commit_message }}
+          PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          BRANCH: ${{ inputs.branch }}
         run: |
           set -Eeuo pipefail
-          git config user.name "gh-actions-bot"
-          git config user.email "gh-actions-bot@example.com"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add -A
-          if git diff --cached --quiet; then echo "[ECHO] No changes"; exit 0; fi
-          git commit -m "${COMMIT_MSG_IN:-chore: mega disk+dirs auto}"
-          git push
+          if git diff --cached --quiet; then
+            echo "[ECHO] No changes"
+          else
+            git commit -m "${COMMIT_MSG_IN:-chore: auto commit}"
+          fi
+
+          git push "$PUSH_URL" HEAD:"$BRANCH"
+
+          {
+            echo "[GIT] post-push on ${BRANCH}"
+            git rev-parse HEAD
+            git log --oneline -n 10 --decorate
+          } > .github/echo_monitoring/git_post_push.txt || true
 
       - name: 📦 Upload artifacts (logs/reports/meta)
         uses: actions/upload-artifact@v4
@@ -290,6 +329,9 @@ jobs:
     needs: [diskdirs]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: 🧰 Generate init/seed/upgrade script
         shell: bash
@@ -392,7 +434,7 @@ jobs:
               airflow) img="apache/airflow:latest" ;; spark) img="bitnami/spark:latest" ;;
               camunda) img="camunda/camunda-bpm-platform:latest" ;;
             esac
-            if command -v docker >/dev/null 2>&1; then
+            if command -v docker >/dev/null 21>&1; then
               [ -n "$img" ] && docker pull "$img" || true
               if docker compose version >/dev/null 2>&1 && { [ -f compose.yml ] || [ -f docker-compose.yml ]; }; then
                 docker compose pull "$svc" || true
@@ -448,11 +490,14 @@ jobs:
     env:
       BASE_PERM_DIR: .github/mass_gen
       PERM_SPEC: "roles=admin,ops,dev; dirs=200; files=20; size_kb=8"
-      MAX_PER_SERVICE: "1"        # 러너 보호(필요시 2~3)
-      CONFLICT_POLICY: "replace"  # replace | skip
+      MAX_PER_SERVICE: "1"
+      CONFLICT_POLICY: "replace"   # replace | skip
       NET_NAME: "mega_net"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: 🧰 Packages for ACL & utils
         shell: bash
@@ -490,7 +535,6 @@ jobs:
             done
           done
 
-          # 필수 권한 템플릿 파일 + 적용 로그
           cat > "$BASE/perm/permissions.csv" <<EOF
           path,mode,owner,group,acl
           roles/admin,750,runner,runner,user:runner:rwx,default:user::rwx,default:group::r-x,default:other::---
@@ -512,7 +556,6 @@ jobs:
             echo "[APPLIED] $T mode=$mode owner=$owner:$group acl=${acl:-none}" >> "$BASE/summary/apply.log"
           done < "$BASE/perm/permissions.csv"
 
-          # 마운트 지점에도 권한 트리 투영(옵션) — Permission denied 방지용 mirror
           M="${MNT:-/mnt/gh-disk}"
           if mount | grep -q " on ${M} "; then
             sudo mkdir -p "${M}/perm_seed"
@@ -586,6 +629,9 @@ jobs:
       PROVENANCE_STORE_DIR: provenance/store
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: 📁 Prepare directories
         shell: bash
@@ -616,9 +662,7 @@ jobs:
           DEST="$BACKUP_DIR/$TS_FOLDER"
           META="$DEST/_meta"
           sudo mkdir -p "$DEST" "$META"
-          # 기본 전송 로그
           sudo cp "$TRANSFER_LOG_DIR"/*.txt "$DEST/" || echo "[⚠️] No logs to copy."
-          # 디스크/디렉토리/권한/컨테이너 요약 동봉 (존재 시에만)
           sudo cp -r .github/echo_monitoring "$META/" 2>/dev/null || true
           sudo cp -r .github/mass_meta "$META/" 2>/dev/null || true
           sudo find .github/mass_gen -maxdepth 3 -type f \( -name 'permissions.csv' -o -name 'apply.log' -o -name 'containers_*.txt' \) -print0 2>/dev/null | sudo xargs -0 -I{} cp -v "{}" "$META/" 2>/dev/null || true
@@ -648,7 +692,9 @@ jobs:
               "disk_dir_reports": ".github/echo_monitoring/*",
               "disk_dir_metadata": ".github/mass_meta/diskdir_metadata.json",
               "permissions_and_apply": ".github/mass_gen/**/permissions.csv, .github/mass_gen/**/summary/apply.log",
-              "containers_list": ".github/mass_gen/containers_${{ github.run_id }}.txt"
+              "containers_list": ".github/mass_gen/containers_${{ github.run_id }}.txt",
+              "git_sync_log": ".github/echo_monitoring/git_sync_log.txt",
+              "git_post_push": ".github/echo_monitoring/git_post_push.txt"
             }
           }
           JSON
