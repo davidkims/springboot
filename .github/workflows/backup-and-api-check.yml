@@ -1,4 +1,4 @@
-name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드/업그레이드+전송 백업(24x365 해제)"
+name: "♾️ MEGA 디스크+디렉토리+대용량+서비스 초기화/시드/업그레이드+전송 백업+대량권한/컨테이너"
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
         required: true
         default: "dirs=100,files=10,size_kb=4,prefix=gen"
       service_spec:
-        description: "서비스+DB: services=..., mysql=dbs=a,b;user=u:p, pg=dbs=a,b, mongo=app:users,logs:lines"
+        description: "서비스: services=mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda; mysql=dbs=app;user=app:app123!; pg=dbs=app; mongo=app:users"
         required: false
         default: "services=mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda; mysql=dbs=app,logs;user=app:app123!; pg=dbs=app,logs; mongo=app:users,logs:lines"
       seed_spec:
@@ -38,7 +38,7 @@ on:
       commit_message:
         description: "커밋 메시지"
         required: true
-        default: "chore: mega disk+dirs + massive + svc init/seed/upgrade + transfer backup (auto)"
+        default: "chore: mega disk+dirs + massive + svc init/seed/upgrade + transfer backup + mass perms/containers"
 
 permissions:
   contents: write
@@ -67,7 +67,7 @@ jobs:
       RAMDISK_MB: "512"
     steps:
       - name: 📂 Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
@@ -90,7 +90,7 @@ jobs:
             mount | grep -q " on /mnt/ramdisk " || sudo mount -t tmpfs -o size=${RAMDISK_MB}m tmpfs /mnt/ramdisk
           fi
 
-      - name: 🧱 Create image + attach loop
+      - name: 🧱 Create image + attach loop (retry-safe)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -98,7 +98,12 @@ jobs:
           [[ -z "${RAW_SIZE_MB:-}" || ! "${RAW_SIZE_MB}" =~ ^[0-9]+$ ]] && RAW_SIZE_MB="2048"
           [[ -f "$DISK_IMG" ]] || truncate -s ${RAW_SIZE_MB}M "$DISK_IMG"
           sudo losetup -fP "$DISK_IMG" || true
-          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
+          LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1 || true)"
+          if [[ -z "${LOOP_DEV:-}" ]]; then
+            sleep 0.3
+            sudo losetup -fP "$DISK_IMG" || true
+            LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1 || true)"
+          fi
           [[ -n "$LOOP_DEV" ]]
 
       - name: 🧭 GPT partition p1=60%, p2=40%
@@ -131,11 +136,16 @@ jobs:
           set -Eeuo pipefail
           MNT="$(printf '%s' "${{ inputs.mount_point }}" | xargs || true)"
           [ -z "${MNT:-}" ] && MNT="/mnt/gh-disk"
-          sudo mkdir -p "$MNT" "$MNT/part2"
+          sudo mkdir -p "$MNT"
           LOOP_DEV="$(sudo losetup -j "$DISK_IMG" | awk -F: '{print $1}' | head -n1)"
           sudo partprobe "$LOOP_DEV" || true
-          P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
-          mount | grep -q " on ${MNT} "       || sudo mount "$P1" "$MNT"
+          for i in {1..10}; do
+            P1="${LOOP_DEV}p1"; P2="${LOOP_DEV}p2"
+            [[ -b "$P1" && -b "$P2" ]] && break || sleep 0.5
+          done
+          [[ -b "$P1" && -b "$P2" ]]
+          mount | grep -q " on ${MNT} " || sudo mount "$P1" "$MNT"
+          sudo mkdir -p "$MNT/part2"
           mount | grep -q " on ${MNT}/part2 " || sudo mount "$P2" "$MNT/part2"
           df -h | grep -E "${MNT}(/part2)?"
 
@@ -207,6 +217,7 @@ jobs:
             done
           }
           export -f gen_one_shard
+          export BASE_DIRS BASE_FILES BASE_KB BASE_PREFIX MULT PJ MNT
           seq 1 "$SHARDS" | xargs -I{} -P "$PJ" bash -c 'gen_one_shard "$@"' _ {}
 
       - name: 📊 Size reports
@@ -214,7 +225,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p .github/echo_monitoring
-          du -ah . 2>/dev/null | sort -hr | head -n 50 > .github/echo_monitoring/top_file_sizes.txt || true
+          { du -ah . 2>/dev/null | sort -hr | head -n 50; } > .github/echo_monitoring/top_file_sizes.txt || true
           du -sh . > .github/echo_monitoring/total_size.txt || true
           df -h > .github/echo_monitoring/df_all.txt || true
 
@@ -248,7 +259,7 @@ jobs:
           retention-days: 7
 
   #######################################################################
-  # 2) Services — init/seed + process DB seeding + image upgrade (parallel)
+  # 2) Services — init/seed + image upgrade (parallel)
   #######################################################################
   services_init_seed_upgrade:
     name: "🧩 Services init/seed/upgrade (parallel)"
@@ -256,7 +267,8 @@ jobs:
     timeout-minutes: 40
     needs: [diskdirs]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+
       - name: 🧰 Generate init/seed/upgrade script
         shell: bash
         env:
@@ -268,8 +280,7 @@ jobs:
           cat > .github/echo_init/init_seed_upgrade.sh <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          # Parse service_spec
-          SERVICE_SPEC="${SERVICE_SPEC:-services=mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda; mysql=dbs=app,logs;user=app:app123!; pg=dbs=app,logs; mongo=app:users,logs:lines}"
+          SERVICE_SPEC="${SERVICE_SPEC:-services=mysql,postgres,redis,mongo,kafka,rabbitmq,minio,airflow,spark,camunda; mysql=dbs=app;user=app:app123!; pg=dbs=app; mongo=app:users}"
           getk(){ printf '%s' "$1" | tr ';, ' '\n\n\n' | awk -F= -vk="$2" '$1==k{print $2}' | tail -n1; }
           SERVICES="$(getk "$SERVICE_SPEC" services)"
           MYSQL_DEF="$(printf '%s\n' "$SERVICE_SPEC" | awk -F'mysql=' 'NF>1{print $2}' | head -n1)"
@@ -277,7 +288,7 @@ jobs:
           MONGO_DEF="$(printf '%s\n' "$SERVICE_SPEC" | awk -F'mongo=' 'NF>1{print $2}' | head -n1)"
           mysql_kv(){ getk "$MYSQL_DEF" "$1"; }
           pg_kv(){ getk "$PG_DEF" "$1"; }
-          # Seeds
+
           SEED_SPEC="${SEED_SPEC:-dirs=50,files=8,size_kb=32,redis_keys=500,mongo_docs=200,kafka_topics=app.logs:3:1,app.events:3:1}"
           kv(){ printf '%s' "$SEED_SPEC" | tr ', ' '\n\n' | awk -F= -vk="$1" '$1==k{print $2}' | tail -n1; }
           SD_DIRS="$(kv dirs)"; : "${SD_DIRS:=50}"
@@ -287,108 +298,76 @@ jobs:
           MONGO_DOCS="$(kv mongo_docs)"; : "${MONGO_DOCS:=200}"
           KAFKA_TP="$(kv kafka_topics)"; : "${KAFKA_TP:=}"
 
-          data_dirs(){
-            svc="$1"; base="service_data/$svc"; mkdir -p "$base"
-            for i in $(seq 1 "$SD_DIRS"); do
-              d=$(printf "%s/%s-%06d" "$base" "$svc" "$i"); mkdir -p "$d"
+          data_dirs(){ svc="$1"; base="service_data/$svc"; mkdir -p "$base"
+            for i in $(seq 1 "$SD_DIRS"); do d=$(printf "%s/%s-%06d" "$base" "$svc" "$i"); mkdir -p "$d"
               for n in $(seq 1 "$SD_FILES"); do truncate -s $((SD_KB*1024)) "$d/file-$(printf '%04d' "$n").bin"; done
             done
           }
           dps(){ docker ps --format '{{.ID}} {{.Image}} {{.Names}}'; }
           find_c(){ dps | awk -vr="$1" '$0 ~ r {print $1; exit}'; }
 
-          do_mysql(){
-            cid="$(find_c "(mysql|mariadb)")" || true
+          do_mysql(){ cid="$(find_c "(mysql|mariadb)")" || true
             [ -z "$cid" ] && { echo "[mysql] no container → skip"; return; }
-            MYSQL_DBS="$(mysql_kv dbs)"; MYSQL_USERPASS="$(mysql_kv user)"
-            sql=""
+            MYSQL_DBS="$(mysql_kv dbs)"; MYSQL_USERPASS="$(mysql_kv user)"; sql=""
             if [ -n "$MYSQL_USERPASS" ]; then u="${MYSQL_USERPASS%%:*}"; p="${MYSQL_USERPASS#*:}"; [ -n "$u" ]&&[ -n "$p" ] && sql+="CREATE USER IF NOT EXISTS '$u'@'%' IDENTIFIED BY '$p'; GRANT ALL PRIVILEGES ON *.* TO '$u'@'%' WITH GRANT OPTION; "; fi
             IFS=',' read -ra DBS <<< "$MYSQL_DBS"
-            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -z "$dbt" ] && continue; sql+="CREATE DATABASE IF NOT EXISTS \`$dbt\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "; done
+            for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && sql+="CREATE DATABASE IF NOT EXISTS \`$dbt\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "; done
             sql+="CREATE DATABASE IF NOT EXISTS \`process\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "
-            echo "[mysql] create DBs/process/user"
             docker exec -i "$cid" sh -lc "mysql -uroot -p\"\$MYSQL_ROOT_PASSWORD\" -e \"$sql\"" || true
             data_dirs mysql
           }
-
-          do_postgres(){
-            cid="$(find_c "postgres")" || true
+          do_postgres(){ cid="$(find_c "postgres")" || true
             [ -z "$cid" ] && { echo "[postgres] no container → skip"; return; }
-            PG_DBS="$(pg_kv dbs)"
-            IFS=',' read -ra DBS <<< "$PG_DBS"
+            PG_DBS="$(pg_kv dbs)"; IFS=',' read -ra DBS <<< "$PG_DBS"
             for db in "${DBS[@]}"; do dbt="$(echo "$db" | xargs)"; [ -n "$dbt" ] && docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" \"$dbt\"" || true; done
             docker exec -i "$cid" sh -lc "createdb -U \"\$POSTGRES_USER\" process" || true
             data_dirs postgres
           }
-
-          do_redis(){
-            cid="$(find_c "redis")" || true
+          do_redis(){ cid="$(find_c "redis")" || true
             [ -z "$cid" ] && { echo "[redis] no container → skip"; return; }
-            echo "[redis] seed ${REDIS_KEYS} keys + process:* space"
             seq 1 "$REDIS_KEYS" | xargs -I{} -P 8 sh -c 'docker exec -i "$0" sh -lc "redis-cli SET seed:{} \$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) >/dev/null"' "$cid" || true
             for i in $(seq 1 200); do docker exec -i "$cid" sh -lc "redis-cli HSET process:job:$i status pending" || true; done
             data_dirs redis
           }
-
-          do_mongo(){
-            cid="$(find_c "mongo")" || true
+          do_mongo(){ cid="$(find_c "mongo")" || true
             [ -z "$cid" ] && { echo "[mongo] no container → skip"; return; }
             MONGO_DEF="${MONGO_DEF:-app:users}"
             IFS=',' read -ra DCS <<< "$MONGO_DEF"
-            for pair in "${DCS[@]}"; do
-              pair="$(echo "$pair" | xargs)"; [ -z "$pair" ] && continue
-              db="${pair%%:*}"; cols="${pair#*:}"
-              IFS=';' read -ra COLS <<< "$(echo "$cols" | tr ',' ';')"
-              for col in "${COLS[@]}"; do
-                col="$(echo "$col" | xargs)"; [ -z "$col" ] && continue
+            for pair in "${DCS[@]}"; do pair="$(echo "$pair" | xargs)"; [ -z "$pair" ] && continue
+              db="${pair%%:*}"; cols="${pair#*:}"; IFS=';' read -ra COLS <<< "$(echo "$cols" | tr ',' ';')"
+              for col in "${COLS[@]}"; do col="$(echo "$col" | xargs)"; [ -z "$col" ] && continue
                 docker exec -i "$cid" mongosh --quiet "$db" --eval "db.createCollection('$col'); docs=[]; for (let i=0;i<${MONGO_DOCS};i++){docs.push({i,ts:new Date(),payload:Math.random().toString(36).slice(2)})}; db.getCollection('$col').insertMany(docs,{ordered:false});" || true
               done
             done
             docker exec -i "$cid" mongosh --quiet process --eval "db.createCollection('jobs'); db.jobs.insertMany(Array.from({length:200}, (_,i)=>({i,ts:new Date(),status:'pending'})),{ordered:false});" || true
             data_dirs mongo
           }
-
-          do_kafka(){
-            cid="$(find_c "kafka")" || true
+          do_kafka(){ cid="$(find_c "kafka")" || true
             [ -z "$cid" ] && { echo "[kafka] no container → skip"; return; }
-            [ -n "$KAFKA_TP" ] && IFS=',' read -ra TPS <<< "$KAFKA_TP" || TPS=()
-            TPS+=("process.jobs:3:1")
-            for t in "${TPS[@]}"; do
-              t="$(echo "$t" | xargs)"; [ -z "$t" ] && continue
+            [ -n "$KAFKA_TP" ] && IFS=',' read -ra TPS <<< "$KAFKA_TP" || TPS=(); TPS+=("process.jobs:3:1")
+            for t in "${TPS[@]}"; do t="$(echo "$t" | xargs)"; [ -z "$t" ] && continue
               name="${t%%:*}"; rest="${t#*:}"; parts="${rest%%:*}"; repl="${rest#*:}"
               docker exec -i "$cid" bash -lc "kafka-topics.sh --create --if-not-exists --topic \"$name\" --bootstrap-server localhost:9092 --partitions ${parts:-3} --replication-factor ${repl:-1}" || true
-            done
-            data_dirs kafka
+            done; data_dirs kafka
           }
-
-          do_rabbit(){
-            cid="$(find_c "rabbit")" || cid="$(find_c "rabbitmq")" || true
+          do_rabbit(){ cid="$(find_c "rabbit")" || cid="$(find_c "rabbitmq")" || true
             [ -z "$cid" ] && { echo "[rabbitmq] no container → skip"; return; }
             docker exec -i "$cid" rabbitmqctl add_vhost /process || true
             docker exec -i "$cid" rabbitmqctl set_permissions -p /process guest ".*" ".*" ".*" || true
             docker exec -i "$cid" rabbitmqadmin declare queue name="process.queue" durable=true || true
             data_dirs rabbitmq
           }
-
-          do_minio(){
-            cid="$(find_c "minio")" || true
+          do_minio(){ cid="$(find_c "minio")" || true
             [ -z "$cid" ] && { echo "[minio] no container → skip"; return; }
             docker run --rm --network host -e MC_HOST_minio="http://minioadmin:minioadmin@127.0.0.1:9000" minio/mc mb -p minio/process || true
             data_dirs minio
           }
-
-          upgrade_one(){
-            svc="$1"; img=""
+          upgrade_one(){ svc="$1"; img=""
             case "$svc" in
-              mysql) img="mysql:8" ;;
-              postgres) img="postgres:16" ;;
-              redis) img="redis:7" ;;
-              mongo) img="mongo:7" ;;
-              kafka) img="bitnami/kafka:latest" ;;
-              rabbitmq) img="rabbitmq:3-management" ;;
-              minio) img="minio/minio:latest" ;;
-              airflow) img="apache/airflow:latest" ;;
-              spark) img="bitnami/spark:latest" ;;
+              mysql) img="mysql:8" ;; postgres) img="postgres:16" ;; redis) img="redis:7" ;;
+              mongo) img="mongo:7" ;; kafka) img="bitnami/kafka:latest" ;;
+              rabbitmq) img="rabbitmq:3-management" ;; minio) img="minio/minio:latest" ;;
+              airflow) img="apache/airflow:latest" ;; spark) img="bitnami/spark:latest" ;;
               camunda) img="camunda/camunda-bpm-platform:latest" ;;
             esac
             if command -v docker >/dev/null 2>&1; then
@@ -402,33 +381,22 @@ jobs:
               fi
             fi
           }
-
           IFS=',' read -r -a SRVS <<< "$(printf '%s' "$SERVICES" | tr '[:upper:]' '[:lower:]')"
-          pids=()
-          for s in "${SRVS[@]}"; do
-            svc="$(echo "$s" | xargs)"
-            [ -z "$svc" ] && continue
-            (
-              upgrade_one "$svc"
+          pids=(); for s in "${SRVS[@]}"; do svc="$(echo "$s" | xargs)"; [ -z "$svc" ] && continue
+            ( upgrade_one "$svc"
               case "$svc" in
-                mysql) do_mysql ;;
-                postgres) do_postgres ;;
-                redis) do_redis ;;
-                mongo) do_mongo ;;
-                kafka) do_kafka ;;
-                rabbitmq) do_rabbit ;;
-                minio) do_minio ;;
-                airflow|spark|camunda) data_dirs "$svc" ;;
+                mysql) do_mysql ;; postgres) do_postgres ;; redis) do_redis ;;
+                mongo) do_mongo ;; kafka) do_kafka ;; rabbitmq) do_rabbit ;;
+                minio) do_minio ;; airflow|spark|camunda) data_dirs "$svc" ;;
                 *) data_dirs "$svc" ;;
               esac
             ) & pids+=($!)
-          done
-          for p in "${pids[@]}"; do wait "$p" || true; done
+          done; for p in "${pids[@]}"; do wait "$p" || true; done
           echo "[init/seed/upgrade] done"
           SH
           chmod +x .github/echo_init/init_seed_upgrade.sh
 
-      - name: 🚀 Run services init/seed/upgrade (parallel)
+      - name: 🚀 Run services init/seed/upgrade
         shell: bash
         env:
           SERVICE_SPEC: ${{ inputs.service_spec }}
@@ -436,8 +404,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           .github/echo_init/init_seed_upgrade.sh
-          echo "### Services init/seed/upgrade (parallel) 완료" >> "$GITHUB_STEP_SUMMARY"
-          echo "- spec: ${SERVICE_SPEC}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Services init/seed/upgrade 완료" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 📦 Upload service seed artifacts
         uses: actions/upload-artifact@v4
@@ -449,7 +416,169 @@ jobs:
           retention-days: 7
 
   #######################################################################
-  # 3) Transfer Log Backup — 60건 + Provenance (after disk)
+  # 3) MASS — 권한 파일/ACL/소유권 + 컨테이너 대량 생성(충돌 방지)
+  #######################################################################
+  mass_perms_and_containers:
+    name: "📚 MASS 권한/ACL + 🐳 컨테이너 대량 생성"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [diskdirs]
+    env:
+      BASE_PERM_DIR: .github/mass_gen
+      PERM_SPEC: "roles=admin,ops,dev; dirs=200; files=20; size_kb=8"
+      # 컨테이너 대량 생성 정책
+      MAX_PER_SERVICE: "1"        # 러너 보호(필요시 2~3으로)
+      CONFLICT_POLICY: "replace"  # replace | skip
+      NET_NAME: "mega_net"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🧰 Packages for ACL & utils
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends acl coreutils
+
+      - name: 🗂️ 대량 디렉토리/파일 + 권한/소유권/ACL 생성
+        shell: bash
+        env:
+          MNT: ${{ inputs.mount_point }}
+        run: |
+          set -Eeuo pipefail
+          TS="$(date +%Y%m%d_%H%M%S)"
+          RID="${{ github.run_id }}"
+          BASE="${BASE_PERM_DIR}/mass_${RID}_${TS}"
+          mkdir -p "$BASE"/{roles,perm,summary}
+          echo "[ECHO] BASE=$BASE"
+
+          # spec 파싱
+          SPEC="${PERM_SPEC}"
+          kv(){ printf '%s' "$SPEC" | tr ',; ' '\n\n\n' | awk -F= -vk="$1" '$1==k{print $2}' | tail -n1; }
+          ROLES="$(kv roles)"; : "${ROLES:=admin,ops,dev}"
+          NDIRS="$(kv dirs)"; : "${NDIRS:=200}"
+          NFILES="$(kv files)"; : "${NFILES:=20}"
+          KB="$(kv size_kb)"; : "${KB:=8}"
+
+          IFS=',' read -ra RS <<< "$ROLES"
+          for role in "${RS[@]}"; do
+            role="$(echo "$role" | xargs)"; [ -z "$role" ] && continue
+            RDIR="$BASE/roles/$role"
+            mkdir -p "$RDIR"
+            for i in $(seq 1 "$NDIRS"); do
+              D="$RDIR/$(printf '%s-%06d' "$role" "$i")"; mkdir -p "$D"
+              for n in $(seq 1 "$NFILES"); do truncate -s $((KB*1024)) "$D/file-$(printf '%04d' "$n").bin"; done
+            done
+          done
+
+          # 권한/소유권 템플릿 파일 생성
+          cat > "$BASE/perm/permissions.csv" <<EOF
+          path,mode,owner,group,acl
+          roles/admin,750,runner,runner,user:runner:rwx,default:user::rwx,default:group::r-x,default:other::---
+          roles/ops,750,runner,runner,user:runner:rwx
+          roles/dev,755,runner,runner,
+          EOF
+
+          # 적용(에러 무시, 요약 수집)
+          touch "$BASE/summary/apply.log"
+          while IFS=, read -r path mode owner group acl; do
+            [[ "$path" == "path" ]] && continue
+            T="$BASE/$path"
+            [ -d "$T" ] || continue
+            chmod "$mode" "$T" || true
+            sudo chown -R "$owner:$group" "$T" || true
+            if command -v setfacl >/dev/null 2>&1 && [[ -n "$acl" ]]; then
+              IFS=';' read -ra ACE <<< "$(echo "$acl" | tr ' ' ';')"
+              for a in "${ACE[@]}"; do
+                setfacl -m "$a" "$T" || true
+              done
+            fi
+            echo "[APPLIED] $T mode=$mode owner=$owner:$group acl=${acl:-none}" >> "$BASE/summary/apply.log"
+          done < "$BASE/perm/permissions.csv"
+
+          # 마운트 지점에도 샘플 권한 트리 투영
+          M="${MNT:-/mnt/gh-disk}"
+          if mount | grep -q " on ${M} "; then
+            sudo mkdir -p "${M}/perm_seed"
+            sudo rsync -a "$BASE/roles/" "${M}/perm_seed/" || true
+            echo "[ECHO] mirrored roles -> ${M}/perm_seed" >> "$BASE/summary/apply.log"
+          fi
+
+      - name: 🐳 컨테이너 대량 생성(충돌 방지·상한)
+        shell: bash
+        env:
+          RID: ${{ github.run_id }}
+          TS: ${{ github.run_number }}
+        run: |
+          set -Eeuo pipefail
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "[WARN] Docker not available on runner"; exit 0
+          fi
+
+          # 네트워크 존재 시 재사용
+          docker network inspect "${NET_NAME}" >/dev/null 2>&1 || docker network create "${NET_NAME}" || true
+
+          # 이미지 목록 (경량 우선)
+          imgs=(
+            "mysql:8"
+            "postgres:16"
+            "redis:7"
+            "mongo:7"
+            "bitnami/kafka:latest"
+            "rabbitmq:3-management"
+            "minio/minio:latest"
+            "nginx:stable-alpine"
+            "busybox:latest"
+          )
+          for i in "${imgs[@]}"; do docker pull "$i" || true; done
+
+          # 유틸 함수: 컨테이너 만들기(중복시 정책 적용)
+          mkc(){ # name image extra-args...
+            local name="$1"; shift
+            local image="$1"; shift
+            if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+              case "${CONFLICT_POLICY}" in
+                replace) docker rm -f "$name" >/dev/null 2>&1 || true ;;
+                skip)    echo "[SKIP] exists: $name"; return 0 ;;
+              esac
+            fi
+            docker run -d --name "$name" --network "${NET_NAME}" "$image" "$@" >/dev/null 2>&1 || echo "[WARN] run failed: $name ($image)"
+          }
+
+          # 서비스별 최대 상한
+          MAX="${MAX_PER_SERVICE:-1}"
+          # 실제 생성(리소스 보호: 서비스당 최대 MAX)
+          for svc in mysql postgres redis mongo rabbitmq minio; do
+            for n in $(seq 1 "$MAX"); do
+              case "$svc" in
+                mysql)    mkc "mysql_${RID}_${n}"    "mysql:8"                   "--health-cmd=mysqladmin ping -h 127.0.0.1 || exit 1" ;;
+                postgres) mkc "postgres_${RID}_${n}" "postgres:16"               ;;
+                redis)    mkc "redis_${RID}_${n}"    "redis:7"                   ;;
+                mongo)    mkc "mongo_${RID}_${n}"    "mongo:7"                   ;;
+                rabbitmq) mkc "rabbit_${RID}_${n}"   "rabbitmq:3-management"     ;;
+                minio)    mkc "minio_${RID}_${n}"    "minio/minio:latest" "server" "/data" ;;
+              esac
+            done
+          done
+
+          # 경량 Nginx/Busybox로 "대량"의 의미 충족(러너 보호: 5개)
+          for n in $(seq 1 5); do
+            mkc "nginx_${RID}_${n}" "nginx:stable-alpine"
+            mkc "bb_${RID}_${n}"    "busybox:latest" "sleep" "3600"
+          done
+
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' > .github/mass_gen/containers_${RID}.txt || true
+
+      - name: 📦 Upload MASS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mass-gen-${{ github.run_id }}
+          path: |
+            .github/mass_gen/**
+          retention-days: 7
+
+  #######################################################################
+  # 4) Transfer Log Backup — 60건 + Provenance
   #######################################################################
   transfer_log_backup:
     name: "🧾 Transfer Log Backup + Provenance"
@@ -462,7 +591,7 @@ jobs:
       PROVENANCE_DIR: provenance
       PROVENANCE_STORE_DIR: provenance/store
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: 📁 Prepare directories
         shell: bash
