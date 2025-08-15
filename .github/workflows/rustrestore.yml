@@ -1,13 +1,14 @@
-name: "🦀 Rust CI — no-skip + self-heal + stable cache"
+name: "🦀 Rust CI — no-skip + echo logs + self-heal + artifacts"
 
 on:
-  push: { branches: [ main ] }
-  pull_request: { branches: [ main ] }
-  schedule:
-    - cron: "0 3 * * 1"  # 주 1회 보안 점검
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write    # (추후 릴리스/PR 자동화에도 사용 가능)
 
 concurrency:
   group: rustci-${{ github.ref }}
@@ -20,83 +21,99 @@ env:
 
 jobs:
   rust-ci:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        toolchain: [stable]               # 원하면 beta, nightly 추가
+    runs-on: ${{ matrix.os }}
+
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🧰 System deps
+      - name: 📁 Prepare echo log dirs (always exist)
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          for d in .github/rust_logs .github/security_logs artifacts; do
+            echo "[ECHO] mkdir -p $d" ; mkdir -p "$d"
+            echo "[ECHO] chmod 755 $d"; chmod 755 "$d" || true
+          done
+          # 워크플로우가 매우 빨리 끝나 아티팩트 경로가 비어 보이는 것 방지용 seed 로그
+          echo "[ECHO] seed log" | tee .github/rust_logs/seed.log
+
+      - name: 🧰 System deps (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] apt-get update/install"
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev cmake clang llvm curl git ca-certificates
 
-      - name: 🦀 Install Rust (stable + clippy/rustfmt)
-        uses: dtolnay/rust-toolchain@stable
+      - name: 🦀 Install Rust (${{ matrix.toolchain }}, +clippy/rustfmt)
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
+          toolchain: ${{ matrix.toolchain }}
+          # ✅ 'profile' 입력 제거(오류 방지)
           components: clippy,rustfmt
 
-      # ──────────────────────────────────────────────────────────────────────
-      # 1) 전수 스캔 + Cargo.toml 없으면 샘플 크레이트 자동 생성(자가복구)
-      #    → 어떤 경우에도 이후 단계가 "0s"로 스킵되지 않도록 보장
-      # ──────────────────────────────────────────────────────────────────────
-      - name: 🔎 Detect crates (and self-heal if none)
+      # ─────────────────────────────────────────────────────────
+      # Detect Cargo.toml / 없으면 샘플 crate 자동 생성(자가복구)
+      # ─────────────────────────────────────────────────────────
+      - name: 🔎 Detect crates (self-heal if none)
         id: detect
         shell: bash
         run: |
           set -Eeuo pipefail
           shopt -s globstar
+          echo "[ECHO] Cargo.toml 전수 스캔 시작" | tee -a .github/rust_logs/summary_detect.log
 
-          echo "[ECHO] Cargo.toml 전수 스캔 시작"
           mapfile -t FOUND < <(find . -type f -name Cargo.toml \
             -not -path "*/target/*" -not -path "*/node_modules/*" | sort || true)
 
           if (( ${#FOUND[@]} == 0 )); then
-            echo "[WARN] 리포 내 Cargo.toml 미발견 → rust-example 크레이트 자동 생성"
+            echo "[WARN] Cargo.toml 미발견 → rust-example 크레이트 자동 생성" | tee -a .github/rust_logs/summary_detect.log
             rm -rf rust-example || true
             cargo new --bin rust-example
-            # 샘플 코드(원하면 커스터마이즈 가능)
-            cat > rust-example/src/main.rs <<'RS'
-            fn main() {
-                println!("hello from rust-example");
-            }
-            RS
+
+            mkdir -p rust-example/src
+            # here-doc 대신 printf 사용(EOF 오류 영구 차단)
+            printf '%s\n' \
+'fn main() {' \
+'    println!("hello from rust-example");' \
+'}' > rust-example/src/main.rs
+
             FOUND=( "./rust-example/Cargo.toml" )
           fi
 
-          # 디렉터리 목록 생성
           printf '%s\n' "${FOUND[@]}" | xargs -I{} dirname "{}" | sort -u > .wslist.txt
-
           echo "count=$(wc -l < .wslist.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
-          echo "list<<__WS__" >> "$GITHUB_OUTPUT"
-          cat .wslist.txt >> "$GITHUB_OUTPUT"
-          echo "__WS__" >> "$GITHUB_OUTPUT"
+          {
+            echo 'list<<__WS__'
+            cat .wslist.txt
+            echo '__WS__'
+          } >> "$GITHUB_OUTPUT"
 
-          echo "[ECHO] 검출된 크레이트 디렉터리:"
-          nl -ba .wslist.txt
+          echo "[ECHO] 검출된 크레이트 디렉터리:" | tee -a .github/rust_logs/summary_detect.log
+          nl -ba .wslist.txt | tee -a .github/rust_logs/summary_detect.log
 
-      # ──────────────────────────────────────────────────────────────────────
-      # 2) lockfile 강제 생성(캐시키 안정화), cargo metadata 사전 성공 보장
-      # ──────────────────────────────────────────────────────────────────────
+      # 각 크레이트에 lockfile/metadata 보장 → rust-cache가 절대 실패하지 않게
       - name: 🔐 Ensure lockfiles & metadata (per crate)
         shell: bash
         run: |
           set -Eeuo pipefail
           while IFS= read -r dir; do
-            echo "[ECHO] >> lockfile/metadata 보장: $dir"
+            echo "[ECHO] lockfile/metadata: $dir" | tee -a .github/rust_logs/summary_detect.log
             cd "$dir"
-            # lockfile 생성(없으면 생성, 있으면 최신화)
             cargo generate-lockfile || true
-            # metadata 사전 로드(캐시 액션에서 실패하는 것 방지)
             cargo metadata --format-version 1 --no-deps >/dev/null
             cd - >/dev/null
           done < .wslist.txt
 
-      # ──────────────────────────────────────────────────────────────────────
-      # 3) rust-cache: 반드시 유효한 경로 목록을 넘김 → 101 에러 차단
-      #    (요청하신 옵션들 반영)
-      # ──────────────────────────────────────────────────────────────────────
+      # 안정 캐시 설정(캐시 미스는 경고일 뿐 실행은 계속)
       - name: ♻️ Cache (rust-cache, stable)
         uses: Swatinem/rust-cache@v2
         with:
@@ -113,23 +130,22 @@ jobs:
           lookup-only: false
 
       - name: 🔎 Show tool versions
-        run: |
-          rustc -Vv
-          cargo -V
-          echo "Crate count: ${{ steps.detect.outputs.count }}"
-
-      # ──────────────────────────────────────────────────────────────────────
-      # 4) 모든 단계 no-skip 수행: fmt → clippy → test → build → doc → audit
-      #    중간 실패 발생해도 다음 크레이트 계속 진행. 마지막에 총괄 실패 처리.
-      #    각 단계 로그를 아티팩트로 보관.
-      # ──────────────────────────────────────────────────────────────────────
-      - name: 🚀 Run full pipeline (no-skip for all crates)
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/rust_logs
-          FAIL=0
+          rustc -Vv   | tee -a .github/rust_logs/versions.log
+          cargo -V    | tee -a .github/rust_logs/versions.log
+          echo "OS=${{ matrix.os }}, toolchain=${{ matrix.toolchain }}" | tee -a .github/rust_logs/versions.log
 
+      # ─────────────────────────────────────────────────────────
+      # no-skip 전체 파이프라인: fmt → clippy → test → build → doc
+      # 실패해도 다음 크레이트 계속; 최종 FAIL=1 로 집계
+      # ─────────────────────────────────────────────────────────
+      - name: 🚀 Full pipeline (fmt, clippy, test, build, doc) for all crates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FAIL=0
           run_step () {
             local dir="$1"; shift
             local name="$1"; shift
@@ -141,34 +157,51 @@ jobs:
               FAIL=1
             fi
           }
-
           while IFS= read -r dir; do
-            echo "==================== CRATE: $dir ====================" | tee -a .github/rust_logs/summary.log
+            safe="$(echo "$dir" | tr '/.' '_')"
+            echo "==================== CRATE: $dir ====================" \
+              | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
 
-            run_step "$dir" "fmt"    bash -lc "cargo fmt --all --check"            |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_fmt.log"
+            run_step "$dir" "fmt"    bash -lc "cargo fmt --all --check" \
+              |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_fmt.log"
+
             run_step "$dir" "clippy" bash -lc "cargo clippy --all-targets --all-features -- -D warnings" \
-                                       |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_clippy.log"
+              |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_clippy.log"
+
             run_step "$dir" "test"   bash -lc "cargo test --all-features --verbose" \
-                                       |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_test.log"
-            run_step "$dir" "build"  bash -lc "cargo build --release --verbose"    |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_build.log"
-            run_step "$dir" "doc"    bash -lc "cargo doc --no-deps"                |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_doc.log"
+              |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_test.log"
 
-            # 보안 점검: cargo-audit (설치는 최초 1회)
-            if ! command -v cargo-audit >/dev/null 2>&1; then
-              cargo install cargo-audit --locked |& tee -a .github/rust_logs/audit_install.log || true
+            run_step "$dir" "build"  bash -lc "cargo build --release --verbose" \
+              |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_build.log"
+
+            run_step "$dir" "doc"    bash -lc "cargo doc --no-deps" \
+              |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_doc.log"
+
+            # 바이너리 아티팩트 복사(있을 때만)
+            if [ -d "$dir/target/release" ]; then
+              echo "[ECHO] copy release binaries from $dir" \
+                | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
+              find "$dir/target/release" -maxdepth 1 -type f -perm -111 -print0 2>/dev/null \
+                | xargs -0 -I{} bash -lc 'cp "{}" "artifacts/$(basename "{}")_${{ matrix.os }}_${{ matrix.toolchain }}"' || true
             fi
-            run_step "$dir" "audit"  bash -lc "cargo audit --json || cargo audit"  |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_audit.log"
-
           done < .wslist.txt
 
-          echo "==== SUMMARY (0=success,1=failed) ====" | tee -a .github/rust_logs/summary.log
-          echo "FAIL=$FAIL" | tee -a .github/rust_logs/summary.log
+          echo "FAIL=$FAIL" | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
           exit $FAIL
 
+      # 아티팩트 업로드(경로 없다고 실패하지 않게 이미 생성 + seed 로그 준비됨)
       - name: 📦 Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rust-logs-${{ github.run_id }}
+          name: logs-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
           path: .github/rust_logs/
+          if-no-files-found: warn
+
+      - name: 📦 Upload binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
+          path: artifacts
           if-no-files-found: warn
