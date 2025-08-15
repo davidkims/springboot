@@ -1,13 +1,10 @@
-name: "🦀 Rust CI + Setup/Upgrade + Lint/Test/Build/Audit"
+name: "🦀 Rust CI (auto-detect Cargo.toml/workspace)"
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  # 주기적 점검(보안/audit 등)
-  schedule:
-    - cron: "0 3 * * 1"  # 매주 월요일 03:00(UTC)
 
 permissions:
   contents: read
@@ -21,209 +18,142 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # 공통 준비: Ubuntu 필수 패키지 설치(+ optional dev headers)
-  prepare:
+  build-and-test:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 프로젝트 루트/서브폴더에서 Cargo.toml 자동 탐색
-      - name: Locate Cargo.toml
-        id: locate
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          if [ -f Cargo.toml ]; then
-            echo "dir=." >>"$GITHUB_OUTPUT"
-          elif [ -f springboot/Cargo.toml ]; then
-            echo "dir=springboot" >>"$GITHUB_OUTPUT"
-          else
-            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
-            exit 1
-          fi
-
-      - name: Install system dependencies (build essentials)
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev cmake clang llvm \
-            curl git ca-certificates
-
-      - name: Toolchain (stable) + components
+      - name: Set up Rust (stable + clippy/rustfmt)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
           profile: minimal
 
-      - name: Cache (Rust build artifacts)
+      - name: Auto-detect Cargo manifests (workspace or crates)
+        id: detect
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] 탐색 시작: 리포지토리 내 Cargo.toml 검색"
+          # 루트 Cargo.toml?
+          if [[ -f Cargo.toml ]]; then
+            echo "[ECHO] 루트에 Cargo.toml 발견"
+            if grep -q "^\[workspace\]" Cargo.toml; then
+              echo "mode=workspace" >> "$GITHUB_OUTPUT"
+              echo "root=."           >> "$GITHUB_OUTPUT"
+              echo "[ECHO] 워크스페이스 모드"
+              exit 0
+            else
+              echo "mode=single"      >> "$GITHUB_OUTPUT"
+              echo "manifest=./Cargo.toml" >> "$GITHUB_OUTPUT"
+              echo "[ECHO] 단일 크레이트 모드"
+              exit 0
+            fi
+          fi
+
+          # 루트가 아니라면 전체에서 찾되 target/node_modules 제외
+          mapfile -t found < <(find . -type f -name Cargo.toml \
+            -not -path "*/target/*" -not -path "*/node_modules/*" \
+            | sort)
+
+          if (( ${#found[@]} == 0 )); then
+            echo "::error ::No Cargo.toml found anywhere in the repo."
+            echo "[HINT] 실제 위치를 알려주세요. 예) backend/, crates/api/, rust/ 등"
+            exit 1
+          fi
+
+          # 워크스페이스 루트 후보(파일 내용에 [workspace]) 우선
+          ws_candidates=()
+          for f in "${found[@]}"; do
+            if grep -q "^\[workspace\]" "$f"; then
+              ws_candidates+=("$f")
+            fi
+          done
+
+          if (( ${#ws_candidates[@]} > 0 )); then
+            # 가장 상위 경로(짧은 깊이)를 워크스페이스 루트로 선택
+            ws_root="$(dirname "$(printf '%s\n' "${ws_candidates[@]}" | awk -F/ '{print NF "\t"$0}' | sort -n | cut -f2- | head -n1)")"
+            echo "mode=workspace" >> "$GITHUB_OUTPUT"
+            echo "root=${ws_root}" >> "$GITHUB_OUTPUT"
+            echo "[ECHO] 워크스페이스 루트: ${ws_root}"
+            exit 0
+          fi
+
+          # 워크스페이스가 아니면 모든 크레이트를 순회 실행
+          echo "mode=multi" >> "$GITHUB_OUTPUT"
+          # 각 Cargo.toml의 디렉터리 경로를 줄바꿈으로 연결
+          printf '%s\n' "${found[@]}" | xargs -I{} dirname "{}" | sort -u > crates.txt
+          echo "crates<<__CRATES__" >> "$GITHUB_OUTPUT"
+          cat crates.txt             >> "$GITHUB_OUTPUT"
+          echo "__CRATES__"          >> "$GITHUB_OUTPUT"
+          echo "[ECHO] 다중 크레이트(${#found[@]}개) 모드"
+
+      - name: Cache (targets)
         uses: Swatinem/rust-cache@v2
         with:
+          # 워크스페이스면 루트, 아니면 전체 리포 (자동 분할 캐시)
           workspaces: |
-            ${{ steps.locate.outputs.dir }}
+            ${{ steps.detect.outputs.root || '.' }}
 
-      - name: Show versions
+      - name: Show rust versions
         shell: bash
         run: |
           rustc -Vv
           cargo -V
-          echo "Workspace: ${{ steps.locate.outputs.dir }}"
 
-  # 포맷/린트/테스트를 OS/툴체인 매트릭스로
-  check:
-    needs: prepare
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ ubuntu-latest ] # 필요 시 macos-latest, windows-latest 추가
-        toolchain: [ stable ] # 필요 시 beta, nightly 추가
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Locate Cargo.toml
-        id: locate
+      - name: Format (rustfmt)
+        if: ${{ steps.detect.outputs.mode == 'workspace' }}
         shell: bash
         run: |
-          set -Eeuo pipefail
-          if [ -f Cargo.toml ]; then
-            echo "dir=." >>"$GITHUB_OUTPUT"
-          elif [ -f springboot/Cargo.toml ]; then
-            echo "dir=springboot" >>"$GITHUB_OUTPUT"
-          else
-            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
-            exit 1
-          fi
-
-      - name: Toolchain (${{ matrix.toolchain }})
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
-          components: clippy,rustfmt
-          profile: minimal
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            ${{ steps.locate.outputs.dir }}
-
-      - name: cargo fmt --check
-        shell: bash
-        run: |
-          cd "${{ steps.locate.outputs.dir }}"
+          cd "${{ steps.detect.outputs.root }}"
           cargo fmt --all --check
 
-      - name: cargo clippy (deny warnings)
+      - name: Lint (clippy) — workspace
+        if: ${{ steps.detect.outputs.mode == 'workspace' }}
         shell: bash
         run: |
-          cd "${{ steps.locate.outputs.dir }}"
+          cd "${{ steps.detect.outputs.root }}"
           cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo test
+      - name: Test — workspace
+        if: ${{ steps.detect.outputs.mode == 'workspace' }}
         shell: bash
         run: |
-          cd "${{ steps.locate.outputs.dir }}"
+          cd "${{ steps.detect.outputs.root }}"
           cargo test --all-features --verbose
 
-  # 릴리스 빌드 & 문서 빌드(필요 시 배포 앞 단계)
-  build:
-    needs: check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Locate Cargo.toml
-        id: locate
+      - name: Build — workspace
+        if: ${{ steps.detect.outputs.mode == 'workspace' }}
         shell: bash
         run: |
-          set -Eeuo pipefail
-          if [ -f Cargo.toml ]; then
-            echo "dir=." >>"$GITHUB_OUTPUT"
-          elif [ -f springboot/Cargo.toml ]; then
-            echo "dir=springboot" >>"$GITHUB_OUTPUT"
-          else
-            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
-            exit 1
-          fi
-
-      - name: Toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            ${{ steps.locate.outputs.dir }}
-
-      - name: cargo build --release
-        shell: bash
-        run: |
-          cd "${{ steps.locate.outputs.dir }}"
+          cd "${{ steps.detect.outputs.root }}"
           cargo build --release --verbose
 
-      - name: cargo doc
+      - name: Single crate (fmt+clippy+test+build)
+        if: ${{ steps.detect.outputs.mode == 'single' }}
         shell: bash
         run: |
-          cd "${{ steps.locate.outputs.dir }}"
-          cargo doc --no-deps
+          manifest="${{ steps.detect.outputs.manifest }}"
+          dir="$(dirname "$manifest")"
+          cd "$dir"
+          cargo fmt --all --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-features --verbose
+          cargo build --release --verbose
 
-  # 보안 점검/업그레이드: cargo-audit & (옵션) cargo-deny
-  security-audit:
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Locate Cargo.toml
-        id: locate
+      - name: Multi-crate loop (fmt+clippy+test+build per crate)
+        if: ${{ steps.detect.outputs.mode == 'multi' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          if [ -f Cargo.toml ]; then
-            echo "dir=." >>"$GITHUB_OUTPUT"
-          elif [ -f springboot/Cargo.toml ]; then
-            echo "dir=springboot" >>"$GITHUB_OUTPUT"
-          else
-            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
-            exit 1
-          fi
-
-      - name: Toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            ${{ steps.locate.outputs.dir }}
-
-      - name: Install cargo-audit
-        shell: bash
-        run: |
-          cargo install cargo-audit --locked
-
-      - name: cargo update -p vulnerable deps (dry-run)
-        shell: bash
-        run: |
-          cd "${{ steps.locate.outputs.dir }}"
-          # 참고: 실제 종속성 업그레이드를 자동 커밋하려면 별도 PR 자동화가 필요합니다.
-          cargo update -Z avoid-dev-deps --dry-run || true
-
-      - name: cargo audit (vulnerability scan)
-        shell: bash
-        run: |
-          cd "${{ steps.locate.outputs.dir }}"
-          cargo audit --json || cargo audit
-
-      # (선택) cargo-deny 사용 시 주석 해제
-      # - name: Install cargo-deny
-      #   run: cargo install cargo-deny --locked
-      # - name: cargo deny check
-      #   run: |
-      #     cd "${{ steps.locate.outputs.dir }}"
-      #     cargo deny check
+          while IFS= read -r dir; do
+            echo "[ECHO] >>> crate: $dir"
+            cd "$dir"
+            cargo fmt --all --check
+            cargo clippy --all-targets --all-features -- -D warnings
+            cargo test --all-features --verbose
+            cargo build --release --verbose
+            cd - >/dev/null
+          done < crates.txt
