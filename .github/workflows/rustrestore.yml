@@ -1,14 +1,32 @@
-name: "🦀 Rust CI — no-skip, POSIX-safe, echo logs, self-heal, artifacts"
+name: "🦀 Rust CI — no-skip (Linux-first detect), POSIX-safe, echo logs, self-heal, artifacts, releases, deps-PR, audit/deny, MSRV"
 
 on:
   push:
     branches: [ main ]
+    tags:
+      - "v*"
   pull_request:
     branches: [ main ]
+  schedule:
+    - cron: "0 3 * * 1"   # 매주 월요일 03:00 UTC: deps PR & 보안 점검
   workflow_dispatch:
+    inputs:
+      make_release:
+        description: "지금 릴리스 생성 (true/false)"
+        required: false
+        default: "false"
+      tag_name:
+        description: "릴리스 태그명(예: v1.2.3)"
+        required: false
+        default: ""
+      msrv_list:
+        description: "MSRV 목록(공백 구분, 예: '1.70.0 1.74.0')"
+        required: false
+        default: "1.70.0"
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: rustci-${{ github.ref }}
@@ -19,20 +37,17 @@ env:
   RUSTFLAGS: "-D warnings"
   CARGO_INCREMENTAL: "0"
 
+# ──────────────────────── 1) Detect (Ubuntu 단일 실행) ────────────────────────
 jobs:
-  rust-ci:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14, windows-2022]
-        toolchain: [stable]
-    runs-on: ${{ matrix.os }}
-
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      list:  ${{ steps.detect.outputs.list }}
+      count: ${{ steps.detect.outputs.count }}
     steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 📁 Prepare echo log dirs (always exist)
+      - name: Prepare echo/log/artifacts dirs
         shell: bash
         run: |
           set -euo pipefail
@@ -43,24 +58,13 @@ jobs:
           echo "[ECHO] seed log" | tee .github/rust_logs/seed.log
           echo "placeholder" > artifacts/.keep
 
-      - name: 🧰 System deps (Linux only)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ECHO] apt-get update/install"
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev cmake clang llvm curl git ca-certificates tar
-
-      - name: 🦀 Install Rust (${{ matrix.toolchain }} + clippy/rustfmt)
+      - name: Install Rust (stable + clippy/rustfmt)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
           components: clippy,rustfmt
 
-      # Detect Cargo.toml / 없으면 샘플 crate 자동 생성(자가복구)
-      - name: 🔎 Detect crates (self-heal if none) — POSIX-safe
+      - name: Detect crates (self-heal if none) — POSIX-safe
         id: detect
         shell: bash
         run: |
@@ -98,7 +102,7 @@ jobs:
           echo "[ECHO] detected crates:" | tee -a .github/rust_logs/summary_detect.log
           awk '{printf("%4d  %s\n", NR, $0)}' .wslist.txt | tee -a .github/rust_logs/summary_detect.log
 
-      - name: 🔐 Ensure lockfiles & metadata (per crate)
+      - name: Ensure lockfiles & metadata (per crate)
         shell: bash
         run: |
           set -euo pipefail
@@ -111,15 +115,56 @@ jobs:
             cd - >/dev/null
           done < .wslist.txt
 
-      - name: 🔎 Show tool versions
+      - name: Upload wslist + detect logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: wslist-and-detect-logs-${{ github.run_id }}
+          path: |
+            .wslist.txt
+            .github/rust_logs/
+            artifacts
+          if-no-files-found: error
+
+# ──────────────────────── 2) Build & Test (매트릭스: Linux/Mac/Windows) ────────────────────────
+  build-and-test:
+    needs: detect
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-2022]   # 고정 라벨(경고 제거)
+        toolchain: [stable]                           # 필요 시 beta/nightly 추가
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wslist from detect
+        uses: actions/download-artifact@v4
+        with:
+          name: wslist-and-detect-logs-${{ github.run_id }}
+          path: .ci_in
+      - name: Put wslist in workspace root
         shell: bash
         run: |
           set -euo pipefail
-          rustc -Vv  2>&1 | tee -a .github/rust_logs/versions.log
-          cargo -V   2>&1 | tee -a .github/rust_logs/versions.log
-          echo "OS=${{ matrix.os }}, toolchain=${{ matrix.toolchain }}" | tee -a .github/rust_logs/versions.log
+          cp .ci_in/.wslist.txt .wslist.txt
+          mkdir -p .github/rust_logs artifacts
+          # placeholder 보장
+          [ -e artifacts/.keep ] || echo "placeholder" > artifacts/.keep
 
-      - name: 🚀 Full pipeline (fmt, clippy, test, build, doc) for all crates
+      - name: Install Rust (${{ matrix.toolchain }} + clippy/rustfmt)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy,rustfmt
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc -Vv  2>&1 | tee -a .github/rust_logs/versions_${{ matrix.os }}_${{ matrix.toolchain }}.log
+          cargo -V   2>&1 | tee -a .github/rust_logs/versions_${{ matrix.os }}_${{ matrix.toolchain }}.log
+
+      - name: Full pipeline (fmt, clippy, test, build, doc) for all crates
         shell: bash
         run: |
           set -euo pipefail
@@ -173,7 +218,7 @@ jobs:
                   ;;
               esac
 
-              # 아무것도 복사하지 못했으면 tar.gz 보장
+              # 아무것도 복사 못했으면 전체를 tar.gz로 보장
               if ! ls artifacts 2>/dev/null | grep -q "${{ matrix.os }}_${{ matrix.toolchain }}"; then
                 tgz="artifacts/$(echo "$safe" | sed 's/^_//')_${{ matrix.os }}_${{ matrix.toolchain }}_release.tgz"
                 (cd "$dir/target/release" && tar -czf "../../$tgz" .) || true
@@ -184,8 +229,7 @@ jobs:
           echo "FAIL=$FAIL" | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
           exit $FAIL
 
-      # 업로드 직전에 artifacts를 한 번 더 보장(어떤 경우에도 경로 존재)
-      - name: 🔒 Ensure artifacts dir for upload
+      - name: Ensure artifacts dir for upload (exists & non-empty)
         if: always()
         shell: bash
         run: |
@@ -193,18 +237,188 @@ jobs:
           mkdir -p artifacts
           [ -e artifacts/.keep ] || echo "placeholder" > artifacts/.keep
 
-      - name: 📦 Upload logs
+      - name: Upload logs (per OS/toolchain)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
           path: .github/rust_logs/
-          if-no-files-found: error   # 항상 존재
+          if-no-files-found: error
 
-      - name: 📦 Upload binaries
+      - name: Upload binaries (per OS/toolchain)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
           path: artifacts
-          if-no-files-found: error   # .keep 또는 tgz로 항상 존재
+          if-no-files-found: error
+
+# ──────────────────────── 3) Security: cargo-audit/deny (Ubuntu 단일) ────────────────────────
+  security:
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wslist-and-detect-logs-${{ github.run_id }}
+          path: .ci_in
+      - run: cp .ci_in/.wslist.txt .wslist.txt
+        shell: bash
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install cargo-audit & cargo-deny
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked
+          cargo install cargo-deny  --locked
+      - name: Run audits (all crates)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .github/security_logs
+          FAIL=0
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            echo "[AUDIT] $dir"
+            (cd "$dir" && cargo audit --json || cargo audit) 2>&1 | tee ".github/security_logs/$(echo "$dir" | tr '/.' '_')_audit.log" || FAIL=1
+            if [ -f "$dir/deny/deny.toml" ]; then
+              (cd "$dir" && cargo deny check --config deny/deny.toml) 2>&1 | tee ".github/security_logs/$(echo "$dir" | tr '/.' '_')_deny.log" || FAIL=1
+            else
+              echo "[WARN] $dir: deny/deny.toml not found, skipping cargo-deny" | tee -a ".github/security_logs/deny_missing.log"
+            fi
+          done < .wslist.txt
+          exit $FAIL
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-logs-${{ github.run_id }}
+          path: .github/security_logs/
+          if-no-files-found: error
+
+# ──────────────────────── 4) MSRV Matrix (Ubuntu 단일) ────────────────────────
+  msrv:
+    needs: detect
+    runs-on: ubuntu-latest
+    env:
+      MSRV_LIST: ${{ inputs.msrv_list || '1.70.0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wslist-and-detect-logs-${{ github.run_id }}
+          path: .ci_in
+      - run: cp .ci_in/.wslist.txt .wslist.txt
+        shell: bash
+      - name: Expand MSRV list
+        id: msrv
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' $MSRV_LIST > .msrv.list
+          echo "list<<__MSRV__" >> "$GITHUB_OUTPUT"
+          cat .msrv.list >> "$GITHUB_OUTPUT"
+          echo "__MSRV__" >> "$GITHUB_OUTPUT"
+          cat .msrv.list
+      - name: Run MSRV checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r v; do
+            [ -n "$v" ] || continue
+            echo "[MSRV] install $v"
+            rustup toolchain install "$v" --profile minimal
+            while IFS= read -r dir; do
+              [ -n "$dir" ] || continue
+              echo "[MSRV] $dir with $v"
+              (cd "$dir" && cargo +"$v" check -q) || exit 1
+            done < .wslist.txt
+          done <<EOF
+          ${{ steps.msrv.outputs.list }}
+          EOF
+
+# ──────────────────────── 5) Deps Update PR (스케줄/수동) ────────────────────────
+  deps-pr:
+    needs: detect
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wslist-and-detect-logs-${{ github.run_id }}
+          path: .ci_in
+      - run: cp .ci_in/.wslist.txt .wslist.txt
+        shell: bash
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: cargo update (all crates)
+        id: update
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPDATED=0
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            echo "[UPDATE] $dir"
+            (cd "$dir" && cargo update || true)
+            UPDATED=1
+          done < .wslist.txt
+          echo "UPDATED=$UPDATED" >> $GITHUB_ENV
+      - name: Create PR
+        if: env.UPDATED == '1'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(deps): cargo update"
+          branch: deps/cargo-update/${{ github.run_id }}
+          title: "chore(deps): cargo update"
+          body: "Automated dependency update via CI"
+          labels: deps, automated
+
+# ──────────────────────── 6) Release (태그/수동) ────────────────────────
+  release:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.make_release == 'true' && inputs.tag_name != '')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tag (when dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag_name }}"
+          if [ -z "$TAG" ]; then
+            echo "No tag_name input; skip tagging."
+            exit 0
+          fi
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists."
+          else
+            git config user.name  "ci-bot"
+            git config user.email "ci@example.local"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: release_assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag_name }}
+          files: release_assets/**
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
