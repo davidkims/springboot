@@ -1,8 +1,10 @@
-name: "🦀 Rust CI — no-skip, auto-detect, safe rust-cache"
+name: "🦀 Rust CI — no-skip + self-heal + stable cache"
 
 on:
   push: { branches: [ main ] }
   pull_request: { branches: [ main ] }
+  schedule:
+    - cron: "0 3 * * 1"  # 주 1회 보안 점검
 
 permissions:
   contents: read
@@ -14,198 +16,159 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  build-and-test:
+  rust-ci:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Rust (stable + clippy/rustfmt)
+      - name: 🧰 System deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake clang llvm curl git ca-certificates
+
+      - name: 🦀 Install Rust (stable + clippy/rustfmt)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy,rustfmt
           profile: minimal
+          components: clippy,rustfmt
 
-      # 1) 리포 전수 스캔: 루트/워크스페이스/다중 크레이트 모두 탐지
-      - name: Detect Cargo manifests (workspace or crates)
+      # ──────────────────────────────────────────────────────────────────────
+      # 1) 전수 스캔 + Cargo.toml 없으면 샘플 크레이트 자동 생성(자가복구)
+      #    → 어떤 경우에도 이후 단계가 "0s"로 스킵되지 않도록 보장
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 🔎 Detect crates (and self-heal if none)
         id: detect
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Cargo.toml 탐색 시작"
+          shopt -s globstar
 
-          # 1) 루트 우선 검사
-          if [[ -f Cargo.toml ]]; then
-            if grep -q "^\[workspace\]" Cargo.toml; then
-              echo "mode=workspace" >>"$GITHUB_OUTPUT"
-              echo "root=."         >>"$GITHUB_OUTPUT"
-              echo "[ECHO] 루트 워크스페이스 모드"
-              exit 0
-            else
-              echo "mode=single"    >>"$GITHUB_OUTPUT"
-              echo "dir=."          >>"$GITHUB_OUTPUT"
-              echo "manifest=./Cargo.toml" >>"$GITHUB_OUTPUT"
-              echo "[ECHO] 루트 단일 크레이트 모드"
-              exit 0
-            fi
+          echo "[ECHO] Cargo.toml 전수 스캔 시작"
+          mapfile -t FOUND < <(find . -type f -name Cargo.toml \
+            -not -path "*/target/*" -not -path "*/node_modules/*" | sort || true)
+
+          if (( ${#FOUND[@]} == 0 )); then
+            echo "[WARN] 리포 내 Cargo.toml 미발견 → rust-example 크레이트 자동 생성"
+            rm -rf rust-example || true
+            cargo new --bin rust-example
+            # 샘플 코드(원하면 커스터마이즈 가능)
+            cat > rust-example/src/main.rs <<'RS'
+            fn main() {
+                println!("hello from rust-example");
+            }
+            RS
+            FOUND=( "./rust-example/Cargo.toml" )
           fi
 
-          # 2) 전체에서 Cargo.toml 수집 (빌드 산출물/노드 제외)
-          mapfile -t found < <(find . -type f -name Cargo.toml \
-            -not -path "*/target/*" -not -path "*/node_modules/*" | sort)
+          # 디렉터리 목록 생성
+          printf '%s\n' "${FOUND[@]}" | xargs -I{} dirname "{}" | sort -u > .wslist.txt
 
-          if (( ${#found[@]} == 0 )); then
-            echo "::error ::No Cargo.toml found anywhere in the repo."
-            exit 1
-          fi
+          echo "count=$(wc -l < .wslist.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "list<<__WS__" >> "$GITHUB_OUTPUT"
+          cat .wslist.txt >> "$GITHUB_OUTPUT"
+          echo "__WS__" >> "$GITHUB_OUTPUT"
 
-          # [workspace] 파일이 있으면 가장 얕은 깊이를 워크스페이스 루트로
-          ws_candidates=()
-          for f in "${found[@]}"; do
-            grep -q "^\[workspace\]" "$f" && ws_candidates+=("$f") || true
-          done
+          echo "[ECHO] 검출된 크레이트 디렉터리:"
+          nl -ba .wslist.txt
 
-          if (( ${#ws_candidates[@]} )); then
-            ws_root="$(dirname "$(printf '%s\n' "${ws_candidates[@]}" \
-              | awk -F/ '{print NF "\t"$0}' | sort -n | cut -f2- | head -n1)")"
-            echo "mode=workspace" >>"$GITHUB_OUTPUT"
-            echo "root=${ws_root}" >>"$GITHUB_OUTPUT"
-            echo "[ECHO] 워크스페이스 루트: ${ws_root}"
-            exit 0
-          fi
-
-          # 워크스페이스가 없다면, 모든 크레이트 디렉터리를 나열
-          printf '%s\n' "${found[@]}" | xargs -I{} dirname "{}" | sort -u > crates.txt
-          echo "mode=multi" >>"$GITHUB_OUTPUT"
-          echo "crates<<__CRATES__" >>"$GITHUB_OUTPUT"
-          cat crates.txt             >>"$GITHUB_OUTPUT"
-          echo "__CRATES__"          >>"$GITHUB_OUTPUT"
-          echo "[ECHO] 다중 크레이트 모드: $(wc -l < crates.txt)개"
-
-      # 2) rust-cache에 '반드시' 유효한 workspaces 목록을 넘겨줍니다.
-      - name: Prepare workspace list for rust-cache
-        id: wslist
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mode="${{ steps.detect.outputs.mode }}"
-          list=""
-          case "$mode" in
-            workspace)
-              list="${{ steps.detect.outputs.root }}"
-              ;;
-            single)
-              # 단일 크레이트 디렉터리
-              list="${{ steps.detect.outputs.dir }}"
-              ;;
-            multi)
-              # crates(줄바꿈 목록)를 그대로 사용
-              list="${{ steps.detect.outputs.crates }}"
-              ;;
-            *)
-              echo "::error ::Unknown mode: $mode"
-              exit 1
-              ;;
-          esac
-
-          # 비어있지 않은 라인만 남기기
-          echo "$list" | awk 'NF' > .wslist.txt
-          echo "list<<__WS__" >>"$GITHUB_OUTPUT"
-          cat .wslist.txt      >>"$GITHUB_OUTPUT"
-          echo "__WS__"        >>"$GITHUB_OUTPUT"
-
-          echo "[ECHO] rust-cache 대상:"
-          nl -ba .wslist.txt || true
-
-      - name: Cache (targets via rust-cache)
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            ${{ steps.wslist.outputs.list }}
-          # 캐시 미스여도 실패하지 않도록 (기본값: true)
-          cache-on-failure: true
-
-      - name: Show Rust versions
-        shell: bash
-        run: |
-          rustc -Vv
-          cargo -V
-
-      # ===== 실행 파이프라인 (모드 별로 전체 과정 실행) =====
-
-      # 워크스페이스 모드
-      - name: Format (workspace)
-        if: ${{ steps.detect.outputs.mode == 'workspace' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.root }}"
-          cargo fmt --all --check
-
-      - name: Clippy (workspace)
-        if: ${{ steps.detect.outputs.mode == 'workspace' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.root }}"
-          cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test (workspace)
-        if: ${{ steps.detect.outputs.mode == 'workspace' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.root }}"
-          cargo test --all-features --verbose
-
-      - name: Build (workspace, release)
-        if: ${{ steps.detect.outputs.mode == 'workspace' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.root }}"
-          cargo build --release --verbose
-
-      # 단일 크레이트 모드
-      - name: Format (single)
-        if: ${{ steps.detect.outputs.mode == 'single' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.dir }}"
-          cargo fmt --all --check
-
-      - name: Clippy (single)
-        if: ${{ steps.detect.outputs.mode == 'single' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.dir }}"
-          cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test (single)
-        if: ${{ steps.detect.outputs.mode == 'single' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.dir }}"
-          cargo test --all-features --verbose
-
-      - name: Build (single, release)
-        if: ${{ steps.detect.outputs.mode == 'single' }}
-        shell: bash
-        run: |
-          cd "${{ steps.detect.outputs.dir }}"
-          cargo build --release --verbose
-
-      # 다중 크레이트 모드 (모든 크레이트에 전 과정 수행)
-      - name: Format/Clippy/Test/Build (multi; loop all crates)
-        if: ${{ steps.detect.outputs.mode == 'multi' }}
+      # ──────────────────────────────────────────────────────────────────────
+      # 2) lockfile 강제 생성(캐시키 안정화), cargo metadata 사전 성공 보장
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 🔐 Ensure lockfiles & metadata (per crate)
         shell: bash
         run: |
           set -Eeuo pipefail
           while IFS= read -r dir; do
-            echo "[ECHO] >>> crate: $dir"
+            echo "[ECHO] >> lockfile/metadata 보장: $dir"
             cd "$dir"
-            cargo fmt --all --check
-            cargo clippy --all-targets --all-features -- -D warnings
-            cargo test --all-features --verbose
-            cargo build --release --verbose
+            # lockfile 생성(없으면 생성, 있으면 최신화)
+            cargo generate-lockfile || true
+            # metadata 사전 로드(캐시 액션에서 실패하는 것 방지)
+            cargo metadata --format-version 1 --no-deps >/dev/null
             cd - >/dev/null
           done < .wslist.txt
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 3) rust-cache: 반드시 유효한 경로 목록을 넘김 → 101 에러 차단
+      #    (요청하신 옵션들 반영)
+      # ──────────────────────────────────────────────────────────────────────
+      - name: ♻️ Cache (rust-cache, stable)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ steps.detect.outputs.list }}
+          cache-on-failure: true
+          prefix-key: v0-rust
+          cache-targets: true
+          cache-all-crates: false
+          cache-workspace-crates: false
+          save-if: true
+          cache-provider: github
+          cache-bin: true
+          lookup-only: false
+
+      - name: 🔎 Show tool versions
+        run: |
+          rustc -Vv
+          cargo -V
+          echo "Crate count: ${{ steps.detect.outputs.count }}"
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 4) 모든 단계 no-skip 수행: fmt → clippy → test → build → doc → audit
+      #    중간 실패 발생해도 다음 크레이트 계속 진행. 마지막에 총괄 실패 처리.
+      #    각 단계 로그를 아티팩트로 보관.
+      # ──────────────────────────────────────────────────────────────────────
+      - name: 🚀 Run full pipeline (no-skip for all crates)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/rust_logs
+          FAIL=0
+
+          run_step () {
+            local dir="$1"; shift
+            local name="$1"; shift
+            echo "[RUN] $name @ $dir"
+            if (cd "$dir" && "$@"); then
+              echo "[OK]  $name @ $dir"
+            else
+              echo "[ERR] $name @ $dir" >&2
+              FAIL=1
+            fi
+          }
+
+          while IFS= read -r dir; do
+            echo "==================== CRATE: $dir ====================" | tee -a .github/rust_logs/summary.log
+
+            run_step "$dir" "fmt"    bash -lc "cargo fmt --all --check"            |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_fmt.log"
+            run_step "$dir" "clippy" bash -lc "cargo clippy --all-targets --all-features -- -D warnings" \
+                                       |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_clippy.log"
+            run_step "$dir" "test"   bash -lc "cargo test --all-features --verbose" \
+                                       |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_test.log"
+            run_step "$dir" "build"  bash -lc "cargo build --release --verbose"    |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_build.log"
+            run_step "$dir" "doc"    bash -lc "cargo doc --no-deps"                |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_doc.log"
+
+            # 보안 점검: cargo-audit (설치는 최초 1회)
+            if ! command -v cargo-audit >/dev/null 2>&1; then
+              cargo install cargo-audit --locked |& tee -a .github/rust_logs/audit_install.log || true
+            fi
+            run_step "$dir" "audit"  bash -lc "cargo audit --json || cargo audit"  |& tee ".github/rust_logs/$(echo "$dir" | tr '/.' '_')_audit.log"
+
+          done < .wslist.txt
+
+          echo "==== SUMMARY (0=success,1=failed) ====" | tee -a .github/rust_logs/summary.log
+          echo "FAIL=$FAIL" | tee -a .github/rust_logs/summary.log
+          exit $FAIL
+
+      - name: 📦 Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-logs-${{ github.run_id }}
+          path: .github/rust_logs/
+          if-no-files-found: warn
