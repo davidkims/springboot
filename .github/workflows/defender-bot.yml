@@ -1,4 +1,4 @@
-name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Cache · SBOM · Trivy→Pages · Scorecard(verified) · CodeQL · Bot)"
+name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Echo · Pages-Fix · Cache · SBOM · Trivy→Pages · Scorecard · CodeQL · Bot)"
 
 on:
   workflow_dispatch:
@@ -38,30 +38,35 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      # 항상 경로를 먼저 만든다 (모든 tee/출력의 공통 가드)
-      - name: 🛠 Init dirs (idempotent)
+      - name: 🔊 Init Echo (global)
         run: |
           set -Eeuo pipefail
-          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR" "$SBOM_DIR" .github/artifacts .github/io/{system,disk,container,image}/logs .github/io/{bundle,reports}
+          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR" "$SBOM_DIR" .github/artifacts
+          init_echo() {
+            export STEP_NAME="$1"
+            ECHO(){ echo "[ECHO][$STEP_NAME] $*"; }
+            trap 's=$?; ECHO "FAIL line ${BASH_LINENO[0]} (cmd: ${BASH_COMMAND}) -> ${s}"; exit ${s}' ERR
+            ECHO "start $(date -u +'%F %T %Z')"
+          }
+          export -f init_echo
+          ECHO(){ echo "[ECHO][bootstrap] $*"; }
+          ECHO "Echo initialized"
 
       - name: ♻️ Free disk (optional)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "free-disk"
           docker system prune -af || true
           sudo rm -rf /opt/hostedtoolcache || true
-          echo "[ECHO] disk freed" | tee -a "$LOG" || true
+          ECHO "disk freed" | tee -a "$LOG" || true
 
-      - name: 🧱 Echo env & tree
+      - name: 🧱 Env & tree (echo)
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR"
+          set -Eeuo pipefail; init_echo "env-tree"
           {
-            echo "[ECHO] date: $(date -u +'%F %T %Z')"
-            echo "[ECHO] runner: $(uname -a)"
-            echo "[ECHO] pwd: $(pwd)"
-            echo "[ECHO] ls -al:"; ls -al
-            echo "[ECHO] workflow tree:"
-            (command -v tree >/dev/null 2>&1 && tree -a workflow || find workflow -maxdepth 2 -print)
+            ECHO "date=$(date -u +'%F %T %Z')"
+            ECHO "pwd=$(pwd)"
+            ECHO "ls -al:"; ls -al
+            ECHO "workflow tree:"; (command -v tree >/dev/null 2>&1 && tree -a workflow || find workflow -maxdepth 2 -print)
           } | tee -a "$LOG" || true
 
       - name: 🧰 QEMU for multi-arch
@@ -77,26 +82,26 @@ jobs:
           key: buildx-${{ env.CACHE_VERSION }}-${{ github.ref_name }}
           restore-keys: buildx-${{ env.CACHE_VERSION }}-
 
-      - name: 🐍 Python syntax check
+      - name: 🐍 Python syntax check (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "py-syntax"
           python3 -m py_compile workflow/rotate_accounts.py
-          echo "[ECHO] py_compile OK" | tee -a "$LOG" || true
+          ECHO "py_compile OK" | tee -a "$LOG" || true
 
-      - name: 🐚 Bash syntax check + ShellCheck
+      - name: 🐚 Bash syntax + ShellCheck (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "bash-syntax"
           bash -n workflow/bootstrap.sh
           bash -n workflow/automation.sh
           sudo apt-get update -y
           sudo apt-get install -y shellcheck
-          (shellcheck -f tty workflow/bootstrap.sh || true) | tee -a "$LOG" || true
-          (shellcheck -f tty workflow/automation.sh || true) | tee -a "$LOG" || true
-          echo "[ECHO] bash -n & ShellCheck OK" | tee -a "$LOG" || true
+          (shellcheck -f tty workflow/bootstrap.sh || true) | sed 's/^/[SHELLCHECK] /' | tee -a "$LOG" || true
+          (shellcheck -f tty workflow/automation.sh || true) | sed 's/^/[SHELLCHECK] /' | tee -a "$LOG" || true
+          ECHO "bash -n & shellcheck OK" | tee -a "$LOG" || true
 
-      - name: 🐳 Build Docker image (amd64, load + cache)
+      - name: 🐳 Build Docker (amd64, load + cache) (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "docker-build-amd64"
           docker buildx build \
             --platform linux/amd64 \
             --cache-from type=local,src=/tmp/.buildx-cache \
@@ -106,21 +111,22 @@ jobs:
             --load \
             workflow
           rm -rf /tmp/.buildx-cache && mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-          echo "[ECHO] docker build (amd64) OK" | tee -a "$LOG" || true
+          ECHO "build (amd64) OK" | tee -a "$LOG" || true
 
-      - name: ▶️ Smoke test (limited resources)
+      - name: ▶️ Smoke test (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "smoke-test"
           docker rm -f workflow-container-test >/dev/null 2>&1 || true
           docker run -d --name workflow-container-test --cpus="1.0" --memory="768m" workflow-image:ci
           sleep 8
-          docker ps --filter "name=workflow-container-test" --format '{{.Names}} {{.Status}}' | tee -a "$LOG" || true
-          docker logs --tail 120 workflow-container-test | tee -a "$LOG" || true
+          docker ps --filter "name=workflow-container-test" --format '{{.Names}} {{.Status}}' | sed 's/^/[DOCKER] /' | tee -a "$LOG" || true
+          docker logs --tail 120 workflow-container-test | sed 's/^/[LOGS] /' | tee -a "$LOG" || true
           docker rm -f workflow-container-test || true
+          ECHO "smoke OK" | tee -a "$LOG" || true
 
-      - name: 🐳 Build Docker image (arm64, OCI tar export + cache)
+      - name: 🐳 Build Docker (arm64, oci tar + cache) (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "docker-build-arm64"
           docker buildx build \
             --platform linux/arm64 \
             --cache-from type=local,src=/tmp/.buildx-cache \
@@ -130,15 +136,15 @@ jobs:
             --output type=oci,dest=.github/artifacts/workflow-image-arm64.tar \
             workflow
           rm -rf /tmp/.buildx-cache && mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-          echo "[ECHO] docker build (arm64) tar exported" | tee -a "$LOG" || true
+          ECHO "build (arm64) tar exported" | tee -a "$LOG" || true
 
-      # ---------- Filesystem I/O ----------
-      - name: 📁 Prepare I/O directories & seed files
+      # ---------- Filesystem I/O (echo everywhere) ----------
+      - name: 📁 I/O seeds (echo)
         env:
           IO_DIR: .github/io
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$IO_DIR"/{system,disk,container,image}/logs "$IO_DIR"/bundle "$IO_DIR"/reports
+          set -Eeuo pipefail; init_echo "io-seed"
+          mkdir -p "$IO_DIR"/{system,disk,container,image}/logs "$IO_DIR"/{bundle,reports}
           for d in system disk container image; do echo "$d $(date -u)" > "$IO_DIR/$d/$d.meta"; done
           for i in $(seq 1 10); do
             echo "system $i $(date -u)" > "$IO_DIR/system/config$i.conf"
@@ -146,52 +152,48 @@ jobs:
             echo "ctr    $i $(date -u)" > "$IO_DIR/container/ctr$i.cfg"
             echo "image  $i $(date -u)" > "$IO_DIR/image/img$i.meta"
           done
-          echo "[ECHO] IO seeds OK" | tee -a "$LOG" || true
+          ECHO "seeds ready" | tee -a "$LOG" || true
 
-      - name: ✍️ I/O write/append/perm tests
-        env:
-          IO_DIR: .github/io
+      - name: ✍️ I/O write/append/perm (echo)
+        env: { IO_DIR: .github/io }
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "io-write"
           echo "$(date -u) write test"  > "$IO_DIR/system/logs/write.log"
           echo "$(date -u) append"     >> "$IO_DIR/system/logs/write.log"
           chmod -R 755 "$IO_DIR" || true
-          head -n 2 "$IO_DIR/system/logs/write.log" | tee -a "$LOG" || true
+          head -n 2 "$IO_DIR/system/logs/write.log" | sed 's/^/[IO] /' | tee -a "$LOG" || true
 
-      - name: ⚙️ I/O throughput micro (dd)
-        env:
-          IO_DIR: .github/io
+      - name: ⚙️ I/O throughput (dd) (echo)
+        env: { IO_DIR: .github/io }
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "io-dd"
           dd if=/dev/zero of="$IO_DIR/disk/dd_test.bin" bs=1M count=8 status=none
           sync
-          md5sum "$IO_DIR/disk/dd_test.bin" | tee "$IO_DIR/reports/dd_test.md5" || true
+          md5sum "$IO_DIR/disk/dd_test.bin" | sed 's/^/[MD5] /' | tee "$IO_DIR/reports/dd_test.md5" | tee -a "$LOG" || true
 
-      - name: 📊 I/O usage reports
-        env:
-          IO_DIR: .github/io
+      - name: 📊 I/O reports (echo)
+        env: { IO_DIR: .github/io }
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "io-reports"
           du -ah "$IO_DIR" | sort -hr | head -n 50 > "$IO_DIR/reports/top_files.txt" || true
           du -sh "$IO_DIR" > "$IO_DIR/reports/total_size.txt" || true
           { echo "# uname"; uname -a; echo "# df -h"; df -h; echo "# mount (head)"; mount | head -n 50; } > "$IO_DIR/reports/system_snapshot.txt"
+          ECHO "reports ready" | tee -a "$LOG" || true
 
-      - name: 📦 Bundle I/O artifacts
-        env:
-          IO_DIR: .github/io
+      - name: 📦 I/O bundle (echo)
+        env: { IO_DIR: .github/io }
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "io-bundle"
           TS="$(date -u +%Y%m%d%H%M%S)"
           BUNDLE="$IO_DIR/bundle/io-$TS.tar.gz"
           tar -czf "$BUNDLE" -C "$IO_DIR" system disk container image reports
           sha256sum "$BUNDLE" > "$BUNDLE".sha256
-          echo "[ECHO] IO bundle: $BUNDLE" | tee -a "$LOG" || true
+          ECHO "bundle=$BUNDLE" | tee -a "$LOG" || true
 
-      - name: 🌐 Generate I/O HTML (Pages)
-        env:
-          IO_DIR: .github/io
+      - name: 🌐 I/O pages (echo)
+        env: { IO_DIR: .github/io }
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "io-pages"
           mkdir -p "$PAGES_DIR/io"
           cp -r "$IO_DIR/reports" "$PAGES_DIR/io/" 2>/dev/null || true
           cat > "$PAGES_DIR/io/index.html" <<'HTML'
@@ -205,19 +207,141 @@ jobs:
             <li><a href="../security_reports/">Security Reports</a></li>
           </ul>
           HTML
-          echo "[ECHO] IO page ready" | tee -a "$LOG" || true
+          ECHO "io pages ready" | tee -a "$LOG" || true
 
-      - name: ⬆️ Upload I/O artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: io-bundle-and-reports
-          path: |
-            .github/io/bundle/*.tar.gz
-            .github/io/bundle/*.sha256
-            .github/io/reports/*
-          retention-days: 14
+      # ---------- Service Resource Files (echo) ----------
+      - name: 🧩 Generate service resources (echo)
+        env:
+          RES_DIR: .github/resources
+        run: |
+          set -Eeuo pipefail; init_echo "resources-gen"
+          mkdir -p "$RES_DIR"/{env,app,docker,k8s,systemd,cron,docs}
+          cat > "$RES_DIR/env/.env.example" <<'ENV'
+          APP_ENV=production
+          APP_PORT=8080
+          LOG_LEVEL=INFO
+          DB_HOST=localhost
+          DB_PORT=5432
+          DB_NAME=appdb
+          DB_USER=appuser
+          DB_PASS=change_me
+          JWT_SECRET=replace_with_strong_secret
+          ENV
+          cat > "$RES_DIR/app/application.yaml" <<'YAML'
+          server:
+            port: ${APP_PORT:8080}
+          logging:
+            level:
+              root: ${LOG_LEVEL:INFO}
+          spring:
+            application:
+              name: springboot-service
+            datasource:
+              url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:appdb}
+              username: ${DB_USER:appuser}
+              password: ${DB_PASS:change_me}
+          management:
+            endpoints:
+              web:
+                exposure:
+                  include: health,info,metrics,loggers,threaddump,heapdump
+          YAML
+          cat > "$RES_DIR/docker/docker-compose.override.yml" <<'YML'
+          services:
+            app:
+              image: workflow-image:ci
+              env_file: [ ../env/.env.example ]
+              ports: [ "${APP_PORT:-8080}:8080" ]
+              depends_on: [ db ]
+            db:
+              image: postgres:16-alpine
+              environment:
+                POSTGRES_DB: ${DB_NAME:-appdb}
+                POSTGRES_USER: ${DB_USER:-appuser}
+                POSTGRES_PASSWORD: ${DB_PASS:-change_me}
+              volumes: [ db_data:/var/lib/postgresql/data ]
+          volumes: { db_data: {} }
+          YML
+          cat > "$RES_DIR/k8s/deployment.yaml" <<'YAML'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: springboot-deploy, labels: { app: springboot-service } }
+          spec:
+            replicas: 2
+            selector: { matchLabels: { app: springboot-service } }
+            template:
+              metadata: { labels: { app: springboot-service } }
+              spec:
+                containers:
+                  - name: app
+                    image: ghcr.io/OWNER/REPO/workflow-image:latest
+                    ports: [ { containerPort: 8080 } ]
+                    envFrom: [ { configMapRef: { name: springboot-config } } ]
+                    readinessProbe: { httpGet: { path: /actuator/health/readiness, port: 8080 }, initialDelaySeconds: 10, periodSeconds: 10 }
+                    livenessProbe:  { httpGet: { path: /actuator/health/liveness,  port: 8080 }, initialDelaySeconds: 20, periodSeconds: 20 }
+          YAML
+          cat > "$RES_DIR/k8s/service.yaml" <<'YAML'
+          apiVersion: v1
+          kind: Service
+          metadata: { name: springboot-svc }
+          spec:
+            type: ClusterIP
+            selector: { app: springboot-service }
+            ports: [ { name: http, port: 80, targetPort: 8080 } ]
+          YAML
+          cat > "$RES_DIR/k8s/configmap.yaml" <<'YAML'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata: { name: springboot-config }
+          data:
+            APP_PORT: "8080"
+            LOG_LEVEL: "INFO"
+          YAML
+          cat > "$RES_DIR/systemd/springboot.service" <<'UNIT'
+          [Unit]
+          Description=Spring Boot Service
+          After=network.target
+          [Service]
+          EnvironmentFile=/etc/springboot/.env
+          ExecStart=/usr/bin/java -jar /opt/springboot/app.jar --spring.config.location=/etc/springboot/application.yaml
+          User=spring
+          Restart=always
+          RestartSec=5s
+          LimitNOFILE=65536
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          cat > "$RES_DIR/cron/rotate-logs.cron" <<'CRON'
+          10 0 * * * /usr/sbin/logrotate -f /etc/logrotate.d/springboot
+          CRON
+          cat > "$RES_DIR/docs/README_RESOURCES.md" <<'MD'
+          Auto-generated service resources (env/app/docker/k8s/systemd/cron). Do NOT commit secrets.
+          MD
+          (cd "$RES_DIR" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$RES_DIR/RESOURCES.SHA256"
+          ECHO "resources generated" | tee -a "$LOG" || true
 
-      # ---------- Trivy (with DB cache) ----------
+      - name: 🧪 Validate resources (echo)
+        env:
+          RES_DIR: .github/resources
+        run: |
+          set -Eeuo pipefail; init_echo "resources-validate"
+          python3 - <<'PY' || true
+          import os, sys, yaml
+          base = ".github/resources"; ok=True
+          for root,_,files in os.walk(base):
+            for f in files:
+              if f.endswith(('.yml','.yaml')):
+                p=os.path.join(root,f)
+                try: yaml.safe_load(open(p,'r',encoding='utf-8').read())
+                except Exception as e: ok=False; print("[YAML ERROR]",p,e)
+          sys.exit(0 if ok else 1)
+          PY
+          for f in env/.env.example app/application.yaml docker/docker-compose.override.yml k8s/deployment.yaml k8s/service.yaml systemd/springboot.service cron/rotate-logs.cron RESOURCES.SHA256; do
+            test -f "$RES_DIR/$f" || { echo "[ERR] missing $f"; exit 1; }
+          done
+          ECHO "resources validated" | tee -a "$LOG" || true
+
+      # ---------- Trivy ----------
       - name: 💾 Cache Trivy DB
         uses: actions/cache@v4
         with:
@@ -225,18 +349,17 @@ jobs:
           key: trivy-db-${{ env.CACHE_VERSION }}
           restore-keys: trivy-db-
 
-      - name: 📥 Install Trivy CLI
+      - name: 📥 Install Trivy (echo)
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR"
+          set -Eeuo pipefail; init_echo "trivy-install"
           curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
           trivy --version | tee -a "$LOG" || true
 
-      - name: 🔎 Trivy scan → SARIF
+      - name: 🔎 Trivy → SARIF (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "trivy-sarif"
           trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format sarif --output "$REPORT_DIR/trivy-image.sarif" workflow-image:ci
-          echo "[ECHO] Trivy SARIF generated" | tee -a "$LOG" || true
+          ECHO "sarif ready" | tee -a "$LOG" || true
 
       - name: ⏫ Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v3
@@ -244,11 +367,11 @@ jobs:
           sarif_file: .github/security_reports/trivy-image.sarif
         continue-on-error: true
 
-      - name: 🧾 Trivy scan → JSON + Table (Pages)
+      - name: 🧾 Trivy → JSON/TXT + Pages (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "trivy-pages"
           trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format json --output "$REPORT_DIR/trivy-image.json" workflow-image:ci
-          trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format table workflow-image:ci | tee "$REPORT_DIR/trivy-image.txt" || true
+          trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format table workflow-image:ci | tee "$REPORT_DIR/trivy-image.txt" | tee -a "$LOG" || true
           cat > "$PAGES_DIR/trivy.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Trivy Report</title>
@@ -260,52 +383,43 @@ jobs:
           fetch('../security_reports/trivy-image.json').then(r=>r.text()).then(t=>document.getElementById('json').textContent=t);
           </script>
           HTML
-          echo "[ECHO] Trivy pages ready" | tee -a "$LOG" || true
+          ECHO "trivy pages ready" | tee -a "$LOG" || true
 
       # ---------- SBOM ----------
-      - name: 📥 Install Syft (SBOM)
+      - name: 📥 Install Syft (SBOM) (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "syft-install"
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
           syft version | tee -a "$LOG" || true
 
-      - name: 🧾 Generate SBOM (SPDX JSON)
+      - name: 🧾 Generate SBOM (SPDX) (echo)
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "syft-sbom"
           syft packages workflow-image:ci -o spdx-json > "$SBOM_DIR/sbom.spdx.json"
           cp "$SBOM_DIR/sbom.spdx.json" "$PAGES_DIR/sbom.spdx.json"
-          echo "[ECHO] SBOM generated" | tee -a "$LOG" || true
+          ECHO "sbom ready" | tee -a "$LOG" || true
 
-      # ---------- Scorecard (verified download + docker fallback) ----------
-      - name: 📥 Install Scorecard CLI (verified or docker fallback)
+      # ---------- Scorecard ----------
+      - name: 📥 Install Scorecard (echo)
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR"
-          VER="4.13.3"
-          INSTALL="/usr/local/bin"
-          TMP="$(mktemp -d)"
-          cd "$TMP"
+          set -Eeuo pipefail; init_echo "scorecard-install"
+          VER="4.13.3"; INSTALL="/usr/local/bin"; TMP="$(mktemp -d)"; cd "$TMP"
           BASE="https://github.com/ossf/scorecard/releases/download/v${VER}"
-          echo "[ECHO] Downloading ${BASE}" | tee -a "$LOG" || true
-          curl -sSfL --retry 5 --retry-delay 2 -o scorecard.tgz        "${BASE}/scorecard_${VER}_linux_amd64.tar.gz" || true
-          curl -sSfL --retry 5 --retry-delay 2 -o checksums.txt        "${BASE}/scorecard_${VER}_checksums.txt" || true
+          ECHO "download ${BASE}"
+          curl -sSfL --retry 5 --retry-delay 2 -o scorecard.tgz "${BASE}/scorecard_${VER}_linux_amd64.tar.gz" || true
+          curl -sSfL --retry 5 --retry-delay 2 -o checksums.txt "${BASE}/scorecard_${VER}_checksums.txt" || true
           if [ -s scorecard.tgz ] && [ -s checksums.txt ]; then
             SUM_LINE="$(grep 'scorecard_'"${VER}"'_linux_amd64.tar.gz' checksums.txt || true)"
             if [ -n "$SUM_LINE" ]; then
-              EXPECTED="$(echo "$SUM_LINE" | awk '{print $1}')"
-              ACTUAL="$(sha256sum scorecard.tgz | awk '{print $1}')"
+              EXPECTED="$(echo "$SUM_LINE" | awk '{print $1}')"; ACTUAL="$(sha256sum scorecard.tgz | awk '{print $1}')"
               if [ "$EXPECTED" = "$ACTUAL" ]; then
                 tar -xzf scorecard.tgz || true
-                if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then
-                  sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"
-                fi
-              else
-                echo "[WARN] checksum mismatch; skip native install" | tee -a "$LOG" || true
-              fi
+                if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"; fi
+              else ECHO "checksum mismatch -> skip native" | tee -a "$LOG" || true; fi
             fi
           fi
           if ! command -v scorecard >/dev/null 2>&1; then
-            echo "[ECHO] Using docker fallback for scorecard" | tee -a "$LOG" || true
+            ECHO "using docker fallback" | tee -a "$LOG" || true
             sudo bash -c 'cat > /usr/local/bin/scorecard <<EOF
             #!/usr/bin/env bash
             exec docker run --rm ghcr.io/ossf/scorecard:stable "$@"
@@ -313,9 +427,9 @@ jobs:
             sudo chmod +x /usr/local/bin/scorecard
             docker pull ghcr.io/ossf/scorecard:stable || true
           fi
-          command -v scorecard && scorecard version | tee -a "$LOG" || true
+          command -v scorecard && scorecard version | sed 's/^/[SCORECARD] /' | tee -a "$LOG" || true
 
-      - name: 🧰 Scorecard Action (SARIF)
+      - name: 🧰 Scorecard Action → SARIF (echo)
         uses: ossf/scorecard-action@v2.4.0
         with:
           results_file: .github/security_reports/scorecard.sarif
@@ -324,12 +438,11 @@ jobs:
           publish_results: false
         continue-on-error: true
 
-      - name: 🧪 Scorecard JSON & HTML summary (Pages)
+      - name: 🧪 Scorecard JSON + Pages (echo)
         env:
           GH_REPO: ${{ github.repository }}
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$REPORT_DIR" "$PAGES_DIR"
+          set -Eeuo pipefail; init_echo "scorecard-pages"
           if command -v scorecard >/dev/null 2>&1; then
             scorecard --repo "github.com/${GH_REPO}" --format=json > "$REPORT_DIR/scorecard.json" || echo '{}' > "$REPORT_DIR/scorecard.json"
           else
@@ -361,9 +474,62 @@ jobs:
           }).catch(()=>{document.getElementById('summary').textContent='No data';});
           </script>
           HTML
-          echo "[ECHO] Scorecard pages ready" | tee -a "$LOG" || true
+          ECHO "scorecard pages ready" | tee -a "$LOG" || true
 
-      - name: 📦 Upload artifacts (logs, images, reports, sbom)
+      # ---------- ✅ Assemble Pages bundle & preflight ----------
+      - name: 📦 Assemble Pages bundle (echo)
+        run: |
+          set -Eeuo pipefail; init_echo "pages-assemble"
+          mkdir -p "$PAGES_DIR/security_reports" "$PAGES_DIR/resources" "$PAGES_DIR/io"
+          cp -r .github/security_reports/* "$PAGES_DIR/security_reports/" 2>/dev/null || true
+          cp -r .github/resources/*        "$PAGES_DIR/resources/"        2>/dev/null || true
+          cp -r .github/io/reports         "$PAGES_DIR/io/"               2>/dev/null || true
+          # 홈/404/기타 보일러플레이트
+          cat > "$PAGES_DIR/index.html" <<'HTML'
+          <!DOCTYPE html><meta charset="utf-8">
+          <title>Reports Portal</title>
+          <h1>Reports Portal</h1>
+          <ul>
+            <li><a href="trivy.html">Trivy Report (HIGH/CRITICAL)</a></li>
+            <li><a href="scorecard.html">OSSF Scorecard Summary</a></li>
+            <li><a href="security_reports/">Raw Security Files (JSON/TXT/SARIF)</a></li>
+            <li><a href="io/">Filesystem I/O Reports</a></li>
+            <li><a href="resources/">Service Resources</a></li>
+            <li><a href="sbom.spdx.json">SBOM (SPDX)</a></li>
+            <li><a href="last_run.txt">Last Run Timestamp</a></li>
+          </ul>
+          HTML
+          echo "$(date -u +'%F %T %Z')" > "$PAGES_DIR/last_run.txt"
+          cat > "$PAGES_DIR/404.html" <<'HTML'
+          <!DOCTYPE html><meta charset="utf-8">
+          <title>404 Not Found</title>
+          <h1>Not Found</h1><p>이 페이지는 존재하지 않습니다. 홈으로 이동하세요.</p>
+          <a href="./index.html">Home</a>
+          HTML
+          printf "User-agent: *\nAllow: /\n" > "$PAGES_DIR/robots.txt"
+          cat > "$PAGES_DIR/sitemap.xml" <<'XML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>/index.html</loc></url>
+            <url><loc>/trivy.html</loc></url>
+            <url><loc>/scorecard.html</loc></url>
+          </urlset>
+          XML
+          echo "ok" > "$PAGES_DIR/healthcheck.txt"
+          # 필수 파일 존재 검증
+          for f in index.html trivy.html scorecard.html security_reports sbom.spdx.json last_run.txt; do
+            test -e "$PAGES_DIR/$f" || { ECHO "[ERR] missing $f"; exit 1; }
+          done
+          ECHO "pages bundle ready" | tee -a "$LOG" || true
+          ECHO "pages tree:" | tee -a "$LOG" || true
+          (cd "$PAGES_DIR" && find . -maxdepth 2 -print) | sed 's/^/[PAGES] /' | tee -a "$LOG" || true
+
+      - name: ⬆️ Upload Pages Artifact (authoritative)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .github/pages
+
+      - name: 📦 Upload security artifacts (echo)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -375,25 +541,27 @@ jobs:
             .github/pages/sbom.spdx.json
           retention-days: 14
 
-      - name: 🧾 Job summary
+      - name: 🧾 Job summary (echo)
         if: always()
         run: |
-          set -Eeuo pipefail
+          set -Eeuo pipefail; init_echo "summary"
           {
             echo "## ✅ SecSuite Run Summary"
-            echo "- Trivy: \`.github/security_reports/trivy-image.json\` / Pages: trivy.html"
-            echo "- Scorecard: \`.github/security_reports/scorecard.json\` / Pages: scorecard.html"
-            echo "- SBOM (SPDX): \`.github/pages/sbom.spdx.json\`"
-            echo "- IO Reports: Pages: io/"
+            echo "- Home: index.html (Pages artifact)"
+            echo "- Trivy: .github/security_reports/trivy-image.json → trivy.html"
+            echo "- Scorecard: .github/security_reports/scorecard.json → scorecard.html"
+            echo "- SBOM (SPDX): sbom.spdx.json"
+            echo "- IO Reports: io/"
+            echo "- Resources: resources/"
           } >> "$GITHUB_STEP_SUMMARY"
+          ECHO "summary written" | tee -a "$LOG" || true
 
-      # ---- Bot heartbeat + PR + [skip ci] (always) ----
-      - name: 🤖 Bot heartbeat commit (+ PR, skip-ci)
+      # ---- Bot heartbeat + PR + [skip ci] (always, echo) ----
+      - name: 🤖 Bot heartbeat commit (+ PR, skip-ci) (echo)
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$(dirname "$LOG")" "$PAGES_DIR"
+          set -Eeuo pipefail; init_echo "bot-heartbeat"
           DEFAULT_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/^\s*HEAD branch: //p')"
           [ -n "$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
           mkdir -p .github/bot .github/pages
@@ -409,7 +577,9 @@ jobs:
           git commit -m "🤖 bot: heartbeat $TS [skip ci]" || exit 0
           git push -u origin "$BR" || exit 0
           if command -v gh >/dev/null 2>&1; then
-            gh pr create --base "$DEFAULT_BRANCH" --head "$BR" --title "🤖 bot: heartbeat $TS" --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." || true
+            gh pr create --base "$DEFAULT_BRANCH" --head "$BR" \
+              --title "🤖 bot: heartbeat $TS" \
+              --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." || true
           fi
 
   codeql:
@@ -434,6 +604,7 @@ jobs:
         with:
           category: "/language:${{ env.CODEQL_LANGUAGES }}"
 
+  # ✅ Deploy the exact Pages artifact uploaded above
   deploy-pages:
     needs: [build-test-sec]
     runs-on: ubuntu-latest
@@ -441,34 +612,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: 📂 Checkout
-        uses: actions/checkout@v4
-
-      - name: 🔁 Copy reports to Pages dir
-        run: |
-          set -Eeuo pipefail
-          mkdir -p .github/pages .github/security_reports .github/io/reports
-          cp -r .github/security_reports .github/pages/ 2>/dev/null || true
-          # index
-          cat > .github/pages/index.html <<'HTML'
-          <!DOCTYPE html><meta charset="utf-8">
-          <title>Reports Portal</title>
-          <h1>Reports Portal</h1>
-          <ul>
-            <li><a href="trivy.html">Trivy Report (HIGH/CRITICAL)</a></li>
-            <li><a href="scorecard.html">OSSF Scorecard Summary</a></li>
-            <li><a href="security_reports/">Raw Security Files (JSON/TXT/SARIF)</a></li>
-            <li><a href="io/">Filesystem I/O Reports</a></li>
-            <li><a href="sbom.spdx.json">SBOM (SPDX)</a></li>
-            <li><a href="last_run.txt">Last Run Timestamp</a></li>
-          </ul>
-          HTML
-
-      - name: 📦 Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: .github/pages
-
-      - name: 🚀 Deploy to GitHub Pages
+      - name: 🚀 Deploy to GitHub Pages (from artifact)
         id: deployment
         uses: actions/deploy-pages@v4
