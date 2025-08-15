@@ -1,9 +1,9 @@
-name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Trivy→Pages · Scorecard · CodeQL · Bot)"
+name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Cache · SBOM · Trivy→Pages · Scorecard(verified) · CodeQL · Bot)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"  # 24x7 · 5분 간격
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: account-rotation
@@ -15,10 +15,16 @@ permissions:
   id-token: write
   security-events: write
 
+defaults:
+  run:
+    shell: bash
+
 env:
   LOG: .github/echo_logs/account-rotation.log
   PAGES_DIR: .github/pages
   REPORT_DIR: .github/security_reports
+  SBOM_DIR: .github/sbom
+  CACHE_VERSION: v1
   CODEQL_LANGUAGES: python
   GIT_USER_NAME: repo-bot
   GIT_USER_EMAIL: repo-bot@example.local
@@ -26,11 +32,24 @@ env:
 jobs:
   build-test-sec:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
+
+      # 항상 경로를 먼저 만든다 (모든 tee/출력의 공통 가드)
+      - name: 🛠 Init dirs (idempotent)
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR" "$SBOM_DIR" .github/artifacts .github/io/{system,disk,container,image}/logs .github/io/{bundle,reports}
+
+      - name: ♻️ Free disk (optional)
+        run: |
+          set -Eeuo pipefail
+          docker system prune -af || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          echo "[ECHO] disk freed" | tee -a "$LOG" || true
 
       - name: 🧱 Echo env & tree
         run: |
@@ -43,19 +62,26 @@ jobs:
             echo "[ECHO] ls -al:"; ls -al
             echo "[ECHO] workflow tree:"
             (command -v tree >/dev/null 2>&1 && tree -a workflow || find workflow -maxdepth 2 -print)
-          } | tee -a "$LOG"
+          } | tee -a "$LOG" || true
 
-      - name: 🧰 (opt) QEMU & Buildx for multi-arch
+      - name: 🧰 QEMU for multi-arch
         uses: docker/setup-qemu-action@v3
 
-      - name: 🧰 Setup Buildx
+      - name: 🧰 Setup Buildx (with cache)
         uses: docker/setup-buildx-action@v3
+
+      - name: 💾 Restore Buildx cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: buildx-${{ env.CACHE_VERSION }}-${{ github.ref_name }}
+          restore-keys: buildx-${{ env.CACHE_VERSION }}-
 
       - name: 🐍 Python syntax check
         run: |
           set -Eeuo pipefail
           python3 -m py_compile workflow/rotate_accounts.py
-          echo "[ECHO] py_compile OK" | tee -a "$LOG"
+          echo "[ECHO] py_compile OK" | tee -a "$LOG" || true
 
       - name: 🐚 Bash syntax check + ShellCheck
         run: |
@@ -64,61 +90,63 @@ jobs:
           bash -n workflow/automation.sh
           sudo apt-get update -y
           sudo apt-get install -y shellcheck
-          (shellcheck -f tty workflow/bootstrap.sh || true) | tee -a "$LOG"
-          (shellcheck -f tty workflow/automation.sh || true) | tee -a "$LOG"
-          echo "[ECHO] bash -n & ShellCheck OK" | tee -a "$LOG"
+          (shellcheck -f tty workflow/bootstrap.sh || true) | tee -a "$LOG" || true
+          (shellcheck -f tty workflow/automation.sh || true) | tee -a "$LOG" || true
+          echo "[ECHO] bash -n & ShellCheck OK" | tee -a "$LOG" || true
 
-      - name: 🐳 Build Docker image (amd64, load)
+      - name: 🐳 Build Docker image (amd64, load + cache)
         run: |
           set -Eeuo pipefail
           docker buildx build \
             --platform linux/amd64 \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to   type=local,dest=/tmp/.buildx-cache-new,mode=max \
             -t workflow-image:ci \
             -f workflow/Dockerfile \
             --load \
             workflow
-          echo "[ECHO] docker build (amd64) OK" | tee -a "$LOG"
+          rm -rf /tmp/.buildx-cache && mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          echo "[ECHO] docker build (amd64) OK" | tee -a "$LOG" || true
 
-      - name: ▶️ Smoke test (container up & cron alive)
+      - name: ▶️ Smoke test (limited resources)
         run: |
           set -Eeuo pipefail
           docker rm -f workflow-container-test >/dev/null 2>&1 || true
-          docker run -d --name workflow-container-test workflow-image:ci
-          sleep 6
-          docker ps --filter "name=workflow-container-test" --format '{{.Names}} {{.Status}}' | tee -a "$LOG"
-          docker logs --tail 100 workflow-container-test | tee -a "$LOG"
+          docker run -d --name workflow-container-test --cpus="1.0" --memory="768m" workflow-image:ci
+          sleep 8
+          docker ps --filter "name=workflow-container-test" --format '{{.Names}} {{.Status}}' | tee -a "$LOG" || true
+          docker logs --tail 120 workflow-container-test | tee -a "$LOG" || true
           docker rm -f workflow-container-test || true
 
-      - name: 🐳 Build Docker image (arm64, OCI tar export)
+      - name: 🐳 Build Docker image (arm64, OCI tar export + cache)
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/artifacts
           docker buildx build \
             --platform linux/arm64 \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to   type=local,dest=/tmp/.buildx-cache-new,mode=max \
             -t workflow-image:arm64 \
             -f workflow/Dockerfile \
             --output type=oci,dest=.github/artifacts/workflow-image-arm64.tar \
             workflow
-          echo "[ECHO] docker build (arm64) tar exported" | tee -a "$LOG"
+          rm -rf /tmp/.buildx-cache && mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          echo "[ECHO] docker build (arm64) tar exported" | tee -a "$LOG" || true
 
-      # ---------- Filesystem I/O 확장 ----------
+      # ---------- Filesystem I/O ----------
       - name: 📁 Prepare I/O directories & seed files
         env:
           IO_DIR: .github/io
         run: |
           set -Eeuo pipefail
           mkdir -p "$IO_DIR"/{system,disk,container,image}/logs "$IO_DIR"/bundle "$IO_DIR"/reports
-          echo "system.conf: $(date -u)"  > "$IO_DIR/system/system.conf"
-          echo "disk.info:   $(date -u)"  > "$IO_DIR/disk/disk.info"
-          echo "container:    $(date -u)"  > "$IO_DIR/container/container.cfg"
-          echo "image.meta:   $(date -u)"  > "$IO_DIR/image/image.meta"
+          for d in system disk container image; do echo "$d $(date -u)" > "$IO_DIR/$d/$d.meta"; done
           for i in $(seq 1 10); do
-            echo "system $i $(date -u)"  > "$IO_DIR/system/config$i.conf"
-            echo "disk   $i $(date -u)"  > "$IO_DIR/disk/disk$i.info"
-            echo "ctr    $i $(date -u)"  > "$IO_DIR/container/ctr$i.cfg"
-            echo "image  $i $(date -u)"  > "$IO_DIR/image/img$i.meta"
+            echo "system $i $(date -u)" > "$IO_DIR/system/config$i.conf"
+            echo "disk   $i $(date -u)" > "$IO_DIR/disk/disk$i.info"
+            echo "ctr    $i $(date -u)" > "$IO_DIR/container/ctr$i.cfg"
+            echo "image  $i $(date -u)" > "$IO_DIR/image/img$i.meta"
           done
-          echo "[ECHO] I/O seed files created" | tee -a "$LOG"
+          echo "[ECHO] IO seeds OK" | tee -a "$LOG" || true
 
       - name: ✍️ I/O write/append/perm tests
         env:
@@ -128,8 +156,7 @@ jobs:
           echo "$(date -u) write test"  > "$IO_DIR/system/logs/write.log"
           echo "$(date -u) append"     >> "$IO_DIR/system/logs/write.log"
           chmod -R 755 "$IO_DIR" || true
-          head -n 2 "$IO_DIR/system/logs/write.log" | tee -a "$LOG"
-          echo "[ECHO] I/O write/append OK" | tee -a "$LOG"
+          head -n 2 "$IO_DIR/system/logs/write.log" | tee -a "$LOG" || true
 
       - name: ⚙️ I/O throughput micro (dd)
         env:
@@ -138,24 +165,18 @@ jobs:
           set -Eeuo pipefail
           dd if=/dev/zero of="$IO_DIR/disk/dd_test.bin" bs=1M count=8 status=none
           sync
-          md5sum "$IO_DIR/disk/dd_test.bin" | tee "$IO_DIR/reports/dd_test.md5"
-          echo "[ECHO] dd micro test OK" | tee -a "$LOG"
+          md5sum "$IO_DIR/disk/dd_test.bin" | tee "$IO_DIR/reports/dd_test.md5" || true
 
-      - name: 📊 I/O usage reports (du/sort/safe)
+      - name: 📊 I/O usage reports
         env:
           IO_DIR: .github/io
         run: |
           set -Eeuo pipefail
           du -ah "$IO_DIR" | sort -hr | head -n 50 > "$IO_DIR/reports/top_files.txt" || true
-          du -sh "$IO_DIR"                 > "$IO_DIR/reports/total_size.txt" || true
-          {
-            echo "# uname"; uname -a
-            echo "# df -h"; df -h
-            echo "# mount (head)"; mount | head -n 50
-          } > "$IO_DIR/reports/system_snapshot.txt"
-          echo "[ECHO] I/O reports generated" | tee -a "$LOG"
+          du -sh "$IO_DIR" > "$IO_DIR/reports/total_size.txt" || true
+          { echo "# uname"; uname -a; echo "# df -h"; df -h; echo "# mount (head)"; mount | head -n 50; } > "$IO_DIR/reports/system_snapshot.txt"
 
-      - name: 📦 Bundle I/O artifacts (tar.gz + sha256)
+      - name: 📦 Bundle I/O artifacts
         env:
           IO_DIR: .github/io
         run: |
@@ -164,9 +185,9 @@ jobs:
           BUNDLE="$IO_DIR/bundle/io-$TS.tar.gz"
           tar -czf "$BUNDLE" -C "$IO_DIR" system disk container image reports
           sha256sum "$BUNDLE" > "$BUNDLE".sha256
-          echo "[ECHO] I/O bundle created: $BUNDLE" | tee -a "$LOG"
+          echo "[ECHO] IO bundle: $BUNDLE" | tee -a "$LOG" || true
 
-      - name: 🌐 Generate I/O HTML (Pages publish)
+      - name: 🌐 Generate I/O HTML (Pages)
         env:
           IO_DIR: .github/io
         run: |
@@ -184,9 +205,9 @@ jobs:
             <li><a href="../security_reports/">Security Reports</a></li>
           </ul>
           HTML
-          echo "[ECHO] I/O HTML generated" | tee -a "$LOG"
+          echo "[ECHO] IO page ready" | tee -a "$LOG" || true
 
-      - name: ⬆️ Upload I/O bundle and reports
+      - name: ⬆️ Upload I/O artifacts
         uses: actions/upload-artifact@v4
         with:
           name: io-bundle-and-reports
@@ -194,24 +215,28 @@ jobs:
             .github/io/bundle/*.tar.gz
             .github/io/bundle/*.sha256
             .github/io/reports/*
+          retention-days: 14
 
-      # ---------- Trivy ----------
+      # ---------- Trivy (with DB cache) ----------
+      - name: 💾 Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ env.CACHE_VERSION }}
+          restore-keys: trivy-db-
+
       - name: 📥 Install Trivy CLI
         run: |
           set -Eeuo pipefail
-          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin
-          trivy --version | tee -a "$LOG"
+          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR"
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          trivy --version | tee -a "$LOG" || true
 
-      - name: 🔎 Trivy scan → SARIF (Code Scanning)
+      - name: 🔎 Trivy scan → SARIF
         run: |
           set -Eeuo pipefail
-          trivy image --scanners vuln --ignore-unfixed \
-            --severity HIGH,CRITICAL \
-            --format sarif \
-            --output "$REPORT_DIR/trivy-image.sarif" \
-            workflow-image:ci
-          echo "[ECHO] Trivy SARIF generated" | tee -a "$LOG"
+          trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format sarif --output "$REPORT_DIR/trivy-image.sarif" workflow-image:ci
+          echo "[ECHO] Trivy SARIF generated" | tee -a "$LOG" || true
 
       - name: ⏫ Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v3
@@ -219,58 +244,68 @@ jobs:
           sarif_file: .github/security_reports/trivy-image.sarif
         continue-on-error: true
 
-      - name: 🧾 Trivy scan → JSON + Table (for Pages)
+      - name: 🧾 Trivy scan → JSON + Table (Pages)
         run: |
           set -Eeuo pipefail
-          trivy image --scanners vuln --ignore-unfixed \
-            --severity HIGH,CRITICAL \
-            --format json \
-            --output "$REPORT_DIR/trivy-image.json" \
-            workflow-image:ci
-          trivy image --scanners vuln --ignore-unfixed \
-            --severity HIGH,CRITICAL \
-            --format table \
-            workflow-image:ci | tee "$REPORT_DIR/trivy-image.txt"
+          trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format json --output "$REPORT_DIR/trivy-image.json" workflow-image:ci
+          trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --format table workflow-image:ci | tee "$REPORT_DIR/trivy-image.txt" || true
           cat > "$PAGES_DIR/trivy.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Trivy Report</title>
           <h1>Trivy Report (HIGH/CRITICAL)</h1>
-          <h2>Table</h2>
-          <pre id="tbl"></pre>
-          <h2>JSON (raw)</h2>
-          <pre id="json"></pre>
+          <h2>Table</h2><pre id="tbl"></pre>
+          <h2>JSON (raw)</h2><pre id="json"></pre>
           <script>
           fetch('../security_reports/trivy-image.txt').then(r=>r.text()).then(t=>document.getElementById('tbl').textContent=t);
           fetch('../security_reports/trivy-image.json').then(r=>r.text()).then(t=>document.getElementById('json').textContent=t);
           </script>
           HTML
-          echo "[ECHO] Trivy JSON/TXT + HTML ready for Pages" | tee -a "$LOG"
+          echo "[ECHO] Trivy pages ready" | tee -a "$LOG" || true
 
-      # ---------- OSSF Scorecard ----------
-      - name: 📥 Install Scorecard CLI (robust, always-available)
+      # ---------- SBOM ----------
+      - name: 📥 Install Syft (SBOM)
         run: |
           set -Eeuo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft version | tee -a "$LOG" || true
+
+      - name: 🧾 Generate SBOM (SPDX JSON)
+        run: |
+          set -Eeuo pipefail
+          syft packages workflow-image:ci -o spdx-json > "$SBOM_DIR/sbom.spdx.json"
+          cp "$SBOM_DIR/sbom.spdx.json" "$PAGES_DIR/sbom.spdx.json"
+          echo "[ECHO] SBOM generated" | tee -a "$LOG" || true
+
+      # ---------- Scorecard (verified download + docker fallback) ----------
+      - name: 📥 Install Scorecard CLI (verified or docker fallback)
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR"
           VER="4.13.3"
           INSTALL="/usr/local/bin"
           TMP="$(mktemp -d)"
           cd "$TMP"
-          URL="https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz"
-          echo "[ECHO] Downloading $URL" | tee -a "$LOG"
-          curl -fL -o scorecard.tgz "$URL" || true
-          if [ -s scorecard.tgz ]; then
-            CT="$(file -b --mime-type scorecard.tgz || true)"
-            echo "[ECHO] Content-Type: $CT" | tee -a "$LOG"
-            if echo "$CT" | grep -qiE 'gzip|octet-stream'; then
-              tar -xzf scorecard.tgz || true
-            else
-              echo "[WARN] Not a gzip archive; skip extract" | tee -a "$LOG"
+          BASE="https://github.com/ossf/scorecard/releases/download/v${VER}"
+          echo "[ECHO] Downloading ${BASE}" | tee -a "$LOG" || true
+          curl -sSfL --retry 5 --retry-delay 2 -o scorecard.tgz        "${BASE}/scorecard_${VER}_linux_amd64.tar.gz" || true
+          curl -sSfL --retry 5 --retry-delay 2 -o checksums.txt        "${BASE}/scorecard_${VER}_checksums.txt" || true
+          if [ -s scorecard.tgz ] && [ -s checksums.txt ]; then
+            SUM_LINE="$(grep 'scorecard_'"${VER}"'_linux_amd64.tar.gz' checksums.txt || true)"
+            if [ -n "$SUM_LINE" ]; then
+              EXPECTED="$(echo "$SUM_LINE" | awk '{print $1}')"
+              ACTUAL="$(sha256sum scorecard.tgz | awk '{print $1}')"
+              if [ "$EXPECTED" = "$ACTUAL" ]; then
+                tar -xzf scorecard.tgz || true
+                if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then
+                  sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"
+                fi
+              else
+                echo "[WARN] checksum mismatch; skip native install" | tee -a "$LOG" || true
+              fi
             fi
           fi
-          if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then
-            sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"
-          fi
           if ! command -v scorecard >/dev/null 2>&1; then
-            echo "[ECHO] Installing docker wrapper for scorecard" | tee -a "$LOG"
+            echo "[ECHO] Using docker fallback for scorecard" | tee -a "$LOG" || true
             sudo bash -c 'cat > /usr/local/bin/scorecard <<EOF
             #!/usr/bin/env bash
             exec docker run --rm ghcr.io/ossf/scorecard:stable "$@"
@@ -278,11 +313,7 @@ jobs:
             sudo chmod +x /usr/local/bin/scorecard
             docker pull ghcr.io/ossf/scorecard:stable || true
           fi
-          if command -v scorecard >/dev/null 2>&1; then
-            scorecard version | tee -a "$LOG" || true
-          else
-            echo '{}' > "$REPORT_DIR/scorecard.json"
-          fi
+          command -v scorecard && scorecard version | tee -a "$LOG" || true
 
       - name: 🧰 Scorecard Action (SARIF)
         uses: ossf/scorecard-action@v2.4.0
@@ -293,7 +324,7 @@ jobs:
           publish_results: false
         continue-on-error: true
 
-      - name: 🧪 Scorecard JSON & HTML summary (Pages, resilient)
+      - name: 🧪 Scorecard JSON & HTML summary (Pages)
         env:
           GH_REPO: ${{ github.repository }}
         run: |
@@ -330,15 +361,10 @@ jobs:
           }).catch(()=>{document.getElementById('summary').textContent='No data';});
           </script>
           HTML
-          echo "[ECHO] Scorecard JSON/HTML ready for Pages" | tee -a "$LOG"
+          echo "[ECHO] Scorecard pages ready" | tee -a "$LOG" || true
 
-      - name: ⏫ Upload Scorecard SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: .github/security_reports/scorecard.sarif
-        continue-on-error: true
-
-      - name: 📦 Upload artifacts (logs, images, reports)
+      - name: 📦 Upload artifacts (logs, images, reports, sbom)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: security-logs-and-reports
@@ -346,14 +372,28 @@ jobs:
             .github/echo_logs/account-rotation.log
             .github/artifacts/workflow-image-arm64.tar
             .github/security_reports/*
+            .github/pages/sbom.spdx.json
+          retention-days: 14
 
-      # ---- 봇 하트비트 + PR + [skip ci] : 항상 실행 ----
+      - name: 🧾 Job summary
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "## ✅ SecSuite Run Summary"
+            echo "- Trivy: \`.github/security_reports/trivy-image.json\` / Pages: trivy.html"
+            echo "- Scorecard: \`.github/security_reports/scorecard.json\` / Pages: scorecard.html"
+            echo "- SBOM (SPDX): \`.github/pages/sbom.spdx.json\`"
+            echo "- IO Reports: Pages: io/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Bot heartbeat + PR + [skip ci] (always) ----
       - name: 🤖 Bot heartbeat commit (+ PR, skip-ci)
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          # 기본 브랜치 탐지 (gh 미설치 대비)
+          mkdir -p "$(dirname "$LOG")" "$PAGES_DIR"
           DEFAULT_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/^\s*HEAD branch: //p')"
           [ -n "$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
           mkdir -p .github/bot .github/pages
@@ -366,17 +406,12 @@ jobs:
           git fetch origin "$DEFAULT_BRANCH" --depth=1 || true
           git checkout -B "$BR" "origin/$DEFAULT_BRANCH" 2>/dev/null || git checkout -B "$BR" "$DEFAULT_BRANCH"
           git add .github/bot/heartbeat.txt .github/pages/last_run.txt
-          git commit -m "🤖 bot: heartbeat $TS [skip ci]" || { echo "[ECHO] nothing to commit" | tee -a "$LOG"; exit 0; }
-          git push -u origin "$BR" || { echo "[WARN] push failed (token/permission)"; exit 0; }
-          # gh 가 있으면 PR 생성 시도(없어도 통과)
+          git commit -m "🤖 bot: heartbeat $TS [skip ci]" || exit 0
+          git push -u origin "$BR" || exit 0
           if command -v gh >/dev/null 2>&1; then
-            gh pr create --base "$DEFAULT_BRANCH" --head "$BR" \
-              --title "🤖 bot: heartbeat $TS" \
-              --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." \
-              || echo "[WARN] PR create skipped/failed"
+            gh pr create --base "$DEFAULT_BRANCH" --head "$BR" --title "🤖 bot: heartbeat $TS" --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." || true
           fi
 
-  # -------- CodeQL full scan --------
   codeql:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -387,7 +422,7 @@ jobs:
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
-      - name: 🛠️ Initialize CodeQL
+      - name: 🛠 Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ env.CODEQL_LANGUAGES }}
@@ -399,7 +434,6 @@ jobs:
         with:
           category: "/language:${{ env.CODEQL_LANGUAGES }}"
 
-  # -------- GitHub Pages 배포 --------
   deploy-pages:
     needs: [build-test-sec]
     runs-on: ubuntu-latest
@@ -410,13 +444,12 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔁 Copy reports (Security + I/O) into Pages dir
+      - name: 🔁 Copy reports to Pages dir
         run: |
           set -Eeuo pipefail
           mkdir -p .github/pages .github/security_reports .github/io/reports
           cp -r .github/security_reports .github/pages/ 2>/dev/null || true
-          # I/O 페이지는 앞 잡에서 생성됨(.github/pages/io)
-          [ -d ".github/pages/io" ] || mkdir -p .github/pages/io
+          # index
           cat > .github/pages/index.html <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Reports Portal</title>
@@ -426,6 +459,7 @@ jobs:
             <li><a href="scorecard.html">OSSF Scorecard Summary</a></li>
             <li><a href="security_reports/">Raw Security Files (JSON/TXT/SARIF)</a></li>
             <li><a href="io/">Filesystem I/O Reports</a></li>
+            <li><a href="sbom.spdx.json">SBOM (SPDX)</a></li>
             <li><a href="last_run.txt">Last Run Timestamp</a></li>
           </ul>
           HTML
