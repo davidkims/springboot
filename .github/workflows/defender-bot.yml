@@ -3,7 +3,7 @@ name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Trivy→Pages · 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *" # 24x7 · 5분 간격
+    - cron: "*/5 * * * *"  # 24x7 · 5분 간격
 
 concurrency:
   group: account-rotation
@@ -13,15 +13,15 @@ permissions:
   contents: write
   pages: write
   id-token: write
-  security-events: write   # SARIF 업로드(Trivy/Scorecard/CodeQL)
+  security-events: write
 
 env:
   LOG: .github/echo_logs/account-rotation.log
   PAGES_DIR: .github/pages
   REPORT_DIR: .github/security_reports
-  CODEQL_LANGUAGES: python      # 필요시 "python,javascript,java" 등으로 확장
-  GIT_USER_NAME: "repo-bot"
-  GIT_USER_EMAIL: "repo-bot@example.local"
+  CODEQL_LANGUAGES: python
+  GIT_USER_NAME: repo-bot
+  GIT_USER_EMAIL: repo-bot@example.local
 
 jobs:
   build-test-sec:
@@ -33,7 +33,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 🧱 Echo env & tree
-        shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR"
@@ -41,8 +40,7 @@ jobs:
             echo "[ECHO] date: $(date -u +'%F %T %Z')"
             echo "[ECHO] runner: $(uname -a)"
             echo "[ECHO] pwd: $(pwd)"
-            echo "[ECHO] ls -al:"
-            ls -al
+            echo "[ECHO] ls -al:"; ls -al
             echo "[ECHO] workflow tree:"
             (command -v tree >/dev/null 2>&1 && tree -a workflow || find workflow -maxdepth 2 -print)
           } | tee -a "$LOG"
@@ -54,14 +52,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: 🐍 Python syntax check
-        shell: bash
         run: |
           set -Eeuo pipefail
           python3 -m py_compile workflow/rotate_accounts.py
           echo "[ECHO] py_compile OK" | tee -a "$LOG"
 
       - name: 🐚 Bash syntax check + ShellCheck
-        shell: bash
         run: |
           set -Eeuo pipefail
           bash -n workflow/bootstrap.sh
@@ -73,7 +69,6 @@ jobs:
           echo "[ECHO] bash -n & ShellCheck OK" | tee -a "$LOG"
 
       - name: 🐳 Build Docker image (amd64, load)
-        shell: bash
         run: |
           set -Eeuo pipefail
           docker buildx build \
@@ -85,7 +80,6 @@ jobs:
           echo "[ECHO] docker build (amd64) OK" | tee -a "$LOG"
 
       - name: ▶️ Smoke test (container up & cron alive)
-        shell: bash
         run: |
           set -Eeuo pipefail
           docker rm -f workflow-container-test >/dev/null 2>&1 || true
@@ -96,7 +90,6 @@ jobs:
           docker rm -f workflow-container-test || true
 
       - name: 🐳 Build Docker image (arm64, OCI tar export)
-        shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p .github/artifacts
@@ -108,9 +101,102 @@ jobs:
             workflow
           echo "[ECHO] docker build (arm64) tar exported" | tee -a "$LOG"
 
-      # ---------- Trivy: SARIF + JSON + TXT + HTML (Pages 공개) ----------
+      # ---------- Filesystem I/O 확장 ----------
+      - name: 📁 Prepare I/O directories & seed files
+        env:
+          IO_DIR: .github/io
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$IO_DIR"/{system,disk,container,image}/logs "$IO_DIR"/bundle "$IO_DIR"/reports
+          echo "system.conf: $(date -u)"  > "$IO_DIR/system/system.conf"
+          echo "disk.info:   $(date -u)"  > "$IO_DIR/disk/disk.info"
+          echo "container:    $(date -u)"  > "$IO_DIR/container/container.cfg"
+          echo "image.meta:   $(date -u)"  > "$IO_DIR/image/image.meta"
+          for i in $(seq 1 10); do
+            echo "system $i $(date -u)"  > "$IO_DIR/system/config$i.conf"
+            echo "disk   $i $(date -u)"  > "$IO_DIR/disk/disk$i.info"
+            echo "ctr    $i $(date -u)"  > "$IO_DIR/container/ctr$i.cfg"
+            echo "image  $i $(date -u)"  > "$IO_DIR/image/img$i.meta"
+          done
+          echo "[ECHO] I/O seed files created" | tee -a "$LOG"
+
+      - name: ✍️ I/O write/append/perm tests
+        env:
+          IO_DIR: .github/io
+        run: |
+          set -Eeuo pipefail
+          echo "$(date -u) write test"  > "$IO_DIR/system/logs/write.log"
+          echo "$(date -u) append"     >> "$IO_DIR/system/logs/write.log"
+          chmod -R 755 "$IO_DIR" || true
+          head -n 2 "$IO_DIR/system/logs/write.log" | tee -a "$LOG"
+          echo "[ECHO] I/O write/append OK" | tee -a "$LOG"
+
+      - name: ⚙️ I/O throughput micro (dd)
+        env:
+          IO_DIR: .github/io
+        run: |
+          set -Eeuo pipefail
+          dd if=/dev/zero of="$IO_DIR/disk/dd_test.bin" bs=1M count=8 status=none
+          sync
+          md5sum "$IO_DIR/disk/dd_test.bin" | tee "$IO_DIR/reports/dd_test.md5"
+          echo "[ECHO] dd micro test OK" | tee -a "$LOG"
+
+      - name: 📊 I/O usage reports (du/sort/safe)
+        env:
+          IO_DIR: .github/io
+        run: |
+          set -Eeuo pipefail
+          du -ah "$IO_DIR" | sort -hr | head -n 50 > "$IO_DIR/reports/top_files.txt" || true
+          du -sh "$IO_DIR"                 > "$IO_DIR/reports/total_size.txt" || true
+          {
+            echo "# uname"; uname -a
+            echo "# df -h"; df -h
+            echo "# mount (head)"; mount | head -n 50
+          } > "$IO_DIR/reports/system_snapshot.txt"
+          echo "[ECHO] I/O reports generated" | tee -a "$LOG"
+
+      - name: 📦 Bundle I/O artifacts (tar.gz + sha256)
+        env:
+          IO_DIR: .github/io
+        run: |
+          set -Eeuo pipefail
+          TS="$(date -u +%Y%m%d%H%M%S)"
+          BUNDLE="$IO_DIR/bundle/io-$TS.tar.gz"
+          tar -czf "$BUNDLE" -C "$IO_DIR" system disk container image reports
+          sha256sum "$BUNDLE" > "$BUNDLE".sha256
+          echo "[ECHO] I/O bundle created: $BUNDLE" | tee -a "$LOG"
+
+      - name: 🌐 Generate I/O HTML (Pages publish)
+        env:
+          IO_DIR: .github/io
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PAGES_DIR/io"
+          cp -r "$IO_DIR/reports" "$PAGES_DIR/io/" 2>/dev/null || true
+          cat > "$PAGES_DIR/io/index.html" <<'HTML'
+          <!DOCTYPE html><meta charset="utf-8">
+          <title>Filesystem I/O Reports</title>
+          <h1>Filesystem I/O Reports</h1>
+          <ul>
+            <li><a href="reports/top_files.txt">Top Files</a></li>
+            <li><a href="reports/total_size.txt">Total Size</a></li>
+            <li><a href="reports/system_snapshot.txt">System Snapshot</a></li>
+            <li><a href="../security_reports/">Security Reports</a></li>
+          </ul>
+          HTML
+          echo "[ECHO] I/O HTML generated" | tee -a "$LOG"
+
+      - name: ⬆️ Upload I/O bundle and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-bundle-and-reports
+          path: |
+            .github/io/bundle/*.tar.gz
+            .github/io/bundle/*.sha256
+            .github/io/reports/*
+
+      # ---------- Trivy ----------
       - name: 📥 Install Trivy CLI
-        shell: bash
         run: |
           set -Eeuo pipefail
           curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
@@ -118,7 +204,6 @@ jobs:
           trivy --version | tee -a "$LOG"
 
       - name: 🔎 Trivy scan → SARIF (Code Scanning)
-        shell: bash
         run: |
           set -Eeuo pipefail
           trivy image --scanners vuln --ignore-unfixed \
@@ -135,7 +220,6 @@ jobs:
         continue-on-error: true
 
       - name: 🧾 Trivy scan → JSON + Table (for Pages)
-        shell: bash
         run: |
           set -Eeuo pipefail
           trivy image --scanners vuln --ignore-unfixed \
@@ -147,7 +231,6 @@ jobs:
             --severity HIGH,CRITICAL \
             --format table \
             workflow-image:ci | tee "$REPORT_DIR/trivy-image.txt"
-          # 간단 HTML
           cat > "$PAGES_DIR/trivy.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Trivy Report</title>
@@ -163,48 +246,31 @@ jobs:
           HTML
           echo "[ECHO] Trivy JSON/TXT + HTML ready for Pages" | tee -a "$LOG"
 
-      # ---------- OSSF Scorecard: 견고한 설치 + SARIF/JSON/HTML ----------
-      - name: 📥 Install Scorecard CLI (robust)
-        shell: bash
+      # ---------- OSSF Scorecard ----------
+      - name: 📥 Install Scorecard CLI (robust, always-available)
         run: |
           set -Eeuo pipefail
           VER="4.13.3"
           INSTALL="/usr/local/bin"
           TMP="$(mktemp -d)"
           cd "$TMP"
-
-          echo "[ECHO] Try gh release download…" | tee -a "$LOG"
-          if command -v gh >/dev/null 2>&1; then
-            gh release download "v${VER}" -R ossf/scorecard \
-              -p "scorecard_${VER}_linux_amd64.tar.gz" \
-              -O scorecard.tgz || true
+          URL="https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz"
+          echo "[ECHO] Downloading $URL" | tee -a "$LOG"
+          curl -fL -o scorecard.tgz "$URL" || true
+          if [ -s scorecard.tgz ]; then
+            CT="$(file -b --mime-type scorecard.tgz || true)"
+            echo "[ECHO] Content-Type: $CT" | tee -a "$LOG"
+            if echo "$CT" | grep -qiE 'gzip|octet-stream'; then
+              tar -xzf scorecard.tgz || true
+            else
+              echo "[WARN] Not a gzip archive; skip extract" | tee -a "$LOG"
+            fi
           fi
-
-          echo "[ECHO] Fallback direct curl…" | tee -a "$LOG"
-          [ -s scorecard.tgz ] || curl -fL -o scorecard.tgz \
-            "https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz" || true
-
-          if [ -s scorecard.tgz ] && file scorecard.tgz | grep -qi gzip; then
-            tar -xzf scorecard.tgz || true
-          fi
-
           if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then
             sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"
           fi
-
-          # go install 대체
           if ! command -v scorecard >/dev/null 2>&1; then
-            echo "[ECHO] Fallback go install…" | tee -a "$LOG"
-            sudo apt-get update -y && sudo apt-get install -y golang-go || true
-            GOBIN="$HOME/go/bin" GOPATH="$HOME/go" go install github.com/ossf/scorecard/v4@v${VER} || true
-            if [ -x "$HOME/go/bin/scorecard" ]; then
-              sudo mv "$HOME/go/bin/scorecard" "$INSTALL/scorecard"
-            fi
-          fi
-
-          # 최후수단: 컨테이너 래퍼
-          if ! command -v scorecard >/dev/null 2>&1; then
-            echo "[ECHO] Fallback container wrapper…" | tee -a "$LOG"
+            echo "[ECHO] Installing docker wrapper for scorecard" | tee -a "$LOG"
             sudo bash -c 'cat > /usr/local/bin/scorecard <<EOF
             #!/usr/bin/env bash
             exec docker run --rm ghcr.io/ossf/scorecard:stable "$@"
@@ -212,8 +278,11 @@ jobs:
             sudo chmod +x /usr/local/bin/scorecard
             docker pull ghcr.io/ossf/scorecard:stable || true
           fi
-
-          scorecard version || (echo "[WARN] scorecard not available but workflow continues" | tee -a "$LOG"; exit 0)
+          if command -v scorecard >/dev/null 2>&1; then
+            scorecard version | tee -a "$LOG" || true
+          else
+            echo '{}' > "$REPORT_DIR/scorecard.json"
+          fi
 
       - name: 🧰 Scorecard Action (SARIF)
         uses: ossf/scorecard-action@v2.4.0
@@ -224,16 +293,17 @@ jobs:
           publish_results: false
         continue-on-error: true
 
-      - name: 🧪 Scorecard JSON & HTML summary (Pages)
-        shell: bash
+      - name: 🧪 Scorecard JSON & HTML summary (Pages, resilient)
         env:
           GH_REPO: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
-          # JSON (네트워크 실패해도 진행)
-          scorecard --repo "github.com/${GH_REPO}" --format=json \
-            > "$REPORT_DIR/scorecard.json" || echo '{}' > "$REPORT_DIR/scorecard.json"
-
+          mkdir -p "$REPORT_DIR" "$PAGES_DIR"
+          if command -v scorecard >/dev/null 2>&1; then
+            scorecard --repo "github.com/${GH_REPO}" --format=json > "$REPORT_DIR/scorecard.json" || echo '{}' > "$REPORT_DIR/scorecard.json"
+          else
+            echo '{}' > "$REPORT_DIR/scorecard.json"
+          fi
           cat > "$PAGES_DIR/scorecard.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>OSSF Scorecard Summary</title>
@@ -279,39 +349,32 @@ jobs:
 
       # ---- 봇 하트비트 + PR + [skip ci] : 항상 실행 ----
       - name: 🤖 Bot heartbeat commit (+ PR, skip-ci)
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          # 기본 브랜치 확인
-          DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo main)"
+          # 기본 브랜치 탐지 (gh 미설치 대비)
+          DEFAULT_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/^\s*HEAD branch: //p')"
           [ -n "$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
-
-          # 하트비트/타임스탬프 갱신
           mkdir -p .github/bot .github/pages
           TS="$(date -u +'%F %T %Z')"
           echo "$TS" > .github/bot/heartbeat.txt
           echo "$TS" > .github/pages/last_run.txt
-
-          # 변경사항 커밋을 위한 브랜치 생성
           BR="bot/heartbeat-$(date -u +%Y%m%d%H%M)"
           git config user.name  "${GIT_USER_NAME}"
           git config user.email "${GIT_USER_EMAIL}"
           git fetch origin "$DEFAULT_BRANCH" --depth=1 || true
           git checkout -B "$BR" "origin/$DEFAULT_BRANCH" 2>/dev/null || git checkout -B "$BR" "$DEFAULT_BRANCH"
-
           git add .github/bot/heartbeat.txt .github/pages/last_run.txt
           git commit -m "🤖 bot: heartbeat $TS [skip ci]" || { echo "[ECHO] nothing to commit" | tee -a "$LOG"; exit 0; }
           git push -u origin "$BR" || { echo "[WARN] push failed (token/permission)"; exit 0; }
-
-          # PR 자동 생성(권한/정책에 따라 실패해도 계속)
-          gh pr create \
-            --base "$DEFAULT_BRANCH" \
-            --head "$BR" \
-            --title "🤖 bot: heartbeat $TS" \
-            --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." \
-            || echo "[WARN] PR create skipped/failed"
+          # gh 가 있으면 PR 생성 시도(없어도 통과)
+          if command -v gh >/dev/null 2>&1; then
+            gh pr create --base "$DEFAULT_BRANCH" --head "$BR" \
+              --title "🤖 bot: heartbeat $TS" \
+              --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." \
+              || echo "[WARN] PR create skipped/failed"
+          fi
 
   # -------- CodeQL full scan --------
   codeql:
@@ -324,22 +387,19 @@ jobs:
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
-
       - name: 🛠️ Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ env.CODEQL_LANGUAGES }}
           queries: +security-and-quality
-
       - name: 🔧 Autobuild
         uses: github/codeql-action/autobuild@v3
-
       - name: 🔎 Analyze
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ env.CODEQL_LANGUAGES }}"
 
-  # -------- GitHub Pages 배포(Trivy/Scorecard 요약 공개) --------
+  # -------- GitHub Pages 배포 --------
   deploy-pages:
     needs: [build-test-sec]
     runs-on: ubuntu-latest
@@ -350,20 +410,22 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔁 Copy security reports into Pages dir
-        shell: bash
+      - name: 🔁 Copy reports (Security + I/O) into Pages dir
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/pages .github/security_reports
+          mkdir -p .github/pages .github/security_reports .github/io/reports
           cp -r .github/security_reports .github/pages/ 2>/dev/null || true
+          # I/O 페이지는 앞 잡에서 생성됨(.github/pages/io)
+          [ -d ".github/pages/io" ] || mkdir -p .github/pages/io
           cat > .github/pages/index.html <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
-          <title>Security Reports</title>
-          <h1>Security Reports</h1>
+          <title>Reports Portal</title>
+          <h1>Reports Portal</h1>
           <ul>
             <li><a href="trivy.html">Trivy Report (HIGH/CRITICAL)</a></li>
             <li><a href="scorecard.html">OSSF Scorecard Summary</a></li>
-            <li><a href="security_reports/">Raw Files (JSON/TXT/SARIF)</a></li>
+            <li><a href="security_reports/">Raw Security Files (JSON/TXT/SARIF)</a></li>
+            <li><a href="io/">Filesystem I/O Reports</a></li>
             <li><a href="last_run.txt">Last Run Timestamp</a></li>
           </ul>
           HTML
