@@ -1,19 +1,277 @@
-name: "⚔️ Defender Bot EchoOps"
+name: "⚔️ Defender Bot EchoOps (Full + FDS + Echo)"
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: "0 * * * *"   # 매시간 정각
   workflow_dispatch:
+    inputs:
+      block_on_alert:
+        description: "FDS 경보 시 실행 차단 (true/false)"
+        required: false
+        default: "true"
+      update_baseline:
+        description: "실행 후 베이스라인 갱신/커밋 (true/false)"
+        required: false
+        default: "false"
+      run_mode:
+        description: "실행 모드 (normal|dry-run)"
+        required: false
+        default: "normal"
 
 permissions:
-  contents: write
+  contents: write  # 베이스라인 갱신 시 커밋에 필요
+  actions: read
+
+concurrency:
+  group: defender-bot-echoops
+  cancel-in-progress: true  # 중복 실행 방지(대기 걸리지 않음)
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   echo-ops:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
+    timeout-minutes: 45
+    env:
+      LOG_DIR: .github/echo_logs
+      FDS_DIR: .github/fds
+      SCRIPT_PATH: scripts/defender_bot_workflow.sh
+      FDS_BASELINE: .github/fds/baseline.sha256
+      FDS_ALLOWLIST: ".github/echo_logs/**,.github/fds/baseline.sha256"  # 허용 변경 패턴(쉼표 구분, 최소 예시)
+      FDS_BLOCK_ON_ALERT: ${{ github.event.inputs.block_on_alert || 'true' }}
+      APPLY_BASELINE_UPDATE: ${{ github.event.inputs.update_baseline || 'false' }}
+      RUN_MODE: ${{ github.event.inputs.run_mode || 'normal' }}
+      TZ: "Asia/Seoul"
 
-      - name: Run Defender Bot workflow
-        run: bash scripts/defender_bot_workflow.sh
+    steps:
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🗒️ Init EchoOps
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$FDS_DIR"
+          TS="$(date +%Y%m%d_%H%M%S)"
+          LOG="$LOG_DIR/defender_bot_${TS}.log"
+          echo "$LOG" > "$LOG_DIR/.latest"     # 다른 스텝에서 참조
+          {
+            echo "[ECHO] Start $(date '+%F %T')"
+            echo "[ECHO] Repo=$GITHUB_REPOSITORY RunID=$GITHUB_RUN_ID SHA=$GITHUB_SHA"
+            echo "[ECHO] Runner=$(uname -a)"
+            echo "[ECHO] RUN_MODE=${RUN_MODE}"
+          } | tee -a "$LOG"
+
+      - name: 🔧 Env Snapshot
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          {
+            echo "[ECHO] Disk:"
+            df -h
+            echo "[ECHO] Top space usage:"
+            du -ah . | sort -hr | head -n 30 || true
+            echo "[ECHO] Processes:"
+            ps aux | head -n 20
+            echo "[ECHO] Open Ports (sample):"
+            (ss -lnt || netstat -lnt || true) | head -n 20
+          } | tee -a "$LOG"
+
+      - name: ✅ Script Guard
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          if [[ ! -f "$SCRIPT_PATH" ]]; then
+            echo "[ERROR] $SCRIPT_PATH not found. Create it and re-run." | tee -a "$LOG"
+            echo "::notice title=Missing script::scripts/defender_bot_workflow.sh is absent"
+            exit 0  # 스케줄 차질 없이 종료
+          fi
+          chmod +x "$SCRIPT_PATH" || true
+          echo "[ECHO] Verified $SCRIPT_PATH" | tee -a "$LOG"
+
+      - name: 🧰 Build/Ensure FDS Baseline (first-run safe)
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          # 모니터링 대상으로 삼을 경로(필요시 추가)
+          MONITOR_PATHS=("scripts" ".github/workflows" ".github/fds/rules" "config")
+          # 베이스라인 생성 함수
+          build_baseline() {
+            : > "$FDS_BASELINE.tmp"
+            for p in "${MONITOR_PATHS[@]}"; do
+              [ -d "$p" ] || continue
+              find "$p" -type f -not -path "$FDS_BASELINE" -print0 \
+                | xargs -0 -I{} sh -c 'sha256sum "{}" || true' >> "$FDS_BASELINE.tmp"
+            done
+            sort "$FDS_BASELINE.tmp" -o "$FDS_BASELINE.tmp" || true
+            mv "$FDS_BASELINE.tmp" "$FDS_BASELINE"
+          }
+          if [[ ! -f "$FDS_BASELINE" ]]; then
+            echo "[FDS] No baseline found → creating initial baseline." | tee -a "$LOG"
+            build_baseline
+          else
+            echo "[FDS] Baseline exists." | tee -a "$LOG"
+          fi
+
+      - name: 🛡️ FDS Pre-Run Integrity & Anomaly Check
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          ALERT=0
+
+          # 1) Git 차이
+          git fetch --quiet origin || true
+          DIFF_NAMES="$(git diff --name-status HEAD origin/HEAD || true)"
+          if [[ -n "$DIFF_NAMES" ]]; then
+            echo "[FDS] Git diff vs origin/HEAD:" | tee -a "$LOG"
+            echo "$DIFF_NAMES" | tee -a "$LOG"
+          else
+            echo "[FDS] No upstream diff." | tee -a "$LOG"
+          fi
+
+          # 2) 해시 기반 무결성 점검
+          #   현 상태 해시 생성
+          : > "$FDS_DIR/current.sha256"
+          while IFS= read -r line; do
+            path="$line"
+            [[ -e "$path" ]] || continue
+            find "$path" -type f -print0 \
+              | xargs -0 -I{} sh -c 'sha256sum "{}" || true' >> "$FDS_DIR/current.sha256"
+          done < <(printf "%s\n" "scripts" ".github/workflows" ".github/fds/rules" "config")
+          sort "$FDS_DIR/current.sha256" -o "$FDS_DIR/current.sha256" || true
+
+          #   변경 목록 추출
+          #   baseline에는 없고 current에만 있는 파일 / 반대의 파일 / 해시 변경 파일
+          ADDED="$(comm -13 "$FDS_BASELINE" "$FDS_DIR/current.sha256" || true)"
+          REMOVED="$(comm -23 "$FDS_BASELINE" "$FDS_DIR/current.sha256" || true)"
+          MODIFIED="$(join -j 2 -o 1.1,2.1 -a1 -e MISSING \
+            <(awk '{print $2,$1}' "$FDS_BASELINE" | sort) \
+            <(awk '{print $2,$1}' "$FDS_DIR/current.sha256" | sort) \
+            | awk '$2!="MISSING" && $1!=$2 {print $0}' || true)"
+
+          echo "[FDS] Added files (by hash):" | tee -a "$LOG";  echo "${ADDED:-<none>}"    | tee -a "$LOG"
+          echo "[FDS] Removed files (by hash):" | tee -a "$LOG"; echo "${REMOVED:-<none>}"  | tee -a "$LOG"
+          echo "[FDS] Modified (path hash_old→hash_new):" | tee -a "$LOG"; echo "${MODIFIED:-<none>}" | tee -a "$LOG"
+
+          # 3) Allowlist 필터 (경로 패턴 쉼표구분)
+          allow_hit() {
+            local f="$1"; local IFS=','; read -ra pats <<< "$FDS_ALLOWLIST"
+            for pat in "${pats[@]}"; do
+              [[ -z "$pat" ]] && continue
+              if [[ "$f" == $pat ]]; then return 0; fi
+              # 와일드카드 매칭
+              if [[ "$pat" == *"**"* ]] || [[ "$pat" == *"*"* ]]; then
+                if [[ "$f" == $pat ]]; then return 0; fi
+              fi
+            done
+            return 1
+          }
+
+          flagged=0
+          # Added/Removed/Modified 모두에서 allowlist 아닌 항목 탐지
+          for f in $(echo "$ADDED"    | awk '{print $2}' || true);   do allow_hit "$f" || { echo "[FDS][ALERT] Unexpected ADD: $f" | tee -a "$LOG"; flagged=1; }; done
+          for f in $(echo "$REMOVED"  | awk '{print $2}' || true);   do allow_hit "$f" || { echo "[FDS][ALERT] Unexpected REMOVE: $f" | tee -a "$LOG"; flagged=1; }; done
+          for f in $(echo "$MODIFIED" | awk '{print $1}' || true);   do allow_hit "$f" || { echo "[FDS][ALERT] Unexpected MODIFY: $f" | tee -a "$LOG"; flagged=1; }; done
+
+          # 4) 위험 패턴 탐지(간이 IOC)
+          suspicious=$(git log -1 --pretty=%an 2>/dev/null || true)
+          if [[ -n "$suspicious" && "$suspicious" =~ (bot|ci|unknown|noreply) ]]; then
+            echo "[FDS][WARN] Last committer looks automated/unconfirmed: $suspicious" | tee -a "$LOG"
+          fi
+          # 권한 777 파일 탐지
+          perms=$(find scripts -type f -perm -0777 -print || true)
+          if [[ -n "$perms" ]]; then
+            echo "[FDS][ALERT] 0777 files detected:" | tee -a "$LOG"
+            echo "$perms" | tee -a "$LOG"
+            flagged=1
+          fi
+
+          if (( flagged == 1 )); then ALERT=1; fi
+
+          # 차단 여부
+          if [[ "${FDS_BLOCK_ON_ALERT,,}" == "true" && $ALERT -eq 1 && "${RUN_MODE}" != "dry-run" ]]; then
+            echo "[FDS] ALERTS present → Blocking execution." | tee -a "$LOG"
+            echo "FDS_BLOCKED=1" >> "$GITHUB_ENV"
+          else
+            echo "[FDS] No blocking condition met. Proceeding." | tee -a "$LOG"
+            echo "FDS_BLOCKED=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: 🚀 Run Defender Bot (wrapped)
+        if: env.FDS_BLOCKED == '0'
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          echo "[ECHO] Execute $SCRIPT_PATH (timeout 25m) ..." | tee -a "$LOG"
+          # 환경 변수 미정의로 실패 방지
+          : "${GITHUB_TOKEN:=${GITHUB_TOKEN:-}}"
+          : "${WORKFLOW_PAT:=${WORKFLOW_PAT:-}}"
+
+          # 실행 (출력 에코 로그에 적재)
+          if timeout --preserve-status 25m "$SCRIPT_PATH" 2>&1 | tee -a "$LOG"; then
+            echo "[ECHO] Script OK" | tee -a "$LOG"
+            echo "BOT_EXIT=0" >> "$GITHUB_ENV"
+          else
+            rc=$?
+            echo "[ERROR] Script failed with RC=$rc" | tee -a "$LOG"
+            echo "BOT_EXIT=$rc" >> "$GITHUB_ENV"
+          fi
+
+      - name: 🧪 Post-Run FDS (log sweep)
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          echo "[FDS] Post-run log sweep ..." | tee -a "$LOG"
+          # 간단 IOC 패턴(필요시 강화)
+          egrep -i "curl .*http|wget .*http|/tmp/|/var/tmp/|bitcoin|miner|ssh-rsa" "$LOG" || true
+          echo "[FDS] Sweep complete." | tee -a "$LOG"
+
+      - name: 📝 Optional Baseline Update (commit)
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          LOG="$(cat "$LOG_DIR/.latest")"
+          if [[ "${APPLY_BASELINE_UPDATE,,}" != "true" ]]; then
+            echo "[ECHO] Baseline update disabled." | tee -a "$LOG"; exit 0
+          fi
+          # 안전: 실패해도 워크플로우 진행
+          {
+            # 현재 상태로 베이스라인 재생성
+            : > "$FDS_BASELINE.tmp"
+            for p in scripts .github/workflows .github/fds/rules config; do
+              [ -d "$p" ] || continue
+              find "$p" -type f -print0 | xargs -0 -I{} sh -c 'sha256sum "{}" || true' >> "$FDS_BASELINE.tmp"
+            done
+            sort "$FDS_BASELINE.tmp" -o "$FDS_BASELINE.tmp" || true
+            mv "$FDS_BASELINE.tmp" "$FDS_BASELINE"
+
+            git config user.name  "defender-bot"
+            git config user.email "defender-bot@users.noreply.github.com"
+            git add "$FDS_BASELINE" || true
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(fds): update baseline $(date -u +%F-%H%M%S)" || true
+              git push || echo "[WARN] push failed (no token/branch perms?)"
+            else
+              echo "[ECHO] Baseline unchanged." | tee -a "$LOG"
+            fi
+          } || echo "[WARN] Baseline update step encountered issues." | tee -a "$LOG"
+
+      - name: 📤 Upload EchoOps Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: defender-bot-logs-${{ github.run_id }}
+          path: .github/echo_logs/
+
+      - name: 🔚 Summary
+        if: always()
+        run: |
+          LOG="$(cat "$LOG_DIR/.latest")"
+          echo "---- SUMMARY ----"
+          echo "FDS_BLOCKED=${FDS_BLOCKED:-?}"
+          echo "BOT_EXIT=${BOT_EXIT:-N/A}"
+          echo "Log: $LOG"
