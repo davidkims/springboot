@@ -1,4 +1,4 @@
-name: "🦀 Rust CI — no-skip + echo logs + self-heal + artifacts"
+name: "🦀 Rust CI — no-skip, POSIX-safe, echo logs, self-heal, artifacts (no cache warnings)"
 
 on:
   push:
@@ -23,8 +23,9 @@ jobs:
   rust-ci:
     strategy:
       fail-fast: false
+      # 이미지 마이그레이션 경고 제거용 고정 라벨 사용
       matrix:
-        os: [ubuntu-latest, macos-14, windows-2022]  # ✅ 마이그레이션 경고 제거
+        os: [ubuntu-latest, macos-14, windows-2022]
         toolchain: [stable]
     runs-on: ${{ matrix.os }}
 
@@ -35,56 +36,65 @@ jobs:
       - name: 📁 Prepare echo log dirs (always exist)
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           for d in .github/rust_logs .github/security_logs artifacts; do
             echo "[ECHO] mkdir -p $d" ; mkdir -p "$d"
             echo "[ECHO] chmod 755 $d"; chmod 755 "$d" || true
           done
           echo "[ECHO] seed log" | tee .github/rust_logs/seed.log
-          # ✅ artifacts 경고 방지용 placeholder
+          # 업로드 경고 방지용 placeholder
           echo "placeholder" > artifacts/.keep
 
       - name: 🧰 System deps (Linux only)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           echo "[ECHO] apt-get update/install"
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev cmake clang llvm curl git ca-certificates
+            build-essential pkg-config libssl-dev cmake clang llvm curl git ca-certificates tar
 
-      - name: 🦀 Install Rust (${{ matrix.toolchain }}, +clippy/rustfmt)
+      - name: 🦀 Install Rust (${{ matrix.toolchain }} + clippy/rustfmt)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          components: clippy,rustfmt   # ✅ profile 입력 사용 안 함
+          # ⚠ profile 입력 금지
+          components: clippy,rustfmt
 
-      # ─────────────────────────────────────────────────────────
-      # Detect Cargo.toml / 없으면 샘플 crate 자동 생성(자가복구)
-      # ─────────────────────────────────────────────────────────
-      - name: 🔎 Detect crates (self-heal if none)
+      # ──────────────── Detect Cargo.toml / Self-heal ────────────────
+      - name: 🔎 Detect crates (self-heal if none) — POSIX-safe
         id: detect
         shell: bash
         run: |
-          set -Eeuo pipefail
-          echo "[ECHO] Cargo.toml 전수 스캔 시작" | tee -a .github/rust_logs/summary_detect.log
+          set -euo pipefail
+          echo "[ECHO] Cargo.toml scan start" | tee -a .github/rust_logs/summary_detect.log
 
-          # globstar 불필요. find만 사용 (macOS bash 3.x 호환)
-          mapfile -t FOUND < <(find . -type f -name Cargo.toml \
-            -not -path "*/target/*" -not -path "*/node_modules/*" | sort || true)
+          FOUND_FILE=".found_cargo_toml.txt"
+          : > "$FOUND_FILE"
 
-          if (( ${#FOUND[@]} == 0 )); then
-            echo "[WARN] Cargo.toml 미발견 → rust-example 크레이트 자동 생성" | tee -a .github/rust_logs/summary_detect.log
+          # macOS bash 3.x 호환: 순수 find + sort + 파일 저장
+          find . -type f -name Cargo.toml \
+            -not -path "*/target/*" -not -path "*/node_modules/*" \
+            | sort > "$FOUND_FILE" || true
+
+          if [ ! -s "$FOUND_FILE" ]; then
+            echo "[WARN] No Cargo.toml → create sample crate 'rust-example'" | tee -a .github/rust_logs/summary_detect.log
             rm -rf rust-example || true
             cargo new --bin rust-example
             mkdir -p rust-example/src
             printf 'fn main() {\n    println!("hello from rust-example");\n}\n' > rust-example/src/main.rs
-            FOUND=( "./rust-example/Cargo.toml" )
+            printf '%s\n' "./rust-example/Cargo.toml" > "$FOUND_FILE"
           fi
 
-          printf '%s\n' "${FOUND[@]}" | xargs -I{} dirname "{}" | sort -u > .wslist.txt
+          # 디렉터리 목록 생성
+          : > .wslist.txt
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            dirname "$f"
+          done < "$FOUND_FILE" | sort -u > .wslist.txt
 
+          # 출력 파라미터
           echo "count=$(wc -l < .wslist.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
           {
             echo 'list<<__WS__'
@@ -92,14 +102,16 @@ jobs:
             echo '__WS__'
           } >> "$GITHUB_OUTPUT"
 
-          echo "[ECHO] 검출된 크레이트 디렉터리:" | tee -a .github/rust_logs/summary_detect.log
-          nl -ba .wslist.txt | tee -a .github/rust_logs/summary_detect.log
+          echo "[ECHO] detected crates:" | tee -a .github/rust_logs/summary_detect.log
+          # nl은 일부 환경에 없을 수 있으므로 대체 출력
+          awk '{printf("%4d  %s\n", NR, $0)}' .wslist.txt | tee -a .github/rust_logs/summary_detect.log
 
       - name: 🔐 Ensure lockfiles & metadata (per crate)
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
             echo "[ECHO] lockfile/metadata: $dir" | tee -a .github/rust_logs/summary_detect.log
             cd "$dir"
             cargo generate-lockfile || true
@@ -107,40 +119,26 @@ jobs:
             cd - >/dev/null
           done < .wslist.txt
 
-      - name: ♻️ Cache (rust-cache, stable)
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            ${{ steps.detect.outputs.list }}
-          cache-on-failure: true
-          prefix-key: v0-rust-rust-ci
-          cache-targets: true
-          cache-all-crates: false
-          cache-workspace-crates: false
-          save-if: true
-          cache-provider: github
-          cache-bin: true
-          lookup-only: false
+      # ⚠ 캐시 단계 제거 → “Cache not found …” 경고 자체 제거
+      # (성능이 정말 필요하면 actions/cache로 교체 가능 — 필요시 별도 브랜치에서 켜세요)
 
       - name: 🔎 Show tool versions
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           rustc -Vv   | tee -a .github/rust_logs/versions.log
           cargo -V    | tee -a .github/rust_logs/versions.log
           echo "OS=${{ matrix.os }}, toolchain=${{ matrix.toolchain }}" | tee -a .github/rust_logs/versions.log
 
-      # ─────────────────────────────────────────────────────────
-      # no-skip 전체 파이프라인: fmt → clippy → test → build → doc
-      # ─────────────────────────────────────────────────────────
+      # ──────────────── fmt → clippy → test → build → doc ────────────────
       - name: 🚀 Full pipeline (fmt, clippy, test, build, doc) for all crates
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           FAIL=0
           run_step () {
-            local dir="$1"; shift
-            local name="$1"; shift
+            dir="$1"; shift
+            name="$1"; shift
             echo "[RUN] $name @ $dir"
             if (cd "$dir" && "$@"); then
               echo "[OK]  $name @ $dir"
@@ -151,51 +149,48 @@ jobs:
           }
 
           while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
             safe="$(echo "$dir" | tr '/.' '_')"
             echo "==================== CRATE: $dir ====================" \
               | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
 
             run_step "$dir" "fmt"    bash -lc "cargo fmt --all --check" \
               |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_fmt.log"
-
             run_step "$dir" "clippy" bash -lc "cargo clippy --all-targets --all-features -- -D warnings" \
               |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_clippy.log"
-
             run_step "$dir" "test"   bash -lc "cargo test --all-features --verbose" \
               |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_test.log"
-
             run_step "$dir" "build"  bash -lc "cargo build --release --verbose" \
               |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_build.log"
-
             run_step "$dir" "doc"    bash -lc "cargo doc --no-deps" \
               |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_doc.log"
 
-            # ---- 바이너리/아티팩트 수집 (OS별 안전 처리) ----
+            # ── 아티팩트 수집 (OS별 안전 처리) ──
             if [ -d "$dir/target/release" ]; then
               echo "[ECHO] collect artifacts from $dir/target/release" \
                 | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
 
               case "${{ matrix.os }}" in
                 ubuntu-latest|macos-14)
-                  # 실행 가능 파일만 복사
-                  while IFS= read -r f; do
-                    if [ -f "$f" ] && [ -x "$f" ]; then
-                      cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
-                    fi
-                  done < <(find "$dir/target/release" -maxdepth 1 -type f 2>/dev/null)
+                  # 실행 가능한 파일만 복사 (존재 안 해도 실패 X)
+                  find "$dir/target/release" -maxdepth 1 -type f 2>/dev/null \
+                    | while IFS= read -r f; do
+                        [ -f "$f" ] && [ -x "$f" ] && cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
+                      done
                   ;;
                 windows-2022)
                   # .exe만 복사
-                  while IFS= read -r f; do
-                    cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
-                  done < <(find "$dir/target/release" -maxdepth 1 -type f -name '*.exe' 2>/dev/null)
+                  find "$dir/target/release" -maxdepth 1 -type f -name '*.exe' 2>/dev/null \
+                    | while IFS= read -r f; do
+                        cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
+                      done
                   ;;
               esac
 
-              # 어떤 파일도 못 찾았으면 release 디렉터리를 zip으로
-              if ! ls artifacts | grep -q "${{ matrix.os }}_${{ matrix.toolchain }}"; then
-                zipname="artifacts/$(echo "$safe" | sed 's/^_//')_${{ matrix.os }}_${{ matrix.toolchain }}_release.zip"
-                (cd "$dir/target/release" && zip -qr "../../$zipname" .) || true
+              # 아무것도 복사하지 못했으면 tar.gz 보장
+              if ! ls artifacts 2>/dev/null | grep -q "${{ matrix.os }}_${{ matrix.toolchain }}"; then
+                tgz="artifacts/$(echo "$safe" | sed 's/^_//')_${{ matrix.os }}_${{ matrix.toolchain }}_release.tgz"
+                (cd "$dir/target/release" && tar -czf "../../$tgz" .) || true
               fi
             fi
           done < .wslist.txt
@@ -209,7 +204,7 @@ jobs:
         with:
           name: logs-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
           path: .github/rust_logs/
-          if-no-files-found: warn
+          if-no-files-found: error  # 로그 디렉토리는 항상 존재하므로 경고/실패 없음
 
       - name: 📦 Upload binaries
         if: always()
@@ -217,4 +212,4 @@ jobs:
         with:
           name: binaries-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
           path: artifacts
-          if-no-files-found: warn
+          if-no-files-found: error  # artifacts는 .keep 또는 .tgz가 항상 있어 경고 없음
