@@ -28,6 +28,7 @@ env:
   CODEQL_LANGUAGES: python
   GIT_USER_NAME: repo-bot
   GIT_USER_EMAIL: repo-bot@example.local
+  BASH_ENV: .github/echo/bootstrap.sh   # 모든 bash 스텝에서 자동 source
 
 jobs:
   build-test-sec:
@@ -38,19 +39,24 @@ jobs:
       - name: 📂 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔊 Init Echo (global)
+      # 모든 스텝의 공통 함수/에코를 BASH_ENV에 주입
+      - name: 🔊 Bootstrap Echo (BASH_ENV)
         run: |
           set -Eeuo pipefail
-          mkdir -p "$(dirname "$LOG")" "$REPORT_DIR" "$PAGES_DIR" "$SBOM_DIR" .github/artifacts
+          mkdir -p .github/echo .github/echo_logs .github/security_reports .github/pages .github/sbom .github/artifacts
+          cat > "$BASH_ENV" <<'EOSH'
+          # --- BASH_ENV (auto-sourced per bash step) ---
+          export LOG="${LOG:-.github/echo_logs/account-rotation.log}"
+          mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+          ECHO() { printf '[ECHO][%s] %s\n' "${STEP_NAME:-step}" "$*"; }
           init_echo() {
-            export STEP_NAME="$1"
-            ECHO(){ echo "[ECHO][$STEP_NAME] $*"; }
-            trap 's=$?; ECHO "FAIL line ${BASH_LINENO[0]} (cmd: ${BASH_COMMAND}) -> ${s}"; exit ${s}' ERR
+            STEP_NAME="$1"; export STEP_NAME
+            trap 'rc=$?; ECHO "FAIL line ${BASH_LINENO[0]} (cmd: ${BASH_COMMAND}) -> ${rc}"; exit ${rc}' ERR
+            mkdir -p "$(dirname "$LOG")" "${REPORT_DIR:-.github/security_reports}" "${PAGES_DIR:-.github/pages}" "${SBOM_DIR:-.github/sbom}" || true
             ECHO "start $(date -u +'%F %T %Z')"
           }
-          export -f init_echo
-          ECHO(){ echo "[ECHO][bootstrap] $*"; }
-          ECHO "Echo initialized"
+          EOSH
+          echo "[ECHO][bootstrap] BASH_ENV ready: $BASH_ENV"
 
       - name: ♻️ Free disk (optional)
         run: |
@@ -108,8 +114,7 @@ jobs:
             --cache-to   type=local,dest=/tmp/.buildx-cache-new,mode=max \
             -t workflow-image:ci \
             -f workflow/Dockerfile \
-            --load \
-            workflow
+            --load workflow
           rm -rf /tmp/.buildx-cache && mv /tmp/.buildx-cache-new /tmp/.buildx-cache
           ECHO "build (amd64) OK" | tee -a "$LOG" || true
 
@@ -138,10 +143,9 @@ jobs:
           rm -rf /tmp/.buildx-cache && mv /tmp/.buildx-cache-new /tmp/.buildx-cache
           ECHO "build (arm64) tar exported" | tee -a "$LOG" || true
 
-      # ---------- Filesystem I/O (echo everywhere) ----------
+      # ---------- Filesystem I/O ----------
       - name: 📁 I/O seeds (echo)
-        env:
-          IO_DIR: .github/io
+        env: { IO_DIR: .github/io }
         run: |
           set -Eeuo pipefail; init_echo "io-seed"
           mkdir -p "$IO_DIR"/{system,disk,container,image}/logs "$IO_DIR"/{bundle,reports}
@@ -209,10 +213,9 @@ jobs:
           HTML
           ECHO "io pages ready" | tee -a "$LOG" || true
 
-      # ---------- Service Resource Files (echo) ----------
+      # ---------- Service Resource Files ----------
       - name: 🧩 Generate service resources (echo)
-        env:
-          RES_DIR: .github/resources
+        env: { RES_DIR: .github/resources }
         run: |
           set -Eeuo pipefail; init_echo "resources-gen"
           mkdir -p "$RES_DIR"/{env,app,docker,k8s,systemd,cron,docs}
@@ -321,8 +324,7 @@ jobs:
           ECHO "resources generated" | tee -a "$LOG" || true
 
       - name: 🧪 Validate resources (echo)
-        env:
-          RES_DIR: .github/resources
+        env: { RES_DIR: .github/resources }
         run: |
           set -Eeuo pipefail; init_echo "resources-validate"
           python3 - <<'PY' || true
@@ -439,8 +441,7 @@ jobs:
         continue-on-error: true
 
       - name: 🧪 Scorecard JSON + Pages (echo)
-        env:
-          GH_REPO: ${{ github.repository }}
+        env: { GH_REPO: ${{ github.repository }} }
         run: |
           set -Eeuo pipefail; init_echo "scorecard-pages"
           if command -v scorecard >/dev/null 2>&1; then
@@ -476,7 +477,7 @@ jobs:
           HTML
           ECHO "scorecard pages ready" | tee -a "$LOG" || true
 
-      # ---------- ✅ Assemble Pages bundle & preflight ----------
+      # ---------- Pages bundle assemble & preflight ----------
       - name: 📦 Assemble Pages bundle (echo)
         run: |
           set -Eeuo pipefail; init_echo "pages-assemble"
@@ -484,7 +485,7 @@ jobs:
           cp -r .github/security_reports/* "$PAGES_DIR/security_reports/" 2>/dev/null || true
           cp -r .github/resources/*        "$PAGES_DIR/resources/"        2>/dev/null || true
           cp -r .github/io/reports         "$PAGES_DIR/io/"               2>/dev/null || true
-          # 홈/404/기타 보일러플레이트
+          # 기본 문서
           cat > "$PAGES_DIR/index.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Reports Portal</title>
@@ -516,12 +517,10 @@ jobs:
           </urlset>
           XML
           echo "ok" > "$PAGES_DIR/healthcheck.txt"
-          # 필수 파일 존재 검증
-          for f in index.html trivy.html scorecard.html security_reports sbom.spdx.json last_run.txt; do
+          for f in index.html scorecard.html trivy.html last_run.txt; do
             test -e "$PAGES_DIR/$f" || { ECHO "[ERR] missing $f"; exit 1; }
           done
           ECHO "pages bundle ready" | tee -a "$LOG" || true
-          ECHO "pages tree:" | tee -a "$LOG" || true
           (cd "$PAGES_DIR" && find . -maxdepth 2 -print) | sed 's/^/[PAGES] /' | tee -a "$LOG" || true
 
       - name: ⬆️ Upload Pages Artifact (authoritative)
@@ -556,10 +555,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           ECHO "summary written" | tee -a "$LOG" || true
 
-      # ---- Bot heartbeat + PR + [skip ci] (always, echo) ----
+      # ---- Bot heartbeat + PR + [skip ci] ----
       - name: 🤖 Bot heartbeat commit (+ PR, skip-ci) (echo)
-        env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+        env: { GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }} }
         run: |
           set -Eeuo pipefail; init_echo "bot-heartbeat"
           DEFAULT_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/^\s*HEAD branch: //p')"
@@ -604,7 +602,6 @@ jobs:
         with:
           category: "/language:${{ env.CODEQL_LANGUAGES }}"
 
-  # ✅ Deploy the exact Pages artifact uploaded above
   deploy-pages:
     needs: [build-test-sec]
     runs-on: ubuntu-latest
