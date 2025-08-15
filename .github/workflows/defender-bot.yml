@@ -1,38 +1,364 @@
----
-name: 🛡️ Defender Bot
+name: "🛡️ Defender Bot + MySQL (ECHO 999999999999% All)"
 
-"on":
+on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: "0 0 * * 0" # 매주 일요일 00:00 UTC
 
 permissions:
   contents: read
   actions: read
   security-events: write
 
+concurrency:
+  group: defender-bot
+  cancel-in-progress: true
+
 jobs:
+  # ─────────────────────────────────────────────────────────
+  # 1) MySQL 설치/업데이트 + root 복구 + robust_admin + Mail + Postfix (ECHO 100%)
+  # ─────────────────────────────────────────────────────────
+  mysql-robust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      ROOT_PASS: rootpass123
+      ROBUST_USER: robust_admin
+      ROBUST_PASS: robustpass123
+      MAIL_DOMAIN: example.com
+      TEST_EMAIL: test@example.com
+      SOCKET_PRIMARY: /run/mysqld/mysqld.sock
+      SOCKET_ALT: /var/run/mysqld/mysqld.sock
+
+    steps:
+      - name: "📁 Checkout (echo meta)"
+        uses: actions/checkout@v5
+
+      - name: "🧩 Write ECHO prelude (must source in every run)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/echo .github/logs .github/error_logs
+          cat > .github/echo/_prelude.sh <<'EOSH'
+          # ===== Echo 100% Prelude =====
+          set -Eeuo pipefail
+          mkdir -p .github/echo .github/logs .github/error_logs
+          TS=$(date +%s)
+          exec > >(tee -a .github/logs/step.$TS.out.log) \
+               2> >(tee -a .github/logs/step.$TS.err.log >&2)
+
+          : "${ROOT_PASS:=}" "${ROBUST_USER:=robust_admin}" "${ROBUST_PASS:=}" \
+            "${MAIL_DOMAIN:=example.com}" "${TEST_EMAIL:=test@example.com}" \
+            "${SOCKET_PRIMARY:=/run/mysqld/mysqld.sock}" "${SOCKET_ALT:=/var/run/mysqld/mysqld.sock}"
+
+          CMDS_LOG=".github/echo/cmds.log"
+          CMDS_SH=".github/echo/cmds.sh"
+          if [ ! -s "$CMDS_SH" ]; then
+            printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n' > "$CMDS_SH"
+            chmod +x "$CMDS_SH"
+          fi
+
+          run(){ { printf '[ECHO] '; printf '%q ' "$@"; printf '\n'; } | tee -a "$CMDS_LOG" >&2; { printf '%q ' "$@"; printf '\n'; } >> "$CMDS_SH"; "$@"; }
+          writefile(){ mkdir -p "$(dirname "$1")"; echo "[ECHO] writefile $1" | tee -a "$CMDS_LOG" >&2; cat > "$1"; }
+          appendfile(){ mkdir -p "$(dirname "$1")"; echo "[ECHO] appendfile $1" | tee -a "$CMDS_LOG" >&2; cat >> "$1"; }
+          safesed(){ echo "[ECHO] sed -i $1 $2" | tee -a "$CMDS_LOG" >&2; sed -i "$1" "$2"; echo "sed -i $1 $2" >> "$CMDS_SH"; }
+          # ===== End Prelude =====
+          EOSH
+          chmod +x .github/echo/_prelude.sh
+
+      - name: "🔐 Mask secrets (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          run bash -lc "echo '::add-mask::${ROOT_PASS}'"
+          run bash -lc "echo '::add-mask::${ROBUST_PASS}'"
+
+      - name: "📦 Install/upgrade packages (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          export DEBIAN_FRONTEND=noninteractive
+          run bash -lc "echo 'postfix postfix/mailname string ${MAIL_DOMAIN}' | sudo debconf-set-selections"
+          run bash -lc "echo 'postfix postfix/main_mailer_type select Internet Site' | sudo debconf-set-selections"
+          run sudo apt-get update -y | tee .github/echo/01-apt-update.txt
+          run sudo apt-get install -y mysql-server mysql-client postfix postfix-mysql mailutils lsof netcat-openbsd | tee .github/echo/02-apt-install.txt
+          run sudo apt-get autoremove -y | tee .github/echo/03-apt-autoremove.txt
+          run sudo systemctl daemon-reload
+
+      - name: "🗂️ Paths/permissions (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          for d in .github/echo .github/logs .github/mysql_bak .github/error_logs; do run mkdir -p "$d"; run chmod 700 "$d"; done
+          run sudo mkdir -p /var/lib/mysql /run/mysqld /var/log/mysql
+          run sudo chown -R mysql:mysql /var/lib/mysql /run/mysqld /var/log/mysql
+          run sudo chmod 750 /var/lib/mysql
+          run sudo chmod 770 /run/mysqld
+          run sudo chmod 755 /var/log/mysql
+
+      - name: "🧰 Init datadir if empty (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          if [ -z "$(ls -A /var/lib/mysql || true)" ]; then
+            run sudo mysqld --initialize-insecure --user=mysql --datadir=/var/lib/mysql
+            run sudo chown -R mysql:mysql /var/lib/mysql
+          fi
+
+      - name: "▶️ Start MySQL + wait (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          run sudo systemctl enable mysql
+          run sudo systemctl restart mysql
+          for i in $(seq 1 60); do
+            if systemctl is-active --quiet mysql && { [ -S "${SOCKET_PRIMARY}" ] || [ -S "${SOCKET_ALT}" ]; }; then break; fi
+            sleep 1
+          done
+          if ! systemctl is-active --quiet mysql; then
+            run sudo systemctl status mysql --no-pager || true
+            run sudo journalctl -u mysql --no-pager | tail -200 || true
+            run bash -lc "sudo cat /var/log/mysql/error.log 2>/dev/null | tail -200 || true"
+            exit 1
+          fi
+
+      - name: "🔓 Root repair (socket→debian.cnf→skip-grant) + echo/.cmd"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          MYSQL_CLI=""
+          if sudo mysql --protocol=SOCKET -e "SELECT 1" >/dev/null 2>&1; then
+            MYSQL_CLI="sudo mysql --protocol=SOCKET"
+          elif [ -r /etc/mysql/debian.cnf ] && sudo mysql --defaults-file=/etc/mysql/debian.cnf -e "SELECT 1" >/dev/null 2>&1; then
+            MYSQL_CLI="sudo mysql --defaults-file=/etc/mysql/debian.cnf"
+          else
+            echo "[WARN] socket/debian.cnf 실패 → skip-grant fallback"
+            SKIP_LOG=".github/logs/mysql_skipgrant.log"; : > "$SKIP_LOG"
+            run nohup sudo -u mysql mysqld \
+              --skip-grant-tables --skip-networking \
+              --datadir=/var/lib/mysql \
+              --socket="${SOCKET_PRIMARY}" \
+              --pid-file=/run/mysqld/mysqld.pid >> "$SKIP_LOG" 2>&1 &
+            for i in $(seq 1 90); do
+              if [ -S "${SOCKET_PRIMARY}" ] || [ -S "${SOCKET_ALT}" ]; then break; fi
+              sleep 1
+            done
+            SOCKET="${SOCKET_PRIMARY}"; [ -S "${SOCKET_ALT}" ] && SOCKET="${SOCKET_ALT}"
+            [ -S "$SOCKET" ] || { run tail -n +1 "$SKIP_LOG" || true; exit 1; }
+            MYSQL_CLI="sudo mysql --protocol=SOCKET --socket=$SOCKET"
+          fi
+
+          writefile ".github/echo/root-fix.sql" <<'SQL'
+          ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'ROOT_PLACEHOLDER';
+          FLUSH PRIVILEGES;
+          SQL
+          safesed "s|ROOT_PLACEHOLDER|${ROOT_PASS//\\/\\\\}|g" .github/echo/root-fix.sql
+          writefile ".github/echo/root-fix.cmd" <<EOF
+          ${MYSQL_CLI} < .github/echo/root-fix.sql
+          EOF
+          run bash -lc "${MYSQL_CLI} < .github/echo/root-fix.sql"
+
+          if pgrep -f "mysqld .*--skip-grant-tables" >/dev/null 2>&1; then
+            run sudo pkill -f mysqld || true
+            sleep 3
+            run sudo systemctl restart mysql
+            for i in $(seq 1 60); do
+              if systemctl is-active --quiet mysql && { [ -S "${SOCKET_PRIMARY}" ] || [ -S "${SOCKET_ALT}" ]; }; then break; fi
+              sleep 1
+            done
+            systemctl is-active --quiet mysql || { run sudo systemctl status mysql --no-pager || true; exit 1; }
+          fi
+
+          run mysql -u root -p"${ROOT_PASS}" -e "SELECT VERSION();" | tee .github/echo/post-rootfix-version.txt
+
+      - name: "👑 robust_admin create/grant (echo + .cmd)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          writefile ".github/echo/robust_admin.sql" <<'SQL'
+          DROP USER IF EXISTS 'ROBUST_USER'@'localhost';
+          DROP USER IF EXISTS 'ROBUST_USER'@'%';
+          CREATE USER 'ROBUST_USER'@'localhost' IDENTIFIED BY 'ROBUST_PASS';
+          CREATE USER 'ROBUST_USER'@'%' IDENTIFIED BY 'ROBUST_PASS';
+          GRANT ALL PRIVILEGES ON *.* TO 'ROBUST_USER'@'localhost' WITH GRANT OPTION;
+          GRANT ALL PRIVILEGES ON *.* TO 'ROBUST_USER'@'%' WITH GRANT OPTION;
+          FLUSH PRIVILEGES;
+          SQL
+          safesed "s|ROBUST_USER|${ROBUST_USER}|g" .github/echo/robust_admin.sql
+          safesed "s|ROBUST_PASS|${ROBUST_PASS//\\/\\\\}|g" .github/echo/robust_admin.sql
+          writefile ".github/echo/robust_admin.cmd" <<'EOF'
+          mysql -u root -p"${ROOT_PASS}" < .github/echo/robust_admin.sql
+          EOF
+          run mysql -u root -p"${ROOT_PASS}" < .github/echo/robust_admin.sql
+
+          writefile ".github/echo/show-grants.sql" <<EOF
+          SHOW GRANTS FOR '${ROBUST_USER}'@'%';
+          SHOW GRANTS FOR '${ROBUST_USER}'@'localhost';
+          EOF
+          run mysql -u "${ROBUST_USER}" -p"${ROBUST_PASS}" < .github/echo/show-grants.sql > ".github/echo/grants_${ROBUST_USER}.txt"
+          run mysql -u "${ROBUST_USER}" -p"${ROBUST_PASS}" -e "SELECT user,host,plugin,account_locked FROM mysql.user;" > ".github/echo/user_list.txt"
+
+      - name: "✉️ Virtual Mail schema + sample (echo + .cmd)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          writefile ".github/echo/virtual_mail_schema.sql" <<'SQL'
+          CREATE DATABASE IF NOT EXISTS mailserver CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+          USE mailserver;
+          CREATE TABLE IF NOT EXISTS virtual_domains (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50) NOT NULL UNIQUE) ENGINE=InnoDB;
+          CREATE TABLE IF NOT EXISTS virtual_users (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, domain_id INT NOT NULL, password VARCHAR(106) NOT NULL, email VARCHAR(100) NOT NULL UNIQUE, FOREIGN KEY (domain_id) REFERENCES virtual_domains(id) ON DELETE CASCADE) ENGINE=InnoDB;
+          CREATE TABLE IF NOT EXISTS virtual_aliases (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, domain_id INT NOT NULL, source VARCHAR(100) NOT NULL, destination VARCHAR(100) NOT NULL, FOREIGN KEY (domain_id) REFERENCES virtual_domains(id) ON DELETE CASCADE) ENGINE=InnoDB;
+          INSERT IGNORE INTO virtual_domains (name) VALUES ('MAIL_DOMAIN_PLACEHOLDER');
+          INSERT IGNORE INTO virtual_users (domain_id, password, email) VALUES (1,'$6$rounds=656000$robustsalt$MJ04ZsU2eWkgR2Q4CjV7GAw74pD6B0WFFR8hyljVEc0ENJPkjQw/YyzJJ0bUowG9/56u6dyKToKPtbnPhsoEx1','TEST_EMAIL_PLACEHOLDER');
+          INSERT IGNORE INTO virtual_aliases (domain_id, source, destination) VALUES (1,'alias@MAIL_DOMAIN_PLACEHOLDER','TEST_EMAIL_PLACEHOLDER');
+          SQL
+          safesed "s|MAIL_DOMAIN_PLACEHOLDER|${MAIL_DOMAIN}|g" .github/echo/virtual_mail_schema.sql
+          safesed "s|TEST_EMAIL_PLACEHOLDER|${TEST_EMAIL}|g" .github/echo/virtual_mail_schema.sql
+          writefile ".github/echo/virtual_mail_schema.cmd" <<'EOF'
+          mysql -u "${ROBUST_USER}" -p"${ROBUST_PASS}" < .github/echo/virtual_mail_schema.sql
+          EOF
+          run mysql -u "${ROBUST_USER}" -p"${ROBUST_PASS}" < .github/echo/virtual_mail_schema.sql
+
+      - name: "📮 Postfix ↔ MySQL maps + postconf (ECHO FULL + .cmd)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+
+          mkmap() {
+            local f="$1"
+            local q="$2"
+            writefile "$f" <<EOF
+user = ${ROBUST_USER}
+password = ${ROBUST_PASS}
+hosts = 127.0.0.1
+dbname = mailserver
+query = ${q}
+EOF
+          }
+
+          mkmap ".github/echo/postfix-mysql-virtual-domains.cf" "SELECT name FROM virtual_domains WHERE name='%s'"
+          mkmap ".github/echo/postfix-mysql-virtual-mailbox.cf" "SELECT 1 FROM virtual_users WHERE email='%s'"
+          mkmap ".github/echo/postfix-mysql-virtual-alias.cf"   "SELECT destination FROM virtual_aliases WHERE source='%s'"
+
+          writefile ".github/echo/postfix-apply.cmd" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+sudo cp .github/echo/postfix-mysql-virtual-*.cf /etc/postfix/
+sudo postconf -e "virtual_mailbox_domains=mysql:/etc/postfix/postfix-mysql-virtual-domains.cf"
+sudo postconf -e "virtual_mailbox_maps=mysql:/etc/postfix/postfix-mysql-virtual-mailbox.cf"
+sudo postconf -e "virtual_alias_maps=mysql:/etc/postfix/postfix-mysql-virtual-alias.cf"
+sudo systemctl restart postfix
+EOF
+          run chmod +x .github/echo/postfix-apply.cmd
+
+          run sudo cp .github/echo/postfix-mysql-virtual-*.cf /etc/postfix/
+          run sudo postconf -e "virtual_mailbox_domains=mysql:/etc/postfix/postfix-mysql-virtual-domains.cf"
+          run sudo postconf -e "virtual_mailbox_maps=mysql:/etc/postfix/postfix-mysql-virtual-mailbox.cf"
+          run sudo postconf -e "virtual_alias_maps=mysql:/etc/postfix/postfix-mysql-virtual-alias.cf"
+          run sudo systemctl restart postfix || true
+
+          writefile ".github/echo/mail-test.cmd" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "테스트메일" | mail -s "[Test] Virtual Mail" "${TEST_EMAIL}"
+EOF
+          run chmod +x .github/echo/mail-test.cmd
+          run bash -lc "echo '테스트메일' | mail -s '[Test] Virtual Mail' '${TEST_EMAIL}' || true"
+
+      - name: "✅ Final checks (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude.sh
+          if [ ! -S "${SOCKET_PRIMARY}" ] && [ ! -S "${SOCKET_ALT}" ]; then
+            echo "[FAIL] Missing MySQL socket"; exit 1
+          fi
+          PLUGIN=$(mysql -u root -p"${ROOT_PASS}" -Nse "SELECT plugin FROM mysql.user WHERE user='root' AND host='localhost';" || true)
+          echo "[INFO] root plugin: ${PLUGIN}"
+          [ "${PLUGIN}" = "mysql_native_password" ] || { echo "[FAIL] root plugin not mysql_native_password"; exit 1; }
+          run mysql -u root -p"${ROOT_PASS}" -e "SELECT user,host FROM mysql.user WHERE user='${ROBUST_USER}';" | tee ".github/echo/check_robust_user.txt"
+          run mysql -u "${ROBUST_USER}" -p"${ROBUST_PASS}" -e "SELECT COUNT(*) AS domains FROM mailserver.virtual_domains; SELECT COUNT(*) AS users FROM mailserver.virtual_users;" | tee ".github/echo/check_mail_counts.txt"
+          for k in virtual_mailbox_domains virtual_mailbox_maps virtual_alias_maps; do
+            sudo postconf "$k" | tee -a ".github/echo/check_postconf.txt"
+          done
+          if command -v tree >/dev/null 2>&1; then
+            run tree -a .github | tee ".github/echo/_index.txt"
+          else
+            run bash -lc "find .github -maxdepth 3 -type f -printf '%p\n' | sort" | tee ".github/echo/_index.txt"
+          fi
+          echo "[PASS] mysql-robust complete."
+
+      - name: "📦 Upload MySQL artifacts (echo/logs/cmds/.cmd)"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-robust-artifacts
+          retention-days: 14
+          path: |
+            .github/echo/**
+            .github/logs/**
+            .github/error_logs/**
+            /var/log/mysql/error.log
+
+  # ─────────────────────────────────────────────────────────
+  # 2) 보안 스캔(Defender Bot) — ECHO 100% 메타 에코 + 산출물 복제
+  # ─────────────────────────────────────────────────────────
   security-scan:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: ['.', 'src', 'scripts', 'rust-example', 'finance_app']
-    name: Scan ${{ matrix.service }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          sparse-checkout: ${{ matrix.service }}
-          sparse-checkout-cone-mode: false
+    needs: [mysql-robust]
 
-      - name: Run Microsoft Security DevOps
+    steps:
+      - name: "📁 Checkout (echo meta)"
+        uses: actions/checkout@v5
+
+      - name: "🧩 Echo prelude for security job"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/echo .github/logs .github/error_logs
+          exec > >(tee -a .github/logs/security.$(date +%s).out.log) \
+               2> >(tee -a .github/logs/security.$(date +%s).err.log >&2)
+          cat > .github/echo/_prelude_sec.sh <<'EOSH'
+          set -Eeuo pipefail
+          RUNLOG=".github/echo/security_cmds.log"
+          RUNSH=".github/echo/security_cmds.sh"
+          if [ ! -s "$RUNSH" ]; then printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n' > "$RUNSH"; chmod +x "$RUNSH"; fi
+          run(){ { printf '[ECHO] '; printf '%q ' "$@"; printf '\n'; } | tee -a "$RUNLOG" >&2; { printf '%q ' "$@"; printf '\n'; } >> "$RUNSH"; "$@"; }
+          EOSH
+          chmod +x .github/echo/_prelude_sec.sh
+          source .github/echo/_prelude_sec.sh
+          echo "[ECHO] actions to run: microsoft/security-devops-action@latest, github/codeql-action/upload-sarif@v3" | tee -a .github/echo/security_cmds.log
+
+      - name: "▶️ Run Microsoft Security DevOps (action)"
         uses: microsoft/security-devops-action@latest
         id: msdo
 
-      - name: Upload results to Security tab
+      - name: "📎 Echo SARIF presence & copy (echo)"
+        shell: bash
+        run: |
+          source .github/echo/_prelude_sec.sh
+          if [ -f "msdo.sarif" ]; then
+            run cp msdo.sarif .github/echo/msdo.sarif
+            run gzip -c msdo.sarif > .github/echo/msdo.sarif.gz
+            run head -n 80 msdo.sarif | tee .github/echo/msdo.head.txt
+          else
+            echo "[WARN] msdo.sarif not found" | tee -a .github/echo/security_cmds.log
+          fi
+
+      - name: "⬆️ Upload results to Security tab"
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: msdo.sarif
-          category: defender-bot-${{ matrix.service }}
+
+      - name: "📦 Upload Security artifacts (echo/logs)"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-echo-logs
+          retention-days: 14
+          path: |
+            .github/echo/**
+            .github/logs/**
+            .github/error_logs/**
