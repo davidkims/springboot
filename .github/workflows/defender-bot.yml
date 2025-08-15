@@ -1,22 +1,25 @@
-name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Scorecard · Trivy Pages · CodeQL)"
+name: "🔐 Account Rotation + SecSuite (5min · Multi-Arch · Trivy→Pages · Scorecard · CodeQL · Bot)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *" # 24x7, 5분 간격
+    - cron: "*/5 * * * *" # 24x7 · 5분 간격
+
+concurrency:
+  group: account-rotation
+  cancel-in-progress: true
 
 permissions:
   contents: write
   pages: write
   id-token: write
-  security-events: write   # SARIF 업로드 (Code Scanning)
+  security-events: write   # SARIF 업로드(Trivy/Scorecard/CodeQL)
 
 env:
   LOG: .github/echo_logs/account-rotation.log
   PAGES_DIR: .github/pages
   REPORT_DIR: .github/security_reports
-  CODEQL_LANGUAGES: python        # 필요시 "python,javascript,java" 등으로 확장 가능
-  DO_COMMIT: "false"
+  CODEQL_LANGUAGES: python      # 필요시 "python,javascript,java" 등으로 확장
   GIT_USER_NAME: "repo-bot"
   GIT_USER_EMAIL: "repo-bot@example.local"
 
@@ -105,7 +108,7 @@ jobs:
             workflow
           echo "[ECHO] docker build (arm64) tar exported" | tee -a "$LOG"
 
-      # ---------- Trivy: SARIF + JSON + HTML (Pages 공개) ----------
+      # ---------- Trivy: SARIF + JSON + TXT + HTML (Pages 공개) ----------
       - name: 📥 Install Trivy CLI
         shell: bash
         run: |
@@ -125,7 +128,7 @@ jobs:
             workflow-image:ci
           echo "[ECHO] Trivy SARIF generated" | tee -a "$LOG"
 
-      - name: 🔄 Upload Trivy SARIF
+      - name: ⏫ Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .github/security_reports/trivy-image.sarif
@@ -144,7 +147,7 @@ jobs:
             --severity HIGH,CRITICAL \
             --format table \
             workflow-image:ci | tee "$REPORT_DIR/trivy-image.txt"
-          # 간단 HTML 생성 (table 텍스트/JSON 내장)
+          # 간단 HTML
           cat > "$PAGES_DIR/trivy.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Trivy Report</title>
@@ -160,7 +163,58 @@ jobs:
           HTML
           echo "[ECHO] Trivy JSON/TXT + HTML ready for Pages" | tee -a "$LOG"
 
-      # ---------- OSSF Scorecard: SARIF + JSON + HTML 요약 (Pages 공개) ----------
+      # ---------- OSSF Scorecard: 견고한 설치 + SARIF/JSON/HTML ----------
+      - name: 📥 Install Scorecard CLI (robust)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          VER="4.13.3"
+          INSTALL="/usr/local/bin"
+          TMP="$(mktemp -d)"
+          cd "$TMP"
+
+          echo "[ECHO] Try gh release download…" | tee -a "$LOG"
+          if command -v gh >/dev/null 2>&1; then
+            gh release download "v${VER}" -R ossf/scorecard \
+              -p "scorecard_${VER}_linux_amd64.tar.gz" \
+              -O scorecard.tgz || true
+          fi
+
+          echo "[ECHO] Fallback direct curl…" | tee -a "$LOG"
+          [ -s scorecard.tgz ] || curl -fL -o scorecard.tgz \
+            "https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz" || true
+
+          if [ -s scorecard.tgz ] && file scorecard.tgz | grep -qi gzip; then
+            tar -xzf scorecard.tgz || true
+          fi
+
+          if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then
+            sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"
+          fi
+
+          # go install 대체
+          if ! command -v scorecard >/dev/null 2>&1; then
+            echo "[ECHO] Fallback go install…" | tee -a "$LOG"
+            sudo apt-get update -y && sudo apt-get install -y golang-go || true
+            GOBIN="$HOME/go/bin" GOPATH="$HOME/go" go install github.com/ossf/scorecard/v4@v${VER} || true
+            if [ -x "$HOME/go/bin/scorecard" ]; then
+              sudo mv "$HOME/go/bin/scorecard" "$INSTALL/scorecard"
+            fi
+          fi
+
+          # 최후수단: 컨테이너 래퍼
+          if ! command -v scorecard >/dev/null 2>&1; then
+            echo "[ECHO] Fallback container wrapper…" | tee -a "$LOG"
+            sudo bash -c 'cat > /usr/local/bin/scorecard <<EOF
+            #!/usr/bin/env bash
+            exec docker run --rm ghcr.io/ossf/scorecard:stable "$@"
+            EOF'
+            sudo chmod +x /usr/local/bin/scorecard
+            docker pull ghcr.io/ossf/scorecard:stable || true
+          fi
+
+          scorecard version || (echo "[WARN] scorecard not available but workflow continues" | tee -a "$LOG"; exit 0)
+
       - name: 🧰 Scorecard Action (SARIF)
         uses: ossf/scorecard-action@v2.4.0
         with:
@@ -170,27 +224,16 @@ jobs:
           publish_results: false
         continue-on-error: true
 
-      - name: 📥 Install Scorecard CLI (for JSON)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          VER="4.13.3"
-          curl -sLO https://github.com/ossf/scorecard/releases/download/v${VER}/scorecard_${VER}_linux_amd64.tar.gz || true
-          tar -xzf scorecard_${VER}_linux_amd64.tar.gz || true
-          sudo mv scorecard_${VER}_linux_amd64/scorecard /usr/local/bin/scorecard || true
-          scorecard version || true
-
       - name: 🧪 Scorecard JSON & HTML summary (Pages)
         shell: bash
         env:
           GH_REPO: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
-          # JSON 출력 (네트워크/레이트리밋 실패해도 워크플로우는 계속)
+          # JSON (네트워크 실패해도 진행)
           scorecard --repo "github.com/${GH_REPO}" --format=json \
             > "$REPORT_DIR/scorecard.json" || echo '{}' > "$REPORT_DIR/scorecard.json"
 
-          # 매우 단순한 요약 HTML 생성 (중요 체크 위주)
           cat > "$PAGES_DIR/scorecard.html" <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>OSSF Scorecard Summary</title>
@@ -219,7 +262,7 @@ jobs:
           HTML
           echo "[ECHO] Scorecard JSON/HTML ready for Pages" | tee -a "$LOG"
 
-      - name: ⏫ Upload Scorecard SARIF (Code Scanning)
+      - name: ⏫ Upload Scorecard SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .github/security_reports/scorecard.sarif
@@ -234,22 +277,43 @@ jobs:
             .github/artifacts/workflow-image-arm64.tar
             .github/security_reports/*
 
-      - name: 🤖 Bot heartbeat commit (optional)
-        if: ${{ env.DO_COMMIT == 'true' }}
+      # ---- 봇 하트비트 + PR + [skip ci] : 항상 실행 ----
+      - name: 🤖 Bot heartbeat commit (+ PR, skip-ci)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          mkdir -p .github/bot
-          date -u +'%F %T %Z' > .github/bot/heartbeat.txt
+          # 기본 브랜치 확인
+          DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo main)"
+          [ -n "$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
+
+          # 하트비트/타임스탬프 갱신
+          mkdir -p .github/bot .github/pages
+          TS="$(date -u +'%F %T %Z')"
+          echo "$TS" > .github/bot/heartbeat.txt
+          echo "$TS" > .github/pages/last_run.txt
+
+          # 변경사항 커밋을 위한 브랜치 생성
+          BR="bot/heartbeat-$(date -u +%Y%m%d%H%M)"
           git config user.name  "${GIT_USER_NAME}"
           git config user.email "${GIT_USER_EMAIL}"
-          git add .github/bot/heartbeat.txt
-          git commit -m "🤖 bot: heartbeat $(date -u +'%F %T %Z')" || { echo "[ECHO] nothing to commit" | tee -a "$LOG"; exit 0; }
-          git push || { echo "[WARN] push failed (missing token/permission)"; exit 0; }
+          git fetch origin "$DEFAULT_BRANCH" --depth=1 || true
+          git checkout -B "$BR" "origin/$DEFAULT_BRANCH" 2>/dev/null || git checkout -B "$BR" "$DEFAULT_BRANCH"
 
-  # -------- CodeQL full scan (Python) --------
+          git add .github/bot/heartbeat.txt .github/pages/last_run.txt
+          git commit -m "🤖 bot: heartbeat $TS [skip ci]" || { echo "[ECHO] nothing to commit" | tee -a "$LOG"; exit 0; }
+          git push -u origin "$BR" || { echo "[WARN] push failed (token/permission)"; exit 0; }
+
+          # PR 자동 생성(권한/정책에 따라 실패해도 계속)
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$BR" \
+            --title "🤖 bot: heartbeat $TS" \
+            --body "자동 하트비트 갱신 및 Pages 타임스탬프 업데이트 ($TS)." \
+            || echo "[WARN] PR create skipped/failed"
+
+  # -------- CodeQL full scan --------
   codeql:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -275,7 +339,7 @@ jobs:
         with:
           category: "/language:${{ env.CODEQL_LANGUAGES }}"
 
-  # -------- Deploy GitHub Pages (Trivy/Scorecard 요약 공개) --------
+  # -------- GitHub Pages 배포(Trivy/Scorecard 요약 공개) --------
   deploy-pages:
     needs: [build-test-sec]
     runs-on: ubuntu-latest
@@ -291,9 +355,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p .github/pages .github/security_reports
-          # 보수적으로 존재할 경우에만 복사(직전 job 아티팩트가 같은 워크스페이스에 있음)
           cp -r .github/security_reports .github/pages/ 2>/dev/null || true
-          # 루트 인덱스
           cat > .github/pages/index.html <<'HTML'
           <!DOCTYPE html><meta charset="utf-8">
           <title>Security Reports</title>
@@ -302,6 +364,7 @@ jobs:
             <li><a href="trivy.html">Trivy Report (HIGH/CRITICAL)</a></li>
             <li><a href="scorecard.html">OSSF Scorecard Summary</a></li>
             <li><a href="security_reports/">Raw Files (JSON/TXT/SARIF)</a></li>
+            <li><a href="last_run.txt">Last Run Timestamp</a></li>
           </ul>
           HTML
 
