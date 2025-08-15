@@ -67,18 +67,17 @@ jobs:
           sudo mkdir -p /var/run/mysqld
           sudo chown mysql:mysql /var/run/mysqld
 
-      - name: 🚨 skip-grant-tables 기동 → root 권한 복구 (auth_socket 제거)
+      - name: 🚨 skip-grant-tables 기동 → root 권한 복구 (전용 소켓 사용)
         run: |
           set -Eeuo pipefail
-          nohup sudo mysqld_safe --skip-grant-tables --skip-networking > .github/logs/mysql_skipgrant.log 2>&1 &
-          # 소켓 생성 대기(최대 30초)
+          REC_SOCKET=/tmp/mysql-recover.sock
+          nohup sudo mysqld --skip-grant-tables --skip-networking --socket="$REC_SOCKET" > .github/logs/mysql_skipgrant.log 2>&1 &
+          # 전용 소켓 생성 대기(최대 30초)
           for i in $(seq 1 30); do
-            if [ -S /var/run/mysqld/mysqld.sock ] || pgrep -f mysqld >/dev/null; then
-              break
-            fi
+            [ -S "$REC_SOCKET" ] && break
             sleep 1
           done
-          if ! pgrep -f mysqld >/dev/null; then
+          if [ ! -S "$REC_SOCKET" ]; then
             echo "[ERR] mysqld(skip-grant) 기동 실패"; cat .github/logs/mysql_skipgrant.log || true
             sudo cat /var/log/mysql/error.log || true
             exit 1
@@ -94,11 +93,11 @@ jobs:
           EOSQL
           sed -i "s/ROOT_PLACEHOLDER/${ROOT_PASS//\//\\/}/g" .github/echo/root-repair.sql
 
-          # skip-networking 상태이므로 로컬 소켓으로 접속
-          sudo mysql --protocol=SOCKET --socket=/var/run/mysqld/mysqld.sock < .github/echo/root-repair.sql \
+          # 전용 소켓으로 접속하여 권한 복구
+          sudo mysql --socket="$REC_SOCKET" < .github/echo/root-repair.sql \
             || (cat .github/logs/mysql_skipgrant.log || true; exit 1)
 
-          # 안전 종료 후 정식 서비스 기동
+          # 임시 인스턴스 종료 후 정식 서비스 기동
           sudo pkill -f mysqld || true
           sleep 3
           sudo systemctl start mysql
