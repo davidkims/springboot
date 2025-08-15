@@ -24,8 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: [stable]  # 필요시 beta, nightly 추가
+        os: [ubuntu-latest, macos-14, windows-2022]  # ✅ 마이그레이션 경고 제거
+        toolchain: [stable]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -41,6 +41,8 @@ jobs:
             echo "[ECHO] chmod 755 $d"; chmod 755 "$d" || true
           done
           echo "[ECHO] seed log" | tee .github/rust_logs/seed.log
+          # ✅ artifacts 경고 방지용 placeholder
+          echo "placeholder" > artifacts/.keep
 
       - name: 🧰 System deps (Linux only)
         if: runner.os == 'Linux'
@@ -56,8 +58,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          # ✅ 'profile' 입력 제거
-          components: clippy,rustfmt
+          components: clippy,rustfmt   # ✅ profile 입력 사용 안 함
 
       # ─────────────────────────────────────────────────────────
       # Detect Cargo.toml / 없으면 샘플 crate 자동 생성(자가복구)
@@ -67,9 +68,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          shopt -s globstar
           echo "[ECHO] Cargo.toml 전수 스캔 시작" | tee -a .github/rust_logs/summary_detect.log
 
+          # globstar 불필요. find만 사용 (macOS bash 3.x 호환)
           mapfile -t FOUND < <(find . -type f -name Cargo.toml \
             -not -path "*/target/*" -not -path "*/node_modules/*" | sort || true)
 
@@ -78,7 +79,6 @@ jobs:
             rm -rf rust-example || true
             cargo new --bin rust-example
             mkdir -p rust-example/src
-            # ✅ here-doc/백슬래시 없이 '단일 printf'로 안전하게 파일 생성
             printf 'fn main() {\n    println!("hello from rust-example");\n}\n' > rust-example/src/main.rs
             FOUND=( "./rust-example/Cargo.toml" )
           fi
@@ -113,7 +113,7 @@ jobs:
           workspaces: |
             ${{ steps.detect.outputs.list }}
           cache-on-failure: true
-          prefix-key: v0-rust
+          prefix-key: v0-rust-rust-ci
           cache-targets: true
           cache-all-crates: false
           cache-workspace-crates: false
@@ -149,6 +149,7 @@ jobs:
               FAIL=1
             fi
           }
+
           while IFS= read -r dir; do
             safe="$(echo "$dir" | tr '/.' '_')"
             echo "==================== CRATE: $dir ====================" \
@@ -169,12 +170,33 @@ jobs:
             run_step "$dir" "doc"    bash -lc "cargo doc --no-deps" \
               |& tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_doc.log"
 
-            # 바이너리 아티팩트 복사(있을 때만)
+            # ---- 바이너리/아티팩트 수집 (OS별 안전 처리) ----
             if [ -d "$dir/target/release" ]; then
-              echo "[ECHO] copy release binaries from $dir" \
+              echo "[ECHO] collect artifacts from $dir/target/release" \
                 | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
-              find "$dir/target/release" -maxdepth 1 -type f -perm -111 -print0 2>/dev/null \
-                | xargs -0 -I{} bash -lc 'cp "{}" "artifacts/$(basename "{}")_${{ matrix.os }}_${{ matrix.toolchain }}"' || true
+
+              case "${{ matrix.os }}" in
+                ubuntu-latest|macos-14)
+                  # 실행 가능 파일만 복사
+                  while IFS= read -r f; do
+                    if [ -f "$f" ] && [ -x "$f" ]; then
+                      cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
+                    fi
+                  done < <(find "$dir/target/release" -maxdepth 1 -type f 2>/dev/null)
+                  ;;
+                windows-2022)
+                  # .exe만 복사
+                  while IFS= read -r f; do
+                    cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
+                  done < <(find "$dir/target/release" -maxdepth 1 -type f -name '*.exe' 2>/dev/null)
+                  ;;
+              esac
+
+              # 어떤 파일도 못 찾았으면 release 디렉터리를 zip으로
+              if ! ls artifacts | grep -q "${{ matrix.os }}_${{ matrix.toolchain }}"; then
+                zipname="artifacts/$(echo "$safe" | sed 's/^_//')_${{ matrix.os }}_${{ matrix.toolchain }}_release.zip"
+                (cd "$dir/target/release" && zip -qr "../../$zipname" .) || true
+              fi
             fi
           done < .wslist.txt
 
