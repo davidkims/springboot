@@ -1,0 +1,229 @@
+name: "🦀 Rust CI + Setup/Upgrade + Lint/Test/Build/Audit"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  # 주기적 점검(보안/audit 등)
+  schedule:
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00(UTC)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rustci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # 공통 준비: Ubuntu 필수 패키지 설치(+ optional dev headers)
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 프로젝트 루트/서브폴더에서 Cargo.toml 자동 탐색
+      - name: Locate Cargo.toml
+        id: locate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -f Cargo.toml ]; then
+            echo "dir=." >>"$GITHUB_OUTPUT"
+          elif [ -f springboot/Cargo.toml ]; then
+            echo "dir=springboot" >>"$GITHUB_OUTPUT"
+          else
+            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
+            exit 1
+          fi
+
+      - name: Install system dependencies (build essentials)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake clang llvm \
+            curl git ca-certificates
+
+      - name: Toolchain (stable) + components
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+          profile: minimal
+
+      - name: Cache (Rust build artifacts)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ steps.locate.outputs.dir }}
+
+      - name: Show versions
+        shell: bash
+        run: |
+          rustc -Vv
+          cargo -V
+          echo "Workspace: ${{ steps.locate.outputs.dir }}"
+
+  # 포맷/린트/테스트를 OS/툴체인 매트릭스로
+  check:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ] # 필요 시 macos-latest, windows-latest 추가
+        toolchain: [ stable ] # 필요 시 beta, nightly 추가
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Cargo.toml
+        id: locate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -f Cargo.toml ]; then
+            echo "dir=." >>"$GITHUB_OUTPUT"
+          elif [ -f springboot/Cargo.toml ]; then
+            echo "dir=springboot" >>"$GITHUB_OUTPUT"
+          else
+            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
+            exit 1
+          fi
+
+      - name: Toolchain (${{ matrix.toolchain }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy,rustfmt
+          profile: minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ steps.locate.outputs.dir }}
+
+      - name: cargo fmt --check
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          cargo fmt --all --check
+
+      - name: cargo clippy (deny warnings)
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          cargo test --all-features --verbose
+
+  # 릴리스 빌드 & 문서 빌드(필요 시 배포 앞 단계)
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Cargo.toml
+        id: locate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -f Cargo.toml ]; then
+            echo "dir=." >>"$GITHUB_OUTPUT"
+          elif [ -f springboot/Cargo.toml ]; then
+            echo "dir=springboot" >>"$GITHUB_OUTPUT"
+          else
+            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
+            exit 1
+          fi
+
+      - name: Toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ steps.locate.outputs.dir }}
+
+      - name: cargo build --release
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          cargo build --release --verbose
+
+      - name: cargo doc
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          cargo doc --no-deps
+
+  # 보안 점검/업그레이드: cargo-audit & (옵션) cargo-deny
+  security-audit:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Cargo.toml
+        id: locate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -f Cargo.toml ]; then
+            echo "dir=." >>"$GITHUB_OUTPUT"
+          elif [ -f springboot/Cargo.toml ]; then
+            echo "dir=springboot" >>"$GITHUB_OUTPUT"
+          else
+            echo "::error ::Could not find Cargo.toml in either ./ or ./springboot/"
+            exit 1
+          fi
+
+      - name: Toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ steps.locate.outputs.dir }}
+
+      - name: Install cargo-audit
+        shell: bash
+        run: |
+          cargo install cargo-audit --locked
+
+      - name: cargo update -p vulnerable deps (dry-run)
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          # 참고: 실제 종속성 업그레이드를 자동 커밋하려면 별도 PR 자동화가 필요합니다.
+          cargo update -Z avoid-dev-deps --dry-run || true
+
+      - name: cargo audit (vulnerability scan)
+        shell: bash
+        run: |
+          cd "${{ steps.locate.outputs.dir }}"
+          cargo audit --json || cargo audit
+
+      # (선택) cargo-deny 사용 시 주석 해제
+      # - name: Install cargo-deny
+      #   run: cargo install cargo-deny --locked
+      # - name: cargo deny check
+      #   run: |
+      #     cd "${{ steps.locate.outputs.dir }}"
+      #     cargo deny check
