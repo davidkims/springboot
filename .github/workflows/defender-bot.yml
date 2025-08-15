@@ -1,11 +1,11 @@
-name: 🛡️ Defender Bot
+name: "🛡️ Defender Bot"
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: "0 0 * * 0" # 매주 일요일 00:00 UTC
 
 permissions:
   contents: read
@@ -13,8 +13,75 @@ permissions:
   security-events: write
 
 jobs:
+  # 1) MySQL 설치/업데이트 + 상태 점검 (에코 로그 포함)
+  mysql-maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: MySQL install/upgrade (echo-safe)
+        run: |
+          # ===== Echo-safe prelude =====
+          set -Eeuo pipefail
+          mkdir -p .github/echo .github/logs .github/error_logs
+          exec > >(tee -a .github/logs/mysql-maint.$(date +%s).out.log) \
+               2> >(tee -a .github/logs/mysql-maint.$(date +%s).err.log >&2)
+          RUNLOG=".github/echo/cmds.log"
+          RUNSH=".github/echo/cmds.sh"
+          printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n' > "$RUNSH" && chmod +x "$RUNSH"
+          run(){ { printf '[ECHO] '; printf '%q ' "$@"; printf '\n'; } | tee -a "$RUNLOG" >&2; { printf '%q ' "$@"; printf '\n'; } >> "$RUNSH"; "$@"; }
+          # ===== Packages =====
+          export DEBIAN_FRONTEND=noninteractive
+          run sudo apt-get update -y | tee .github/echo/01-apt-update.txt
+          # 설치되어 있으면 업그레이드, 없으면 설치 (idempotent)
+          run sudo apt-get install -y mysql-server mysql-client lsof | tee .github/echo/02-apt-install.txt
+          run sudo apt-get autoremove -y | tee .github/echo/03-apt-autoremove.txt
+          run sudo systemctl daemon-reload
+          # ===== Service start / health check =====
+          run sudo mkdir -p /run/mysqld
+          run sudo chown mysql:mysql /run/mysqld || true
+          run sudo systemctl enable mysql
+          run sudo systemctl restart mysql
+          # 소켓 또는 active 상태 확인 (최대 60초)
+          for i in $(seq 1 60); do
+            if systemctl is-active --quiet mysql || [ -S /run/mysqld/mysqld.sock ] || [ -S /var/run/mysqld/mysqld.sock ]; then
+              break
+            fi
+            sleep 1
+          done
+          if ! systemctl is-active --quiet mysql; then
+            echo "[FAIL] MySQL service not active"
+            sudo systemctl status mysql --no-pager || true
+            sudo journalctl -u mysql --no-pager | tail -200 || true
+            sudo cat /var/log/mysql/error.log 2>/dev/null | tail -200 || true
+            exit 1
+          fi
+          # ===== Version / info echo =====
+          {
+            echo "== which/mysql =="; which mysql || true
+            echo "== mysql version =="; mysql --version || true
+            echo "== server package version =="; dpkg -l | grep -E '^ii\s+mysql-server' || true
+            echo "== socket presence =="; ls -l /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock 2>/dev/null || true
+          } | tee .github/echo/mysql-info.txt
+
+      - name: Upload MySQL logs & echoes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-maintenance-artifacts
+          retention-days: 7
+          path: |
+            .github/echo/**
+            .github/logs/**
+            .github/error_logs/**
+            /var/log/mysql/error.log
+
+  # 2) Microsoft Security DevOps 스캔 (기존 기능 유지)
   security-scan:
     runs-on: ubuntu-latest
+    needs: [mysql-maintenance]  # MySQL 유지보수 후 스캔 수행(원치 않으면 제거)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
