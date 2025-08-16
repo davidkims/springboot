@@ -1,4 +1,4 @@
-name: "🩺 Workflows Health Check (24x7 + Echo + Safe Rerun)"
+name: "🩺 Workflows Health Check (24x7 + Echo Everywhere)"
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ on:
   schedule:
     - cron: "0 * * * *" # 매시간 정각(UTC)
 
-# ⬇️ 권한 확장: rerun/파일쓰기 위해 actions:write, contents:write 필요
+# 재실행/파일 변경에 필요한 권한
 permissions:
   actions: write
   contents: write
@@ -38,9 +38,10 @@ permissions:
 
 jobs:
   health-check:
-    name: "Health Check (EchoOps + Safe Rerun)"
+    name: "Health Check (EchoOps)"
     runs-on: ubuntu-latest
     env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LOG_DIR: .github/logs
       LAB_DIR: ci-labs/replicas
       QUAR_DIR: ci-labs/quarantine
@@ -56,28 +57,6 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: 🔑 Select token (PAT preferred, fallback to GITHUB_TOKEN)
-        id: token
-        shell: bash
-        env:
-          GH_PAT: ${{ secrets.HEALTHCHECK_PAT }}
-          GH_DEF: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-          if [ -n "${GH_PAT:-}" ]; then
-            echo "token_source=PAT" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::${GH_PAT}"
-            echo "GH_TOKEN=${GH_PAT}" >> "$GITHUB_ENV"
-            ECHO INFO "Using HEALTHCHECK_PAT for elevated permissions"
-          else
-            echo "token_source=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::${GH_DEF}"
-            echo "GH_TOKEN=${GH_DEF}" >> "$GITHUB_ENV"
-            ECHO INFO "Using default GITHUB_TOKEN"
-          fi
 
       - name: 🧰 Install gh & jq
         shell: bash
@@ -97,14 +76,13 @@ jobs:
           set -e
           ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
           ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          ECHO INFO "mkdir -p $LOG_DIR $LAB_DIR $QUAR_DIR"
           mkdir -p "$LOG_DIR" "$LAB_DIR" "$QUAR_DIR"
           echo "# Workflows Health Logs ($(ts))" > "$LOG_DIR/health_report.md"
-          ECHO OK "dirs prepared"
+          ECHO OK   "dirs prepared"
 
-      - name: 🔍 Health check + safe auto-rerun + labs/quarantine (echo)
+      - name: 🔍 Health check + auto-rerun + labs/quarantine (echo)
         shell: bash
-        env:
-          REPO: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
 
@@ -123,26 +101,9 @@ jobs:
             echo ""
             echo "# 🩺 Workflows Health Check Report ($(ts))"
             echo ""
-            echo "| Workflow | Runs | OK | Fail | Cancel | FailRate | Last | ReRuns | Action | Notes |"
-            echo "|---|---:|---:|---:|---:|---:|---|---:|---|---|"
+            echo "| Workflow | Runs | OK | Fail | Cancel | FailRate | Last | ReRuns | Action |"
+            echo "|---|---:|---:|---:|---:|---:|---|---:|---|"
           } >> "$REPORT_MD"
-
-          # 안전 재실행 함수: gh → REST → 실패 시 메시지 반환
-          safe_rerun() {
-            local run_id="$1"
-            local out err rc
-            out="$(gh run rerun "$run_id" 2>&1)" || rc=$?
-            if [ "${rc:-0}" -ne 0 ]; then
-              err="$out"
-              # 권한 문제? REST API 시도
-              out="$(gh api -X POST "repos/${REPO}/actions/runs/${run_id}/rerun" 2>&1)" || rc=$?
-              if [ "${rc:-0}" -ne 0 ]; then
-                printf '%s' "$err $out"
-                return 1
-              fi
-            fi
-            return 0
-          }
 
           ECHO INFO "params LOOKBACK=$LOOKBACK MAX_RERUNS=$MAX_RERUNS RATE_TH=$FAIL_RATE_THRESHOLD ABS_TH=$FAIL_ABS_THRESHOLD REPLICA=$REPLICA_COUNT COMMIT=$COMMIT_CHANGES"
 
@@ -154,12 +115,12 @@ jobs:
             WF_FILE="$(basename "$file")"
             ECHO INFO "check $WF_FILE"
 
-            RUNS_JSON="$(GH_TOKEN="$GH_TOKEN" gh run list --workflow "$WF_FILE" --limit "$LOOKBACK" --json databaseId,conclusion,status,createdAt,headBranch 2>/dev/null || true)"
+            RUNS_JSON="$(gh run list --workflow "$WF_FILE" --limit "$LOOKBACK" --json databaseId,conclusion,status,createdAt,headBranch 2>/dev/null || true)"
             RUNS_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
 
             if [[ -z "$RUNS_JSON" || "$RUNS_COUNT" -eq 0 ]]; then
               ECHO WARN "no runs for $WF_FILE"
-              echo "| \`$WF_FILE\` | 0 | 0 | 0 | 0 | 0.00 | N/A | 0 | no-runs | n/a |" >> "$REPORT_MD"
+              echo "| \`$WF_FILE\` | 0 | 0 | 0 | 0 | 0.00 | N/A | 0 | no-runs |" >> "$REPORT_MD"
               continue
             fi
 
@@ -167,38 +128,33 @@ jobs:
             FAI="$(jq '[.[] | select(.conclusion=="failure")] | length' <<< "$RUNS_JSON")"
             CAN="$(jq '[.[] | select(.conclusion=="cancelled")] | length' <<< "$RUNS_JSON")"
             LAST_CONC="$(jq -r '.[0].conclusion // "unknown"' <<< "$RUNS_JSON")"
+
+            # 실패율 계산 (awk로 대체 — heredoc 제거)
             FAIL_RATE="$(awk -v t="$RUNS_COUNT" -v f="$FAI" 'BEGIN{ if(t>0) printf "%.2f", f/t; else printf "0.00"; }')"
 
             ECHO INFO "$WF_FILE runs=$RUNS_COUNT ok=$SUC fail=$FAI cancel=$CAN rate=$FAIL_RATE last=$LAST_CONC"
 
-            # 최근 실패/취소 자동 재실행 (권한 안전 처리)
+            # 최근 실패/취소 자동 재실행
             RERUNS=0
-            NOTES=""
             if [[ "$MAX_RERUNS" -gt 0 ]]; then
               while read -r run_id; do
                 [[ -z "$run_id" ]] && continue
-                ECHO INFO "try rerun $run_id for $WF_FILE"
-                if msg="$(safe_rerun "$run_id" 2>&1)"; then
-                  ECHO OK "rerun accepted id=$run_id"
-                  RERUNS=$((RERUNS+1)); TOTAL_RERUNS=$((TOTAL_RERUNS+1))
-                else
-                  # 권한 부족/리소스 접근 불가 처리
-                  if echo "$msg" | grep -qi "Resource not accessible by integration"; then
-                    ECHO WARN "rerun blocked by permissions (integration): run=$run_id"
-                    NOTES="${NOTES}blocked:integration "
-                  else
-                    ECHO WARN "rerun failed id=$run_id: $msg"
-                    NOTES="${NOTES}rerun-failed "
-                  fi
-                fi
+                ECHO INFO "rerun $run_id for $WF_FILE"
+                gh run rerun "$run_id" || ECHO WARN "rerun failed id=$run_id"
+                RERUNS=$((RERUNS+1))
+                TOTAL_RERUNS=$((TOTAL_RERUNS+1))
                 [[ "$RERUNS" -ge "$MAX_RERUNS" ]] && break
               done < <(jq -r '[.[] | select((.conclusion=="failure") or (.conclusion=="cancelled")) | .databaseId] | .[]?' <<< "$RUNS_JSON")
             fi
 
-            # 임계 판단
+            # 임계 판단 (awk/정수 비교)
             OVER_RATE="$(awk -v r="$FAIL_RATE" -v th="$FAIL_RATE_THRESHOLD" 'BEGIN{ print (r+0 >= th+0) ? "1" : "0" }')"
             if [[ "$FAI" =~ ^[0-9]+$ ]] && [[ "$FAIL_ABS_THRESHOLD" =~ ^[0-9]+$ ]]; then
-              [ "$FAI" -ge "$FAIL_ABS_THRESHOLD" ] && OVER_ABS="1" || OVER_ABS="0"
+              if [ "$FAI" -ge "$FAIL_ABS_THRESHOLD" ]; then
+                OVER_ABS="1"
+              else
+                OVER_ABS="0"
+              fi
             else
               OVER_ABS="0"
             fi
@@ -211,7 +167,7 @@ jobs:
               WF_BASE="${WF_FILE%.*}"
               TS_ID="$(ts | tr ':T' '__' | tr -d 'Z')"
 
-              # 랩 복제본(수동 트리거만) 생성
+              # 랩 복제본 생성 (workflow_dispatch만 허용)
               LAB_ROOT="$LAB_DIR/${WF_BASE}/${TS_ID}"
               mkdir -p "$LAB_ROOT"
               for i in $(seq 1 "$REPLICA_COUNT"); do
@@ -222,6 +178,7 @@ jobs:
                   /^[[:space:]]*on:[[:space:]]*$/ {print "on:\n  workflow_dispatch:"; in_on=1; next}
                   {if(in_on && $0 ~ /^[[:space:]]*[^[:space:]]/){in_on=0} if(!in_on) print}
                 ' "$file" > "$LAB_COPY"
+                # 이름 수정
                 if grep -q '^name:' "$LAB_COPY"; then
                   sed -i "1s|^name:.*|name: ${WF_BASE} (LAB ${i})|" "$LAB_COPY"
                 else
@@ -229,14 +186,15 @@ jobs:
                 fi
               done
 
-              # 격리 백업(원본 파일)
+              # 격리 백업(원본 그대로)
               QUAR_ROOT="$QUAR_DIR/${WF_BASE}/${TS_ID}"
               mkdir -p "$QUAR_ROOT"
-              cp -f "$file" "$QUAR_ROOT/$WF_FILE"
-              NOTES="${NOTES}labs+quarantine "
+              QUAR_COPY="$QUAR_ROOT/$WF_FILE"
+              ECHO INFO "backup quarantine $QUAR_COPY"
+              cp -f "$file" "$QUAR_COPY"
             fi
 
-            echo "| \`$WF_FILE\` | $RUNS_COUNT | $SUC | $FAI | $CAN | $FAIL_RATE | $LAST_CONC | $RERUNS | $ACTION | ${NOTES:-} |" >> "$REPORT_MD"
+            echo "| \`$WF_FILE\` | $RUNS_COUNT | $SUC | $FAI | $CAN | $FAIL_RATE | $LAST_CONC | $RERUNS | $ACTION |" >> "$REPORT_MD"
           done
 
           {
@@ -256,32 +214,29 @@ jobs:
 
       - name: 💾 Commit & Push generated labs/quarantine & report (echo)
         shell: bash
-        env:
-          COMMIT_CHANGES_INPUT: ${{ github.event.inputs.commit_changes }}
-          COMMIT_CHANGES_DEFAULT: ${{ env.COMMIT_CHANGES_DEFAULT }}
         run: |
           set -Eeuo pipefail
           ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
           ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-          COMMIT_CHANGES="${COMMIT_CHANGES_INPUT:-$COMMIT_CHANGES_DEFAULT}"
+          COMMIT_CHANGES="${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}"
 
           if [[ "$COMMIT_CHANGES" != "true" ]]; then
             ECHO INFO "commit_changes=false → 커밋/푸시 생략"
             exit 0
           fi
-
           if git diff --quiet; then
             ECHO INFO "no changes to commit"
             exit 0
           fi
 
+          ECHO INFO "git commit"
           git config user.name  "workflow-bot"
           git config user.email "workflow-bot@users.noreply.github.com"
           git add -A
           git commit -m "chore(health): labs/quarantine & report ($(ts))"
           ECHO INFO "git push"
           git push origin "HEAD:${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}" || true
-          ECHO OK "pushed"
+          ECHO OK   "pushed"
 
       - name: 📎 Upload report & logs (echo)
         uses: actions/upload-artifact@v4
