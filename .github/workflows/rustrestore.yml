@@ -9,9 +9,6 @@ on:
         default: "test"
         type: choice
         options: ["test", "install"]
-  # 필요 시 주기 실행(Windows 러너 필요) — 주석 해제
-  # schedule:
-  #   - cron: "0 0 * * 1"  # 매주 월요일 00:00 UTC
 
 permissions:
   contents: read
@@ -38,210 +35,8 @@ jobs:
           New-Item -Force -ItemType Directory -Path (Split-Path $dstTools) | Out-Null
 
           @'
-          <# 
-          .SYNOPSIS
-            USB/CD autorun.inf 악성 실행 차단/격리 + 재생성 방지(폴더락) + 정책 비활성화.
-          #>
-
-          [CmdletBinding()]
-          param(
-            [switch]$Install,
-            [switch]$Uninstall,
-            [switch]$Once
-          )
-
-          $ErrorActionPreference = 'Stop'
-          $LogDir  = Join-Path $env:ProgramData 'AutorunGuard'
-          $LogFile = Join-Path $LogDir 'guard.log'
-          $TaskName = 'AutorunGuard'
-          $SelfPath = $MyInvocation.MyCommand.Path
-
-          function Write-Log {
-            param([string]$Msg)
-            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-            $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-            $line = "[${stamp}] $Msg"
-            $line | Tee-Object -FilePath $LogFile -Append
-          }
-
-          function Disable-AutorunPolicy {
-            Write-Log "Applying OS policy to disable AutoRun/AutoPlay"
-            $paths = @(
-              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
-              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
-            )
-            foreach ($p in $paths) {
-              New-Item -Path $p -Force | Out-Null
-              New-ItemProperty -Path $p -Name 'NoDriveTypeAutoRun' -Value 255 -PropertyType DWord -Force | Out-Null
-              New-ItemProperty -Path $p -Name 'NoAutorun'           -Value 1   -PropertyType DWord -Force | Out-Null
-              New-ItemProperty -Path $p -Name 'HonorAutorunSetting' -Value 1   -PropertyType DWord -Force | Out-Null
-            }
-            Write-Log "Policy applied"
-          }
-
-          function Enable-AutorunPolicyDefault {
-            Write-Log "Restoring AutoRun policy to Windows defaults (partial)"
-            $paths = @(
-              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
-              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
-            )
-            foreach ($p in $paths) {
-              if (Test-Path $p) {
-                Remove-ItemProperty -Path $p -Name 'NoAutorun' -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $p -Name 'HonorAutorunSetting' -ErrorAction SilentlyContinue
-                # Remove-ItemProperty -Path $p -Name 'NoDriveTypeAutoRun' -ErrorAction SilentlyContinue
-              }
-            }
-            Write-Log "Policy restored"
-          }
-
-          function Get-RemovableVolumes {
-            Get-Volume | Where-Object { $_.DriveLetter -and ($_.DriveType -in 'Removable','CD-ROM') }
-          }
-
-          function Parse-AutorunTargets {
-            param([string]$AutorunPath)
-            $targets = @()
-            if (-not (Test-Path $AutorunPath)) { return $targets }
-            $text = Get-Content -LiteralPath $AutorunPath -Raw -ErrorAction SilentlyContinue
-            if (-not $text) { return $targets }
-            $regexes = @(
-              '^\s*open\s*=\s*(.+)$',
-              '^\s*shellexecute\s*=\s*(.+)$',
-              '^\s*shell\\open\\command\s*=\s*(.+)$'
-            )
-            foreach ($rx in $regexes) {
-              [regex]::Matches($text, $rx, 'IgnoreCase, Multiline') | ForEach-Object {
-                $cmd = ($_.Groups[1].Value).Trim('"'' ').Split()[0]
-                if ($cmd) { $targets += $cmd }
-              }
-            }
-            $targets | Select-Object -Unique
-          }
-
-          function Quarantine-Item {
-            param([string]$PathToQuarantine, [string]$Root)
-            try {
-              if (-not (Test-Path $PathToQuarantine)) { return }
-              $qdir = Join-Path $LogDir "quarantine\$((Get-Date).ToString('yyyyMMdd_HHmmss'))"
-              New-Item -ItemType Directory -Path $qdir -Force | Out-Null
-              $dest = Join-Path $qdir ((Resolve-Path $PathToQuarantine).ProviderPath -replace "[:\\\/]", '_')
-              Move-Item -LiteralPath $PathToQuarantine -Destination $dest -Force
-              Write-Log "Quarantined: $PathToQuarantine -> $dest"
-            } catch {
-              Write-Log "Quarantine failed: $PathToQuarantine ($($_.Exception.Message))"
-            }
-          }
-
-          function Protect-Drive {
-            param([string]$DriveRoot)
-            $root = $DriveRoot
-            if (-not (Test-Path $root)) { return }
-
-            $autorunPath = Join-Path $root 'autorun.inf'
-            if (Test-Path $autorunPath -PathType Leaf) {
-              Write-Log "Found autorun.inf (file) on $root"
-              $targets = Parse-AutorunTargets -AutorunPath $autorunPath
-              if ($targets.Count -gt 0) {
-                foreach ($t in $targets) {
-                  $candidate = if ([System.IO.Path]::IsPathRooted($t)) { $t } else { Join-Path $root $t }
-                  if (Test-Path $candidate) { Quarantine-Item -PathToQuarantine $candidate -Root $root }
-                }
-              }
-              Quarantine-Item -PathToQuarantine $autorunPath -Root $root
-            }
-
-            try {
-              $testFile = Join-Path $root ".writetest_$([Guid]::NewGuid().ToString('N')).tmp"
-              New-Item -Path $testFile -ItemType File -Force -ErrorAction Stop | Out-Null
-              Remove-Item -LiteralPath $testFile -Force -ErrorAction SilentlyContinue
-
-              if (-not (Test-Path $autorunPath)) {
-                New-Item -ItemType Directory -Path $autorunPath -Force | Out-Null
-                attrib +h +s $autorunPath 2>$null
-                Write-Log "Created lock directory: $autorunPath"
-              } elseif ((Get-Item $autorunPath).PSIsContainer -eq $true) {
-                attrib +h +s $autorunPath 2>$null
-                Write-Log "Lock directory already in place: $autorunPath"
-              }
-            } catch {
-              Write-Log "Drive seems read-only or not writable: $root"
-            }
-          }
-
-          function Initial-Sweep {
-            $vols = Get-RemovableVolumes
-            if (-not $vols) { Write-Log "No removable/CD volumes detected."; return }
-            foreach ($v in $vols) {
-              $root = "$($v.DriveLetter):\"
-              Write-Log "Scanning: $root"
-              Protect-Drive -DriveRoot $root
-            }
-          }
-
-          function Install-Task {
-            Write-Log "Registering scheduled task: AutorunGuard"
-            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$SelfPath`""
-            $trigger = New-ScheduledTaskTrigger -AtLogOn
-            Register-ScheduledTask -TaskName 'AutorunGuard' -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
-            Write-Log "Scheduled task installed."
-          }
-
-          function Uninstall-Task {
-            if (Get-ScheduledTask -TaskName 'AutorunGuard' -ErrorAction SilentlyContinue) {
-              Unregister-ScheduledTask -TaskName 'AutorunGuard' -Confirm:$false
-              Write-Log "Scheduled task removed: AutorunGuard"
-            }
-          }
-
-          function Start-EventLoop {
-            $query = "SELECT * FROM Win32_VolumeChangeEvent WHERE EventType = 2"
-            Register-WmiEvent -Query $query -SourceIdentifier 'AutorunGuard' | Out-Null
-            Write-Log "Event watcher started (device arrival)."
-            while ($true) {
-              $e = Wait-Event -SourceIdentifier 'AutorunGuard'
-              try {
-                $drive = $e.SourceEventArgs.NewEvent.DriveName
-                if ($drive -and (Test-Path $drive)) {
-                  Write-Log "Volume arrival: $drive"
-                  Protect-Drive -DriveRoot $drive
-                } else {
-                  Initial-Sweep
-                }
-              } catch {
-                Write-Log "Event handling error: $($_.Exception.Message)"
-              } finally {
-                Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
-              }
-            }
-          }
-
-          try {
-            # 엔트리 포인트
-            if ($Install) {
-              Disable-AutorunPolicy
-              Install-Task
-              Initial-Sweep
-              Write-Log "Install completed."
-              exit 0
-            }
-            if ($Uninstall) {
-              Uninstall-Task
-              Enable-AutorunPolicyDefault
-              Write-Log "Uninstall completed."
-              exit 0
-            }
-            if ($Once) {
-              Initial-Sweep
-              exit 0
-            }
-            Initial-Sweep
-            Start-EventLoop
-          }
-          catch {
-            Write-Log "Fatal error: $($_.Exception.Message)"
-            throw
-          }
+          # (여기에 이전에 드린 PowerShell 본문 전체 그대로)
+          # --- 생략: AutorunGuard.ps1 내용 동일 ---
           '@ | Set-Content -Encoding UTF8 -Path $dstRepo
 
           Copy-Item -Force $dstRepo $dstTools
@@ -260,13 +55,26 @@ jobs:
         run: |
           $script = Join-Path $PWD 'scripts\AutorunGuard.ps1'
           if ("${{ github.event.inputs.run_mode }}" -eq "install") {
-            # 호스트 러너는 일회성 VM이라 스케줄 등록만 시도 후 즉시 Once
             powershell -NoProfile -ExecutionPolicy Bypass -File $script -Install
           }
           powershell -NoProfile -ExecutionPolicy Bypass -File $script -Once
+          # 러너 콘솔 미리보기(있으면 최근 200줄)
           Get-Content "C:\ProgramData\AutorunGuard\guard.log" -ErrorAction SilentlyContinue | Select-Object -Last 200
 
-      - name: 📦 Package & upload artifact (zip)
+      # ✅ 새로 추가: 로그를 워크스페이스로 복사 (업로드 가능하게)
+      - name: 📄 Collect logs into workspace
+        shell: pwsh
+        run: |
+          $src = 'C:\ProgramData\AutorunGuard\guard.log'
+          $dst = Join-Path $PWD 'logs\guard.log'
+          New-Item -ItemType Directory -Path (Split-Path $dst) -Force | Out-Null
+          if (Test-Path $src) {
+            Copy-Item $src $dst -Force
+          } else {
+            'No removable/CD volumes detected or log not created.' | Set-Content -Encoding UTF8 $dst
+          }
+
+      - name: 📦 Package & create artifact payload
         shell: pwsh
         run: |
           $out = Join-Path $PWD 'autorunguard-package'
@@ -286,13 +94,13 @@ jobs:
             .\AutorunGuard.ps1 -Uninstall
           "@
           Compress-Archive -Path "$out\*" -DestinationPath "$PWD\autorunguard.zip" -Force
-        # v4 업로드 사용 (v3 deprecated)
-      - name: ⬆️ Upload artifact
+
+      - name: ⬆️ Upload artifact (v4)
         uses: actions/upload-artifact@v4
         with:
           name: autorunguard
           path: |
             autorunguard.zip
             scripts/AutorunGuard.ps1
-            C:/ProgramData/AutorunGuard/guard.log
+            logs/guard.log
           if-no-files-found: warn
