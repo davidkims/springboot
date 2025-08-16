@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
-  pull_request:
-    types: [opened, synchronize, reopened]
 
 concurrency:
   group: account-rotation
@@ -16,7 +14,6 @@ permissions:
   pages: write
   id-token: write
   security-events: write
-  pull-requests: write
 
 defaults:
   run:
@@ -36,8 +33,10 @@ env:
   TERM: xterm-256color
   DEBIAN_FRONTEND: noninteractive
   UCF_FORCE_CONFNEW: "1"
-  # 대화형 프론트엔드 강제 비활성화
   APT_LISTCHANGES_FRONTEND: none
+  # (옵션) git 네트워크 탄력성
+  GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+  GIT_HTTP_LOW_SPEED_TIME: "60"
 
 jobs:
   build-test-sec:
@@ -478,7 +477,7 @@ jobs:
           cp "$SBOM_DIR/sbom.spdx.json" "$PAGES_DIR/sbom.spdx.json" || true
           ECHO "sbom ready" | tee -a "$LOG" || true
 
-      # ---------- Scorecard ----------
+      # ---------- Scorecard (Install + JSON Page) ----------
       - name: 📥 Install Scorecard (echo)
         run: |
           set -Eeuo pipefail; init_echo "scorecard-install"
@@ -498,24 +497,15 @@ jobs:
             fi
           fi
           if ! command -v scorecard >/dev/null 2>&1; then
-            ECHO "using docker fallback" | tee -a "$LOG" || true
+            ECHO "using docker fallback (GHCR)" | tee -a "$LOG" || true
             sudo bash -c 'cat > /usr/local/bin/scorecard <<EOF
             #!/usr/bin/env bash
-            exec docker run --rm ghcr.io/ossf/scorecard:stable "$@"
+            exec docker run --rm -e GITHUB_AUTH_TOKEN="${GITHUB_TOKEN}" ghcr.io/ossf/scorecard:stable "$@"
             EOF'
             sudo chmod +x /usr/local/bin/scorecard
             docker pull ghcr.io/ossf/scorecard:stable || true
           fi
           command -v scorecard && scorecard version | sed 's/^/[SCORECARD] /' | tee -a "$LOG" || true
-
-      - name: 🧰 Scorecard Action → SARIF (echo)
-        uses: ossf/scorecard-action@v2.4.0
-        with:
-          results_file: .github/security_reports/scorecard.sarif
-          results_format: sarif
-          repo_token: ${{ github.token }}
-          publish_results: false
-        continue-on-error: true
 
       - name: 🧪 Scorecard JSON + Pages (echo)
         env:
@@ -554,6 +544,122 @@ jobs:
           </script>
           HTML
           ECHO "scorecard pages ready" | tee -a "$LOG" || true
+
+      # ---------- Scorecard SARIF (GCR 비의존) ----------
+      - name: 🧰 Scorecard SARIF via CLI (no GCR) (echo)
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail; init_echo "scorecard-sarif-cli"
+          mkdir -p "$REPORT_DIR"
+          try_scorecard() {
+            local attempt="$1"
+            ECHO "scorecard attempt ${attempt}"
+            if command -v scorecard >/dev/null 2>&1; then
+              scorecard --repo "github.com/${GH_REPO}" \
+                        --format sarif \
+                        --show-details \
+                        --policy github \
+                        --enable-scorecard-endpoints \
+                        --commit-depth 0 \
+                        > "$REPORT_DIR/scorecard.sarif"
+            else
+              docker run --rm \
+                -e GITHUB_AUTH_TOKEN="${GITHUB_TOKEN}" \
+                ghcr.io/ossf/scorecard:stable \
+                --repo "github.com/${GH_REPO}" \
+                --format sarif \
+                --show-details \
+                --policy github \
+                --enable-scorecard-endpoints \
+                --commit-depth 0 \
+                > "$REPORT_DIR/scorecard.sarif"
+            fi
+          }
+          n=0; rc=1
+          until [ $n -ge 3 ]; do
+            if try_scorecard "$((n+1))"; then rc=0; break; fi
+            n=$((n+1))
+            sleep $(( 5 * n ))
+          done
+          if [ $rc -ne 0 ]; then
+            ECHO "scorecard sarif generation failed, writing empty SARIF"
+            echo '{"runs":[]}' > "$REPORT_DIR/scorecard.sarif"
+          fi
+          ECHO "scorecard sarif ready -> $REPORT_DIR/scorecard.sarif"
+
+      - name: ⏫ Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: .github/security_reports/scorecard.sarif
+        continue-on-error: true
+
+      # ---------- Dependabot Alerts Snapshot ----------
+      - name: 🛡️ Dependabot Alerts → JSON/CSV/HTML (echo)
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail; init_echo "dependabot-alerts"
+          mkdir -p "$REPORT_DIR" "$PAGES_DIR"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GH_REPO}/dependabot/alerts?per_page=100&state=open" \
+            > "$REPORT_DIR/dependabot-alerts.json" || echo '[]' > "$REPORT_DIR/dependabot-alerts.json"
+
+          python3 - <<'PY'
+          import json, csv, os
+          rpt=os.environ.get("REPORT_DIR",".github/security_reports")
+          pages=os.environ.get("PAGES_DIR",".github/pages")
+          data=json.load(open(os.path.join(rpt,"dependabot-alerts.json"),"r",encoding="utf-8"))
+          with open(os.path.join(rpt,"dependabot-alerts.csv"),"w",newline="",encoding="utf-8") as f:
+              w=csv.writer(f)
+              w.writerow(["number","state","dependency","manifest","ecosystem","severity","cve_ids","ghsa_id","fixed_in","created_at","updated_at","url"])
+              for a in data:
+                  dep=a.get("dependency",{}) or {}
+                  sec=a.get("security_advisory",{}) or {}
+                  sev=(sec.get("severity") or a.get("severity") or "").upper()
+                  cves=";".join([id.get("value","") for id in (sec.get("identifiers") or []) if id.get("type")=="CVE"])
+                  fixed=";".join(a.get("fixed_in",[]) or [])
+                  w.writerow([a.get("number"), a.get("state"),
+                    dep.get("package",{}).get("name",""), dep.get("manifest_path",""),
+                    dep.get("package",{}).get("ecosystem",""),
+                    sev, cves, sec.get("ghsa_id",""), fixed,
+                    a.get("created_at",""), a.get("updated_at",""),
+                    a.get("html_url","")])
+          PY
+
+          cat > "$PAGES_DIR/dependabot.html" <<'HTML'
+          <!DOCTYPE html><meta charset="utf-8">
+          <title>Dependabot Alerts</title>
+          <h1>Dependabot Alerts (Open)</h1>
+          <table border="1" cellpadding="6" cellspacing="0" id="tbl"></table>
+          <script>
+          fetch('security_reports/dependabot-alerts.json').then(r=>r.json()).then(js=>{
+            const head=['#','State','Dependency','Manifest','Ecosystem','Severity','CVE','GHSA','Fixed In','Created','Updated','URL'];
+            const rows=(js||[]).map(a=>{
+              const dep=a.dependency||{}, pkg=(dep.package||{}).name||'';
+              const eco=(dep.package||{}).ecosystem||'';
+              const sec=a.security_advisory||{};
+              const cves=(sec.identifiers||[]).filter(i=>i.type==='CVE').map(i=>i.value).join(';');
+              const fixed=(a.fixed_in||[]).join(';');
+              const sev=(sec.severity || a.severity || '').toUpperCase();
+              return [a.number, a.state, pkg, dep.manifest_path||'', eco, sev, cves, sec.ghsa_id||'', fixed, a.created_at||'', a.updated_at||'', a.html_url||''];
+            });
+            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>',
+                        '<tbody>'+rows.map(r=>'<tr>'+r.map((x,i)=>{
+                          if(i===11 && x) return `<td><a href="${x}" target="_blank">link</a></td>`;
+                          return `<td>${(x??'').toString().replace(/</g,'&lt;')}</td>`;
+                        }).join('')+'</tr>').join('')+'</tbody>'].join('');
+            document.getElementById('tbl').innerHTML=html;
+          }).catch(()=>{document.getElementById('tbl').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
+          </script>
+          HTML
+          ECHO "dependabot alerts snapshot ready" | tee -a "$LOG" || true
 
       # ---------- Anomaly & FDS (Aggressive Columns + CSV/HTML/Score) ----------
       - name: 🧠 Anomaly/FDS + Aggressive Columns (CSV/HTML/Score) (echo)
@@ -637,7 +743,8 @@ jobs:
                           if ent >= 4.0:
                               items.append({"indicator":"entropy>=4.0","snippet":s[:80],"entropy":round(ent,2)})
                       if items: fds_findings.append({"file":p, "hits":items[:10]})
-                  except Exception: pass
+                  except Exception:
+                      pass
 
           with open(os.path.join(rpt,"fds_report.json"),"w",encoding="utf-8") as f:
               json.dump({"generated_at": int(time.time()), "findings": fds_findings[:100]}, f, indent=2)
@@ -672,45 +779,7 @@ jobs:
                          "score_checks": checks,"risk_score": round(risk,2),
                          "risk_level": risk_level,"anomalies": anomalies}, f, indent=2)
 
-          # ADVANCED HTMLs
-          open(os.path.join(pages,"trivy-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
-          <title>Trivy — Advanced</title><h1>Trivy — Advanced Vulnerabilities</h1>
-          <table border="1" cellpadding="6" cellspacing="0" id="t"></table>
-          <script>
-          fetch('../security_reports/trivy-image.json').then(r=>r.json()).then(j=>{
-            let rows=[];(j.Results||[]).forEach(r=>{
-              (r.Vulnerabilities||[]).forEach(v=>{
-                rows.push([r.Target||'', r.Type||'', v.Severity||'', v.VulnerabilityID||'', v.PkgName||'', v.InstalledVersion||'', v.FixedVersion||'', v.Title||'', v.PrimaryURL||'']);
-              });
-            });
-            const head=['Target','Type','Severity','CVE','Pkg','Installed','Fixed','Title','URL'];
-            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
-            document.getElementById('t').innerHTML=html;
-          }).catch(()=>{document.getElementById('t').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
-          </script>""")
-          open(os.path.join(pages,"scorecard-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
-          <title>Scorecard — Advanced</title><h1>OSSF Scorecard — Advanced Checks</h1>
-          <table border="1" cellpadding="6" cellspacing="0" id="sc"></table>
-          <script>
-          fetch('../security_reports/scorecard.json').then(r=>r.json()).then(j=>{
-            const checks=j.checks||[]; const head=['Check','Score','Reason','Docs','DetailsCount'];
-            const rows=checks.map(c=>[c.name||'', c.score||'', c.reason||'', (c.documentation||{}).url||'', (c.details||[]).length||0]);
-            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
-            document.getElementById('sc').innerHTML=html;
-          }).catch(()=>{document.getElementById('sc').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
-          </script>""")
-          open(os.path.join(pages,"sbom-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
-          <title>SBOM — Advanced</title><h1>SBOM — Packages</h1>
-          <table border="1" cellpadding="6" cellspacing="0" id="sb"></table>
-          <script>
-          fetch('sbom.spdx.json').then(r=>r.json()).then(j=>{
-            const pkgs=j.packages||[]; const head=['Name','Version','Supplier','Download','LicenseConcluded','LicenseDeclared','Originator','ExternalRefs'];
-            const rows=pkgs.map(p=>{const ex=(p.externalRefs||[]).map(x=>`${x.referenceCategory||''}:${x.referenceType||''}:${x.referenceLocator||''}`).join(';');
-              return [p.name||'', p.versionInfo||'', p.supplier||'', p.downloadLocation||'', p.licenseConcluded||'', p.licenseDeclared||'', p.originator||'', ex];});
-            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
-            document.getElementById('sb').innerHTML=html;
-          }).catch(()=>{document.getElementById('sb').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
-          </script>""")
+          # ADVANCED HTMLs (간단 버전)
           open(os.path.join(pages,"anomaly-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
           <title>Anomaly — Advanced</title><h1>Anomaly — Advanced</h1><div id="info"></div>
           <table border="1" cellpadding="6" cellspacing="0" id="an"></table>
@@ -723,38 +792,7 @@ jobs:
             document.getElementById('an').innerHTML=html;
           }).catch(()=>{document.getElementById('an').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
           </script>""")
-          open(os.path.join(pages,"fds-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
-          <title>FDS — Advanced</title><h1>FDS — Potential Secrets</h1>
-          <table border="1" cellpadding="6" cellspacing="0" id="fds"></table>
-          <script>
-          fetch('security_reports/fds_report.json').then(r=>r.json()).then(j=>{
-            const head=['File','Indicator','Entropy','Snippet']; const rows=[];
-            (j.findings||[]).forEach(f=>{(f.hits||[]).forEach(h=>{rows.push([f.file||'', h.indicator||'', (h.entropy??''), (h.snippet||'')]);});});
-            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${(x+'').replace(/</g,'&lt;')}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
-            document.getElementById('fds').innerHTML=html;
-          }).catch(()=>{document.getElementById('fds').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
-          </script>""")
           PY
-
-          # 고급 페이지 인덱스
-          cat > "$PAGES_DIR/dashboard.html" <<'HTML'
-          <!DOCTYPE html><meta charset="utf-8">
-          <title>Security Dashboard (Advanced)</title>
-          <h1>Security Dashboard (Advanced Columns)</h1>
-          <ul>
-            <li><a href="trivy-adv.html">Trivy — Advanced</a></li>
-            <li><a href="scorecard-adv.html">Scorecard — Advanced</a></li>
-            <li><a href="sbom-adv.html">SBOM — Advanced</a></li>
-            <li><a href="anomaly-adv.html">Anomaly — Advanced</a></li>
-            <li><a href="fds-adv.html">FDS — Advanced</a></li>
-          </ul>
-          <h3>Raw CSV Exports</h3>
-          <ul>
-            <li><a href="security_reports/trivy-image.csv">trivy-image.csv</a></li>
-            <li><a href="security_reports/scorecard.csv">scorecard.csv</a></li>
-            <li><a href="security_reports/sbom-packages.csv">sbom-packages.csv</a></li>
-          </ul>
-          HTML
           ECHO "aggressive CSV/HTML dashboards ready" | tee -a "$LOG" || true
 
       - name: 📦 Assemble Pages bundle (echo)
@@ -777,8 +815,8 @@ jobs:
             <li><a href="io/">Filesystem I/O Reports</a></li>
             <li><a href="resources/">Service Resources</a></li>
             <li><a href="sbom.spdx.json">SBOM (SPDX)</a></li>
-            <li><a href="dashboard.html">Security Dashboard (Advanced)</a></li>
-            <li><a href="trivy-adv.html">Trivy — Advanced (direct)</a></li>
+            <li><a href="anomaly-adv.html">Anomaly — Advanced</a></li>
+            <li><a href="dependabot.html">Dependabot Alerts</a></li>
             <li><a href="last_run.txt">Last Run Timestamp</a></li>
           </ul>
           HTML
@@ -798,12 +836,12 @@ jobs:
             <url><loc>/scorecard.html</loc></url>
             <url><loc>/anomaly.html</loc></url>
             <url><loc>/fds.html</loc></url>
-            <url><loc>/dashboard.html</loc></url>
-            <url><loc>/trivy-adv.html</loc></url>
+            <url><loc>/dependabot.html</loc></url>
+            <url><loc>/anomaly-adv.html</loc></url>
           </urlset>
           XML
           echo "ok" > "$PAGES_DIR/healthcheck.txt"
-          for f in index.html scorecard.html trivy.html anomaly.html fds.html dashboard.html last_run.txt; do
+          for f in index.html scorecard.html trivy.html anomaly.html fds.html dependabot.html anomaly-adv.html last_run.txt; do
             test -e "$PAGES_DIR/$f" || { ECHO "[ERR] missing $f"; exit 1; }
           done
           ECHO "pages bundle ready" | tee -a "$LOG" || true
@@ -833,11 +871,12 @@ jobs:
           {
             echo "## ✅ SecSuite Run Summary"
             echo "- Home: index.html (Pages artifact)"
-            echo "- Trivy: .github/security_reports/trivy-image.json → trivy.html / trivy-adv.html"
-            echo "- Scorecard: .github/security_reports/scorecard.json → scorecard.html / scorecard-adv.html"
-            echo "- Anomaly/FDS: anomaly.html / fds.html / anomaly-adv.html / fds-adv.html"
-            echo "- SBOM (SPDX): sbom.spdx.json / sbom-adv.html"
-            echo "- CSV: trivy-image.csv / scorecard.csv / sbom-packages.csv"
+            echo "- Trivy: trivy-image.json → trivy.html"
+            echo "- Scorecard(JSON): scorecard.json → scorecard.html"
+            echo "- Scorecard(SARIF): scorecard.sarif (uploaded)"
+            echo "- Dependabot: dependabot-alerts.json/csv → dependabot.html"
+            echo "- Anomaly/FDS: anomaly_report.json / fds_report.json → anomaly-adv.html"
+            echo "- SBOM (SPDX): sbom.spdx.json"
             echo "- IO Reports: io/"
             echo "- Resources: resources/"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -903,39 +942,3 @@ jobs:
       - name: 🚀 Deploy to GitHub Pages (from artifact)
         id: deployment
         uses: actions/deploy-pages@v4
-
-  dependabot-auto-merge:
-    needs: [build-test-sec, codeql]
-    if: github.actor == 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - name: ✅ Auto approve PR
-        uses: hmarr/auto-approve-action@v4
-      - name: 🚀 Enable auto-merge
-        run: |
-          gh pr merge "$PR_URL" --merge --admin || echo "⚠️ Auto-merge failed"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-
-  dependabot-rescue:
-    needs: dependabot-auto-merge
-    if: >
-      github.actor == 'dependabot[bot]' &&
-      needs.dependabot-auto-merge.result == 'failure'
-    runs-on: ubuntu-latest
-    steps:
-      - name: 🧪 Checkout
-        uses: actions/checkout@v5
-      - name: 🔍 Check for missing Dockerfile, README, etc.
-        run: |
-          mkdir -p .github/workflows
-          [ ! -f Dockerfile ] && echo "# Dummy Dockerfile" > Dockerfile
-          [ ! -f README.md ] && echo "# Placeholder README" > README.md
-          git config --global user.name github-actions
-          git config --global user.email github-actions@users.noreply.github.com
-          git add .
-          git commit -m "🚑 Auto-fix missing config files" || echo "Nothing to commit"
-          git push || echo "Already up to date"
-      - name: 🔁 Retry failed workflow (log only)
-        run: echo "[INFO] Workflow failed. Human review suggested. Manual rerun if needed."
