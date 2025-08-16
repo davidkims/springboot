@@ -1,277 +1,272 @@
-name: "⚔️ Defender Bot EchoOps (Full + FDS + Echo)"
+# yamllint disable rule:line-length
+name: Update Program Data (Auto-discover)
 
 on:
-  schedule:
-    - cron: "0 * * * *"   # 매시간 정각
   workflow_dispatch:
     inputs:
-      block_on_alert:
-        description: "FDS 경보 시 실행 차단 (true/false)"
+      program:
+        description: "업데이트할 프로그램 이름 (all=전체, 부분문자열 매칭)"
         required: false
-        default: "true"
-      update_baseline:
-        description: "실행 후 베이스라인 갱신/커밋 (true/false)"
+        default: "all"
+      commit_mode:
+        description: "commit-and-pr | commit-direct | none"
         required: false
-        default: "false"
-      run_mode:
-        description: "실행 모드 (normal|dry-run)"
-        required: false
-        default: "normal"
-
-permissions:
-  contents: write  # 베이스라인 갱신 시 커밋에 필요
-  actions: read
+        default: "commit-and-pr"
+  schedule:
+    - cron: '0 0 * * 0'  # 매주 일요일 00:00 UTC
 
 concurrency:
-  group: defender-bot-echoops
-  cancel-in-progress: true  # 중복 실행 방지(대기 걸리지 않음)
+  group: update-program-data
+  cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
-  echo-ops:
+  refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     env:
-      LOG_DIR: .github/echo_logs
-      FDS_DIR: .github/fds
-      SCRIPT_PATH: scripts/defender_bot_workflow.sh
-      FDS_BASELINE: .github/fds/baseline.sha256
-      FDS_ALLOWLIST: ".github/echo_logs/**,.github/fds/baseline.sha256"  # 허용 변경 패턴(쉼표 구분, 최소 예시)
-      FDS_BLOCK_ON_ALERT: ${{ github.event.inputs.block_on_alert || 'true' }}
-      APPLY_BASELINE_UPDATE: ${{ github.event.inputs.update_baseline || 'false' }}
-      RUN_MODE: ${{ github.event.inputs.run_mode || 'normal' }}
-      TZ: "Asia/Seoul"
+      LOG_DIR: .github/logs
+      BRANCH_PREFIX: chore/auto-update
+      DEFAULT_AUTHOR_NAME: repo-bot
+      DEFAULT_AUTHOR_EMAIL: repo-bot@users.noreply.github.com
 
     steps:
-      - name: 📂 Checkout
+      - name: 📂 Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 🗒️ Init EchoOps
+      - name: 📁 Prepare log & tools
+        shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$FDS_DIR"
-          TS="$(date +%Y%m%d_%H%M%S)"
-          LOG="$LOG_DIR/defender_bot_${TS}.log"
-          echo "$LOG" > "$LOG_DIR/.latest"     # 다른 스텝에서 참조
-          {
-            echo "[ECHO] Start $(date '+%F %T')"
-            echo "[ECHO] Repo=$GITHUB_REPOSITORY RunID=$GITHUB_RUN_ID SHA=$GITHUB_SHA"
-            echo "[ECHO] Runner=$(uname -a)"
-            echo "[ECHO] RUN_MODE=${RUN_MODE}"
-          } | tee -a "$LOG"
+          mkdir -p "$LOG_DIR"
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq jq coreutils make python3 python3-venv
 
-      - name: 🔧 Env Snapshot
+      - name: 🔧 Make common updaters executable
+        shell: bash
         run: |
           set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          {
-            echo "[ECHO] Disk:"
-            df -h
-            echo "[ECHO] Top space usage:"
-            du -ah . | sort -hr | head -n 30 || true
-            echo "[ECHO] Processes:"
-            ps aux | head -n 20
-            echo "[ECHO] Open Ports (sample):"
-            (ss -lnt || netstat -lnt || true) | head -n 20
-          } | tee -a "$LOG"
+          [ -f workflow/update_all_data.sh ] && chmod +x workflow/update_all_data.sh || true
+          while IFS= read -r -d '' f; do
+            chmod +x "$f" || true
+          done < <(find . -type f -iname "update*.sh" -print0 2>/dev/null || true)
 
-      - name: ✅ Script Guard
+      - name: 🔎 Discover update targets
+        id: discover
+        shell: bash
         run: |
           set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          if [[ ! -f "$SCRIPT_PATH" ]]; then
-            echo "[ERROR] $SCRIPT_PATH not found. Create it and re-run." | tee -a "$LOG"
-            echo "::notice title=Missing script::scripts/defender_bot_workflow.sh is absent"
-            exit 0  # 스케줄 차질 없이 종료
-          fi
-          chmod +x "$SCRIPT_PATH" || true
-          echo "[ECHO] Verified $SCRIPT_PATH" | tee -a "$LOG"
+          PROGRAM_IN="${{ github.event.inputs.program || 'all' }}"
+          echo "program_in=$PROGRAM_IN" >> "$GITHUB_OUTPUT"
 
-      - name: 🧰 Build/Ensure FDS Baseline (first-run safe)
-        run: |
-          set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          # 모니터링 대상으로 삼을 경로(필요시 추가)
-          MONITOR_PATHS=("scripts" ".github/workflows" ".github/fds/rules" "config")
-          # 베이스라인 생성 함수
-          build_baseline() {
-            : > "$FDS_BASELINE.tmp"
-            for p in "${MONITOR_PATHS[@]}"; do
-              [ -d "$p" ] || continue
-              find "$p" -type f -not -path "$FDS_BASELINE" -print0 \
-                | xargs -0 -I{} sh -c 'sha256sum "{}" || true' >> "$FDS_BASELINE.tmp"
-            done
-            sort "$FDS_BASELINE.tmp" -o "$FDS_BASELINE.tmp" || true
-            mv "$FDS_BASELINE.tmp" "$FDS_BASELINE"
-          }
-          if [[ ! -f "$FDS_BASELINE" ]]; then
-            echo "[FDS] No baseline found → creating initial baseline." | tee -a "$LOG"
-            build_baseline
-          else
-            echo "[FDS] Baseline exists." | tee -a "$LOG"
-          fi
+          # 후보 수집
+          mapfile -t CANDIDATES < <( \
+            { [ -f "workflow/update_all_data.sh" ] && echo "sh::workflow/update_all_data.sh"; } ; \
+            find . -type f -iname "update*.sh" -printf "sh::%p\n" 2>/dev/null || true ; \
+            # npm (package.json에 scripts.update-data 있는 경우만)
+            { for pkg in $(git ls-files "**/package.json" 2>/dev/null || true); do
+                if jq -e '.scripts["update-data"]' "$pkg" >/dev/null 2>&1; then
+                  echo "npm::$pkg";
+                fi
+              done; } ; \
+            # Makefile (update-data 타깃 있는 경우만)
+            {
+              while IFS= read -r mk; do
+                if grep -qE '^[[:space:]]*update-data:' "$mk"; then
+                  echo "make::$mk"
+                fi
+              done < <(git ls-files "**/Makefile" 2>/dev/null || true)
+            } ; \
+            # Python
+            { for py in $(git ls-files "**/updater.py" 2>/dev/null || true); do echo "py::${py}"; done } \
+          )
 
-      - name: 🛡️ FDS Pre-Run Integrity & Anomaly Check
-        run: |
-          set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          ALERT=0
-
-          # 1) Git 차이
-          git fetch --quiet origin || true
-          DIFF_NAMES="$(git diff --name-status HEAD origin/HEAD || true)"
-          if [[ -n "$DIFF_NAMES" ]]; then
-            echo "[FDS] Git diff vs origin/HEAD:" | tee -a "$LOG"
-            echo "$DIFF_NAMES" | tee -a "$LOG"
-          else
-            echo "[FDS] No upstream diff." | tee -a "$LOG"
-          fi
-
-          # 2) 해시 기반 무결성 점검
-          #   현 상태 해시 생성
-          : > "$FDS_DIR/current.sha256"
-          while IFS= read -r line; do
-            path="$line"
-            [[ -e "$path" ]] || continue
-            find "$path" -type f -print0 \
-              | xargs -0 -I{} sh -c 'sha256sum "{}" || true' >> "$FDS_DIR/current.sha256"
-          done < <(printf "%s\n" "scripts" ".github/workflows" ".github/fds/rules" "config")
-          sort "$FDS_DIR/current.sha256" -o "$FDS_DIR/current.sha256" || true
-
-          #   변경 목록 추출
-          #   baseline에는 없고 current에만 있는 파일 / 반대의 파일 / 해시 변경 파일
-          ADDED="$(comm -13 "$FDS_BASELINE" "$FDS_DIR/current.sha256" || true)"
-          REMOVED="$(comm -23 "$FDS_BASELINE" "$FDS_DIR/current.sha256" || true)"
-          MODIFIED="$(join -j 2 -o 1.1,2.1 -a1 -e MISSING \
-            <(awk '{print $2,$1}' "$FDS_BASELINE" | sort) \
-            <(awk '{print $2,$1}' "$FDS_DIR/current.sha256" | sort) \
-            | awk '$2!="MISSING" && $1!=$2 {print $0}' || true)"
-
-          echo "[FDS] Added files (by hash):" | tee -a "$LOG";  echo "${ADDED:-<none>}"    | tee -a "$LOG"
-          echo "[FDS] Removed files (by hash):" | tee -a "$LOG"; echo "${REMOVED:-<none>}"  | tee -a "$LOG"
-          echo "[FDS] Modified (path hash_old→hash_new):" | tee -a "$LOG"; echo "${MODIFIED:-<none>}" | tee -a "$LOG"
-
-          # 3) Allowlist 필터 (경로 패턴 쉼표구분)
-          allow_hit() {
-            local f="$1"; local IFS=','; read -ra pats <<< "$FDS_ALLOWLIST"
-            for pat in "${pats[@]}"; do
-              [[ -z "$pat" ]] && continue
-              if [[ "$f" == $pat ]]; then return 0; fi
-              # 와일드카드 매칭
-              if [[ "$pat" == *"**"* ]] || [[ "$pat" == *"*"* ]]; then
-                if [[ "$f" == $pat ]]; then return 0; fi
-              fi
-            done
-            return 1
-          }
-
-          flagged=0
-          # Added/Removed/Modified 모두에서 allowlist 아닌 항목 탐지
-          for f in $(echo "$ADDED"    | awk '{print $2}' || true);   do allow_hit "$f" || { echo "[FDS][ALERT] Unexpected ADD: $f" | tee -a "$LOG"; flagged=1; }; done
-          for f in $(echo "$REMOVED"  | awk '{print $2}' || true);   do allow_hit "$f" || { echo "[FDS][ALERT] Unexpected REMOVE: $f" | tee -a "$LOG"; flagged=1; }; done
-          for f in $(echo "$MODIFIED" | awk '{print $1}' || true);   do allow_hit "$f" || { echo "[FDS][ALERT] Unexpected MODIFY: $f" | tee -a "$LOG"; flagged=1; }; done
-
-          # 4) 위험 패턴 탐지(간이 IOC)
-          suspicious=$(git log -1 --pretty=%an 2>/dev/null || true)
-          if [[ -n "$suspicious" && "$suspicious" =~ (bot|ci|unknown|noreply) ]]; then
-            echo "[FDS][WARN] Last committer looks automated/unconfirmed: $suspicious" | tee -a "$LOG"
-          fi
-          # 권한 777 파일 탐지
-          perms=$(find scripts -type f -perm -0777 -print || true)
-          if [[ -n "$perms" ]]; then
-            echo "[FDS][ALERT] 0777 files detected:" | tee -a "$LOG"
-            echo "$perms" | tee -a "$LOG"
-            flagged=1
-          fi
-
-          if (( flagged == 1 )); then ALERT=1; fi
-
-          # 차단 여부
-          if [[ "${FDS_BLOCK_ON_ALERT,,}" == "true" && $ALERT -eq 1 && "${RUN_MODE}" != "dry-run" ]]; then
-            echo "[FDS] ALERTS present → Blocking execution." | tee -a "$LOG"
-            echo "FDS_BLOCKED=1" >> "$GITHUB_ENV"
-          else
-            echo "[FDS] No blocking condition met. Proceeding." | tee -a "$LOG"
-            echo "FDS_BLOCKED=0" >> "$GITHUB_ENV"
-          fi
-
-      - name: 🚀 Run Defender Bot (wrapped)
-        if: env.FDS_BLOCKED == '0'
-        run: |
-          set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          echo "[ECHO] Execute $SCRIPT_PATH (timeout 25m) ..." | tee -a "$LOG"
-          # 환경 변수 미정의로 실패 방지
-          : "${GITHUB_TOKEN:=${GITHUB_TOKEN:-}}"
-          : "${WORKFLOW_PAT:=${WORKFLOW_PAT:-}}"
-
-          # 실행 (출력 에코 로그에 적재)
-          if timeout --preserve-status 25m "$SCRIPT_PATH" 2>&1 | tee -a "$LOG"; then
-            echo "[ECHO] Script OK" | tee -a "$LOG"
-            echo "BOT_EXIT=0" >> "$GITHUB_ENV"
-          else
-            rc=$?
-            echo "[ERROR] Script failed with RC=$rc" | tee -a "$LOG"
-            echo "BOT_EXIT=$rc" >> "$GITHUB_ENV"
-          fi
-
-      - name: 🧪 Post-Run FDS (log sweep)
-        if: always()
-        run: |
-          set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          echo "[FDS] Post-run log sweep ..." | tee -a "$LOG"
-          # 간단 IOC 패턴(필요시 강화)
-          egrep -i "curl .*http|wget .*http|/tmp/|/var/tmp/|bitcoin|miner|ssh-rsa" "$LOG" || true
-          echo "[FDS] Sweep complete." | tee -a "$LOG"
-
-      - name: 📝 Optional Baseline Update (commit)
-        if: always()
-        run: |
-          set -Eeuo pipefail
-          LOG="$(cat "$LOG_DIR/.latest")"
-          if [[ "${APPLY_BASELINE_UPDATE,,}" != "true" ]]; then
-            echo "[ECHO] Baseline update disabled." | tee -a "$LOG"; exit 0
-          fi
-          # 안전: 실패해도 워크플로우 진행
-          {
-            # 현재 상태로 베이스라인 재생성
-            : > "$FDS_BASELINE.tmp"
-            for p in scripts .github/workflows .github/fds/rules config; do
-              [ -d "$p" ] || continue
-              find "$p" -type f -print0 | xargs -0 -I{} sh -c 'sha256sum "{}" || true' >> "$FDS_BASELINE.tmp"
-            done
-            sort "$FDS_BASELINE.tmp" -o "$FDS_BASELINE.tmp" || true
-            mv "$FDS_BASELINE.tmp" "$FDS_BASELINE"
-
-            git config user.name  "defender-bot"
-            git config user.email "defender-bot@users.noreply.github.com"
-            git add "$FDS_BASELINE" || true
-            if ! git diff --cached --quiet; then
-              git commit -m "chore(fds): update baseline $(date -u +%F-%H%M%S)" || true
-              git push || echo "[WARN] push failed (no token/branch perms?)"
-            else
-              echo "[ECHO] Baseline unchanged." | tee -a "$LOG"
+          # 중복 제거
+          UNIQUE=()
+          declare -A seen
+          for c in "${CANDIDATES[@]}"; do
+            [[ -z "${c:-}" ]] && continue
+            if [[ -z "${seen[$c]+x}" ]]; then
+              UNIQUE+=("$c"); seen[$c]=1
             fi
-          } || echo "[WARN] Baseline update step encountered issues." | tee -a "$LOG"
+          done
 
-      - name: 📤 Upload EchoOps Logs
+          # program 필터링
+          FILTERED=()
+          if [[ "${PROGRAM_IN}" == "all" || -z "${PROGRAM_IN}" ]]; then
+            FILTERED=("${UNIQUE[@]}")
+          else
+            for c in "${UNIQUE[@]}"; do
+              [[ "${c,,}" == *"${PROGRAM_IN,,}"* ]] && FILTERED+=("$c")
+            done
+          fi
+
+          # 결과 JSON
+          {
+            printf '{ "targets": ['
+            sep=""
+            for x in "${FILTERED[@]}"; do
+              printf '%s"%s"' "$sep" "$x"; sep=","
+            done
+            printf '] }'
+          } | tee "$LOG_DIR/targets.json"
+
+          echo "count=${#FILTERED[@]}" >> "$GITHUB_OUTPUT"
+          echo "targets_json=$(tr -d '\n' < "$LOG_DIR/targets.json")" >> "$GITHUB_OUTPUT"
+
+      - name: 🟨 Setup Node (npm targets only)
+        if: contains(steps.discover.outputs.targets_json, '"npm::"')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 🚀 Run targets sequentially (with per-target logs)
+        if: steps.discover.outputs.count != '0'
+        shell: bash
+        env:
+          PROGRAM_IN: ${{ github.event.inputs.program || 'all' }}
+        run: |
+          set -Eeuo pipefail
+          ts(){ date '+%F %T'; }
+          echo "## Update Program Data — Run Summary ($(ts))" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          TARGETS=$(jq -r '.targets[]' "$LOG_DIR/targets.json")
+          FAIL=0
+
+          run_sh()   { local path="$1"; ( set -Eeuo pipefail; bash "$path" ); }
+          run_npm()  { local pkg="$1"; ( set -Eeuo pipefail; cd "$(dirname "$pkg")"; npm ci --no-audit --no-fund; npm run update-data --if-present ); }
+          run_make() { local mkf="$1"; ( set -Eeuo pipefail; cd "$(dirname "$mkf")"; make update-data ); }
+          run_py()   { local pyf="$1"; ( set -Eeuo pipefail; cd "$(dirname "$pyf")"; python3 "$(basename "$pyf")" ); }
+
+          idx=0
+          while IFS= read -r target; do
+            [[ -z "$target" ]] && continue
+            idx=$((idx+1))
+            kind="${target%%::*}"
+            path="${target#*::}"
+            safe="$(echo "$path" | tr '/ .' '__')"
+            log="$LOG_DIR/run_${idx}_${kind}_${safe}.log"
+
+            echo "[ECHO] ($idx) kind=$kind path=$path → 로그: $log"
+            {
+              echo "[RUN] kind=$kind path=$path @ $(ts)"
+              case "$kind" in
+                sh)   run_sh "$path" ;;
+                npm)  run_npm "$path" ;;
+                make) run_make "$path" ;;
+                py)   run_py "$path" ;;
+                *)    echo "[WARN] Unknown kind: $kind (skip)";;
+              esac
+              echo "[OK ] $path @ $(ts)"
+            } > >(tee "$log") 2>&1 || {
+              echo "[ERR] $path 실패 @ $(ts)" | tee -a "$log"
+              FAIL=$((FAIL+1))
+            }
+
+            echo "- \`$kind\` → \`$path\` → [log](./$log)" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$TARGETS"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$FAIL" -gt 0 ]]; then
+            echo "**실패 수:** $FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            echo "**모든 대상 성공**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 🧹 Normalize line endings (optional)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config core.autocrlf input || true
+
+      - name: 🔐 Configure git author
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name  "${{ env.DEFAULT_AUTHOR_NAME }}"
+          git config user.email "${{ env.DEFAULT_AUTHOR_EMAIL }}"
+
+      - name: 📦 Detect changes
+        id: changes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! git diff --quiet; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git status --porcelain | tee "$LOG_DIR/git_status.txt"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "[ECHO] 변경사항 없음"
+          fi
+
+      - name: 💾 Commit changes
+        if: steps.changes.outputs.changed == 'true'
+        id: commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+          git add -A
+          git commit -m "chore(data): auto update ($stamp)"
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+
+      - name: ⤴️ Push (direct) when commit_mode=commit-direct
+        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_mode == 'commit-direct'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: 🌿 Create branch & Push for PR
+        if: steps.changes.outputs.changed == 'true' && (github.event.inputs.commit_mode == '' || github.event.inputs.commit_mode == 'commit-and-pr')
+        id: prbranch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+          BR="${BRANCH_PREFIX}/${stamp}"
+          git branch "$BR"
+          git push -u origin "$BR"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+      - name: 🔁 Open pull request
+        if: steps.prbranch.outputs.branch != '' && (github.event.inputs.commit_mode == '' || github.event.inputs.commit_mode == 'commit-and-pr')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = `${{ steps.prbranch.outputs.branch }}`;
+            const { repo, owner } = context.repo;
+            const base = context.payload?.repository?.default_branch || 'main';
+            const title = `chore(data): auto update (${new Date().toISOString()})`;
+            const body  = [
+              '자동 데이터 업데이트 결과입니다.',
+              '',
+              '- 워크플로우: Update Program Data (Auto-discover)',
+              `- 브랜치: ${branch}`,
+              '',
+              '변경 내역과 실행 로그는 `.github/logs/` 디렉토리를 참조하세요.'
+            ].join('\n');
+            try {
+              const res = await github.rest.pulls.create({
+                owner, repo,
+                title, head: branch, base, body
+              });
+              core.notice(`PR created: ${res.data.html_url}`);
+            } catch (e) {
+              core.warning(`PR create failed: ${e.message}`);
+            }
+
+      - name: 📎 Upload logs (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: defender-bot-logs-${{ github.run_id }}
-          path: .github/echo_logs/
-
-      - name: 🔚 Summary
-        if: always()
-        run: |
-          LOG="$(cat "$LOG_DIR/.latest")"
-          echo "---- SUMMARY ----"
-          echo "FDS_BLOCKED=${FDS_BLOCKED:-?}"
-          echo "BOT_EXIT=${BOT_EXIT:-N/A}"
-          echo "Log: $LOG"
+          name: update-logs-${{ github.run_id }}
+          path: .github/logs
+          if-no-files-found: warn
