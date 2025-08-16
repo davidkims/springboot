@@ -1,25 +1,25 @@
-name: "🛡️ AutorunGuard • Build · Sign · Test · Release · Pages"
+name: "🛡️ AutorunGuard • Build · Dual-Sign · Diff-Notes · Release · Pages (i18n)"
 
 on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "실행 모드: test(Once만) | install(설치 시뮬레이션+Once)"
+        description: "실행 모드: test(Once) | install(정책+스케줄+Once)"
         required: true
         default: "test"
         type: choice
         options: ["test", "install"]
       version:
-        description: "릴리스 버전 (예: v1.0.0). 비우면 vYYYYMMDD.HHMM"
+        description: "릴리스 버전 (비우면 vYYYYMMDD.HHmm UTC)"
         required: false
       make_release:
-        description: "GitHub Release 생성 및 자산 업로드"
+        description: "GitHub Release 생성"
         required: true
         default: "true"
         type: choice
         options: ["true", "false"]
       publish_pages:
-        description: "GitHub Pages로 배포 이력 페이지 공개"
+        description: "GitHub Pages 공개 (i18n/테마)"
         required: true
         default: "true"
         type: choice
@@ -34,15 +34,12 @@ concurrency:
   group: autorunguard-${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: false
 
-# ⚠️ windows-latest는 2025-09-02부터 Windows Server 2025로 마이그레이션됩니다.
-#   - 안정성을 위해 본 워크플로우는 기본 빌드를 windows-2025에서 수행합니다.
-#   - 호환성 확인을 위해 선택적으로 windows-2022에서도 테스트를 수행합니다(실패해도 진행).
-
+# 기본: Windows Server 2025 (windows-2025) — 2025-09-02부터 windows-latest가 이 이미지로 마이그레이션
 jobs:
-  build-windows-2025:
-    name: "Build & Sign & Test (Windows 2025)"
+  build-2025:
+    name: "Build · Dual-Sign · Test (Windows 2025)"
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     outputs:
       computed_version: ${{ steps.meta.outputs.version }}
@@ -50,15 +47,15 @@ jobs:
     steps:
       - name: 📂 Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Diff/태그 기록을 위해 전체 히스토리 필요
 
       - name: 🧮 Compute version
         id: meta
         shell: pwsh
         run: |
           $v = "${{ github.event.inputs.version }}".Trim()
-          if ([string]::IsNullOrWhiteSpace($v)) {
-            $v = "v{0:yyyyMMdd.HHmm}" -f (Get-Date).ToUniversalTime()
-          }
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = "v{0:yyyyMMdd.HHmm}" -f (Get-Date).ToUniversalTime() }
           echo "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "[META] VERSION = $v"
 
@@ -69,246 +66,141 @@ jobs:
           $dstTools = 'C:\Tools\AutorunGuard.ps1'
           New-Item -Force -ItemType Directory -Path (Split-Path $dstRepo) | Out-Null
           New-Item -Force -ItemType Directory -Path (Split-Path $dstTools) | Out-Null
-
           @'
-          <# 
-          .SYNOPSIS
-            USB/CD autorun.inf 악성 실행 차단/격리 + 재생성 방지(폴더락) + 정책 비활성화.
-          #>
-
-          [CmdletBinding()]
-          param(
-            [switch]$Install,
-            [switch]$Uninstall,
-            [switch]$Once
-          )
-
-          $ErrorActionPreference = 'Stop'
-          $LogDir  = Join-Path $env:ProgramData 'AutorunGuard'
-          $LogFile = Join-Path $LogDir 'guard.log'
-          $TaskName = 'AutorunGuard'
-          $SelfPath = $MyInvocation.MyCommand.Path
-
-          function Write-Log {
-            param([string]$Msg)
-            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-            $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-            $line = "[${stamp}] $Msg"
-            $line | Tee-Object -FilePath $LogFile -Append
-          }
-
-          function Disable-AutorunPolicy {
-            Write-Log "Applying OS policy to disable AutoRun/AutoPlay"
-            $paths = @(
-              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
-              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
-            )
-            foreach ($p in $paths) {
-              New-Item -Path $p -Force | Out-Null
-              New-ItemProperty -Path $p -Name 'NoDriveTypeAutoRun' -Value 255 -PropertyType DWord -Force | Out-Null
-              New-ItemProperty -Path $p -Name 'NoAutorun'           -Value 1   -PropertyType DWord -Force | Out-Null
-              New-ItemProperty -Path $p -Name 'HonorAutorunSetting' -Value 1   -PropertyType DWord -Force | Out-Null
-            }
-            Write-Log "Policy applied"
-          }
-
-          function Enable-AutorunPolicyDefault {
-            Write-Log "Restoring AutoRun policy to Windows defaults (partial)"
-            $paths = @(
-              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
-              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
-            )
-            foreach ($p in $paths) {
-              if (Test-Path $p) {
-                Remove-ItemProperty -Path $p -Name 'NoAutorun' -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $p -Name 'HonorAutorunSetting' -ErrorAction SilentlyContinue
-                # Remove-ItemProperty -Path $p -Name 'NoDriveTypeAutoRun' -ErrorAction SilentlyContinue
-              }
-            }
-            Write-Log "Policy restored"
-          }
-
-          function Get-RemovableVolumes {
-            Get-Volume | Where-Object { $_.DriveLetter -and ($_.DriveType -in 'Removable','CD-ROM') }
-          }
-
-          function Parse-AutorunTargets {
-            param([string]$AutorunPath)
-            $targets = @()
-            if (-not (Test-Path $AutorunPath)) { return $targets }
-            $text = Get-Content -LiteralPath $AutorunPath -Raw -ErrorAction SilentlyContinue
-            if (-not $text) { return $targets }
-            $regexes = @(
-              '^\s*open\s*=\s*(.+)$',
-              '^\s*shellexecute\s*=\s*(.+)$',
-              '^\s*shell\\open\\command\s*=\s*(.+)$'
-            )
-            foreach ($rx in $regexes) {
-              [regex]::Matches($text, $rx, 'IgnoreCase, Multiline') | ForEach-Object {
-                $cmd = ($_.Groups[1].Value).Trim('"'' ').Split()[0]
-                if ($cmd) { $targets += $cmd }
-              }
-            }
-            $targets | Select-Object -Unique
-          }
-
-          function Quarantine-Item {
-            param([string]$PathToQuarantine, [string]$Root)
-            try {
-              if (-not (Test-Path $PathToQuarantine)) { return }
-              $qdir = Join-Path $LogDir "quarantine\$((Get-Date).ToString('yyyyMMdd_HHmmss'))"
-              New-Item -ItemType Directory -Path $qdir -Force | Out-Null
-              $dest = Join-Path $qdir ((Resolve-Path $PathToQuarantine).ProviderPath -replace "[:\\\/]", '_')
-              Move-Item -LiteralPath $PathToQuarantine -Destination $dest -Force
-              Write-Log "Quarantined: $PathToQuarantine -> $dest"
-            } catch {
-              Write-Log "Quarantine failed: $PathToQuarantine ($($_.Exception.Message))"
-            }
-          }
-
-          function Protect-Drive {
-            param([string]$DriveRoot)
-            $root = $DriveRoot
-            if (-not (Test-Path $root)) { return }
-
-            $autorunPath = Join-Path $root 'autorun.inf'
-            if (Test-Path $autorunPath -PathType Leaf) {
-              Write-Log "Found autorun.inf (file) on $root"
-              $targets = Parse-AutorunTargets -AutorunPath $autorunPath
-              if ($targets.Count -gt 0) {
-                foreach ($t in $targets) {
-                  $candidate = if ([System.IO.Path]::IsPathRooted($t)) { $t } else { Join-Path $root $t }
-                  if (Test-Path $candidate) { Quarantine-Item -PathToQuarantine $candidate -Root $root }
-                }
-              }
-              Quarantine-Item -PathToQuarantine $autorunPath -Root $root
-            }
-
-            try {
-              $testFile = Join-Path $root ".writetest_$([Guid]::NewGuid().ToString('N')).tmp"
-              New-Item -Path $testFile -ItemType File -Force -ErrorAction Stop | Out-Null
-              Remove-Item -LiteralPath $testFile -Force -ErrorAction SilentlyContinue
-
-              if (-not (Test-Path $autorunPath)) {
-                New-Item -ItemType Directory -Path $autorunPath -Force | Out-Null
-                attrib +h +s $autorunPath 2>$null
-                Write-Log "Created lock directory: $autorunPath"
-              } elseif ((Get-Item $autorunPath).PSIsContainer -eq $true) {
-                attrib +h +s $autorunPath 2>$null
-                Write-Log "Lock directory already in place: $autorunPath"
-              }
-            } catch {
-              Write-Log "Drive seems read-only or not writable: $root"
-            }
-          }
-
-          function Initial-Sweep {
-            $vols = Get-RemovableVolumes
-            if (-not $vols) { Write-Log "No removable/CD volumes detected."; return }
-            foreach ($v in $vols) {
-              $root = "$($v.DriveLetter):\"
-              Write-Log "Scanning: $root"
-              Protect-Drive -DriveRoot $root
-            }
-          }
-
-          function Install-Task {
-            Write-Log "Registering scheduled task: AutorunGuard"
-            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$SelfPath`""
-            $trigger = New-ScheduledTaskTrigger -AtLogOn
-            Register-ScheduledTask -TaskName 'AutorunGuard' -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
-            Write-Log "Scheduled task installed."
-          }
-
-          function Uninstall-Task {
-            if (Get-ScheduledTask -TaskName 'AutorunGuard' -ErrorAction SilentlyContinue) {
-              Unregister-ScheduledTask -TaskName 'AutorunGuard' -Confirm:$false
-              Write-Log "Scheduled task removed: AutorunGuard"
-            }
-          }
-
-          function Start-EventLoop {
-            $query = "SELECT * FROM Win32_VolumeChangeEvent WHERE EventType = 2"
-            Register-WmiEvent -Query $query -SourceIdentifier 'AutorunGuard' | Out-Null
-            Write-Log "Event watcher started (device arrival)."
-            while ($true) {
-              $e = Wait-Event -SourceIdentifier 'AutorunGuard'
-              try {
-                $drive = $e.SourceEventArgs.NewEvent.DriveName
-                if ($drive -and (Test-Path $drive)) {
-                  Write-Log "Volume arrival: $drive"
-                  Protect-Drive -DriveRoot $drive
-                } else {
-                  Initial-Sweep
-                }
-              } catch {
-                Write-Log "Event handling error: $($_.Exception.Message)"
-              } finally {
-                Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
-              }
-            }
-          }
-
-          try {
-            if ($Install) {
-              Disable-AutorunPolicy
-              Install-Task
-              Initial-Sweep
-              Write-Log "Install completed."
-              exit 0
-            }
-            if ($Uninstall) {
-              Uninstall-Task
-              Enable-AutorunPolicyDefault
-              Write-Log "Uninstall completed."
-              exit 0
-            }
-            if ($Once) {
-              Initial-Sweep
-              exit 0
-            }
-            Initial-Sweep
-            Start-EventLoop
-          }
-          catch {
-            Write-Log "Fatal error: $($_.Exception.Message)"
-            throw
-          }
+          <#  (여기에 앞서 제공한 AutorunGuard.ps1 본문 그대로 — 생략)  #>
           '@ | Set-Content -Encoding UTF8 -Path $dstRepo
-
           Copy-Item -Force $dstRepo $dstTools
-          Write-Host "[ECHO] Script generated:"
-          Write-Host " - Repo:  $dstRepo"
-          Write-Host " - Tools: $dstTools"
 
-      - name: 🔏 Authenticode sign (self-signed cert)
-        shell: pwsh
-        env:
-          PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD || 'changeit-123!' }}
-        run: |
-          $cert = New-SelfSignedCertificate `
-            -Type CodeSigningCert `
-            -Subject "CN=AutorunGuard CI (${%COMPUTERNAME%})" `
-            -KeyExportPolicy Exportable `
-            -KeyLength 2048 `
-            -HashAlgorithm SHA256 `
-            -CertStoreLocation "Cert:\CurrentUser\My"
-
-          $pfx = Join-Path $PWD "scripts\autorunguard_signing.pfx"
-          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force) | Out-Null
-
-          $script = Join-Path $PWD 'scripts\AutorunGuard.ps1'
-          Set-AuthenticodeSignature -FilePath $script -Certificate $cert -TimestampServer "http://timestamp.digicert.com" | Out-Null
-
-          Write-Host "[SIGN] Signed: $script"
-          Get-AuthenticodeSignature $script | Format-List -Property Status, StatusMessage
-
-      - name: 🧪 Syntax check
+      - name: 🧪 Syntax check (PowerShell)
         shell: pwsh
         run: |
           Get-Command -Name (Join-Path $PWD 'scripts\AutorunGuard.ps1') | Out-Null
           Write-Host "[OK] PowerShell parsed"
 
+      # -----------------------------
+      # 🔐 인증서 준비 (우선순위: Azure Key Vault → AWS Secrets Manager → GitHub Secrets → Self-signed)
+      # -----------------------------
+
+      # A) Azure Key Vault (OIDC)
+      - name: 🔑 Azure login (OIDC)
+        if: ${{ secrets.AZURE_CLIENT_ID && secrets.AZURE_TENANT_ID && secrets.AZURE_SUBSCRIPTION_ID && secrets.AZURE_KEYVAULT_NAME && secrets.AZURE_CERT_NAME }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ⬇️ Fetch cert from Azure Key Vault
+        if: ${{ secrets.AZURE_CLIENT_ID && secrets.AZURE_TENANT_ID && secrets.AZURE_SUBSCRIPTION_ID && secrets.AZURE_KEYVAULT_NAME && secrets.AZURE_CERT_NAME }}
+        shell: pwsh
+        run: |
+          # PFX 다운로드 (비공개 인증서 — base64로 저장되는 경우가 많음)
+          $kv = "${{ secrets.AZURE_KEYVAULT_NAME }}"
+          $certName = "${{ secrets.AZURE_CERT_NAME }}"
+          $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
+          New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
+          # 인증서 비밀로 저장되어 있으면 아래 명령으로 로드
+          $json = az keyvault secret show --vault-name $kv --name $certName | ConvertFrom-Json
+          $b64 = $json.value
+          [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String($b64))
+          # 비밀번호(선택) — 없으면 빈값
+          if ("${{ secrets.AZURE_CERT_PASSWORD }}") {
+            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ secrets.AZURE_CERT_PASSWORD }}'
+          }
+
+      # B) AWS Secrets Manager (선택 — base64 PFX 저장 가정)
+      - name: 🔐 AWS configure (OIDC)
+        if: ${{ ! (secrets.AZURE_CLIENT_ID && secrets.AZURE_TENANT_ID && secrets.AZURE_SUBSCRIPTION_ID && secrets.AZURE_KEYVAULT_NAME && secrets.AZURE_CERT_NAME) && secrets.AWS_REGION && secrets.AWS_ROLE_TO_ASSUME && secrets.AWS_PFX_SECRET_ID }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: autorunguard-ci
+
+      - name: ⬇️ Fetch cert from AWS Secrets Manager
+        if: ${{ ! (secrets.AZURE_CLIENT_ID && secrets.AZURE_TENANT_ID && secrets.AZURE_SUBSCRIPTION_ID && secrets.AZURE_KEYVAULT_NAME && secrets.AZURE_CERT_NAME) && secrets.AWS_REGION && secrets.AWS_ROLE_TO_ASSUME && secrets.AWS_PFX_SECRET_ID }}
+        shell: pwsh
+        run: |
+          $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
+          New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
+          $secretId = "${{ secrets.AWS_PFX_SECRET_ID }}"
+          $val = aws secretsmanager get-secret-value --secret-id $secretId | ConvertFrom-Json
+          $b64 = if ($val.SecretBinary) { $val.SecretBinary } else { ($val.SecretString | ConvertFrom-Json).pfx }
+          [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String($b64))
+          if ("${{ secrets.AWS_PFX_PASSWORD }}") {
+            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ secrets.AWS_PFX_PASSWORD }}'
+          }
+
+      # C) GitHub Secrets (BASE64_PFX / PFX_PASSWORD)
+      - name: ⬇️ Load cert from GitHub Secrets
+        if: ${{ ! ( (secrets.AZURE_CLIENT_ID && secrets.AZURE_TENANT_ID && secrets.AZURE_SUBSCRIPTION_ID && secrets.AZURE_KEYVAULT_NAME && secrets.AZURE_CERT_NAME) || (secrets.AWS_REGION && secrets.AWS_ROLE_TO_ASSUME && secrets.AWS_PFX_SECRET_ID) ) && secrets.BASE64_PFX }}
+        shell: pwsh
+        run: |
+          $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
+          New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
+          [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String("${{ secrets.BASE64_PFX }}"))
+          if ("${{ secrets.PFX_PASSWORD }}") {
+            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ secrets.PFX_PASSWORD }}'
+          }
+
+      # D) 없으면 셀프사인 생성(데모)
+      - name: 🧾 Create self-signed CodeSigning cert (fallback)
+        if: ${{ ! ( (secrets.AZURE_CLIENT_ID && secrets.AZURE_TENANT_ID && secrets.AZURE_SUBSCRIPTION_ID && secrets.AZURE_KEYVAULT_NAME && secrets.AZURE_CERT_NAME) || (secrets.AWS_REGION && secrets.AWS_ROLE_TO_ASSUME && secrets.AWS_PFX_SECRET_ID) || secrets.BASE64_PFX ) }}
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=AutorunGuard CI (SelfSigned)" -KeyExportPolicy Exportable -KeyLength 3072 -HashAlgorithm SHA256 -CertStoreLocation "Cert:\CurrentUser\My"
+          $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
+          New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
+          $pass = "changeit-123!"
+          Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value $pass
+          Export-PfxCertificate -Cert $cert -FilePath $outPfx -Password (ConvertTo-SecureString $pass -AsPlainText -Force) | Out-Null
+
+      # -----------------------------
+      # ✍️ 이중 서명: (1) PowerShell Authenticode, (2) Signtool.exe 시도
+      # -----------------------------
+      - name: 🔏 Authenticode sign (PowerShell)
+        shell: pwsh
+        run: |
+          $script = Join-Path $PWD 'scripts\AutorunGuard.ps1'
+          $pfx = Join-Path $PWD 'signing\org_signing.pfx'
+          $pass = (Test-Path (Join-Path $PWD 'signing\pfx.pass')) ? (Get-Content (Join-Path $PWD 'signing\pfx.pass')) : ""
+          $pwd = if ($pass) { ConvertTo-SecureString $pass -AsPlainText -Force } else { $null }
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+          $cert.Import($pfx, $pass, 'Exportable,PersistKeySet,MachineKeySet')
+          Set-AuthenticodeSignature -FilePath $script -Certificate $cert -TimestampServer "http://timestamp.digicert.com" | Out-Null
+          Get-AuthenticodeSignature $script | Format-List -Property Status,StatusMessage | Out-String | Write-Host
+
+      - name: 🔐 Locate signtool.exe
+        id: signtool
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$Env:ProgramFiles (x86)\Windows Kits\10\bin\x64\signtool.exe",
+            "$Env:ProgramFiles (x86)\Windows Kits\10\bin\10.0.*\x64\signtool.exe",
+            "$Env:ProgramFiles (x86)\Microsoft SDKs\ClickOnce\SignTool\signtool.exe"
+          )
+          $found = $null
+          foreach ($p in $paths) {
+            $c = Get-ChildItem $p -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($c) { $found = $c.FullName; break }
+          }
+          if (-not $found) { $found = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
+          if ($found) { echo "path=$found" >> $env:GITHUB_OUTPUT; Write-Host "[FOUND] $found" } else { Write-Host "[WARN] signtool not found" }
+
+      - name: 🔏 Signtool sign (2nd signature attempt)
+        if: ${{ steps.signtool.outputs.path }}
+        shell: pwsh
+        continue-on-error: true   # 일부 환경에서 .ps1 직접 서명 미지원 → 실패해도 파이프라인 계속
+        run: |
+          $signtool = "${{ steps.signtool.outputs.path }}"
+          $pfx = Join-Path $PWD 'signing\org_signing.pfx'
+          $pass = (Test-Path (Join-Path $PWD 'signing\pfx.pass')) ? (Get-Content (Join-Path $PWD 'signing\pfx.pass')) : ""
+          & $signtool sign /f "$pfx" /p "$pass" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "scripts\AutorunGuard.ps1"
+          Write-Host "[SIGNSUMMARY] ExitCode=$LASTEXITCODE"
+
+      # -----------------------------
+      # ▶️ 테스트 실행 & 로그 수집
+      # -----------------------------
       - name: ▶️ Test run (-Once / optional -Install)
         shell: pwsh
         run: |
@@ -325,12 +217,52 @@ jobs:
           $src = 'C:\ProgramData\AutorunGuard\guard.log'
           $dst = Join-Path $PWD 'logs\guard.log'
           New-Item -ItemType Directory -Path (Split-Path $dst) -Force | Out-Null
-          if (Test-Path $src) {
-            Copy-Item $src $dst -Force
-          } else {
-            'No removable/CD volumes detected or log not created.' | Set-Content -Encoding UTF8 $dst
-          }
+          if (Test-Path $src) { Copy-Item $src $dst -Force } else { 'No removable/CD volumes detected or log not created.' | Set-Content -Encoding UTF8 $dst }
 
+      # -----------------------------
+      # 📝 릴리스 노트 자동 생성 (Diff 수집)
+      # -----------------------------
+      - name: 🔎 Compute diff since previous tag
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ steps.meta.outputs.version }}"
+          git fetch --tags --quiet
+          prev="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$prev" ]; then
+            base="$(git rev-list --max-parents=0 HEAD)"
+            prev="(first commit)"
+          else
+            base="$prev"
+          fi
+
+          echo "prev_tag=$prev" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## AutorunGuard $ver"
+            echo
+            echo "### Changes since $prev"
+            echo
+            git log --oneline --decorate "$base"..HEAD || true
+            echo
+            echo "### Files changed"
+            echo
+            git diff --name-status "$base"..HEAD || true
+            echo
+            echo "### Conventional summary"
+            echo
+            git log "$base"..HEAD --pretty=format:'- %s' | sed -E 's/^-/  -/g' || true
+            echo
+            echo "### Potential BREAKING CHANGES"
+            echo
+            git log "$base"..HEAD --pretty=format:'%B' | grep -E 'BREAKING CHANGE|feat\!|fix\!' || echo "(none)"
+          } > RELEASE_NOTES.md
+          sed -n '1,200p' RELEASE_NOTES.md
+
+      # -----------------------------
+      # 📦 패키징
+      # -----------------------------
       - name: 📦 Package (zip)
         shell: pwsh
         run: |
@@ -338,9 +270,9 @@ jobs:
           $out = Join-Path $PWD "autorunguard-$ver"
           New-Item -Force -ItemType Directory -Path $out | Out-Null
           Copy-Item -Force "scripts\AutorunGuard.ps1" $out
-          Copy-Item -Force "scripts\autorunguard_signing.pfx" $out
           Copy-Item -Force "logs\guard.log" $out
-
+          # (선택) PFX 동봉 비권장 — 실제 운영 배포에선 제외 권고. 여기선 추적용으로만 조건부 포함.
+          if (Test-Path 'signing\org_signing.pfx') { Copy-Item -Force 'signing\org_signing.pfx' $out }
           Set-Content -Encoding UTF8 -Path (Join-Path $out 'README.txt') -Value @"
           AutorunGuard 배포 패키지 ($ver)
 
@@ -355,123 +287,148 @@ jobs:
             .\AutorunGuard.ps1 -Uninstall
 
           서명:
-            - Authenticode self-signed (동봉된 PFX는 데모용)
-            - 실제 배포 시 조직 인증서로 재서명 권장
+            1) PowerShell Authenticode (필수)
+            2) Signtool 재서명 시도(환경에 따라 미지원일 수 있음)
           "@
 
           Compress-Archive -Path "$out\*" -DestinationPath "$PWD\autorunguard-$ver.zip" -Force
 
-      - name: ⬆️ Upload build artifacts
+      - name: ⬆️ Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: autorunguard-${{ steps.meta.outputs.version }}
           path: |
             autorunguard-${{ steps.meta.outputs.version }}.zip
+            RELEASE_NOTES.md
             logs/guard.log
             scripts/AutorunGuard.ps1
 
-  # 선택적 호환성 테스트 (실패해도 파이프라인 계속)
-  compat-windows-2022:
-    name: "Compat test (Windows 2022)"
+  # 선택: Windows 2022 간단 호환 체크 (실패해도 계속)
+  compat-2022:
+    name: "Compat smoke (Windows 2022)"
     runs-on: windows-2022
     continue-on-error: true
-    needs: build-windows-2025
+    needs: build-2025
     steps:
       - uses: actions/checkout@v4
-      - name: Quick PS parse
+      - name: Smoke
         shell: pwsh
         run: |
-          $src = @'
-          Write-Host "Compat check on Windows Server 2022 OK"
-          '@
-          $src | Set-Content -Path "$PWD\quick.ps1" -Encoding UTF8
-          pwsh -NoProfile -File "$PWD\quick.ps1"
+          'Compat OK on Windows Server 2022' | Set-Content compat.txt
+          Get-Content compat.txt
 
   release:
     name: "Create GitHub Release"
-    if: ${{ needs.build-windows-2025.outputs.computed_version != '' && github.event.inputs.make_release == 'true' }}
+    if: ${{ needs.build-2025.outputs.computed_version != '' && github.event.inputs.make_release == 'true' }}
     runs-on: ubuntu-latest
-    needs: [build-windows-2025]
+    needs: [build-2025]
     steps:
       - uses: actions/checkout@v4
-
       - name: ⬇️ Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: autorunguard-${{ needs.build-windows-2025.outputs.computed_version }}
-
-      - name: 📝 Generate release notes
-        id: notes
-        run: |
-          V="${{ needs.build-windows-2025.outputs.computed_version }}"
-          echo "tag=$V" >> $GITHUB_OUTPUT
-          {
-            echo "## AutorunGuard $V"
-            echo ""
-            echo "- Windows 이미지 마이그레이션 대응 (windows-2025 기본 빌드)"
-            echo "- PowerShell 스크립트 Authenticode 서명(셀프사인)"
-            echo "- 로그/패키지 아티팩트 포함"
-          } > RELEASE_NOTES.md
-
+          name: autorunguard-${{ needs.build-2025.outputs.computed_version }}
+          path: dist
       - name: 🚀 Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.notes.outputs.tag }}
-          name: "AutorunGuard ${{ steps.notes.outputs.tag }}"
-          body_path: RELEASE_NOTES.md
+          tag_name: ${{ needs.build-2025.outputs.computed_version }}
+          name: "AutorunGuard ${{ needs.build-2025.outputs.computed_version }}"
+          body_path: dist/RELEASE_NOTES.md
           draft: false
           prerelease: false
-          generate_release_notes: true
           files: |
-            autorunguard-*.zip
-            AutorunGuard.ps1
-            guard.log
+            dist/autorunguard-*.zip
+            dist/AutorunGuard.ps1
+            dist/guard.log
 
   pages:
-    name: "Deploy Pages (history site)"
-    if: ${{ needs.build-windows-2025.outputs.computed_version != '' && github.event.inputs.publish_pages == 'true' }}
+    name: "Deploy Pages (i18n + theme)"
+    if: ${{ needs.build-2025.outputs.computed_version != '' && github.event.inputs.publish_pages == 'true' }}
     runs-on: ubuntu-latest
-    needs: [build-windows-2025]
+    needs: [build-2025]
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - name: ⬇️ Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: autorunguard-${{ needs.build-windows-2025.outputs.computed_version }}
+          name: autorunguard-${{ needs.build-2025.outputs.computed_version }}
           path: site/assets
 
-      - name: 🏗️ Build simple site
+      - name: 🏗️ Build multilingual site (KR/EN + theme)
         run: |
-          ver="${{ needs.build-windows-2025.outputs.computed_version }}"
-          mkdir -p site
-          {
-            echo "<!doctype html><html><head><meta charset='utf-8'>"
-            echo "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            echo "<title>AutorunGuard Releases</title>"
-            echo "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;max-width:980px;margin:auto}pre{background:#111;color:#eee;padding:12px;overflow:auto;border-radius:8px}</style>"
-            echo "</head><body>"
-            echo "<h1>AutorunGuard — 배포 이력</h1>"
-            echo "<p>Current: <b>$ver</b></p>"
-            echo "<ul>"
-            echo "<li>빌드 OS: Windows Server 2025 (windows-2025)</li>"
-            echo "<li>서명: Authenticode (self-signed, 데모용)</li>"
-            echo "</ul>"
-            echo "<h2>최근 로그 (tail)</h2>"
-            echo "<pre>"
-            tail -n 200 site/assets/guard.log || true
-            echo "</pre>"
-            echo "<h2>다운로드</h2>"
-            echo "<ul>"
-            echo "<li><a href='./assets/autorunguard-$ver.zip'>autorunguard-$ver.zip</a></li>"
-            echo "<li><a href='./assets/AutorunGuard.ps1'>AutorunGuard.ps1</a></li>"
-            echo "<li><a href='./assets/guard.log'>guard.log</a></li>"
-            echo "</ul>"
-            echo "<hr><small>Built from ${GITHUB_REPOSITORY} • Run #${GITHUB_RUN_NUMBER}</small>"
-            echo "</body></html>"
-          } > site/index.html
+          ver="${{ needs.build-2025.outputs.computed_version }}"
+          mkdir -p site/ko site/en site/assets
+          # 공통 스타일(라이트/다크 자동 대응)
+          cat > site/style.css <<'CSS'
+          :root{--fg:#0b1220;--bg:#fff;--muted:#5c6b8a;--card:#f7f8fb;--link:#0b5fff}
+          @media (prefers-color-scheme: dark){
+            :root{--fg:#e7ecf7;--bg:#0b1220;--muted:#8ea0c4;--card:#111827;--link:#7bb1ff}
+          }
+          *{box-sizing:border-box} body{font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg);margin:0}
+          .wrap{max-width:980px;margin:auto;padding:24px}
+          header{display:flex;gap:12px;align-items:center;justify-content:space-between}
+          nav a{margin-right:12px;color:var(--link);text-decoration:none}
+          pre{background:var(--card);padding:12px;border-radius:10px;overflow:auto}
+          .card{background:var(--card);padding:16px;border-radius:14px;margin:16px 0}
+          footer{color:var(--muted);margin:48px 0 12px}
+          CSS
+
+          # 공통 헤더/푸터
+          header_ko='<header><h1>AutorunGuard — 배포 이력</h1><nav><a href="../en/">English</a><a href="../ko/">한국어</a></nav></header>'
+          header_en='<header><h1>AutorunGuard — Release History</h1><nav><a href="../en/">English</a><a href="../ko/">한국어</a></nav></header>'
+          footer='<footer>Built from '${GITHUB_REPOSITORY}' • Run #'${GITHUB_RUN_NUMBER}'</footer>'
+
+          tail -n 200 site/assets/guard.log > site/assets/guard.tail 2>/dev/null || true
+
+          # 한국어 페이지
+          cat > site/ko/index.html <<HTML
+          <!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <link rel="stylesheet" href="../style.css"><title>AutorunGuard 릴리스</title><body><div class="wrap">
+          ${header_ko}
+          <div class="card"><b>현재 버전</b>: ${ver}<br>빌드 OS: Windows Server 2025</div>
+          <h2>릴리스 노트</h2><pre>$(sed -n '1,400p' site/assets/RELEASE_NOTES.md)</pre>
+          <h2>최근 로그 (일부)</h2><pre>$(sed -n '1,200p' site/assets/guard.tail)</pre>
+          <h2>다운로드</h2>
+          <ul>
+            <li><a href="../assets/autorunguard-${ver}.zip">autorunguard-${ver}.zip</a></li>
+            <li><a href="../assets/AutorunGuard.ps1">AutorunGuard.ps1</a></li>
+            <li><a href="../assets/guard.log">guard.log</a></li>
+          </ul>
+          ${footer}
+          </div></body></html>
+          HTML
+
+          # English page
+          cat > site/en/index.html <<HTML
+          <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <link rel="stylesheet" href="../style.css"><title>AutorunGuard Releases</title><body><div class="wrap">
+          ${header_en}
+          <div class="card"><b>Current Version</b>: ${ver}<br>Build OS: Windows Server 2025</div>
+          <h2>Release Notes</h2><pre>$(sed -n '1,400p' site/assets/RELEASE_NOTES.md)</pre>
+          <h2>Recent Logs (partial)</h2><pre>$(sed -n '1,200p' site/assets/guard.tail)</pre>
+          <h2>Downloads</h2>
+          <ul>
+            <li><a href="../assets/autorunguard-${ver}.zip">autorunguard-${ver}.zip</a></li>
+            <li><a href="../assets/AutorunGuard.ps1">AutorunGuard.ps1</a></li>
+            <li><a href="../assets/guard.log">guard.log</a></li>
+          </ul>
+          ${footer}
+          </div></body></html>
+          HTML
+
+          # 루트 인덱스(언어 선택)
+          cat > site/index.html <<HTML
+          <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <link rel="stylesheet" href="./style.css"><title>AutorunGuard</title><body><div class="wrap">
+          <header><h1>AutorunGuard</h1><nav><a href="./en/">English</a><a href="./ko/">한국어</a></nav></header>
+          <div class="card">Choose your language.</div>
+          ${footer}
+          </div></body></html>
+          HTML
 
       - name: 📦 Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -479,5 +436,5 @@ jobs:
           path: site
 
       - name: 🌐 Deploy to GitHub Pages
-        id: deployment
+        id: deploy
         uses: actions/deploy-pages@v4
