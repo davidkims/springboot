@@ -127,13 +127,9 @@ jobs:
             CAN="$(jq '[.[] | select(.conclusion=="cancelled")] | length' <<< "$RUNS_JSON")"
             LAST_CONC="$(jq -r '.[0].conclusion // "unknown"' <<< "$RUNS_JSON")"
 
-            # 실패율 계산
-            FAIL_RATE=$(python3 - <<PY
- total=$RUNS_COUNT
- fail=$FAI
- print(f"{(fail/total):.2f}" if total>0 else "0.00")
-PY
-)
+            # 실패율 계산 (awk 사용, here-doc 제거)
+            FAIL_RATE="$(awk -v t="$RUNS_COUNT" -v f="$FAI" 'BEGIN{ if(t>0) printf "%.2f", f/t; else printf "0.00"; }')"
+
             ECHO INFO "$WF_FILE runs=$RUNS_COUNT ok=$SUC fail=$FAI cancel=$CAN rate=$FAIL_RATE last=$LAST_CONC"
 
             # 최근 실패/취소 자동 재실행
@@ -149,15 +145,17 @@ PY
               done < <(jq -r '[.[] | select((.conclusion=="failure") or (.conclusion=="cancelled")) | .databaseId] | .[]?' <<< "$RUNS_JSON")
             fi
 
-            # 임계 판단
-            OVER_RATE=$(python3 - <<PY
-print("1" if float("$FAIL_RATE") >= float("$FAIL_RATE_THRESHOLD") else "0")
-PY
-)
-            OVER_ABS=$(python3 - <<PY
-print("1" if int("$FAI") >= int("$FAIL_ABS_THRESHOLD") else "0")
-PY
-)
+            # 임계 판단 (awk/정수 비교로 대체)
+            OVER_RATE="$(awk -v r="$FAIL_RATE" -v th="$FAIL_RATE_THRESHOLD" 'BEGIN{ print (r+0 >= th+0) ? "1" : "0" }')"
+            if [[ "$FAI" =~ ^[0-9]+$ ]] && [[ "$FAIL_ABS_THRESHOLD" =~ ^[0-9]+$ ]]; then
+              if [ "$FAI" -ge "$FAIL_ABS_THRESHOLD" ]; then
+                OVER_ABS="1"
+              else
+                OVER_ABS="0"
+              fi
+            else
+              OVER_ABS="0"
+            fi
 
             ACTION="ok"
             if [[ "$OVER_RATE" == "1" || "$OVER_ABS" == "1" ]]; then
@@ -209,7 +207,7 @@ PY
           } >> "$REPORT_MD"
 
           # 콘솔/요약에도 복사
-          cat "$REPORT_MD" | sed 's/^/[ECHO] /' || true
+          sed 's/^/[ECHO] /' "$REPORT_MD" || true
           cat "$REPORT_MD" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 💾 Commit & Push generated labs/quarantine & report (echo)
@@ -218,8 +216,8 @@ PY
           set -Eeuo pipefail
           ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
           ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-
           COMMIT_CHANGES="${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}"
+
           if [[ "$COMMIT_CHANGES" != "true" ]]; then
             ECHO INFO "commit_changes=false → 커밋/푸시 생략"
             exit 0
