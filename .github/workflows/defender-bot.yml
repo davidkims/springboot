@@ -29,6 +29,12 @@ env:
   GIT_USER_NAME: repo-bot
   GIT_USER_EMAIL: repo-bot@example.local
   BASH_ENV: .github/echo/bootstrap.sh
+  # ---- TERM/dialog 문제 방지 (전역) ----
+  TERM: xterm-256color
+  DEBIAN_FRONTEND: noninteractive
+  UCF_FORCE_CONFNEW: "1"
+  # 대화형 프론트엔드 강제 비활성화
+  APT_LISTCHANGES_FRONTEND: none
 
 jobs:
   build-test-sec:
@@ -63,8 +69,27 @@ jobs:
           DOCKERFILE
           chmod +x workflow/*.sh || true
 
+          # BASH_ENV: 모든 스텝 자동 소싱 + apt 비대화/TERM 안전가드
           cat > "$BASH_ENV" <<'EOSH'
           # --- BASH_ENV (auto-sourced per bash step) ---
+          export TERM="${TERM:-dumb}"
+          export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+          export UCF_FORCE_CONFNEW="${UCF_FORCE_CONFNEW:-1}"
+          export APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-none}"
+          # tzdata 대화창 방지
+          sudo ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime 2>/dev/null || true
+          sudo dpkg-reconfigure -f noninteractive tzdata 2>/dev/null || true
+
+          # 안전 apt 래퍼
+          apti() {
+            sudo -E apt-get update -y -o Dpkg::Use-Pty=0 || true
+            sudo -E apt-get install -y -q \
+              -o Dpkg::Options::=--force-confnew \
+              -o Dpkg::Options::=--force-confdef \
+              -o Dpkg::Use-Pty=0 "$@" || true
+            sudo -E apt-get clean || true
+          }
+
           export LOG="${LOG:-.github/echo_logs/account-rotation.log}"
           mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
           ECHO() { printf '[ECHO][%s] %s\n' "${STEP_NAME:-step}" "$*"; }
@@ -114,14 +139,11 @@ jobs:
           ECHO "py_compile OK" | tee -a "$LOG" || true
 
       - name: 🐚 Bash syntax + ShellCheck (echo)
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
           set -Eeuo pipefail; init_echo "bash-syntax"
           bash -n workflow/bootstrap.sh || true
           bash -n workflow/automation.sh || true
-          sudo apt-get update -y || true
-          sudo apt-get install -y shellcheck || true
+          apti shellcheck
           (shellcheck -f tty workflow/bootstrap.sh || true) | sed 's/^/[SHELLCHECK] /' | tee -a "$LOG" || true
           (shellcheck -f tty workflow/automation.sh || true) | sed 's/^/[SHELLCHECK] /' | tee -a "$LOG" || true
           ECHO "bash -n & shellcheck OK (best-effort)" | tee -a "$LOG" || true
@@ -455,8 +477,6 @@ jobs:
 
       # ---------- Scorecard ----------
       - name: 📥 Install Scorecard (echo)
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
           set -Eeuo pipefail; init_echo "scorecard-install"
           VER="4.13.3"; INSTALL="/usr/local/bin"; TMP="$(mktemp -d)"; cd "$TMP"
@@ -532,88 +552,207 @@ jobs:
           HTML
           ECHO "scorecard pages ready" | tee -a "$LOG" || true
 
-      # ---------- Anomaly & FDS ----------
-      - name: 🧠 Anomaly & FDS analysis (echo)
+      # ---------- Anomaly & FDS (Aggressive Columns + CSV/HTML/Score) ----------
+      - name: 🧠 Anomaly/FDS + Aggressive Columns (CSV/HTML/Score) (echo)
         run: |
-          set -Eeuo pipefail; init_echo "anomaly-fds"
+          set -Eeuo pipefail; init_echo "anomaly-fds-aggressive"
           mkdir -p "$REPORT_DIR" "$PAGES_DIR"
           python3 - <<'PY'
-          import json, os, re, time
-          rpt = os.environ.get("REPORT_DIR",".github/security_reports")
+          import os, re, json, csv, math, time
+          rpt   = os.environ.get("REPORT_DIR",".github/security_reports")
           pages = os.environ.get("PAGES_DIR",".github/pages")
-          out_anom = os.path.join(rpt,"anomaly_report.json")
-          out_fds  = os.path.join(rpt,"fds_report.json")
-          def read_json(path, default):
-            try:
-              with open(path,"r",encoding="utf-8") as f:
-                return json.load(f)
-            except Exception:
-              return default
-          trivy = read_json(os.path.join(rpt,"trivy-image.json"), {})
-          score = read_json(os.path.join(rpt,"scorecard.json"), {})
-          vulns = 0
-          for r in trivy.get("Results",[]):
-            for v in r.get("Vulnerabilities",[]) or []:
-              if v.get("Severity") in ("HIGH","CRITICAL"):
-                vulns += 1
-          checks = { c.get("name"): c.get("score") for c in score.get("checks",[]) } if "checks" in score else {}
-          tokens_ok = checks.get("Token-Permissions")
-          branchprot = checks.get("Branch-Protection")
-          anomalies = []
-          if vulns >= 20: anomalies.append({"type":"vuln_spike","level":"warning","value":vulns,"threshold":20})
-          if tokens_ok is not None and tokens_ok < 5: anomalies.append({"type":"token_perms_low","level":"warning","value":tokens_ok,"threshold":5})
-          if branchprot is not None and branchprot < 5: anomalies.append({"type":"branch_protection_low","level":"warning","value":branchprot,"threshold":5})
-          sus_files = []
-          for root,_,files in os.walk(".", topdown=True):
-            if root.startswith("./.git") or root.startswith("./.github/pages") or "/node_modules" in root:
-              continue
-            for f in files:
-              p = os.path.join(root,f)
+          os.makedirs(rpt, exist_ok=True); os.makedirs(pages, exist_ok=True)
+          def read_json(p, default):
               try:
-                if os.path.getsize(p) > 1024*1024:
-                  continue
-                with open(p,"r",errors="ignore") as fh:
-                  txt = fh.read()
-                if re.search(r'(?i)api[_-]?key|secret[_-]?key|aws[_-]?access|private[_-]?key|BEGIN RSA PRIVATE KEY', txt):
-                  sus_files.append(p)
-              except Exception:
-                pass
+                  with open(p,"r",encoding="utf-8") as f: return json.load(f)
+              except Exception: return default
+          def shannon_entropy(s):
+              if not s or len(s) < 20: return 0.0
+              from collections import Counter
+              c = Counter(s); n = len(s)
+              return -sum((cnt/n)*math.log2(cnt/n) for cnt in c.values() if cnt>0)
+
+          trivy_json  = read_json(os.path.join(rpt,"trivy-image.json"), {})
+          score_json  = read_json(os.path.join(rpt,"scorecard.json"), {})
+          sbom_spdx   = read_json(os.path.join(rpt,"sbom.spdx.json"), {"packages":[]})
+
+          # TRIVY CSV
+          with open(os.path.join(rpt,"trivy-image.csv"),"w",newline="",encoding="utf-8") as f:
+              w = csv.writer(f)
+              w.writerow(["Target","Type","PkgName","InstalledVersion","FixedVersion","Severity","VulnerabilityID","Title","PrimaryURL","PublishedDate","LastModifiedDate"])
+              for res in trivy_json.get("Results",[]) or []:
+                  target, typ = res.get("Target",""), res.get("Type","")
+                  for v in res.get("Vulnerabilities",[]) or []:
+                      w.writerow([target,typ,v.get("PkgName",""),v.get("InstalledVersion",""),v.get("FixedVersion",""),
+                                  v.get("Severity",""),v.get("VulnerabilityID",""),v.get("Title",""),v.get("PrimaryURL",""),
+                                  v.get("PublishedDate",""),v.get("LastModifiedDate","")])
+
+          # SCORECARD CSV
+          with open(os.path.join(rpt,"scorecard.csv"),"w",newline="",encoding="utf-8") as f:
+              w = csv.writer(f)
+              w.writerow(["CheckName","Score","Reason","DocumentationURL","DetailsCount"])
+              for c in score_json.get("checks",[]) or []:
+                  w.writerow([c.get("name",""),c.get("score",""),c.get("reason",""),
+                              (c.get("documentation",{}) or {}).get("url",""),len(c.get("details",[]) or [])])
+
+          # SBOM CSV
+          with open(os.path.join(rpt,"sbom-packages.csv"),"w",newline="",encoding="utf-8") as f:
+              w = csv.writer(f)
+              w.writerow(["Name","Version","Supplier","DownloadLocation","LicenseConcluded","LicenseDeclared","Originator","ExternalRefs"])
+              for p in sbom_spdx.get("packages",[]) or []:
+                  ex = ";".join(["{}:{}:{}".format(x.get("referenceCategory",""),x.get("referenceType",""),x.get("referenceLocator","")) for x in p.get("externalRefs",[]) or []])
+                  w.writerow([p.get("name",""),p.get("versionInfo",""),p.get("supplier",""),p.get("downloadLocation",""),
+                              p.get("licenseConcluded",""),p.get("licenseDeclared",""),p.get("originator",""),ex])
+
+          # FDS(패턴+엔트로피)
+          secret_patterns = [
+              r'(?i)api[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9_\-]{16,})',
+              r'(?i)secret[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9_\-]{16,})',
+              r'(?i)aws[_-]?access[_-]?key[_-]?id\s*[:=]\s*[\'"]?([A-Z0-9]{16,})',
+              r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9/+=]{32,})',
+              r'(?i)ghp_[A-Za-z0-9]{20,}',
+              r'(?i)glpat-[A-Za-z0-9\-]{20,}',
+              r'(?i)BEGIN RSA PRIVATE KEY',
+              r'(?i)BEGIN OPENSSH PRIVATE KEY',
+              r'(?i)xox[baprs]-[A-Za-z0-9-]{20,}',
+          ]
+          secret_re = re.compile("|".join(secret_patterns))
           fds_findings = []
-          if sus_files:
-            fds_findings.append({"type":"potential_secret","level":"warning","files":sus_files[:50]})
-          with open(out_anom,"w",encoding="utf-8") as f:
-            json.dump({"generated_at": int(time.time()),"vuln_high_critical": vulns,"score_checks": checks,"anomalies": anomalies}, f, indent=2)
-          with open(out_fds,"w",encoding="utf-8") as f:
-            json.dump({"generated_at": int(time.time()),"findings": fds_findings}, f, indent=2)
-          PY
-          cat > "$PAGES_DIR/anomaly.html" <<'HTML'
-          <!DOCTYPE html><meta charset="utf-8">
-          <title>Anomaly Report</title>
-          <h1>Anomaly Report</h1>
-          <div id="a"></div>
+          for root,_,files in os.walk(".", topdown=True):
+              if root.startswith("./.git") or root.startswith("./.github/pages") or "/node_modules" in root: continue
+              for fn in files:
+                  p = os.path.join(root,fn)
+                  try:
+                      if os.path.getsize(p) > 1024*1024: continue
+                      with open(p,"r",errors="ignore") as fh: txt = fh.read()
+                      items = []
+                      for m in secret_re.finditer(txt):
+                          s = m.group(0); ent = shannon_entropy(s)
+                          items.append({"indicator":"pattern","snippet":s[:80],"entropy":round(ent,2)})
+                      for m in re.finditer(r'[A-Za-z0-9/+_=.-]{24,}', txt):
+                          s = m.group(0); ent = shannon_entropy(s)
+                          if ent >= 4.0:
+                              items.append({"indicator":"entropy>=4.0","snippet":s[:80],"entropy":round(ent,2)})
+                      if items: fds_findings.append({"file":p, "hits":items[:10]})
+                  except Exception: pass
+
+          with open(os.path.join(rpt,"fds_report.json"),"w",encoding="utf-8") as f:
+              json.dump({"generated_at": int(time.time()), "findings": fds_findings[:100]}, f, indent=2)
+
+          # ANOMALY + RISK
+          high_crit = 0
+          for res in trivy_json.get("Results",[]) or []:
+              for v in res.get("Vulnerabilities",[]) or []:
+                  if v.get("Severity") in ("HIGH","CRITICAL"): high_crit += 1
+          checks = { c.get("name"): c.get("score") for c in (score_json.get("checks",[]) or []) }
+          anomalies = []
+          if high_crit >= 10: anomalies.append({"type":"vuln_highcrit_10p","level":"warning","value":high_crit})
+          if high_crit >= 50: anomalies.append({"type":"vuln_highcrit_50p","level":"critical","value":high_crit})
+          if checks.get("Token-Permissions") is not None and checks["Token-Permissions"] < 5:
+              anomalies.append({"type":"token_perms_low","level":"warning","value":checks["Token-Permissions"]})
+          if checks.get("Branch-Protection") is not None and checks["Branch-Protection"] < 5:
+              anomalies.append({"type":"branch_protection_low","level":"warning","value":checks["Branch-Protection"]})
+          if fds_findings:
+              anomalies.append({"type":"fds_hits","level":"warning","value":len(fds_findings)})
+
+          risk = 0
+          risk += min(high_crit, 200) * 0.5
+          if checks.get("Token-Permissions") is not None: risk += (10 - checks["Token-Permissions"]) * 3
+          if checks.get("Branch-Protection") is not None: risk += (10 - checks["Branch-Protection"]) * 4
+          risk += min(len(fds_findings), 200) * 1.5
+          risk_level = "low"
+          if risk >= 50: risk_level = "medium"
+          if risk >= 120: risk_level = "high"
+          if risk >= 200: risk_level = "critical"
+          with open(os.path.join(rpt,"anomaly_report.json"),"w",encoding="utf-8") as f:
+              json.dump({"generated_at": int(time.time()),"vuln_high_critical": high_crit,
+                         "score_checks": checks,"risk_score": round(risk,2),
+                         "risk_level": risk_level,"anomalies": anomalies}, f, indent=2)
+
+          # ADVANCED HTMLs
+          open(os.path.join(pages,"trivy-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
+          <title>Trivy — Advanced</title><h1>Trivy — Advanced Vulnerabilities</h1>
+          <table border="1" cellpadding="6" cellspacing="0" id="t"></table>
+          <script>
+          fetch('../security_reports/trivy-image.json').then(r=>r.json()).then(j=>{
+            let rows=[];(j.Results||[]).forEach(r=>{
+              (r.Vulnerabilities||[]).forEach(v=>{
+                rows.push([r.Target||'', r.Type||'', v.Severity||'', v.VulnerabilityID||'', v.PkgName||'', v.InstalledVersion||'', v.FixedVersion||'', v.Title||'', v.PrimaryURL||'']);
+              });
+            });
+            const head=['Target','Type','Severity','CVE','Pkg','Installed','Fixed','Title','URL'];
+            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
+            document.getElementById('t').innerHTML=html;
+          }).catch(()=>{document.getElementById('t').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
+          </script>""")
+          open(os.path.join(pages,"scorecard-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
+          <title>Scorecard — Advanced</title><h1>OSSF Scorecard — Advanced Checks</h1>
+          <table border="1" cellpadding="6" cellspacing="0" id="sc"></table>
+          <script>
+          fetch('../security_reports/scorecard.json').then(r=>r.json()).then(j=>{
+            const checks=j.checks||[]; const head=['Check','Score','Reason','Docs','DetailsCount'];
+            const rows=checks.map(c=>[c.name||'', c.score||'', c.reason||'', (c.documentation||{}).url||'', (c.details||[]).length||0]);
+            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
+            document.getElementById('sc').innerHTML=html;
+          }).catch(()=>{document.getElementById('sc').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
+          </script>""")
+          open(os.path.join(pages,"sbom-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
+          <title>SBOM — Advanced</title><h1>SBOM — Packages</h1>
+          <table border="1" cellpadding="6" cellspacing="0" id="sb"></table>
+          <script>
+          fetch('sbom.spdx.json').then(r=>r.json()).then(j=>{
+            const pkgs=j.packages||[]; const head=['Name','Version','Supplier','Download','LicenseConcluded','LicenseDeclared','Originator','ExternalRefs'];
+            const rows=pkgs.map(p=>{const ex=(p.externalRefs||[]).map(x=>`${x.referenceCategory||''}:${x.referenceType||''}:${x.referenceLocator||''}`).join(';');
+              return [p.name||'', p.versionInfo||'', p.supplier||'', p.downloadLocation||'', p.licenseConcluded||'', p.licenseDeclared||'', p.originator||'', ex];});
+            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
+            document.getElementById('sb').innerHTML=html;
+          }).catch(()=>{document.getElementById('sb').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
+          </script>""")
+          open(os.path.join(pages,"anomaly-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
+          <title>Anomaly — Advanced</title><h1>Anomaly — Advanced</h1><div id="info"></div>
+          <table border="1" cellpadding="6" cellspacing="0" id="an"></table>
           <script>
           fetch('security_reports/anomaly_report.json').then(r=>r.json()).then(j=>{
-            const a = j.anomalies||[];
-            const rows = a.map(x=>`<tr><td>${x.type}</td><td>${x.level}</td><td>${x.value??""}</td><td>${x.threshold??""}</td></tr>`).join("");
-            document.getElementById('a').innerHTML = `<p>HIGH/CRITICAL vulns: ${j.vuln_high_critical||0}</p>
-              <table border="1" cellpadding="6"><tr><th>Type</th><th>Level</th><th>Value</th><th>Threshold</th></tr>${rows||'<tr><td colspan=4>No anomalies</td></tr>'}</table>`;
-          }).catch(()=>{document.getElementById('a').textContent='No data';});
-          </script>
-          HTML
-          cat > "$PAGES_DIR/fds.html" <<'HTML'
-          <!DOCTYPE html><meta charset="utf-8">
-          <title>FDS Report</title>
-          <h1>FDS Report</h1>
-          <div id="f"></div>
+            document.getElementById('info').innerHTML=`<p><b>Risk Score:</b> ${j.risk_score||0} &nbsp; <b>Level:</b> ${j.risk_level||'low'} &nbsp; <b>Vuln(H/C):</b> ${j.vuln_high_critical||0}</p>`;
+            const a=j.anomalies||[]; const head=['Type','Level','Value','Threshold'];
+            const rows=a.map(x=>[x.type||'', x.level||'', (x.value??''), (x.threshold??'')]);
+            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${x??''}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
+            document.getElementById('an').innerHTML=html;
+          }).catch(()=>{document.getElementById('an').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
+          </script>""")
+          open(os.path.join(pages,"fds-adv.html"),"w",encoding="utf-8").write("""<!DOCTYPE html><meta charset="utf-8">
+          <title>FDS — Advanced</title><h1>FDS — Potential Secrets</h1>
+          <table border="1" cellpadding="6" cellspacing="0" id="fds"></table>
           <script>
           fetch('security_reports/fds_report.json').then(r=>r.json()).then(j=>{
-            const fs = j.findings||[];
-            const rows = fs.map(x=>`<tr><td>${x.type}</td><td>${x.level}</td><td>${(x.files||[]).slice(0,10).join('<br>')}</td></tr>`).join("");
-            document.getElementById('f').innerHTML = `<table border="1" cellpadding="6"><tr><th>Type</th><th>Level</th><th>Files</th></tr>${rows||'<tr><td colspan=3>No findings</td></tr>'}</table>`;
-          }).catch(()=>{document.getElementById('f').textContent='No data';});
-          </script>
+            const head=['File','Indicator','Entropy','Snippet']; const rows=[];
+            (j.findings||[]).forEach(f=>{(f.hits||[]).forEach(h=>{rows.push([f.file||'', h.indicator||'', (h.entropy??''), (h.snippet||'')]);});});
+            const html=['<thead><tr>'+head.map(h=>`<th>${h}</th>`).join('')+'</tr></thead>','<tbody>'+rows.map(r=>'<tr>'+r.map(x=>`<td>${(x+'').replace(/</g,'&lt;')}</td>`).join('')+'</tr>').join('')+'</tbody>'].join('');
+            document.getElementById('fds').innerHTML=html;
+          }).catch(()=>{document.getElementById('fds').innerHTML='<tbody><tr><td>No data</td></tr></tbody>'});
+          </script>""")
+          PY
+
+          # 고급 페이지 인덱스
+          cat > "$PAGES_DIR/dashboard.html" <<'HTML'
+          <!DOCTYPE html><meta charset="utf-8">
+          <title>Security Dashboard (Advanced)</title>
+          <h1>Security Dashboard (Advanced Columns)</h1>
+          <ul>
+            <li><a href="trivy-adv.html">Trivy — Advanced</a></li>
+            <li><a href="scorecard-adv.html">Scorecard — Advanced</a></li>
+            <li><a href="sbom-adv.html">SBOM — Advanced</a></li>
+            <li><a href="anomaly-adv.html">Anomaly — Advanced</a></li>
+            <li><a href="fds-adv.html">FDS — Advanced</a></li>
+          </ul>
+          <h3>Raw CSV Exports</h3>
+          <ul>
+            <li><a href="security_reports/trivy-image.csv">trivy-image.csv</a></li>
+            <li><a href="security_reports/scorecard.csv">scorecard.csv</a></li>
+            <li><a href="security_reports/sbom-packages.csv">sbom-packages.csv</a></li>
+          </ul>
           HTML
-          ECHO "anomaly & fds reports generated" | tee -a "$LOG" || true
+          ECHO "aggressive CSV/HTML dashboards ready" | tee -a "$LOG" || true
 
       - name: 📦 Assemble Pages bundle (echo)
         run: |
@@ -631,10 +770,12 @@ jobs:
             <li><a href="scorecard.html">OSSF Scorecard Summary</a></li>
             <li><a href="anomaly.html">Anomaly Report</a></li>
             <li><a href="fds.html">FDS Report</a></li>
-            <li><a href="security_reports/">Raw Security Files (JSON/TXT/SARIF)</a></li>
+            <li><a href="security_reports/">Raw Security Files (JSON/TXT/SARIF/CSV)</a></li>
             <li><a href="io/">Filesystem I/O Reports</a></li>
             <li><a href="resources/">Service Resources</a></li>
             <li><a href="sbom.spdx.json">SBOM (SPDX)</a></li>
+            <li><a href="dashboard.html">Security Dashboard (Advanced)</a></li>
+            <li><a href="trivy-adv.html">Trivy — Advanced (direct)</a></li>
             <li><a href="last_run.txt">Last Run Timestamp</a></li>
           </ul>
           HTML
@@ -654,10 +795,12 @@ jobs:
             <url><loc>/scorecard.html</loc></url>
             <url><loc>/anomaly.html</loc></url>
             <url><loc>/fds.html</loc></url>
+            <url><loc>/dashboard.html</loc></url>
+            <url><loc>/trivy-adv.html</loc></url>
           </urlset>
           XML
           echo "ok" > "$PAGES_DIR/healthcheck.txt"
-          for f in index.html scorecard.html trivy.html anomaly.html fds.html last_run.txt; do
+          for f in index.html scorecard.html trivy.html anomaly.html fds.html dashboard.html last_run.txt; do
             test -e "$PAGES_DIR/$f" || { ECHO "[ERR] missing $f"; exit 1; }
           done
           ECHO "pages bundle ready" | tee -a "$LOG" || true
@@ -687,10 +830,11 @@ jobs:
           {
             echo "## ✅ SecSuite Run Summary"
             echo "- Home: index.html (Pages artifact)"
-            echo "- Trivy: .github/security_reports/trivy-image.json → trivy.html"
-            echo "- Scorecard: .github/security_reports/scorecard.json → scorecard.html"
-            echo "- Anomaly/FDS: anomaly.html / fds.html"
-            echo "- SBOM (SPDX): sbom.spdx.json"
+            echo "- Trivy: .github/security_reports/trivy-image.json → trivy.html / trivy-adv.html"
+            echo "- Scorecard: .github/security_reports/scorecard.json → scorecard.html / scorecard-adv.html"
+            echo "- Anomaly/FDS: anomaly.html / fds.html / anomaly-adv.html / fds-adv.html"
+            echo "- SBOM (SPDX): sbom.spdx.json / sbom-adv.html"
+            echo "- CSV: trivy-image.csv / scorecard.csv / sbom-packages.csv"
             echo "- IO Reports: io/"
             echo "- Resources: resources/"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -702,7 +846,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail; init_echo "bot-heartbeat"
-          # 토큰 폴백(GH CLI는 GH_TOKEN 또는 GITHUB_TOKEN 인식)
           GH_TOKEN="${WORKFLOW_PAT:-${GITHUB_TOKEN:-}}"
           export GH_TOKEN GITHUB_TOKEN
           DEFAULT_BRANCH="$(git remote show origin 2>/dev/null | sed -n 's/^\s*HEAD branch: //p')"
