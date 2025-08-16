@@ -29,12 +29,10 @@ env:
   GIT_USER_NAME: repo-bot
   GIT_USER_EMAIL: repo-bot@example.local
   BASH_ENV: .github/echo/bootstrap.sh
-  # ---- TERM/dialog 문제 방지 (전역) ----
   TERM: xterm-256color
   DEBIAN_FRONTEND: noninteractive
   UCF_FORCE_CONFNEW: "1"
   APT_LISTCHANGES_FRONTEND: none
-  # (옵션) git 네트워크 탄력성
   GIT_HTTP_LOW_SPEED_LIMIT: "1000"
   GIT_HTTP_LOW_SPEED_TIME: "60"
 
@@ -51,7 +49,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p .github/echo .github/echo_logs .github/security_reports .github/pages .github/sbom .github/artifacts workflow
-          # 더미 소스/도커파일 자동 생성(없을 때만)
+          # 더미 파일(존재 안할 때만)
           [ -f workflow/rotate_accounts.py ] || cat > workflow/rotate_accounts.py <<'PY'
           print("rotate_accounts: noop demo")
           PY
@@ -71,18 +69,14 @@ jobs:
           DOCKERFILE
           chmod +x workflow/*.sh || true
 
-          # BASH_ENV: 모든 스텝 자동 소싱 + apt 비대화/TERM 안전가드
           cat > "$BASH_ENV" <<'EOSH'
           # --- BASH_ENV (auto-sourced per bash step) ---
           export TERM="${TERM:-dumb}"
           export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
           export UCF_FORCE_CONFNEW="${UCF_FORCE_CONFNEW:-1}"
           export APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-none}"
-          # tzdata 대화창 방지
           sudo ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime 2>/dev/null || true
           sudo dpkg-reconfigure -f noninteractive tzdata 2>/dev/null || true
-
-          # 안전 apt 래퍼
           apti() {
             sudo -E apt-get update -y -o Dpkg::Use-Pty=0 || true
             sudo -E apt-get install -y -q \
@@ -91,7 +85,6 @@ jobs:
               -o Dpkg::Use-Pty=0 "$@" || true
             sudo -E apt-get clean || true
           }
-
           export LOG="${LOG:-.github/echo_logs/account-rotation.log}"
           mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
           ECHO() { printf '[ECHO][%s] %s\n' "${STEP_NAME:-step}" "$*"; }
@@ -458,7 +451,7 @@ jobs:
           ECHO "trivy pages ready" | tee -a "$LOG" || true
 
       # ---------- SBOM ----------
-      - name: 📥 Install Syft (SBOM) (echo)
+      - name: 📥 Install Syft (echo)
         continue-on-error: true
         run: |
           set -Eeuo pipefail; init_echo "syft-install"
@@ -470,46 +463,37 @@ jobs:
         run: |
           set -Eeuo pipefail; init_echo "syft-sbom"
           if command -v syft >/dev/null 2>&1; then
-            syft packages workflow-image:ci -o spdx-json > "$SBOM_DIR/sbom.spdx.json"
+            # v1.31+ : packages → scan
+            syft scan workflow-image:ci -o spdx-json > "$SBOM_DIR/sbom.spdx.json"
           else
             echo '{"spdxVersion":"SPDX-2.3","packages":[]}' > "$SBOM_DIR/sbom.spdx.json"
           fi
           cp "$SBOM_DIR/sbom.spdx.json" "$PAGES_DIR/sbom.spdx.json" || true
           ECHO "sbom ready" | tee -a "$LOG" || true
 
-      # ---------- Scorecard (Install + JSON Page) ----------
-      - name: 📥 Install Scorecard (echo)
+      # ---------- Scorecard (Go 설치 → 로컬 바이너리 빌드) ----------
+      - name: 🔧 Setup Go (for Scorecard)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: 📥 Install Scorecard via Go (no Docker/GCR)
+        env:
+          GOBIN: /usr/local/bin
         run: |
-          set -Eeuo pipefail; init_echo "scorecard-install"
-          VER="4.13.3"; INSTALL="/usr/local/bin"; TMP="$(mktemp -d)"; cd "$TMP"
-          BASE="https://github.com/ossf/scorecard/releases/download/v${VER}"
-          ECHO "download ${BASE}"
-          curl -sSfL --retry 5 --retry-delay 2 -o scorecard.tgz "${BASE}/scorecard_${VER}_linux_amd64.tar.gz" || true
-          curl -sSfL --retry 5 --retry-delay 2 -o checksums.txt "${BASE}/scorecard_${VER}_checksums.txt" || true
-          if [ -s scorecard.tgz ] && [ -s checksums.txt ]; then
-            SUM_LINE="$(grep 'scorecard_'"${VER}"'_linux_amd64.tar.gz' checksums.txt || true)"
-            if [ -n "$SUM_LINE" ]; then
-              EXPECTED="$(echo "$SUM_LINE" | awk '{print $1}')"; ACTUAL="$(sha256sum scorecard.tgz | awk '{print $1}')"
-              if [ "$EXPECTED" = "$ACTUAL" ]; then
-                tar -xzf scorecard.tgz || true
-                if [ -x "scorecard_${VER}_linux_amd64/scorecard" ]; then sudo mv "scorecard_${VER}_linux_amd64/scorecard" "$INSTALL/scorecard"; fi
-              else ECHO "checksum mismatch -> skip native" | tee -a "$LOG" || true; fi
-            fi
+          set -Eeuo pipefail; init_echo "scorecard-install-go"
+          # go install to /usr/local/bin (requires sudo move if GOBIN not writable)
+          go env
+          go install github.com/ossf/scorecard/v5@latest
+          if [ ! -x "$GOBIN/scorecard" ] && [ -x "$(go env GOPATH)/bin/scorecard" ]; then
+            sudo mv "$(go env GOPATH)/bin/scorecard" /usr/local/bin/scorecard
           fi
-          if ! command -v scorecard >/dev/null 2>&1; then
-            ECHO "using docker fallback (GHCR)" | tee -a "$LOG" || true
-            sudo bash -c 'cat > /usr/local/bin/scorecard <<EOF
-            #!/usr/bin/env bash
-            exec docker run --rm -e GITHUB_AUTH_TOKEN="${GITHUB_TOKEN}" ghcr.io/ossf/scorecard:stable "$@"
-            EOF'
-            sudo chmod +x /usr/local/bin/scorecard
-            docker pull ghcr.io/ossf/scorecard:stable || true
-          fi
-          command -v scorecard && scorecard version | sed 's/^/[SCORECARD] /' | tee -a "$LOG" || true
+          scorecard version | sed 's/^/[SCORECARD] /' | tee -a "$LOG" || true
 
       - name: 🧪 Scorecard JSON + Pages (echo)
         env:
           GH_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail; init_echo "scorecard-pages"
           if command -v scorecard >/dev/null 2>&1; then
@@ -545,53 +529,42 @@ jobs:
           HTML
           ECHO "scorecard pages ready" | tee -a "$LOG" || true
 
-      # ---------- Scorecard SARIF (GCR 비의존) ----------
-      - name: 🧰 Scorecard SARIF via CLI (no GCR) (echo)
+      - name: 🧰 Scorecard SARIF (CLI, with guard) (echo)
+        id: scorecard_sarif
         env:
           GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
-        continue-on-error: true
         run: |
           set -Eeuo pipefail; init_echo "scorecard-sarif-cli"
           mkdir -p "$REPORT_DIR"
-          try_scorecard() {
-            local attempt="$1"
-            ECHO "scorecard attempt ${attempt}"
-            if command -v scorecard >/dev/null 2>&1; then
-              scorecard --repo "github.com/${GH_REPO}" \
-                        --format sarif \
-                        --show-details \
-                        --policy github \
-                        --enable-scorecard-endpoints \
-                        --commit-depth 0 \
-                        > "$REPORT_DIR/scorecard.sarif"
-            else
-              docker run --rm \
-                -e GITHUB_AUTH_TOKEN="${GITHUB_TOKEN}" \
-                ghcr.io/ossf/scorecard:stable \
-                --repo "github.com/${GH_REPO}" \
-                --format sarif \
-                --show-details \
-                --policy github \
-                --enable-scorecard-endpoints \
-                --commit-depth 0 \
-                > "$REPORT_DIR/scorecard.sarif"
+          if command -v scorecard >/dev/null 2>&1; then
+            set +e
+            scorecard --repo "github.com/${GH_REPO}" \
+                      --format sarif \
+                      --show-details \
+                      --policy github \
+                      --enable-scorecard-endpoints \
+                      --commit-depth 0 \
+                      > "$REPORT_DIR/scorecard.sarif"
+            rc=$?
+            set -e
+            if [ $rc -ne 0 ]; then
+              echo '{"runs":[]}' > "$REPORT_DIR/scorecard.sarif"
             fi
-          }
-          n=0; rc=1
-          until [ $n -ge 3 ]; do
-            if try_scorecard "$((n+1))"; then rc=0; break; fi
-            n=$((n+1))
-            sleep $(( 5 * n ))
-          done
-          if [ $rc -ne 0 ]; then
-            ECHO "scorecard sarif generation failed, writing empty SARIF"
+          else
             echo '{"runs":[]}' > "$REPORT_DIR/scorecard.sarif"
           fi
-          ECHO "scorecard sarif ready -> $REPORT_DIR/scorecard.sarif"
+          # runs 비어있는지 검사하여 출력 플래그 설정
+          if command -v jq >/dev/null 2>&1; then
+            HAS_RUNS=$(jq -r '(.runs|length) > 0' "$REPORT_DIR/scorecard.sarif" 2>/dev/null || echo false)
+          else
+            HAS_RUNS=$(grep -q '"runs":\s*\[\s*\]' "$REPORT_DIR/scorecard.sarif" && echo false || echo true)
+          fi
+          echo "has_runs=${HAS_RUNS}" >> "$GITHUB_OUTPUT"
+          ECHO "scorecard sarif ready (has_runs=${HAS_RUNS}) -> $REPORT_DIR/scorecard.sarif"
 
-      - name: ⏫ Upload Scorecard SARIF
+      - name: ⏫ Upload Scorecard SARIF (skip when empty)
+        if: steps.scorecard_sarif.outputs.has_runs == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .github/security_reports/scorecard.sarif
@@ -606,24 +579,22 @@ jobs:
         run: |
           set -Eeuo pipefail; init_echo "dependabot-alerts"
           mkdir -p "$REPORT_DIR" "$PAGES_DIR"
-          gh api \
-            -H "Accept: application/vnd.github+json" \
+          # 일부 리포/권한에서 403 발생 가능 → 실패시 빈 배열
+          gh api -X GET -H "Accept: application/vnd.github+json" \
             "/repos/${GH_REPO}/dependabot/alerts?per_page=100&state=open" \
             > "$REPORT_DIR/dependabot-alerts.json" || echo '[]' > "$REPORT_DIR/dependabot-alerts.json"
 
           python3 - <<'PY'
           import json, csv, os
           rpt=os.environ.get("REPORT_DIR",".github/security_reports")
-          pages=os.environ.get("PAGES_DIR",".github/pages")
           data=json.load(open(os.path.join(rpt,"dependabot-alerts.json"),"r",encoding="utf-8"))
           with open(os.path.join(rpt,"dependabot-alerts.csv"),"w",newline="",encoding="utf-8") as f:
-              w=csv.writer(f)
-              w.writerow(["number","state","dependency","manifest","ecosystem","severity","cve_ids","ghsa_id","fixed_in","created_at","updated_at","url"])
+              w=csv.writer(f); w.writerow(["number","state","dependency","manifest","ecosystem","severity","cve_ids","ghsa_id","fixed_in","created_at","updated_at","url"])
               for a in data:
                   dep=a.get("dependency",{}) or {}
                   sec=a.get("security_advisory",{}) or {}
                   sev=(sec.get("severity") or a.get("severity") or "").upper()
-                  cves=";".join([id.get("value","") for id in (sec.get("identifiers") or []) if id.get("type")=="CVE"])
+                  cves=";".join([i.get("value","") for i in (sec.get("identifiers") or []) if i.get("type")=="CVE"])
                   fixed=";".join(a.get("fixed_in",[]) or [])
                   w.writerow([a.get("number"), a.get("state"),
                     dep.get("package",{}).get("name",""), dep.get("manifest_path",""),
@@ -661,7 +632,7 @@ jobs:
           HTML
           ECHO "dependabot alerts snapshot ready" | tee -a "$LOG" || true
 
-      # ---------- Anomaly & FDS (Aggressive Columns + CSV/HTML/Score) ----------
+      # ---------- Anomaly & FDS (regex 플래그 수정) ----------
       - name: 🧠 Anomaly/FDS + Aggressive Columns (CSV/HTML/Score) (echo)
         run: |
           set -Eeuo pipefail; init_echo "anomaly-fds-aggressive"
@@ -713,19 +684,20 @@ jobs:
                   w.writerow([p.get("name",""),p.get("versionInfo",""),p.get("supplier",""),p.get("downloadLocation",""),
                               p.get("licenseConcluded",""),p.get("licenseDeclared",""),p.get("originator",""),ex])
 
-          # FDS(패턴+엔트로피)
+          # FDS(패턴+엔트로피) — (?i) 제거, IGNORECASE 플래그 사용
           secret_patterns = [
-              r'(?i)api[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9_\-]{16,})',
-              r'(?i)secret[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9_\-]{16,})',
-              r'(?i)aws[_-]?access[_-]?key[_-]?id\s*[:=]\s*[\'"]?([A-Z0-9]{16,})',
-              r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9/+=]{32,})',
-              r'(?i)ghp_[A-Za-z0-9]{20,}',
-              r'(?i)glpat-[A-Za-z0-9\-]{20,}',
-              r'(?i)BEGIN RSA PRIVATE KEY',
-              r'(?i)BEGIN OPENSSH PRIVATE KEY',
-              r'(?i)xox[baprs]-[A-Za-z0-9-]{20,}',
+              r'api[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9_\-]{16,})',
+              r'secret[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9_\-]{16,})',
+              r'aws[_-]?access[_-]?key[_-]?id\s*[:=]\s*[\'"]?([A-Z0-9]{16,})',
+              r'aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*[\'"]?([A-Za-z0-9/+=]{32,})',
+              r'ghp_[A-Za-z0-9]{20,}',
+              r'glpat-[A-Za-z0-9\-]{20,}',
+              r'BEGIN RSA PRIVATE KEY',
+              r'BEGIN OPENSSH PRIVATE KEY',
+              r'xox[baprs]-[A-Za-z0-9-]{20,}',
           ]
-          secret_re = re.compile("|".join(secret_patterns))
+          secret_re = re.compile("|".join(secret_patterns), flags=re.IGNORECASE)
+
           fds_findings = []
           for root,_,files in os.walk(".", topdown=True):
               if root.startswith("./.git") or root.startswith("./.github/pages") or "/node_modules" in root: continue
@@ -736,10 +708,17 @@ jobs:
                       with open(p,"r",errors="ignore") as fh: txt = fh.read()
                       items = []
                       for m in secret_re.finditer(txt):
-                          s = m.group(0); ent = shannon_entropy(s)
+                          s = m.group(0); # 엔트로피는 전체 매치 문자열로 계산
+                          def shannon_entropy_local(s0):
+                              if not s0 or len(s0) < 20: return 0.0
+                              from collections import Counter
+                              c = Counter(s0); n = len(s0)
+                              return -sum((cnt/n)*math.log2(cnt/n) for cnt in c.values() if cnt>0)
+                          ent = shannon_entropy_local(s)
                           items.append({"indicator":"pattern","snippet":s[:80],"entropy":round(ent,2)})
-                      for m in re.finditer(r'[A-Za-z0-9/+_=.-]{24,}', txt):
-                          s = m.group(0); ent = shannon_entropy(s)
+                      for m in re.finditer(r'[A-Za-z0-9/+_=.\-]{24,}', txt):
+                          s = m.group(0)
+                          ent = shannon_entropy(s)
                           if ent >= 4.0:
                               items.append({"indicator":"entropy>=4.0","snippet":s[:80],"entropy":round(ent,2)})
                       if items: fds_findings.append({"file":p, "hits":items[:10]})
@@ -850,7 +829,7 @@ jobs:
             .github/pages/sbom.spdx.json
           retention-days: 14
 
-      # ⬇️ init_echo 의존 제거 (항상 성공)
+      # init_echo 의존 제거 요약 (항상 성공)
       - name: 🧾 Job summary (echo)
         if: always()
         continue-on-error: true
@@ -861,7 +840,7 @@ jobs:
             echo "- Home: index.html (Pages artifact)"
             echo "- Trivy: trivy-image.json → trivy.html"
             echo "- Scorecard(JSON): scorecard.json → scorecard.html"
-            echo "- Scorecard(SARIF): scorecard.sarif (uploaded)"
+            echo "- Scorecard(SARIF): scorecard.sarif (uploaded if non-empty)"
             echo "- Dependabot: dependabot-alerts.json/csv → dependabot.html"
             echo "- Anomaly/FDS: anomaly_report.json / fds_report.json → anomaly-adv.html"
             echo "- SBOM (SPDX): sbom.spdx.json"
