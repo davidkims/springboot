@@ -1,5 +1,5 @@
 #!/bin/bash
-# Update data for program directories.
+# Update data for program directories, creating them when missing.
 # Writes a timestamped file under data/ for each program updated.
 set -euo pipefail
 

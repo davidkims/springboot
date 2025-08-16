@@ -1,33 +1,268 @@
 ---
-name: Update Program Data
+# yamllint disable rule:line-length
+name: Update Program Data (Auto-discover)
 
 'on':
   workflow_dispatch:
     inputs:
       program:
-        description: "업데이트할 프로그램 이름 (all 입력 시 전체)"
+        description: "업데이트할 프로그램 이름 (all=전체, 부분문자열 매칭)"
         required: false
         default: "all"
+      commit_mode:
+        description: "commit-and-pr | commit-direct | none"
+        required: false
+        default: "commit-and-pr"
   schedule:
     - cron: '0 0 * * 0'  # 매주 일요일 00:00 UTC
-  pull_request:
+
+concurrency:
+  group: update-program-data
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    env:
+      LOG_DIR: .github/logs
+      BRANCH_PREFIX: chore/auto-update
+      DEFAULT_AUTHOR_NAME: repo-bot
+      DEFAULT_AUTHOR_EMAIL: repo-bot@users.noreply.github.com
     steps:
       - name: "📂 Checkout repository"
         uses: actions/checkout@v4
-      - name: "🔄 Update package list"
-        run: sudo apt-get update
-      - name: "📁 Create logs directory"
-        run: mkdir -p .github/logs
-      - name: "🔑 Make script executable"
-        run: chmod +x workflow/update_all_data.sh
-      - name: "🚀 Refresh data for programs"
-        env:
-          PROGRAM: ${{ github.event.inputs.program || 'all' }}
+        with:
+          fetch-depth: 0
+
+      - name: "📁 Prepare log & tools"
+        shell: bash
         run: |
-          set -euo pipefail
-          LOG=".github/logs/update_$(date +%F).log"
-          bash workflow/update_all_data.sh "$PROGRAM" | tee "$LOG"
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR"
+          echo "[ECHO] tools: jq, coreutils 설치"
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq jq coreutils make python3 python3-venv
+
+      - name: "🔧 Make common updaters executable"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 대표 스크립트가 있으면 실행권한 부여
+          [ -f workflow/update_all_data.sh ] && chmod +x workflow/update_all_data.sh || true
+          # 리포 전역의 update*.sh에 실행권한 부여(안전하게)
+          while IFS= read -r -d '' f; do
+            chmod +x "$f" || true
+          done < <(find . -type f -iname "update*.sh" -print0 2>/dev/null || true)
+
+      - name: "🔎 Discover update targets"
+        id: discover
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROGRAM_IN="${{ github.event.inputs.program || 'all' }}"
+          echo "program_in=$PROGRAM_IN" >> "$GITHUB_OUTPUT"
+
+          # 후보 수집 배열
+          mapfile -t CANDIDATES < <( \
+            { [ -f "workflow/update_all_data.sh" ] && echo "sh::workflow/update_all_data.sh"; } ; \
+            find . -type f -iname "update*.sh" -printf "sh::%p\n" 2>/dev/null || true ; \
+            jq -r 'select(.scripts and .scripts["update-data"]) | "npm::" + input_filename' \
+              $(git ls-files "**/package.json" 2>/dev/null || true) 2>/dev/null || true ; \
+            { for mk in $(git ls-files "**/Makefile" 2>/dev/null || true); do echo "make::$mk"; done } ; \
+            { for py in $(git ls-files "**/updater.py" 2>/dev/null || true); do echo "py::${py}"; done } \
+          )
+
+          # 중복 제거
+          UNIQUE=()
+          declare -A seen
+          for c in "${CANDIDATES[@]}"; do
+            [[ -z "${c:-}" ]] && continue
+            if [[ -z "${seen[$c]+x}" ]]; then
+              UNIQUE+=("$c")
+              seen[$c]=1
+            fi
+          done
+
+          # program 필터링
+          FILTERED=()
+          if [[ "${PROGRAM_IN}" == "all" || -z "${PROGRAM_IN}" ]]; then
+            FILTERED=("${UNIQUE[@]}")
+          else
+            for c in "${UNIQUE[@]}"; do
+              # 경로/파일명에 program 문자열이 포함되면 매칭
+              if [[ "${c,,}" == *"${PROGRAM_IN,,}"* ]]; then
+                FILTERED+=("$c")
+              fi
+            done
+          fi
+
+          # 요약 출력 및 아웃풋
+          echo "[ECHO] 발견된 후보 수: ${#UNIQUE[@]}"
+          printf '%s\n' "${UNIQUE[@]}" | sed 's/^/[ALL] /' || true
+          echo "[ECHO] 실행 대상 수: ${#FILTERED[@]}"
+          printf '%s\n' "${FILTERED[@]}" | sed 's/^/[RUN] /' || true
+
+          # JSON 목록 생성
+          {
+            printf '{ "targets": ['
+            sep=""
+            for x in "${FILTERED[@]}"; do
+              printf '%s"%s"' "$sep" "$x"
+              sep=","
+            done
+            printf '] }'
+          } | tee "$LOG_DIR/targets.json"
+
+          echo "count=${#FILTERED[@]}" >> "$GITHUB_OUTPUT"
+          echo "targets_json=$(tr -d '\n' < "$LOG_DIR/targets.json")" >> "$GITHUB_OUTPUT"
+
+      - name: "🚀 Run targets sequentially (with per-target logs)"
+        if: steps.discover.outputs.count != '0'
+        shell: bash
+        env:
+          PROGRAM_IN: ${{ github.event.inputs.program || 'all' }}
+        run: |
+          set -Eeuo pipefail
+          ts(){ date '+%F %T'; }
+          echo "## Update Program Data — Run Summary ($(ts))" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # targets.json 읽어서 실행
+          TARGETS=$(jq -r '.targets[]' "$LOG_DIR/targets.json")
+          FAIL=0
+
+          run_sh()   { local path="$1"; ( set -Eeuo pipefail; bash "$path" ); }
+          run_npm()  { local pkg="$1"; ( set -Eeuo pipefail; cd "$(dirname "$pkg")"; npm ci --no-audit --no-fund; npm run update-data ); }
+          run_make() { local mkf="$1"; ( set -Eeuo pipefail; cd "$(dirname "$mkf")"; make update-data ); }
+          run_py()   { local pyf="$1"; ( set -Eeuo pipefail; cd "$(dirname "$pyf")"; python3 "$(basename "$pyf")" ); }
+
+          idx=0
+          while IFS= read -r target; do
+            [[ -z "$target" ]] && continue
+            idx=$((idx+1))
+            kind="${target%%::*}"
+            path="${target#*::}"
+            safe="$(echo "$path" | tr '/ .' '__')"
+            log="$LOG_DIR/run_${idx}_${kind}_${safe}.log"
+
+            echo "[ECHO] ($idx) kind=$kind path=$path → 로그: $log"
+            {
+              echo "[RUN] kind=$kind path=$path @ $(ts)"
+              case "$kind" in
+                sh)   run_sh "$path" ;;
+                npm)  run_npm "$path" ;;
+                make) run_make "$path" ;;
+                py)   run_py "$path" ;;
+                *)    echo "[WARN] Unknown kind: $kind (skip)";;
+              esac
+              echo "[OK ] $path @ $(ts)"
+            } > >(tee "$log") 2>&1 || {
+              echo "[ERR] $path 실패 @ $(ts)" | tee -a "$log"
+              FAIL=$((FAIL+1))
+            }
+
+            echo "- \`$kind\` → \`$path\` → [log](./$log)" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$TARGETS"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$FAIL" -gt 0 ]]; then
+            echo "**실패 수:** $FAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            echo "**모든 대상 성공**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "🧹 Normalize line endings (optional)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config core.autocrlf input || true
+
+      - name: "🔐 Configure git author"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name  "${{ env.DEFAULT_AUTHOR_NAME }}"
+          git config user.email "${{ env.DEFAULT_AUTHOR_EMAIL }}"
+
+      - name: "📦 Detect changes"
+        id: changes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! git diff --quiet; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git status --porcelain | tee "$LOG_DIR/git_status.txt"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "[ECHO] 변경사항 없음"
+          fi
+
+      - name: "💾 Commit changes"
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+          git add -A
+          git commit -m "chore(data): auto update ($stamp)"
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+
+      - name: "⤴️ Push (direct) when commit_mode=commit-direct"
+        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_mode == 'commit-direct'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: "🌿 Create branch & Push for PR"
+        if: steps.changes.outputs.changed == 'true' && (github.event.inputs.commit_mode == '' || github.event.inputs.commit_mode == 'commit-and-pr')
+        id: prbranch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+          BR="${BRANCH_PREFIX}/${stamp}"
+          git branch "$BR"
+          git push -u origin "$BR"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+      - name: "🔁 Open pull request"
+        if: steps.prbranch.outputs.branch && (github.event.inputs.commit_mode == '' || github.event.inputs.commit_mode == 'commit-and-pr')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = core.getInput('branch', { required: true });
+            const { repo, owner } = context.repo;
+            const title = `chore(data): auto update (${new Date().toISOString()})`;
+            const body  = [
+              '자동 데이터 업데이트 결과입니다.',
+              '',
+              '- 워크플로우: Update Program Data (Auto-discover)',
+              `- 브랜치: ${branch}`,
+              '',
+              '변경 내역과 실행 로그는 `.github/logs/` 디렉토리를 참조하세요.'
+            ].join('\n');
+            try {
+              const res = await github.rest.pulls.create({
+                owner, repo,
+                title, head: branch, base: context.ref.replace('refs/heads/',''),
+                body
+              });
+              core.notice(`PR created: ${res.data.html_url}`);
+            } catch (e) {
+              core.warning(`PR create failed: ${e.message}`);
+            }
+          branch: ${{ steps.prbranch.outputs.branch }}
+
+      - name: "📎 Upload logs (artifact)"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-logs-${{ github.run_id }}
+          path: .github/logs
+          if-no-files-found: warn
