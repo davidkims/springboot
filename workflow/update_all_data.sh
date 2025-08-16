@@ -12,7 +12,7 @@ DEFAULT_PROGRAMS=(
 )
 
 # Determine programs to update
-if [ "$#" -gt 0 ] && [ "$1" != "all" ]; then
+if [ "$#" -gt 0 ] && [ -n "$1" ] && [ "$1" != "all" ]; then
   PROGRAMS=("$@")
 else
   PROGRAMS=("${DEFAULT_PROGRAMS[@]}")
