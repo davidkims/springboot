@@ -8,6 +8,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from precheck import run_prechecks
+
 # Paths for generated resources
 BASE_DIR = Path(__file__).resolve().parent
 GENERATED_DIR = BASE_DIR / "generated"
@@ -46,6 +48,10 @@ def generate_queries(count: int) -> list[str]:
 def refresh_every_five_minutes() -> None:
     """Run the workflow repeatedly every five minutes."""
     while True:
+        if not run_prechecks():
+            print("[refresh] Pre-check failed, 5분 후 재시도")
+            time.sleep(300)
+            continue
         with sqlite3.connect(DB_PATH) as conn:
             create_disks(10)
             create_tables(conn, 10)
