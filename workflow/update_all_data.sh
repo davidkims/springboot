@@ -1,26 +1,31 @@
 #!/bin/bash
-# Update data for all known programs in this repository.
-# This script writes a timestamped file under the data/ directory for
-# each program to indicate when it was refreshed.
+# Update data for program directories, creating them when missing.
+# Writes a timestamped file under data/ for each program updated.
 set -euo pipefail
 
-# List of program directories to update
-PROGRAMS=(
+# Default program directories
+DEFAULT_PROGRAMS=(
   "bulk"
   "finance_app"
   "rust-example"
   "src"
 )
 
-DATA_DIR="$(cd "$(dirname "$0")/.." && pwd)/data"
-mkdir -p "$DATA_DIR"
+# Determine programs to update
+if [ "$#" -gt 0 ] && [ -n "${1:-}" ] && [ "$1" != "all" ]; then
+  PROGRAMS=("$@")
+else
+  PROGRAMS=("${DEFAULT_PROGRAMS[@]}")
+fi
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DATA_DIR="$ROOT_DIR/data"
+LOG_DIR="$ROOT_DIR/.github/logs"
+mkdir -p "$DATA_DIR" "$LOG_DIR"
 
 for prog in "${PROGRAMS[@]}"; do
-  if [ -d "$prog" ]; then
-    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "$timestamp" > "$DATA_DIR/${prog}_last_updated.txt"
-    echo "[update] $prog -> $timestamp"
-  else
-    echo "[skip] $prog (directory not found)"
-  fi
+  mkdir -p "$ROOT_DIR/$prog"
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  echo "$timestamp" > "$DATA_DIR/${prog}_last_updated.txt"
+  echo "[update] $prog -> $timestamp" | tee -a "$LOG_DIR/update_all_data.log"
 done
