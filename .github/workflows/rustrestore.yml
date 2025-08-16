@@ -1,424 +1,298 @@
-name: "🦀 Rust CI — no-skip (Linux-first detect), POSIX-safe, echo logs, self-heal, artifacts, releases, deps-PR, audit/deny, MSRV"
+name: "🛡️ AutorunGuard (PowerShell) — build • test • artifact"
 
 on:
-  push:
-    branches: [ main ]
-    tags:
-      - "v*"
-  pull_request:
-    branches: [ main ]
-  schedule:
-    - cron: "0 3 * * 1"   # 매주 월요일 03:00 UTC: deps PR & 보안 점검
   workflow_dispatch:
     inputs:
-      make_release:
-        description: "지금 릴리스 생성 (true/false)"
-        required: false
-        default: "false"
-      tag_name:
-        description: "릴리스 태그명(예: v1.2.3)"
-        required: false
-        default: ""
-      msrv_list:
-        description: "MSRV 목록(공백 구분, 예: '1.70.0 1.74.0')"
-        required: false
-        default: "1.70.0"
+      run_mode:
+        description: "실행 모드: test(Once만) | install(설치 시뮬레이션+Once)"
+        required: true
+        default: "test"
+        type: choice
+        options: ["test", "install"]
+  # 필요 시 주기 실행(Windows 러너 필요) — 주석 해제
+  # schedule:
+  #   - cron: "0 0 * * 1"  # 매주 월요일 00:00 UTC
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
-  group: rustci-${{ github.ref }}
-  cancel-in-progress: true
+  group: autorunguard-${{ github.ref }}
+  cancel-in-progress: false
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
-  CARGO_INCREMENTAL: "0"
-
-# ──────────────────────── 1) Detect (Ubuntu 단일 실행) ────────────────────────
 jobs:
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      list:  ${{ steps.detect.outputs.list }}
-      count: ${{ steps.detect.outputs.count }}
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
 
-      - name: Prepare echo/log/artifacts dirs
-        shell: bash
+      - name: 🧩 Generate AutorunGuard.ps1 (EchoOps)
+        shell: pwsh
         run: |
-          set -euo pipefail
-          for d in .github/rust_logs .github/security_logs artifacts; do
-            echo "[ECHO] mkdir -p $d"; mkdir -p "$d"
-            echo "[ECHO] chmod 755 $d"; chmod 755 "$d" || true
-          done
-          echo "[ECHO] seed log" | tee .github/rust_logs/seed.log
-          echo "placeholder" > artifacts/.keep
+          $dstRepo = Join-Path $PWD 'scripts\AutorunGuard.ps1'
+          $dstTools = 'C:\Tools\AutorunGuard.ps1'
+          New-Item -Force -ItemType Directory -Path (Split-Path $dstRepo) | Out-Null
+          New-Item -Force -ItemType Directory -Path (Split-Path $dstTools) | Out-Null
 
-      - name: Install Rust (stable + clippy/rustfmt)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy,rustfmt
+          @'
+          <# 
+          .SYNOPSIS
+            USB/CD autorun.inf 악성 실행 차단/격리 + 재생성 방지(폴더락) + 정책 비활성화.
+          #>
 
-      - name: Detect crates (self-heal if none) — POSIX-safe
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ECHO] Cargo.toml scan start" | tee -a .github/rust_logs/summary_detect.log
+          [CmdletBinding()]
+          param(
+            [switch]$Install,
+            [switch]$Uninstall,
+            [switch]$Once
+          )
 
-          FOUND_FILE=".found_cargo_toml.txt"
-          : > "$FOUND_FILE"
-          find . -type f -name Cargo.toml \
-            -not -path "*/target/*" -not -path "*/node_modules/*" \
-            | sort > "$FOUND_FILE" || true
+          $ErrorActionPreference = 'Stop'
+          $LogDir  = Join-Path $env:ProgramData 'AutorunGuard'
+          $LogFile = Join-Path $LogDir 'guard.log'
+          $TaskName = 'AutorunGuard'
+          $SelfPath = $MyInvocation.MyCommand.Path
 
-          if [ ! -s "$FOUND_FILE" ]; then
-            echo "[WARN] No Cargo.toml → create sample crate 'rust-example'" | tee -a .github/rust_logs/summary_detect.log
-            rm -rf rust-example || true
-            cargo new --bin rust-example
-            mkdir -p rust-example/src
-            printf 'fn main() {\n    println!("hello from rust-example");\n}\n' > rust-example/src/main.rs
-            printf '%s\n' "./rust-example/Cargo.toml" > "$FOUND_FILE"
-          fi
-
-          : > .wslist.txt
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            dirname "$f"
-          done < "$FOUND_FILE" | sort -u > .wslist.txt
-
-          echo "count=$(wc -l < .wslist.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
-          {
-            echo 'list<<__WS__'
-            cat .wslist.txt
-            echo '__WS__'
-          } >> "$GITHUB_OUTPUT"
-
-          echo "[ECHO] detected crates:" | tee -a .github/rust_logs/summary_detect.log
-          awk '{printf("%4d  %s\n", NR, $0)}' .wslist.txt | tee -a .github/rust_logs/summary_detect.log
-
-      - name: Ensure lockfiles & metadata (per crate)
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            echo "[ECHO] lockfile/metadata: $dir" | tee -a .github/rust_logs/summary_detect.log
-            cd "$dir"
-            cargo generate-lockfile || true
-            cargo metadata --format-version 1 --no-deps >/dev/null
-            cd - >/dev/null
-          done < .wslist.txt
-
-      - name: Upload wslist + detect logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: wslist-and-detect-logs-${{ github.run_id }}
-          path: |
-            .wslist.txt
-            .github/rust_logs/
-            artifacts
-          if-no-files-found: error
-
-# ──────────────────────── 2) Build & Test (매트릭스: Linux/Mac/Windows) ────────────────────────
-  build-and-test:
-    needs: detect
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14, windows-2022]   # 고정 라벨(경고 제거)
-        toolchain: [stable]                           # 필요 시 beta/nightly 추가
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download wslist from detect
-        uses: actions/download-artifact@v4
-        with:
-          name: wslist-and-detect-logs-${{ github.run_id }}
-          path: .ci_in
-      - name: Put wslist in workspace root
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp .ci_in/.wslist.txt .wslist.txt
-          mkdir -p .github/rust_logs artifacts
-          # placeholder 보장
-          [ -e artifacts/.keep ] || echo "placeholder" > artifacts/.keep
-
-      - name: Install Rust (${{ matrix.toolchain }} + clippy/rustfmt)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
-          components: clippy,rustfmt
-
-      - name: Show tool versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustc -Vv  2>&1 | tee -a .github/rust_logs/versions_${{ matrix.os }}_${{ matrix.toolchain }}.log
-          cargo -V   2>&1 | tee -a .github/rust_logs/versions_${{ matrix.os }}_${{ matrix.toolchain }}.log
-
-      - name: Full pipeline (fmt, clippy, test, build, doc) for all crates
-        shell: bash
-        run: |
-          set -euo pipefail
-          FAIL=0
-          run_step () {
-            dir="$1"; shift
-            name="$1"; shift
-            echo "[RUN] $name @ $dir"
-            if (cd "$dir" && "$@"); then
-              echo "[OK]  $name @ $dir"
-            else
-              echo "[ERR] $name @ $dir" >&2
-              FAIL=1
-            fi
+          function Write-Log {
+            param([string]$Msg)
+            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+            $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $line = "[${stamp}] $Msg"
+            $line | Tee-Object -FilePath $LogFile -Append
           }
 
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            safe="$(echo "$dir" | tr '/.' '_')"
-            echo "==================== CRATE: $dir ====================" \
-              | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
+          function Disable-AutorunPolicy {
+            Write-Log "Applying OS policy to disable AutoRun/AutoPlay"
+            $paths = @(
+              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
+              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+            )
+            foreach ($p in $paths) {
+              New-Item -Path $p -Force | Out-Null
+              New-ItemProperty -Path $p -Name 'NoDriveTypeAutoRun' -Value 255 -PropertyType DWord -Force | Out-Null
+              New-ItemProperty -Path $p -Name 'NoAutorun'           -Value 1   -PropertyType DWord -Force | Out-Null
+              New-ItemProperty -Path $p -Name 'HonorAutorunSetting' -Value 1   -PropertyType DWord -Force | Out-Null
+            }
+            Write-Log "Policy applied"
+          }
 
-            run_step "$dir" "fmt"    bash -lc "cargo fmt --all --check" \
-              2>&1 | tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_fmt.log"
-            run_step "$dir" "clippy" bash -lc "cargo clippy --all-targets --all-features -- -D warnings" \
-              2>&1 | tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_clippy.log"
-            run_step "$dir" "test"   bash -lc "cargo test --all-features --verbose" \
-              2>&1 | tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_test.log"
-            run_step "$dir" "build"  bash -lc "cargo build --release --verbose" \
-              2>&1 | tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_build.log"
-            run_step "$dir" "doc"    bash -lc "cargo doc --no-deps" \
-              2>&1 | tee ".github/rust_logs/${safe}_${{ matrix.os }}_${{ matrix.toolchain }}_doc.log"
+          function Enable-AutorunPolicyDefault {
+            Write-Log "Restoring AutoRun policy to Windows defaults (partial)"
+            $paths = @(
+              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
+              'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+            )
+            foreach ($p in $paths) {
+              if (Test-Path $p) {
+                Remove-ItemProperty -Path $p -Name 'NoAutorun' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $p -Name 'HonorAutorunSetting' -ErrorAction SilentlyContinue
+                # Remove-ItemProperty -Path $p -Name 'NoDriveTypeAutoRun' -ErrorAction SilentlyContinue
+              }
+            }
+            Write-Log "Policy restored"
+          }
 
-            # ── 아티팩트 수집 (OS별 안전 처리) ──
-            if [ -d "$dir/target/release" ]; then
-              echo "[ECHO] collect artifacts from $dir/target/release" \
-                | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
+          function Get-RemovableVolumes {
+            Get-Volume | Where-Object { $_.DriveLetter -and ($_.DriveType -in 'Removable','CD-ROM') }
+          }
 
-              case "${{ matrix.os }}" in
-                ubuntu-latest|macos-14)
-                  find "$dir/target/release" -maxdepth 1 -type f 2>/dev/null \
-                    | while IFS= read -r f; do
-                        [ -f "$f" ] && [ -x "$f" ] && cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
-                      done
-                  ;;
-                windows-2022)
-                  find "$dir/target/release" -maxdepth 1 -type f -name '*.exe' 2>/dev/null \
-                    | while IFS= read -r f; do
-                        cp "$f" "artifacts/$(basename "$f")_${{ matrix.os }}_${{ matrix.toolchain }}" || true
-                      done
-                  ;;
-              esac
+          function Parse-AutorunTargets {
+            param([string]$AutorunPath)
+            $targets = @()
+            if (-not (Test-Path $AutorunPath)) { return $targets }
+            $text = Get-Content -LiteralPath $AutorunPath -Raw -ErrorAction SilentlyContinue
+            if (-not $text) { return $targets }
+            $regexes = @(
+              '^\s*open\s*=\s*(.+)$',
+              '^\s*shellexecute\s*=\s*(.+)$',
+              '^\s*shell\\open\\command\s*=\s*(.+)$'
+            )
+            foreach ($rx in $regexes) {
+              [regex]::Matches($text, $rx, 'IgnoreCase, Multiline') | ForEach-Object {
+                $cmd = ($_.Groups[1].Value).Trim('"'' ').Split()[0]
+                if ($cmd) { $targets += $cmd }
+              }
+            }
+            $targets | Select-Object -Unique
+          }
 
-              # 아무것도 복사 못했으면 전체를 tar.gz로 보장
-              if ! ls artifacts 2>/dev/null | grep -q "${{ matrix.os }}_${{ matrix.toolchain }}"; then
-                tgz="artifacts/$(echo "$safe" | sed 's/^_//')_${{ matrix.os }}_${{ matrix.toolchain }}_release.tgz"
-                (cd "$dir/target/release" && tar -czf "../../$tgz" .) || true
-              fi
-            fi
-          done < .wslist.txt
+          function Quarantine-Item {
+            param([string]$PathToQuarantine, [string]$Root)
+            try {
+              if (-not (Test-Path $PathToQuarantine)) { return }
+              $qdir = Join-Path $LogDir "quarantine\$((Get-Date).ToString('yyyyMMdd_HHmmss'))"
+              New-Item -ItemType Directory -Path $qdir -Force | Out-Null
+              $dest = Join-Path $qdir ((Resolve-Path $PathToQuarantine).ProviderPath -replace "[:\\\/]", '_')
+              Move-Item -LiteralPath $PathToQuarantine -Destination $dest -Force
+              Write-Log "Quarantined: $PathToQuarantine -> $dest"
+            } catch {
+              Write-Log "Quarantine failed: $PathToQuarantine ($($_.Exception.Message))"
+            }
+          }
 
-          echo "FAIL=$FAIL" | tee -a ".github/rust_logs/summary_${{ matrix.os }}_${{ matrix.toolchain }}.log"
-          exit $FAIL
+          function Protect-Drive {
+            param([string]$DriveRoot)
+            $root = $DriveRoot
+            if (-not (Test-Path $root)) { return }
 
-      - name: Ensure artifacts dir for upload (exists & non-empty)
-        if: always()
-        shell: bash
+            $autorunPath = Join-Path $root 'autorun.inf'
+            if (Test-Path $autorunPath -PathType Leaf) {
+              Write-Log "Found autorun.inf (file) on $root"
+              $targets = Parse-AutorunTargets -AutorunPath $autorunPath
+              if ($targets.Count -gt 0) {
+                foreach ($t in $targets) {
+                  $candidate = if ([System.IO.Path]::IsPathRooted($t)) { $t } else { Join-Path $root $t }
+                  if (Test-Path $candidate) { Quarantine-Item -PathToQuarantine $candidate -Root $root }
+                }
+              }
+              Quarantine-Item -PathToQuarantine $autorunPath -Root $root
+            }
+
+            try {
+              $testFile = Join-Path $root ".writetest_$([Guid]::NewGuid().ToString('N')).tmp"
+              New-Item -Path $testFile -ItemType File -Force -ErrorAction Stop | Out-Null
+              Remove-Item -LiteralPath $testFile -Force -ErrorAction SilentlyContinue
+
+              if (-not (Test-Path $autorunPath)) {
+                New-Item -ItemType Directory -Path $autorunPath -Force | Out-Null
+                attrib +h +s $autorunPath 2>$null
+                Write-Log "Created lock directory: $autorunPath"
+              } elseif ((Get-Item $autorunPath).PSIsContainer -eq $true) {
+                attrib +h +s $autorunPath 2>$null
+                Write-Log "Lock directory already in place: $autorunPath"
+              }
+            } catch {
+              Write-Log "Drive seems read-only or not writable: $root"
+            }
+          }
+
+          function Initial-Sweep {
+            $vols = Get-RemovableVolumes
+            if (-not $vols) { Write-Log "No removable/CD volumes detected."; return }
+            foreach ($v in $vols) {
+              $root = "$($v.DriveLetter):\"
+              Write-Log "Scanning: $root"
+              Protect-Drive -DriveRoot $root
+            }
+          }
+
+          function Install-Task {
+            Write-Log "Registering scheduled task: AutorunGuard"
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$SelfPath`""
+            $trigger = New-ScheduledTaskTrigger -AtLogOn
+            Register-ScheduledTask -TaskName 'AutorunGuard' -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
+            Write-Log "Scheduled task installed."
+          }
+
+          function Uninstall-Task {
+            if (Get-ScheduledTask -TaskName 'AutorunGuard' -ErrorAction SilentlyContinue) {
+              Unregister-ScheduledTask -TaskName 'AutorunGuard' -Confirm:$false
+              Write-Log "Scheduled task removed: AutorunGuard"
+            }
+          }
+
+          function Start-EventLoop {
+            $query = "SELECT * FROM Win32_VolumeChangeEvent WHERE EventType = 2"
+            Register-WmiEvent -Query $query -SourceIdentifier 'AutorunGuard' | Out-Null
+            Write-Log "Event watcher started (device arrival)."
+            while ($true) {
+              $e = Wait-Event -SourceIdentifier 'AutorunGuard'
+              try {
+                $drive = $e.SourceEventArgs.NewEvent.DriveName
+                if ($drive -and (Test-Path $drive)) {
+                  Write-Log "Volume arrival: $drive"
+                  Protect-Drive -DriveRoot $drive
+                } else {
+                  Initial-Sweep
+                }
+              } catch {
+                Write-Log "Event handling error: $($_.Exception.Message)"
+              } finally {
+                Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          try {
+            # 엔트리 포인트
+            if ($Install) {
+              Disable-AutorunPolicy
+              Install-Task
+              Initial-Sweep
+              Write-Log "Install completed."
+              exit 0
+            }
+            if ($Uninstall) {
+              Uninstall-Task
+              Enable-AutorunPolicyDefault
+              Write-Log "Uninstall completed."
+              exit 0
+            }
+            if ($Once) {
+              Initial-Sweep
+              exit 0
+            }
+            Initial-Sweep
+            Start-EventLoop
+          }
+          catch {
+            Write-Log "Fatal error: $($_.Exception.Message)"
+            throw
+          }
+          '@ | Set-Content -Encoding UTF8 -Path $dstRepo
+
+          Copy-Item -Force $dstRepo $dstTools
+          Write-Host "[ECHO] Script generated at:"
+          Write-Host " - Repo:  $dstRepo"
+          Write-Host " - Tools: $dstTools"
+
+      - name: 🧪 Syntax check (PowerShell)
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          [ -e artifacts/.keep ] || echo "placeholder" > artifacts/.keep
+          $script = Join-Path $PWD 'scripts\AutorunGuard.ps1'
+          pwsh -NoProfile -Command "Get-Command -Name $script | Out-Null; Write-Host '[OK] parsed'"
 
-      - name: Upload logs (per OS/toolchain)
-        if: always()
+      - name: ▶️ Test run (-Once)
+        shell: pwsh
+        run: |
+          $script = Join-Path $PWD 'scripts\AutorunGuard.ps1'
+          if ("${{ github.event.inputs.run_mode }}" -eq "install") {
+            # 호스트 러너는 일회성 VM이라 스케줄 등록만 시도 후 즉시 Once
+            powershell -NoProfile -ExecutionPolicy Bypass -File $script -Install
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File $script -Once
+          Get-Content "C:\ProgramData\AutorunGuard\guard.log" -ErrorAction SilentlyContinue | Select-Object -Last 200
+
+      - name: 📦 Package & upload artifact (zip)
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD 'autorunguard-package'
+          New-Item -Force -ItemType Directory -Path $out | Out-Null
+          Copy-Item -Force "scripts\AutorunGuard.ps1" $out
+          Set-Content -Encoding UTF8 -Path (Join-Path $out 'README.txt') -Value @"
+          AutorunGuard 배포 패키지
+
+          설치(관리자 PowerShell):
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            .\AutorunGuard.ps1 -Install
+
+          1회 점검:
+            .\AutorunGuard.ps1 -Once
+
+          제거:
+            .\AutorunGuard.ps1 -Uninstall
+          "@
+          Compress-Archive -Path "$out\*" -DestinationPath "$PWD\autorunguard.zip" -Force
+        # v4 업로드 사용 (v3 deprecated)
+      - name: ⬆️ Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
-          path: .github/rust_logs/
-          if-no-files-found: error
-
-      - name: Upload binaries (per OS/toolchain)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ matrix.os }}-${{ matrix.toolchain }}-${{ github.run_id }}
-          path: artifacts
-          if-no-files-found: error
-
-# ──────────────────────── 3) Security: cargo-audit/deny (Ubuntu 단일) ────────────────────────
-  security:
-    needs: detect
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: wslist-and-detect-logs-${{ github.run_id }}
-          path: .ci_in
-      - run: cp .ci_in/.wslist.txt .wslist.txt
-        shell: bash
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - name: Install cargo-audit & cargo-deny
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cargo-audit --locked
-          cargo install cargo-deny  --locked
-      - name: Run audits (all crates)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .github/security_logs
-          FAIL=0
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            echo "[AUDIT] $dir"
-            (cd "$dir" && cargo audit --json || cargo audit) 2>&1 | tee ".github/security_logs/$(echo "$dir" | tr '/.' '_')_audit.log" || FAIL=1
-            if [ -f "$dir/deny/deny.toml" ]; then
-              (cd "$dir" && cargo deny check --config deny/deny.toml) 2>&1 | tee ".github/security_logs/$(echo "$dir" | tr '/.' '_')_deny.log" || FAIL=1
-            else
-              echo "[WARN] $dir: deny/deny.toml not found, skipping cargo-deny" | tee -a ".github/security_logs/deny_missing.log"
-            fi
-          done < .wslist.txt
-          exit $FAIL
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: security-logs-${{ github.run_id }}
-          path: .github/security_logs/
-          if-no-files-found: error
-
-# ──────────────────────── 4) MSRV Matrix (Ubuntu 단일) ────────────────────────
-  msrv:
-    needs: detect
-    runs-on: ubuntu-latest
-    env:
-      MSRV_LIST: ${{ inputs.msrv_list || '1.70.0' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: wslist-and-detect-logs-${{ github.run_id }}
-          path: .ci_in
-      - run: cp .ci_in/.wslist.txt .wslist.txt
-        shell: bash
-      - name: Expand MSRV list
-        id: msrv
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf '%s\n' $MSRV_LIST > .msrv.list
-          echo "list<<__MSRV__" >> "$GITHUB_OUTPUT"
-          cat .msrv.list >> "$GITHUB_OUTPUT"
-          echo "__MSRV__" >> "$GITHUB_OUTPUT"
-          cat .msrv.list
-      - name: Run MSRV checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r v; do
-            [ -n "$v" ] || continue
-            echo "[MSRV] install $v"
-            rustup toolchain install "$v" --profile minimal
-            while IFS= read -r dir; do
-              [ -n "$dir" ] || continue
-              echo "[MSRV] $dir with $v"
-              (cd "$dir" && cargo +"$v" check -q) || exit 1
-            done < .wslist.txt
-          done <<EOF
-          ${{ steps.msrv.outputs.list }}
-          EOF
-
-# ──────────────────────── 5) Deps Update PR (스케줄/수동) ────────────────────────
-  deps-pr:
-    needs: detect
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: wslist-and-detect-logs-${{ github.run_id }}
-          path: .ci_in
-      - run: cp .ci_in/.wslist.txt .wslist.txt
-        shell: bash
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-      - name: cargo update (all crates)
-        id: update
-        shell: bash
-        run: |
-          set -euo pipefail
-          UPDATED=0
-          while IFS= read -r dir; do
-            [ -n "$dir" ] || continue
-            echo "[UPDATE] $dir"
-            (cd "$dir" && cargo update || true)
-            UPDATED=1
-          done < .wslist.txt
-          echo "UPDATED=$UPDATED" >> $GITHUB_ENV
-      - name: Create PR
-        if: env.UPDATED == '1'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          commit-message: "chore(deps): cargo update"
-          branch: deps/cargo-update/${{ github.run_id }}
-          title: "chore(deps): cargo update"
-          body: "Automated dependency update via CI"
-          labels: deps, automated
-
-# ──────────────────────── 6) Release (태그/수동) ────────────────────────
-  release:
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    if: |
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.make_release == 'true' && inputs.tag_name != '')
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create tag (when dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ inputs.tag_name }}"
-          if [ -z "$TAG" ]; then
-            echo "No tag_name input; skip tagging."
-            exit 0
-          fi
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists."
-          else
-            git config user.name  "ci-bot"
-            git config user.email "ci@example.local"
-            git tag -a "$TAG" -m "Release $TAG"
-            git push origin "$TAG"
-          fi
-
-      - name: Download all binaries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: binaries-*
-          path: release_assets
-          merge-multiple: true
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name || inputs.tag_name }}
-          files: release_assets/**
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: autorunguard
+          path: |
+            autorunguard.zip
+            scripts/AutorunGuard.ps1
+            C:/ProgramData/AutorunGuard/guard.log
+          if-no-files-found: warn
