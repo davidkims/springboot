@@ -37,12 +37,29 @@ concurrency:
 jobs:
   build-2025:
     name: "Build · Dual-Sign · Test (Windows 2025)"
-    # windows-2025 가 없으면 windows-latest 로 변경하세요.
+    # windows-2025 이미지가 없으면 'windows-latest'로 변경하세요.
     runs-on: windows-2025
     timeout-minutes: 30
 
     outputs:
       computed_version: ${{ steps.meta.outputs.version }}
+
+    # ✅ secrets → env 로 매핑 (if 조건은 env.*로 판정)
+    env:
+      AZURE_CLIENT_ID:        ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID:        ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID:  ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_KEYVAULT_NAME:    ${{ secrets.AZURE_KEYVAULT_NAME }}
+      AZURE_CERT_NAME:        ${{ secrets.AZURE_CERT_NAME }}
+      AZURE_CERT_PASSWORD:    ${{ secrets.AZURE_CERT_PASSWORD }}
+
+      AWS_REGION:             ${{ secrets.AWS_REGION }}
+      AWS_ROLE_TO_ASSUME:     ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_PFX_SECRET_ID:      ${{ secrets.AWS_PFX_SECRET_ID }}
+      AWS_PFX_PASSWORD:       ${{ secrets.AWS_PFX_PASSWORD }}
+
+      BASE64_PFX:             ${{ secrets.BASE64_PFX }}
+      PFX_PASSWORD:           ${{ secrets.PFX_PASSWORD }}
 
     steps:
       - name: 📂 Checkout
@@ -78,62 +95,63 @@ jobs:
           Write-Host "[OK] PowerShell parsed"
 
       # ---------- CERT SELECTION (Azure KV → AWS SM → GitHub Secrets → Self-signed) ----------
+
       - name: 🔑 Azure login (OIDC)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && secrets.AZURE_KEYVAULT_NAME != '' && secrets.AZURE_CERT_NAME != '' }}
+        if: ${{ env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' && env.AZURE_KEYVAULT_NAME != '' && env.AZURE_CERT_NAME != '' }}
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id:     ${{ env.AZURE_CLIENT_ID }}
+          tenant-id:     ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
       - name: ⬇️ Fetch cert from Azure Key Vault
-        if: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && secrets.AZURE_KEYVAULT_NAME != '' && secrets.AZURE_CERT_NAME != '' }}
+        if: ${{ env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' && env.AZURE_KEYVAULT_NAME != '' && env.AZURE_CERT_NAME != '' }}
         shell: pwsh
         run: |
-          $kv = "${{ secrets.AZURE_KEYVAULT_NAME }}"
-          $certName = "${{ secrets.AZURE_CERT_NAME }}"
+          $kv = "${{ env.AZURE_KEYVAULT_NAME }}"
+          $certName = "${{ env.AZURE_CERT_NAME }}"
           $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
           New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
           $json = az keyvault secret show --vault-name $kv --name $certName | ConvertFrom-Json
           [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String($json.value))
-          if ("${{ secrets.AZURE_CERT_PASSWORD }}") {
-            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ secrets.AZURE_CERT_PASSWORD }}'
+          if ("${{ env.AZURE_CERT_PASSWORD }}") {
+            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ env.AZURE_CERT_PASSWORD }}'
           }
 
       - name: 🔐 AWS configure (OIDC)
-        if: ${{ !(secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && secrets.AZURE_KEYVAULT_NAME != '' && secrets.AZURE_CERT_NAME != '') && secrets.AWS_REGION != '' && secrets.AWS_ROLE_TO_ASSUME != '' && secrets.AWS_PFX_SECRET_ID != '' }}
+        if: ${{ !(env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' && env.AZURE_KEYVAULT_NAME != '' && env.AZURE_CERT_NAME != '') && env.AWS_REGION != '' && env.AWS_ROLE_TO_ASSUME != '' && env.AWS_PFX_SECRET_ID != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region:        ${{ env.AWS_REGION }}
+          role-to-assume:    ${{ env.AWS_ROLE_TO_ASSUME }}
           role-session-name: autorunguard-ci
 
       - name: ⬇️ Fetch cert from AWS Secrets Manager
-        if: ${{ !(secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && secrets.AZURE_KEYVAULT_NAME != '' && secrets.AZURE_CERT_NAME != '') && secrets.AWS_REGION != '' && secrets.AWS_ROLE_TO_ASSUME != '' && secrets.AWS_PFX_SECRET_ID != '' }}
+        if: ${{ !(env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' && env.AZURE_KEYVAULT_NAME != '' && env.AZURE_CERT_NAME != '') && env.AWS_REGION != '' && env.AWS_ROLE_TO_ASSUME != '' && env.AWS_PFX_SECRET_ID != '' }}
         shell: pwsh
         run: |
           $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
           New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
-          $val = aws secretsmanager get-secret-value --secret-id "${{ secrets.AWS_PFX_SECRET_ID }}" | ConvertFrom-Json
+          $val = aws secretsmanager get-secret-value --secret-id "${{ env.AWS_PFX_SECRET_ID }}" | ConvertFrom-Json
           $b64 = if ($val.SecretBinary) { $val.SecretBinary } else { ($val.SecretString | ConvertFrom-Json).pfx }
           [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String($b64))
-          if ("${{ secrets.AWS_PFX_PASSWORD }}") {
-            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ secrets.AWS_PFX_PASSWORD }}'
+          if ("${{ env.AWS_PFX_PASSWORD }}") {
+            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ env.AWS_PFX_PASSWORD }}'
           }
 
       - name: ⬇️ Load cert from GitHub Secrets
-        if: ${{ !( (secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && secrets.AZURE_KEYVAULT_NAME != '' && secrets.AZURE_CERT_NAME != '') || (secrets.AWS_REGION != '' && secrets.AWS_ROLE_TO_ASSUME != '' && secrets.AWS_PFX_SECRET_ID != '') ) && secrets.BASE64_PFX != '' }}
+        if: ${{ !( (env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' && env.AZURE_KEYVAULT_NAME != '' && env.AZURE_CERT_NAME != '') || (env.AWS_REGION != '' && env.AWS_ROLE_TO_ASSUME != '' && env.AWS_PFX_SECRET_ID != '') ) && env.BASE64_PFX != '' }}
         shell: pwsh
         run: |
           $outPfx = Join-Path $PWD 'signing\org_signing.pfx'
           New-Item -ItemType Directory -Path (Split-Path $outPfx) -Force | Out-Null
-          [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String("${{ secrets.BASE64_PFX }}"))
-          if ("${{ secrets.PFX_PASSWORD }}") {
-            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ secrets.PFX_PASSWORD }}'
+          [IO.File]::WriteAllBytes($outPfx, [Convert]::FromBase64String("${{ env.BASE64_PFX }}"))
+          if ("${{ env.PFX_PASSWORD }}") {
+            Set-Content -Path (Join-Path $PWD 'signing\pfx.pass') -Value '${{ env.PFX_PASSWORD }}'
           }
 
       - name: 🧾 Create self-signed CodeSigning cert (fallback)
-        if: ${{ !( (secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_SUBSCRIPTION_ID != '' && secrets.AZURE_KEYVAULT_NAME != '' && secrets.AZURE_CERT_NAME != '') || (secrets.AWS_REGION != '' && secrets.AWS_ROLE_TO_ASSUME != '' && secrets.AWS_PFX_SECRET_ID != '') || secrets.BASE64_PFX != '' ) }}
+        if: ${{ !( (env.AZURE_CLIENT_ID != '' && env.AZURE_TENANT_ID != '' && env.AZURE_SUBSCRIPTION_ID != '' && env.AZURE_KEYVAULT_NAME != '' && env.AZURE_CERT_NAME != '') || (env.AWS_REGION != '' && env.AWS_ROLE_TO_ASSUME != '' && env.AWS_PFX_SECRET_ID != '') || env.BASE64_PFX != '' ) }}
         shell: pwsh
         run: |
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=AutorunGuard CI (SelfSigned)" -KeyExportPolicy Exportable -KeyLength 3072 -HashAlgorithm SHA256 -CertStoreLocation "Cert:\CurrentUser\My"
