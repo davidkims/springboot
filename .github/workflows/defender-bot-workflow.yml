@@ -1,5 +1,5 @@
 # yamllint disable rule:line-length
-name: Update Program Data (Auto-discover)
+name: Update Program Data (No-Skip Auto-discover)
 
 on:
   workflow_dispatch:
@@ -31,6 +31,8 @@ jobs:
       BRANCH_PREFIX: chore/auto-update
       DEFAULT_AUTHOR_NAME: repo-bot
       DEFAULT_AUTHOR_EMAIL: repo-bot@users.noreply.github.com
+      PROGRAM_IN: ${{ github.event.inputs.program || 'all' }}
+      COMMIT_MODE: ${{ github.event.inputs.commit_mode || 'commit-and-pr' }}
 
     steps:
       - name: 📂 Checkout repository
@@ -46,6 +48,12 @@ jobs:
           sudo apt-get update -y -qq
           sudo apt-get install -y -qq jq coreutils make python3 python3-venv
 
+      - name: 🟨 Setup Node (always, no-skip)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
       - name: 🔧 Make common updaters executable
         shell: bash
         run: |
@@ -55,25 +63,21 @@ jobs:
             chmod +x "$f" || true
           done < <(find . -type f -iname "update*.sh" -print0 2>/dev/null || true)
 
-      - name: 🔎 Discover update targets
+      - name: 🔎 Discover update targets (no-skip)
         id: discover
         shell: bash
         run: |
           set -Eeuo pipefail
-          PROGRAM_IN="${{ github.event.inputs.program || 'all' }}"
-          echo "program_in=$PROGRAM_IN" >> "$GITHUB_OUTPUT"
 
           # 후보 수집
           mapfile -t CANDIDATES < <( \
             { [ -f "workflow/update_all_data.sh" ] && echo "sh::workflow/update_all_data.sh"; } ; \
             find . -type f -iname "update*.sh" -printf "sh::%p\n" 2>/dev/null || true ; \
-            # npm (package.json에 scripts.update-data 있는 경우만)
             { for pkg in $(git ls-files "**/package.json" 2>/dev/null || true); do
                 if jq -e '.scripts["update-data"]' "$pkg" >/dev/null 2>&1; then
                   echo "npm::$pkg";
                 fi
               done; } ; \
-            # Makefile (update-data 타깃 있는 경우만)
             {
               while IFS= read -r mk; do
                 if grep -qE '^[[:space:]]*update-data:' "$mk"; then
@@ -81,7 +85,6 @@ jobs:
                 fi
               done < <(git ls-files "**/Makefile" 2>/dev/null || true)
             } ; \
-            # Python
             { for py in $(git ls-files "**/updater.py" 2>/dev/null || true); do echo "py::${py}"; done } \
           )
 
@@ -95,7 +98,7 @@ jobs:
             fi
           done
 
-          # program 필터링
+          # program 필터링 (부분문자열 매칭)
           FILTERED=()
           if [[ "${PROGRAM_IN}" == "all" || -z "${PROGRAM_IN}" ]]; then
             FILTERED=("${UNIQUE[@]}")
@@ -103,6 +106,11 @@ jobs:
             for c in "${UNIQUE[@]}"; do
               [[ "${c,,}" == *"${PROGRAM_IN,,}"* ]] && FILTERED+=("$c")
             done
+          fi
+
+          # 1개도 못 찾았으면 최소 보호 장치로 update_all_data.sh만이라도 추가
+          if [[ ${#FILTERED[@]} -eq 0 && -f "workflow/update_all_data.sh" ]]; then
+            FILTERED=("sh::workflow/update_all_data.sh")
           fi
 
           # 결과 JSON
@@ -118,25 +126,20 @@ jobs:
           echo "count=${#FILTERED[@]}" >> "$GITHUB_OUTPUT"
           echo "targets_json=$(tr -d '\n' < "$LOG_DIR/targets.json")" >> "$GITHUB_OUTPUT"
 
-      - name: 🟨 Setup Node (npm targets only)
-        if: contains(steps.discover.outputs.targets_json, '"npm::"')
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: 🚀 Run targets sequentially (with per-target logs)
-        if: steps.discover.outputs.count != '0'
+      - name: 🚀 Run targets sequentially (no-skip; continue on error)
         shell: bash
-        env:
-          PROGRAM_IN: ${{ github.event.inputs.program || 'all' }}
         run: |
           set -Eeuo pipefail
           ts(){ date '+%F %T'; }
           echo "## Update Program Data — Run Summary ($(ts))" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          TARGETS=$(jq -r '.targets[]' "$LOG_DIR/targets.json")
+          TARGETS=$(jq -r '.targets[]' "$LOG_DIR/targets.json" 2>/dev/null || true)
+          if [[ -z "${TARGETS:-}" ]]; then
+            echo "_대상이 없어 스킵 없이 종료(탐지 실패)._"
+            echo "_대상이 없어 스킵 없이 종료(탐지 실패)._">> "$GITHUB_STEP_SUMMARY"
+          fi
+
           FAIL=0
 
           run_sh()   { local path="$1"; ( set -Eeuo pipefail; bash "$path" ); }
@@ -161,7 +164,7 @@ jobs:
                 npm)  run_npm "$path" ;;
                 make) run_make "$path" ;;
                 py)   run_py "$path" ;;
-                *)    echo "[WARN] Unknown kind: $kind (skip)";;
+                *)    echo "[WARN] Unknown kind: $kind (skip logical)";;
               esac
               echo "[OK ] $path @ $(ts)"
             } > >(tee "$log") 2>&1 || {
@@ -173,98 +176,89 @@ jobs:
           done <<< "$TARGETS"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$FAIL" -gt 0 ]]; then
-            echo "**실패 수:** $FAIL" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          else
-            echo "**모든 대상 성공**" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "**실패 수:** $FAIL" >> "$GITHUB_STEP_SUMMARY"
+          # 실패가 있어도 종료코드 0을 반환하여 다음 단계로 진행 (No-Skip)
+          exit 0
 
-      - name: 🧹 Normalize line endings (optional)
+      - name: 🧹 Normalize line endings (optional; no-skip)
         shell: bash
         run: |
           set -Eeuo pipefail
           git config core.autocrlf input || true
 
-      - name: 🔐 Configure git author
+      - name: 💾 Commit / Push / PR (single step; no-skip)
+        id: publish
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          git config user.name  "${{ env.DEFAULT_AUTHOR_NAME }}"
-          git config user.email "${{ env.DEFAULT_AUTHOR_EMAIL }}"
-
-      - name: 📦 Detect changes
-        id: changes
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          if ! git diff --quiet; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            git status --porcelain | tee "$LOG_DIR/git_status.txt"
+          echo "[ECHO] Detect changes..."
+          if git diff --quiet; then
+            echo "[ECHO] 변경사항 없음 → 커밋/푸시/PR 생략"
+            echo "PR_BRANCH=" >> "$GITHUB_OUTPUT"
+            echo "NO_CHANGES=1" >> "$GITHUB_ENV"
           else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "[ECHO] 변경사항 없음"
+            echo "[ECHO] 변경사항 감지됨 → 커밋 진행"
+            git config user.name  "${DEFAULT_AUTHOR_NAME}"
+            git config user.email "${DEFAULT_AUTHOR_EMAIL}"
+            stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+            git add -A
+            git commit -m "chore(data): auto update ($stamp)"
+
+            MODE="${COMMIT_MODE}"
+            REF_NAME="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD || echo main)}"
+            if [[ "$MODE" == "commit-direct" ]]; then
+              echo "[ECHO] commit-direct 모드 → 현재 브랜치로 푸시"
+              git push origin "HEAD:${REF_NAME}" || true
+              echo "PR_BRANCH=" >> "$GITHUB_OUTPUT"
+            elif [[ "$MODE" == "none" ]]; then
+              echo "[ECHO] none 모드 → 커밋만 하고 푸시/PR 생략"
+              echo "PR_BRANCH=" >> "$GITHUB_OUTPUT"
+            else
+              echo "[ECHO] commit-and-pr 모드 → 새 브랜치 생성 후 푸시"
+              BR="${BRANCH_PREFIX}/${stamp}"
+              git branch "$BR"
+              git push -u origin "$BR" || true
+              echo "PR_BRANCH=$BR" >> "$GITHUB_OUTPUT"
+            fi
+            echo "NO_CHANGES=0" >> "$GITHUB_ENV"
           fi
 
-      - name: 💾 Commit changes
-        if: steps.changes.outputs.changed == 'true'
-        id: commit
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
-          git add -A
-          git commit -m "chore(data): auto update ($stamp)"
-          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
-
-      - name: ⤴️ Push (direct) when commit_mode=commit-direct
-        if: steps.changes.outputs.changed == 'true' && github.event.inputs.commit_mode == 'commit-direct'
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git push origin HEAD:${{ github.ref_name }}
-
-      - name: 🌿 Create branch & Push for PR
-        if: steps.changes.outputs.changed == 'true' && (github.event.inputs.commit_mode == '' || github.event.inputs.commit_mode == 'commit-and-pr')
-        id: prbranch
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
-          BR="${BRANCH_PREFIX}/${stamp}"
-          git branch "$BR"
-          git push -u origin "$BR"
-          echo "branch=$BR" >> "$GITHUB_OUTPUT"
-
-      - name: 🔁 Open pull request
-        if: steps.prbranch.outputs.branch != '' && (github.event.inputs.commit_mode == '' || github.event.inputs.commit_mode == 'commit-and-pr')
+      - name: 🔁 Open pull request (always; safe)
         uses: actions/github-script@v7
+        env:
+          PR_BRANCH: ${{ steps.publish.outputs.PR_BRANCH }}
         with:
           script: |
-            const branch = `${{ steps.prbranch.outputs.branch }}`;
-            const { repo, owner } = context.repo;
-            const base = context.payload?.repository?.default_branch || 'main';
-            const title = `chore(data): auto update (${new Date().toISOString()})`;
-            const body  = [
-              '자동 데이터 업데이트 결과입니다.',
-              '',
-              '- 워크플로우: Update Program Data (Auto-discover)',
-              `- 브랜치: ${branch}`,
-              '',
-              '변경 내역과 실행 로그는 `.github/logs/` 디렉토리를 참조하세요.'
-            ].join('\n');
             try {
+              const prBranch = process.env.PR_BRANCH || "";
+              const noChanges = process.env.NO_CHANGES === "1";
+              if (!prBranch || noChanges) {
+                core.info("No PR branch or no changes → skip PR creation (no-skip step).");
+                return;
+              }
+              const { repo, owner } = context.repo;
+              const base = context.payload?.repository?.default_branch || 'main';
+              const title = `chore(data): auto update (${new Date().toISOString()})`;
+              const body  = [
+                '자동 데이터 업데이트 결과입니다.',
+                '',
+                '- 워크플로우: Update Program Data (No-Skip Auto-discover)',
+                `- 브랜치: ${prBranch}`,
+                '',
+                '변경 내역과 실행 로그는 `.github/logs/` 디렉토리를 참조하세요.'
+              ].join('\n');
               const res = await github.rest.pulls.create({
                 owner, repo,
-                title, head: branch, base, body
+                title, head: prBranch, base, body
               });
               core.notice(`PR created: ${res.data.html_url}`);
             } catch (e) {
-              core.warning(`PR create failed: ${e.message}`);
+              core.warning(`PR create failed (no-skip): ${e.message}`);
             }
 
-      - name: 📎 Upload logs (artifact)
-        if: always()
+      - name: 📎 Upload logs (artifact; always)
         uses: actions/upload-artifact@v4
         with:
           name: update-logs-${{ github.run_id }}
