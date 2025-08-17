@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v6.1)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v6.2)"
 
 permissions:
   contents: write
@@ -92,7 +92,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y curl wget jq sed file \
             genisoimage xorriso cloud-guest-utils \
-            p7zip-full gnupg squashfs-tools gawk libcdio-utils
+            p7zip-full gnupg squashfs-tools gawk libcdio-utils perl
 
       - name: "입력값 정규화"
         run: |
@@ -240,7 +240,7 @@ jobs:
           [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
 
       # =======================
-      # Ubuntu: 체크섬-우선 단계
+      # Ubuntu: 체크섬-우선 (Perl 전역 파서)
       # =======================
       - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치)"
         if: env.DISTRO == 'ubuntu'
@@ -272,26 +272,23 @@ jobs:
             0xC5986B4F1257FFA86632CBA746181433FBB75451 \
             0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
           if [ -s "${ECHO_ROOT}/out/SHA256SUMS.gpg" ]; then
-            gpg --keyid-format long --verify "${ECHO_ROOT}/out/SHA256SUMS.gpg" "${ECHO_ROOT}/out/SHA256SUMS" || echoe "[WARN] GPG 검증 실패(계속 진행)"
+            gpg --keyid-format long --verify "${ECHO_ROOT}/out/SHA256SUMS.gpg" "${ECHO_ROOT}/out/SHA256SUMS" || echoe "[WARN] GPG 검증 실패(계속)"
           fi
 
-          # 3) SHA256SUMS 파싱(두 포맷 지원) → "HASH filename" 표준화
-          awk '
-            /^[0-9a-fA-F]{64}[ \t]+\*?[^ ]+\.iso$/ {
-              h=$1; f=$2; sub(/^\*/,"",f); print h, f; next
-            }
-            match($0,/^SHA256 *\(([^)]+\.iso)\) *= *([0-9a-fA-F]{64})/,m){
-              print m[2], m[1]
-            }
-          ' "${ECHO_ROOT}/out/SHA256SUMS" > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
+          # 3) SHA256SUMS 파싱(라인 무시, 전역 매칭) → "HASH filename" 표준화
+          perl -0777 -ne '
+            while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
+            while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
+          ' "${ECHO_ROOT}/out/SHA256SUMS" \
+          | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
 
-          # 4) 파일 선택: REL_HINT 있으면 해당, 없으면 최신 live-server
+          # 4) 파일 선택: REL_HINT 있으면 해당(마이크로버전 포함), 없으면 체크섬에 존재하는 최신 live-server
           REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
           CAND_LINE=""
           if [ -n "${REL_HINT}" ]; then
-            CAND_LINE="$(grep -E " ubuntu-${REL_RX}(\.[0-9]+)?-live-server-amd64\.iso$" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true)"
+            CAND_LINE="$(grep -Ei " ubuntu-${REL_RX}(\.[0-9]+)?-live-server-amd64\.iso$" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true)"
           fi
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(grep -E ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-amd64\.iso$' "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true)"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(grep -Ei ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-amd64\.iso$' "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true)"
           [ -z "$CAND_LINE" ] && { echoe "[ERR] SHA256SUMS에서 live-server 항목을 찾지 못함"; exit 1; }
 
           EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
@@ -303,7 +300,7 @@ jobs:
             "${INDEX_URL}${CAND}"
             "https://releases.ubuntu.com/${CAND%-live-server-amd64.iso}/${CAND}"
             "https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-live-server-amd64.iso}/release/${CAND}"
-            "https://ftp.usf.edu/pub/ubuntu-releases/${CAND%-live-server-amd64.iso}/${CAND}"
+            "https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-live-server-amd64.iso}/${CAND}"
           )
           ok=0
           for u in "${urls[@]}"; do
@@ -315,7 +312,7 @@ jobs:
                 echo "ISO_URL_USED=$u" >> $GITHUB_ENV
                 ok=1; break
               else
-                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도 진행"
+                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도"
               fi
             fi
           done
