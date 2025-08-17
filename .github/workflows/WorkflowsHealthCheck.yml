@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.0)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.0.1)"
 
 permissions:
   contents: write
@@ -37,10 +37,6 @@ on:
       region:
         description: "타임존/로케일 (예: Asia/Seoul|en_US.UTF-8)"
         default: "Asia/Seoul|en_US.UTF-8"
-        required: true
-      upload_artifacts:
-        description: "생성물 아티팩트 업로드"
-        default: "true"
         required: true
       do_upgrade:
         description: "런너 apt full-upgrade 실행"
@@ -142,13 +138,10 @@ jobs:
           SNIP="${ECHO_ROOT}/snippets"
           SCRIPTS="${ECHO_ROOT}/scripts"
           mkdir -p "$SNIP" "$SCRIPTS"
-          # padding (최소 데이터 보장)
           head -c 65536 /dev/urandom > "${SNIP}/.padding"
-          # sudoers
           cat > "${SNIP}/sudoers_${USERNAME}" <<EOF
           ${USERNAME} ALL=(ALL) NOPASSWD:ALL
           EOF
-          # sshd
           cat > "${SNIP}/sshd_${USERNAME}.conf" <<'EOF'
           PasswordAuthentication no
           PermitRootLogin no
@@ -156,7 +149,6 @@ jobs:
           ChallengeResponseAuthentication no
           UsePAM yes
           EOF
-          # ufw
           cat > "${SNIP}/ufw_init.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -168,7 +160,6 @@ jobs:
           ufw status verbose || true
           EOF
           chmod +x "${SNIP}/ufw_init.sh"
-          # apply_permissions.sh
           cat > "${SCRIPTS}/apply_permissions.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -246,18 +237,16 @@ jobs:
           isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
           [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
 
-      # =======================
       # Ubuntu: 체크섬-우선 — dual-index + arch + robust fallback
-      # =======================
       - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치) — dual-index + arch + robust fallback"
         if: env.DISTRO == 'ubuntu'
+        env:
+          UBUNTU_ARCH: ${{ env.UBUNTU_ARCH }}
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
           mkdir -p ${ECHO_ROOT}/out ${ECHO_ROOT}/tmp
           ARCH="${UBUNTU_ARCH}"
-
-          # 0) REL_HINT→코드네임 추정
           SERIES=()
           case "${REL_HINT}" in
             24.*) SERIES=("noble");;
@@ -265,8 +254,6 @@ jobs:
             20.*) SERIES=("focal");;
             *) SERIES=("noble" "jammy" "focal");;
           esac
-
-          # 1) 후보 인덱스 2종 구성: cdimage + releases
           CDIMAGE_URL=""
           for CODENAME in "${SERIES[@]}"; do
             U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
@@ -276,8 +263,6 @@ jobs:
           RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
           echo "CDIMAGE_URL=${CDIMAGE_URL}"  >> $GITHUB_ENV
           echo "RELEASES_URL=${RELEASES_URL}" >> $GITHUB_ENV
-
-          # 2) 두 디렉터리에서 SHA256SUMS(.gpg) 수집 + GPG 검증(가능 시)
           fetch_sums () {
             local base="$1" tag="$2"
             local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
@@ -295,8 +280,6 @@ jobs:
           fetch_sums "${CDIMAGE_URL}"  "cdimage"
           fetch_sums "${RELEASES_URL}" "releases"
           [ -s "${ECHO_ROOT}/out/SHA256SUMS.cdimage" ] || [ -s "${ECHO_ROOT}/out/SHA256SUMS.releases" ] || { echoe "[ERR] 두 인덱스 모두에서 SHA256SUMS 확보 실패"; exit 1; }
-
-          # 3) 병합 파싱 → "HASH filename"
           cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
             | perl -0777 -ne '
                 while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
@@ -304,49 +287,35 @@ jobs:
               ' \
             | awk '{print tolower($1), $2}' \
             | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
-
           echo "[DEBUG] Parsed ISO entries (top 100):"
           head -n 100 "${ECHO_ROOT}/out/SHA256SUMS.parsed" || true
-
-          # 4) 후보 선택(다단계 fallback + 아키텍처)
           pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
           REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
           CAND_LINE=""
-          # live-server 우선
           [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
           [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
-          # server
           [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*server.*-${ARCH}\\.iso$")"
           [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
-          # desktop
           [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*desktop.*-${ARCH}\\.iso$")"
           [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
-          # any
           [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*-${ARCH}\\.iso$")"
           [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
-          # 아키텍처 제거 마지막 보루
           [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line ' ubuntu-'"${REL_RX}"'.*\.iso$')"
           [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
-
           [ -n "$CAND_LINE" ] || { echoe "[ERR] SHA256SUMS에서 사용할 수 있는 *.iso 후보를 찾지 못했습니다."; exit 1; }
           EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
           CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
           echo "[PICK] ${CAND} (expected sha256=${EXPECT})"
           echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
-
-          # 5) 다운로드 URL 만들기(원본 디렉터리 추정 + 미러)
           base_candidates=()
           [ -n "${CDIMAGE_URL}" ]  && base_candidates+=("${CDIMAGE_URL}")
           base_candidates+=("${RELEASES_URL}")
           YYMM_FROM_NAME="$(printf '%s\n' "${CAND}" | sed -nE 's/^ubuntu-([0-9]{2}\.[0-9]{2}).*/\1/p')"
           [ -n "${YYMM_FROM_NAME}" ] && base_candidates+=("https://releases.ubuntu.com/${YYMM_FROM_NAME}/")
-
           urls=()
           for B in "${base_candidates[@]}"; do urls+=("${B}${CAND}"); done
           urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
           urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
-
-          # 6) 다운로드 & SHA256 검증(미러 재시도)
           ok=0
           for u in "${urls[@]}"; do
             echoe "[FETCH] $u"
@@ -362,16 +331,12 @@ jobs:
             fi
           done
           [ "$ok" -eq 1 ] || { echoe "[FAIL] 모든 미러에서 SHA256 불일치/실패"; exit 1; }
-
-          # 7) 부가 파일(선택)
           for ext in zsync list manifest; do
             curl -fsI "${RELEASES_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${RELEASES_URL}${CAND}.${ext}" || true
             if [ -n "${CDIMAGE_URL}" ]; then
               curl -fsI "${CDIMAGE_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${CDIMAGE_URL}${CAND}.${ext}" || true
             fi
           done
-
-          # 디버그: 파싱 결과 보존
           cp -a "${ECHO_ROOT}/out/SHA256SUMS.parsed" "${ECHO_ROOT}/logs/" || true
 
       - name: "Kickstart & Preseed 템플릿"
@@ -488,8 +453,7 @@ jobs:
           echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
           echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
 
-      - name: "아티팩트 업로드(유효 파일만)"
-        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
+      - name: "아티팩트 업로드(항상)"
         uses: actions/upload-artifact@v4
         with:
           name: linux-seed-iso-and-echo
