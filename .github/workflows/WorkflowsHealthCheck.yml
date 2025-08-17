@@ -1,496 +1,563 @@
-name: "🏦 Echo FinDev Docker FullOps (컨테이너·이미지·파일·권한·DB·쿼리)"
+name: "🏦 MEGA Echo FinOps v2 (Artifacts Fix + Massive Echo + SpringBoot + AppArmor/OPA + DB 확장)"
 
 on:
   workflow_dispatch:
     inputs:
       db_engine:
-        description: "DB 엔진 선택 (mysql | postgres | both)"
+        description: "DB 엔진 (mysql | postgres | both)"
         required: true
         default: "mysql"
-      app_port:
-        description: "애플리케이션 포트"
+      build_tool:
+        description: "Spring Boot 빌드 도구 (maven | gradle)"
         required: true
-        default: "8000"
+        default: "maven"
       image_name:
-        description: "빌드할 이미지 이름 (예: findevecho)"
+        description: "앱 이미지 이름"
         required: true
-        default: "findevecho"
+        default: "finmega-echo"
+      app_port:
+        description: "호스트 노출 포트"
+        required: true
+        default: "8080"
       push_image:
-        description: "GHCR로 푸시 여부 (true/false)"
+        description: "이미지 GHCR 푸시 (true/false)"
+        required: true
+        default: "false"
+      do_upgrade:
+        description: "각 Job에서 apt full-upgrade 실행 (true/false)"
         required: true
         default: "false"
       run_tests:
-        description: "간단 헬스/쿼리 테스트 실행 (true/false)"
+        description: "스모크/리포트 테스트 실행 (true/false)"
         required: true
         default: "true"
   schedule:
-    - cron: "0 3 * * *"  # 매일 03:00 UTC (= 한국 12:00) 정기 점검/재생성
+    - cron: "0 2 * * *" # 매일 11:00 KST
+
+env:
+  JAVA_VERSION: "17"
+  ECHO_ROOT: ".github/echo"
 
 jobs:
-  prepare-echo-files:
+  bootstrap-echo-bundle:
+    name: "① 부트스트랩: 에코 파일 대량 생성 + 번들 업로드"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Create echo directories & helper
+      - name: (공통) 에코 디렉터리/헬퍼/리페어 스크립트 생성
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .github/echo/{app,db,queries,perm,logs,images,containers}
-          mkdir -p .github/echo/db/sql/{mysql,postgres}
-          mkdir -p .github/echo/db/results/{mysql,postgres}
-          cat > .github/echo/echo.sh <<'EOSH'
+          mkdir -p ${ECHO_ROOT}/{app,db,queries,perm,logs,images,containers,reports,tools}
+          mkdir -p ${ECHO_ROOT}/db/sql/{mysql,postgres}
+          mkdir -p ${ECHO_ROOT}/db/results/{mysql,postgres}
+
+          cat > ${ECHO_ROOT}/echo.sh <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
-          ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
-          echoe() { printf "[%s] %s\n" "$(ts)" "$*" | tee -a ".github/echo/logs/echo.log"; }
-          EOSH
-          chmod +x .github/echo/echo.sh
-          ./.github/echo/echo.sh echoe "[INIT] echo 디렉터리 및 헬퍼 생성 완료"
-
-      - name: Generate sample FastAPI app (echo logging everywhere)
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .github/echo/echo.sh
-          echoe "[APP] 샘플 FastAPI 앱/도커파일 생성"
-          cat > .github/echo/app/app.py <<'PY'
-          import os, time
-          from fastapi import FastAPI
-          app = FastAPI()
-
-          APP_NAME = os.getenv("APP_NAME", "Echo-FinDev")
-          DB_ENGINE = os.getenv("DB_ENGINE", "mysql")
-          DB_HOST = os.getenv("DB_HOST", "mysql-echo")
-          DB_PORT = os.getenv("DB_PORT", "3306" if DB_ENGINE=="mysql" else "5432")
-          DB_USER = os.getenv("DB_USER", "root" if DB_ENGINE=="mysql" else "postgres")
-          DB_PASS = os.getenv("DB_PASS", "root" if DB_ENGINE=="mysql" else "postgres")
-          DB_NAME = os.getenv("DB_NAME", "fin")
-
-          def echo(msg: str):
-            print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {msg}", flush=True)
-
-          @app.get("/")
-          def root():
-            echo(f"[APP] {APP_NAME} alive. DB={DB_ENGINE}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-            return {"ok": True, "app": APP_NAME, "db": DB_ENGINE}
-
-          @app.get("/healthz")
-          def health():
-            echo("[HEALTH] ok")
-            return {"status":"ok"}
-
-          @app.get("/config")
-          def config():
-            echo("[CONFIG] emit")
-            return {
-              "DB_ENGINE": DB_ENGINE,
-              "DB_HOST": DB_HOST,
-              "DB_PORT": DB_PORT,
-              "DB_USER": DB_USER,
-              "DB_NAME": DB_NAME,
-            }
-          PY
-
-          # requirements
-          cat > .github/echo/app/requirements.txt <<'REQ'
-          fastapi
-          uvicorn
-          REQ
-
-          # Dockerfile
-          cat > .github/echo/app/Dockerfile <<'DOCK'
-          FROM python:3.11-slim
-          ENV PYTHONDONTWRITEBYTECODE=1
-          ENV PYTHONUNBUFFERED=1
-          WORKDIR /app
-          COPY requirements.txt /app/
-          RUN pip install --no-cache-dir -r requirements.txt
-          COPY app.py /app/
-          EXPOSE 8000
-          CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-          DOCK
-
-          # .env (기본값, 런타임에 덮어씀)
-          cat > .github/echo/app/.env <<'ENVV'
-          APP_NAME=Echo-FinDev
-          DB_ENGINE=${DB_ENGINE:-mysql}
-          DB_HOST=${DB_HOST:-mysql-echo}
-          DB_PORT=${DB_PORT:-3306}
-          DB_USER=${DB_USER:-root}
-          DB_PASS=${DB_PASS:-root}
-          DB_NAME=fin
-          ENVV
-
-          echoe "[APP] 앱/도커파일/requirements/.env 생성 완료"
-
-      - name: Generate permission files (with echo)
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .github/echo/echo.sh
-          echoe "[PERM] 권한 정책/스크립트 생성"
-          cat > .github/echo/perm/acl.policy <<'ACL'
-          # Echo permission file (sample).
-          # - 컨테이너/이미지/파일 생성 로그를 모두 허용(기본)
-          # - 민감 경로 쓰기 제한 (예: /etc, /root)
-          [allow]
-          paths.allow = [
-            "/app",
-            "/data",
-            "/logs",
-            "/var/log/echo"
-          ]
-          [deny]
-          paths.deny = [
-            "/etc",
-            "/root",
-            "/bin",
-            "/usr/sbin"
-          ]
-          ACL
-
-          cat > .github/echo/perm/apply-perm.sh <<'SH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          echo "[PERM] applying ACL (mock) ..."
-          # 실제 ACL/SELinux/AppArmor 연동 대신 데모용 로그
-          echo "[PERM] allowed paths: /app,/data,/logs,/var/log/echo"
-          echo "[PERM] denied  paths: /etc,/root,/bin,/usr/sbin"
+          ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
+          echoe(){ printf "[%s] %s\n" "$(ts)" "$*" | tee -a ".github/echo/logs/echo.log"; }
           SH
-          chmod +x .github/echo/perm/apply-perm.sh
-          echoe "[PERM] 권한 파일 생성 완료"
+          chmod +x ${ECHO_ROOT}/echo.sh
 
-      - name: Generate finance DB schema & queries (MySQL/Postgres) with echo
+          # 누락시 최소 구조를 복구하는 리페어 스크립트
+          cat > ${ECHO_ROOT}/tools/ensure_echo.sh <<'ENS'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT=".github/echo"
+          ts(){ date +"%Y-%m-%dT%H:%M:%S%z"; }
+          e(){ printf "[%s] [ENSURE] %s\n" "$(ts)" "$*" | tee -a "$ROOT/logs/echo.log"; }
+          # dirs
+          mkdir -p "$ROOT/app/spring/src/main/java/com/echo/finmega" \
+                   "$ROOT/app/spring/src/main/resources" \
+                   "$ROOT/db/sql/mysql" "$ROOT/db/sql/postgres" \
+                   "$ROOT/db/results/mysql" "$ROOT/db/results/postgres" \
+                   "$ROOT/perm/apparmor" "$ROOT/perm/opa" \
+                   "$ROOT/logs" "$ROOT/reports" "$ROOT/images" "$ROOT/containers" "$ROOT/tools"
+          # minimal Spring Boot (필요시)
+          if [ ! -f "$ROOT/app/spring/src/main/java/com/echo/finmega/Application.java" ]; then
+            e "Recreate minimal Spring Boot sources"
+            cat > "$ROOT/app/spring/src/main/java/com/echo/finmega/Application.java" <<'JAVA'
+            package com.echo.finmega;
+            import org.springframework.boot.SpringApplication;
+            import org.springframework.boot.autoconfigure.SpringBootApplication;
+            import org.springframework.web.bind.annotation.*;
+            import java.time.OffsetDateTime;
+            import java.util.Map;
+            @SpringBootApplication
+            public class Application {
+              public static void main(String[] args){ SpringApplication.run(Application.class, args); }
+            }
+            @RestController
+            class HealthController {
+              @GetMapping("/") public Map<String,Object> root(){
+                return Map.of("ok", true, "ts", OffsetDateTime.now().toString(), "app", "FinMega-Echo");
+              }
+              @GetMapping("/healthz") public Map<String,String> hz(){ return Map.of("status","ok"); }
+              @GetMapping("/config") public Map<String,String> cfg(){
+                return Map.of(
+                  "DB_ENGINE", System.getenv().getOrDefault("DB_ENGINE","mysql"),
+                  "DB_HOST", System.getenv().getOrDefault("DB_HOST","mysql-echo"),
+                  "DB_PORT", System.getenv().getOrDefault("DB_PORT","3306"),
+                  "DB_NAME", System.getenv().getOrDefault("DB_NAME","fin"));
+              }
+            }
+            JAVA
+          fi
+          if [ ! -f "$ROOT/app/spring/pom.xml" ]; then
+            cat > "$ROOT/app/spring/pom.xml" <<'POM'
+            <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.echo</groupId><artifactId>finmega</artifactId><version>0.0.1-SNAPSHOT</version>
+              <properties><java.version>17</java.version><spring.boot.version>3.3.1</spring.boot.version></properties>
+              <dependencyManagement><dependencies>
+                <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-dependencies</artifactId><version>${spring.boot.version}</version><type>pom</type><scope>import</scope></dependency>
+              </dependencies></dependencyManagement>
+              <dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies>
+              <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>
+            </project>
+            POM
+          fi
+          if [ ! -f "$ROOT/app/spring/build.gradle" ]; then
+            cat > "$ROOT/app/spring/build.gradle" <<'GR'
+            plugins { id 'java'; id 'org.springframework.boot' version '3.3.1'; id 'io.spring.dependency-management' version '1.1.5' }
+            group='com.echo'; version='0.0.1-SNAPSHOT'
+            java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+            repositories { mavenCentral() }
+            dependencies { implementation 'org.springframework.boot:spring-boot-starter-web' }
+            tasks.named('test'){ useJUnitPlatform() }
+            GR
+          fi
+          if [ ! -f "$ROOT/app/spring/Dockerfile" ]; then
+            cat > "$ROOT/app/spring/Dockerfile" <<'DOCK'
+            FROM eclipse-temurin:17-jre
+            WORKDIR /app
+            ARG JAR_FILE=app.jar
+            COPY ${JAR_FILE} /app/app.jar
+            EXPOSE 8080
+            ENTRYPOINT ["java","-jar","/app/app.jar"]
+            DOCK
+          fi
+          # minimal SQL placeholders (없으면 생성)
+          for f in 001_schema.sql 010_seed.sql 020_reports.sql; do
+            [ -f "$ROOT/db/sql/mysql/$f" ] || echo "SELECT 'placeholder mysql $f';" > "$ROOT/db/sql/mysql/$f"
+            [ -f "$ROOT/db/sql/postgres/$f" ] || echo "\\echo 'placeholder postgres $f'" > "$ROOT/db/sql/postgres/$f"
+          done
+          # OPA/AppArmor 최소 파일
+          [ -f "$ROOT/perm/opa/policy.rego" ] || cat > "$ROOT/perm/opa/policy.rego" <<'REGO'
+          package echo
+          default allow = false
+          allowed_ops := {"create_container","create_file","build_image"}
+          allowed_paths := {"/app","/data","/logs","/var/log/echo"}
+          allow { input.operation == allowed_ops[_]; input.path == allowed_paths[_] }
+          REGO
+          [ -f "$ROOT/perm/apparmor/echo-app-profile" ] || cat > "$ROOT/perm/apparmor/echo-app-profile" <<'AA'
+          profile echo-app-profile flags=(attach_disconnected,mediate_deleted) {
+            #include <abstractions/base>
+            network, capability, file,
+            deny /etc/** wl, deny /root/** wl,
+            /usr/bin/java rix, /bin/* rix, /usr/bin/* rix,
+            /app/** rwk, /proc/** r, /dev/** r,
+          }
+          AA
+          e "structure ensured"
+          ENS
+          chmod +x ${ECHO_ROOT}/tools/ensure_echo.sh
+
+      - name: Spring Boot & 확장 SQL & 권한 정책 실제 생성(대량 에코)
         shell: bash
         run: |
           set -euo pipefail
-          . .github/echo/echo.sh
-          echoe "[DB] 금융 스키마 및 쿼리 생성 (mysql/postgres)"
+          . ${ECHO_ROOT}/echo.sh
+          . ${ECHO_ROOT}/tools/ensure_echo.sh
+          echoe "[INIT] 대량 에코 파일 기본 구조 확보"
 
-          # 공통 테이블: customers, accounts, transactions, ledger
-          cat > .github/echo/db/sql/mysql/001_schema.sql <<'SQL'
+          # ---- 확장 SQL(카드/대출/이체/환율) 생성 (MySQL/Postgres) ----
+          # (이전 답변의 확장 SQL 본문과 동일 — 분량상 생략 없이 그대로 생성)
+          # MySQL
+          cat > ${ECHO_ROOT}/db/sql/mysql/001_schema.sql <<'SQL'
           CREATE DATABASE IF NOT EXISTS fin;
           USE fin;
-
-          CREATE TABLE IF NOT EXISTS customers (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            name VARCHAR(128) NOT NULL,
-            email VARCHAR(256) UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-
-          CREATE TABLE IF NOT EXISTS accounts (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            customer_id BIGINT NOT NULL,
-            account_number VARCHAR(32) UNIQUE NOT NULL,
-            balance DECIMAL(18,2) NOT NULL DEFAULT 0,
-            currency VARCHAR(8) NOT NULL DEFAULT 'KRW',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-          );
-
-          CREATE TABLE IF NOT EXISTS transactions (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            account_id BIGINT NOT NULL,
-            txn_type VARCHAR(16) NOT NULL, -- deposit/withdraw/transfer
-            amount DECIMAL(18,2) NOT NULL,
-            ref VARCHAR(64),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (account_id) REFERENCES accounts(id)
-          );
-
-          CREATE TABLE IF NOT EXISTS ledger (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            txn_id BIGINT NOT NULL,
-            debit_account BIGINT,
-            credit_account BIGINT,
-            amount DECIMAL(18,2) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
+          CREATE TABLE IF NOT EXISTS customers (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(128) NOT NULL, email VARCHAR(256) UNIQUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS accounts (id BIGINT PRIMARY KEY AUTO_INCREMENT, customer_id BIGINT NOT NULL, account_number VARCHAR(32) UNIQUE NOT NULL, balance DECIMAL(18,2) NOT NULL DEFAULT 0, currency VARCHAR(8) NOT NULL DEFAULT 'KRW', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (customer_id) REFERENCES customers(id));
+          CREATE TABLE IF NOT EXISTS transactions (id BIGINT PRIMARY KEY AUTO_INCREMENT, account_id BIGINT NOT NULL, txn_type VARCHAR(16) NOT NULL, amount DECIMAL(18,2) NOT NULL, ref VARCHAR(64), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (account_id) REFERENCES accounts(id));
+          CREATE TABLE IF NOT EXISTS ledger (id BIGINT PRIMARY KEY AUTO_INCREMENT, txn_id BIGINT NOT NULL, debit_account BIGINT, credit_account BIGINT, amount DECIMAL(18,2) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS cards (id BIGINT PRIMARY KEY AUTO_INCREMENT, customer_id BIGINT NOT NULL, card_number VARCHAR(32) UNIQUE NOT NULL, brand VARCHAR(16) NOT NULL, limit_amount DECIMAL(18,2) NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'active', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (customer_id) REFERENCES customers(id));
+          CREATE TABLE IF NOT EXISTS card_transactions (id BIGINT PRIMARY KEY AUTO_INCREMENT, card_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, merchant VARCHAR(128), category VARCHAR(64), txn_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (card_id) REFERENCES cards(id));
+          CREATE TABLE IF NOT EXISTS loans (id BIGINT PRIMARY KEY AUTO_INCREMENT, customer_id BIGINT NOT NULL, principal DECIMAL(18,2) NOT NULL, interest_rate DECIMAL(5,2) NOT NULL, start_date DATE NOT NULL, end_date DATE, status VARCHAR(16) NOT NULL DEFAULT 'active', outstanding DECIMAL(18,2) NOT NULL DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (customer_id) REFERENCES customers(id));
+          CREATE TABLE IF NOT EXISTS transfers (id BIGINT PRIMARY KEY AUTO_INCREMENT, from_account_id BIGINT NOT NULL, to_account_id BIGINT NOT NULL, amount DECIMAL(18,2) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (from_account_id) REFERENCES accounts(id), FOREIGN KEY (to_account_id) REFERENCES accounts(id));
+          CREATE TABLE IF NOT EXISTS fx_rates (id BIGINT PRIMARY KEY AUTO_INCREMENT, base_currency VARCHAR(8) NOT NULL, quote_currency VARCHAR(8) NOT NULL, rate DECIMAL(18,6) NOT NULL, as_of TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
           SQL
-
-          cat > .github/echo/db/sql/mysql/010_seed.sql <<'SQL'
+          cat > ${ECHO_ROOT}/db/sql/mysql/010_seed.sql <<'SQL'
           USE fin;
-          INSERT INTO customers (name,email) VALUES
-            ('Alice','alice@example.com'),
-            ('Bob','bob@example.com');
-
+          INSERT INTO customers (name,email) VALUES ('Alice','alice@example.com'),('Bob','bob@example.com')
+            ON DUPLICATE KEY UPDATE email=VALUES(email);
           INSERT INTO accounts (customer_id,account_number,balance,currency)
-            VALUES (1,'ACCT-0001',100000,'KRW'),
-                   (2,'ACCT-0002',50000,'KRW');
-
-          INSERT INTO transactions (account_id,txn_type,amount,ref)
-            VALUES (1,'deposit',25000,'INIT-1'),
-                   (2,'withdraw',10000,'INIT-2');
+            VALUES (1,'ACCT-0001',100000,'KRW'),(2,'ACCT-0002',50000,'KRW')
+            ON DUPLICATE KEY UPDATE balance=VALUES(balance);
+          INSERT INTO cards (customer_id,card_number,brand,limit_amount,status)
+            VALUES (1,'4111-1111-1111-1111','VISA',3000000,'active'),
+                   (2,'5555-5555-5555-4444','MASTERCARD',2000000,'active')
+            ON DUPLICATE KEY UPDATE brand=VALUES(brand);
+          INSERT INTO card_transactions (card_id,amount,merchant,category)
+            VALUES (1,125000,'CU','GROCERY'),(1,9900,'Bus','TRANSIT'),(2,250000,'ABC Electronics','ELECTRONICS');
+          INSERT INTO loans (customer_id,principal,interest_rate,start_date,status,outstanding)
+            VALUES (1,10000000,4.50,CURRENT_DATE,'active',9750000),(2,5000000,5.20,CURRENT_DATE,'active',4920000);
+          INSERT INTO transfers (from_account_id,to_account_id,amount) VALUES (1,2,25000),(2,1,10000);
+          INSERT INTO fx_rates (base_currency,quote_currency,rate) VALUES ('USD','KRW',1350.25),('EUR','KRW',1488.10),('JPY','KRW',9.35);
           SQL
-
-          cat > .github/echo/db/sql/mysql/020_queries.sql <<'SQL'
+          cat > ${ECHO_ROOT}/db/sql/mysql/020_reports.sql <<'SQL'
           USE fin;
-          -- 잔액 상위 고객
-          SELECT c.name, a.account_number, a.balance
-          FROM accounts a JOIN customers c ON a.customer_id=c.id
-          ORDER BY a.balance DESC LIMIT 10;
-
-          -- 일별 거래 수/금액
-          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total
-          FROM transactions
-          GROUP BY DATE(created_at)
-          ORDER BY d DESC;
+          SELECT c.name, a.account_number, a.balance FROM accounts a JOIN customers c ON a.customer_id=c.id ORDER BY a.balance DESC LIMIT 10;
+          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total FROM transactions GROUP BY DATE(created_at) ORDER BY d DESC;
+          SELECT c.name, DATE_FORMAT(ct.txn_at, '%Y-%m') AS ym, SUM(ct.amount) AS spend
+          FROM card_transactions ct JOIN cards cd ON ct.card_id=cd.id JOIN customers c ON cd.customer_id=c.id
+          GROUP BY c.name, ym ORDER BY ym DESC, spend DESC;
+          SELECT status, SUM(outstanding) AS total_outstanding FROM loans GROUP BY status;
+          SELECT DATE(created_at) d, COUNT(*) cnt, SUM(amount) total FROM transfers GROUP BY DATE(created_at) ORDER BY d DESC;
+          SELECT base_currency, quote_currency, rate, as_of FROM fx_rates ORDER BY as_of DESC, base_currency, quote_currency LIMIT 10;
           SQL
 
           # Postgres
-          cat > .github/echo/db/sql/postgres/001_schema.sql <<'SQL'
+          cat > ${ECHO_ROOT}/db/sql/postgres/001_schema.sql <<'SQL'
           CREATE DATABASE fin;
           SQL
-          cat > .github/echo/db/sql/postgres/002_objects.sql <<'SQL'
+          cat > ${ECHO_ROOT}/db/sql/postgres/002_objects.sql <<'SQL'
           \c fin
-
-          CREATE TABLE IF NOT EXISTS customers (
-            id BIGSERIAL PRIMARY KEY,
-            name VARCHAR(128) NOT NULL,
-            email VARCHAR(256) UNIQUE,
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-
-          CREATE TABLE IF NOT EXISTS accounts (
-            id BIGSERIAL PRIMARY KEY,
-            customer_id BIGINT NOT NULL REFERENCES customers(id),
-            account_number VARCHAR(32) UNIQUE NOT NULL,
-            balance NUMERIC(18,2) NOT NULL DEFAULT 0,
-            currency VARCHAR(8) NOT NULL DEFAULT 'KRW',
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-
-          CREATE TABLE IF NOT EXISTS transactions (
-            id BIGSERIAL PRIMARY KEY,
-            account_id BIGINT NOT NULL REFERENCES accounts(id),
-            txn_type VARCHAR(16) NOT NULL,
-            amount NUMERIC(18,2) NOT NULL,
-            ref VARCHAR(64),
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-
-          CREATE TABLE IF NOT EXISTS ledger (
-            id BIGSERIAL PRIMARY KEY,
-            txn_id BIGINT NOT NULL,
-            debit_account BIGINT,
-            credit_account BIGINT,
-            amount NUMERIC(18,2) NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-          );
+          CREATE TABLE IF NOT EXISTS customers (id BIGSERIAL PRIMARY KEY, name VARCHAR(128) NOT NULL, email VARCHAR(256) UNIQUE, created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS accounts (id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES customers(id), account_number VARCHAR(32) UNIQUE NOT NULL, balance NUMERIC(18,2) NOT NULL DEFAULT 0, currency VARCHAR(8) NOT NULL DEFAULT 'KRW', created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS transactions (id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL REFERENCES accounts(id), txn_type VARCHAR(16) NOT NULL, amount NUMERIC(18,2) NOT NULL, ref VARCHAR(64), created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS ledger (id BIGSERIAL PRIMARY KEY, txn_id BIGINT NOT NULL, debit_account BIGINT, credit_account BIGINT, amount NUMERIC(18,2) NOT NULL, created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS cards (id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES customers(id), card_number VARCHAR(32) UNIQUE NOT NULL, brand VARCHAR(16) NOT NULL, limit_amount NUMERIC(18,2) NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'active', created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS card_transactions (id BIGSERIAL PRIMARY KEY, card_id BIGINT NOT NULL REFERENCES cards(id), amount NUMERIC(18,2) NOT NULL, merchant VARCHAR(128), category VARCHAR(64), txn_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS loans (id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES customers(id), principal NUMERIC(18,2) NOT NULL, interest_rate NUMERIC(5,2) NOT NULL, start_date DATE NOT NULL, end_date DATE, status VARCHAR(16) NOT NULL DEFAULT 'active', outstanding NUMERIC(18,2) NOT NULL DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS transfers (id BIGSERIAL PRIMARY KEY, from_account_id BIGINT NOT NULL REFERENCES accounts(id), to_account_id BIGINT NOT NULL REFERENCES accounts(id), amount NUMERIC(18,2) NOT NULL, created_at TIMESTAMP DEFAULT NOW());
+          CREATE TABLE IF NOT EXISTS fx_rates (id BIGSERIAL PRIMARY KEY, base_currency VARCHAR(8) NOT NULL, quote_currency VARCHAR(8) NOT NULL, rate NUMERIC(18,6) NOT NULL, as_of TIMESTAMP NOT NULL DEFAULT NOW());
           SQL
-
-          cat > .github/echo/db/sql/postgres/010_seed.sql <<'SQL'
+          cat > ${ECHO_ROOT}/db/sql/postgres/010_seed.sql <<'SQL'
           \c fin
-          INSERT INTO customers (name,email) VALUES
-            ('Alice','alice@example.com'),
-            ('Bob','bob@example.com');
-
+          INSERT INTO customers (name,email) VALUES ('Alice','alice@example.com'),('Bob','bob@example.com')
+            ON CONFLICT (email) DO UPDATE SET name=EXCLUDED.name;
           INSERT INTO accounts (customer_id,account_number,balance,currency)
-            VALUES (1,'ACCT-0001',100000,'KRW'),
-                   (2,'ACCT-0002',50000,'KRW');
-
-          INSERT INTO transactions (account_id,txn_type,amount,ref)
-            VALUES (1,'deposit',25000,'INIT-1'),
-                   (2,'withdraw',10000,'INIT-2');
+            VALUES (1,'ACCT-0001',100000,'KRW'),(2,'ACCT-0002',50000,'KRW')
+            ON CONFLICT (account_number) DO UPDATE SET balance=EXCLUDED.balance;
+          INSERT INTO cards (customer_id,card_number,brand,limit_amount,status)
+            VALUES (1,'4111-1111-1111-1111','VISA',3000000,'active'),
+                   (2,'5555-5555-5555-4444','MASTERCARD',2000000,'active')
+            ON CONFLICT (card_number) DO UPDATE SET brand=EXCLUDED.brand;
+          INSERT INTO card_transactions (card_id,amount,merchant,category)
+            VALUES (1,125000,'CU','GROCERY'),(1,9900,'Bus','TRANSIT'),(2,250000,'ABC Electronics','ELECTRONICS');
+          INSERT INTO loans (customer_id,principal,interest_rate,start_date,status,outstanding)
+            VALUES (1,10000000,4.50,CURRENT_DATE,'active',9750000),(2,5000000,5.20,CURRENT_DATE,'active',4920000);
+          INSERT INTO transfers (from_account_id,to_account_id,amount) VALUES (1,2,25000),(2,1,10000);
+          INSERT INTO fx_rates (base_currency,quote_currency,rate) VALUES ('USD','KRW',1350.25),('EUR','KRW',1488.10),('JPY','KRW',9.35);
           SQL
-
-          cat > .github/echo/db/sql/postgres/020_queries.sql <<'SQL'
+          cat > ${ECHO_ROOT}/db/sql/postgres/020_reports.sql <<'SQL'
           \c fin
-          -- 잔액 상위 고객
-          SELECT c.name, a.account_number, a.balance
-          FROM accounts a JOIN customers c ON a.customer_id=c.id
-          ORDER BY a.balance DESC LIMIT 10;
-
-          -- 일별 거래 수/금액
-          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total
-          FROM transactions
-          GROUP BY DATE(created_at)
-          ORDER BY d DESC;
+          SELECT c.name, a.account_number, a.balance FROM accounts a JOIN customers c ON a.customer_id=c.id ORDER BY a.balance DESC LIMIT 10;
+          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total FROM transactions GROUP BY DATE(created_at) ORDER BY d DESC;
+          SELECT c.name, TO_CHAR(ct.txn_at, 'YYYY-MM') AS ym, SUM(ct.amount) AS spend
+          FROM card_transactions ct JOIN cards cd ON ct.card_id=cd.id JOIN customers c ON cd.customer_id=c.id
+          GROUP BY c.name, ym ORDER BY ym DESC, spend DESC;
+          SELECT status, SUM(outstanding) AS total_outstanding FROM loans GROUP BY status;
+          SELECT DATE(created_at) d, COUNT(*) cnt, SUM(amount) total FROM transfers GROUP BY DATE(created_at) ORDER BY d DESC;
+          SELECT base_currency, quote_currency, rate, as_of FROM fx_rates ORDER BY as_of DESC, base_currency, quote_currency LIMIT 10;
           SQL
 
-          . .github/echo/echo.sh
-          echoe "[DB] 스키마/시드/쿼리 스크립트 생성 완료"
+          # 권한(AppArmor/OPA)
+          cat > ${ECHO_ROOT}/perm/opa/input.json <<'JSON'
+          { "operation": "create_container", "path": "/app" }
+          JSON
 
-      - name: Show tree
+          # 트리 기록
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y tree >/dev/null 2>&1 || true
+          tree -a ${ECHO_ROOT} | tee ${ECHO_ROOT}/logs/tree_bootstrap.txt
+          echoe "[INIT] 대량 생성 완료"
+
+      - name: (번들) echo-bundle 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: echo-bundle
+          path: .github/echo/**
+
+  build-app-image:
+    name: "② 앱 빌드/이미지 생성(필요 도구 설치 포함)"
+    runs-on: ubuntu-latest
+    needs: [bootstrap-echo-bundle]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: echo-bundle 다운로드 및 복원
+        uses: actions/download-artifact@v4
+        with:
+          name: echo-bundle
+          path: .
+
+      - name: (필수) 도구 설치 + 선택적 업그레이드
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y >/dev/null 2>&1 || true
-          sudo apt-get install -y tree >/dev/null 2>&1 || true
-          tree -a .github/echo | tee .github/echo/logs/tree.txt
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-${JAVA_VERSION}-jdk maven gradle jq tree
+          if [ "${{ inputs.do_upgrade }}" = "true" ]; then sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade; fi
 
-  build-image:
-    runs-on: ubuntu-latest
-    needs: prepare-echo-files
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build Docker image (echo)
+      - name: 누락 자동 복구(ensure_echo)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ${ECHO_ROOT}/tools/ensure_echo.sh
+          tree -a ${ECHO_ROOT} | tee ${ECHO_ROOT}/logs/tree_build.txt
+
+      - name: Spring Boot JAR 빌드 (Maven/Gradle)
+        shell: bash
+        env:
+          BUILD_TOOL: ${{ inputs.build_tool }}
+        run: |
+          set -euo pipefail
+          cd ${ECHO_ROOT}/app/spring
+          if [ "${BUILD_TOOL}" = "gradle" ]; then
+            gradle --no-daemon clean bootJar | tee -a ../../logs/app_build.txt
+            cp build/libs/*.jar app.jar
+          else
+            mvn -B -q -DskipTests package spring-boot:repackage | tee -a ../../logs/app_build.txt
+            cp target/*.jar app.jar
+          fi
+          ls -l app.jar | tee -a ../../logs/app_build.txt
+
+      - name: Docker 이미지 빌드(+latest)
+        shell: bash
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
-        shell: bash
         run: |
           set -euo pipefail
           ts=$(date +%Y%m%d%H%M%S)
-          docker build -t "${IMAGE_NAME}:$ts" -t "${IMAGE_NAME}:latest" -f .github/echo/app/Dockerfile .github/echo/app
-          echo "IMAGE_TAG=${ts}" | tee .github/echo/images/image_tag.txt
-          docker images | tee .github/echo/images/images.txt
+          cd ${ECHO_ROOT}/app/spring
+          docker build -t "${IMAGE_NAME}:$ts" -t "${IMAGE_NAME}:latest" --build-arg JAR_FILE=app.jar -f Dockerfile .
+          echo "IMAGE_TAG=${ts}" | tee ../../images/image_tag.txt
+          docker images | tee ../../images/images.txt
 
-      - name: (Optional) Push to GHCR
+      - name: (옵션) GHCR 푸시
         if: ${{ inputs.push_image == 'true' }}
+        shell: bash
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
-        shell: bash
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           docker login ghcr.io -u "${owner}" -p "${{ secrets.GITHUB_TOKEN }}"
-          ts=$(cat .github/echo/images/image_tag.txt | cut -d= -f2)
+          ts=$(cut -d= -f2 ${ECHO_ROOT}/images/image_tag.txt)
           docker tag "${IMAGE_NAME}:$ts" "ghcr.io/${owner}/${IMAGE_NAME}:$ts"
           docker tag "${IMAGE_NAME}:latest" "ghcr.io/${owner}/${IMAGE_NAME}:latest"
           docker push "ghcr.io/${owner}/${IMAGE_NAME}:$ts"
           docker push "ghcr.io/${owner}/${IMAGE_NAME}:latest"
-          echo "GHCR=ghcr.io/${owner}/${IMAGE_NAME}:$ts" | tee .github/echo/images/pushed.txt
+          echo "GHCR=ghcr.io/${owner}/${IMAGE_NAME}:$ts" | tee ${ECHO_ROOT}/images/pushed.txt
 
-      - name: Upload image artifacts
+      - name: 아티팩트 업로드(이미지/로그)
         uses: actions/upload-artifact@v4
         with:
-          name: echo-images
+          name: echo-app-build
           path: |
-            .github/echo/images/*
-            .github/echo/logs/*
+            .github/echo/app/spring/app.jar
+            .github/echo/images/**
+            .github/echo/logs/**
 
-  run-dbs-and-init:
+  run-dbs-init:
+    name: "③ DB 컨테이너 기동 + 확장 스키마/리포트 적용"
     runs-on: ubuntu-latest
-    needs: prepare-echo-files
+    needs: [bootstrap-echo-bundle]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create docker network
+      - name: echo-bundle 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: echo-bundle
+          path: .
+
+      - name: 도구 설치 + 선택 업그레이드
         shell: bash
         run: |
           set -euo pipefail
-          docker network create echonet || true
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-client postgresql-client jq tree
+          if [ "${{ inputs.do_upgrade }}" = "true" ]; then sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade; fi
 
-      - name: Start MySQL (if selected) + init
+      - name: ensure_echo + 네트워크
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ${ECHO_ROOT}/tools/ensure_echo.sh
+          docker network create echonet || true
+          tree -a ${ECHO_ROOT}/db/sql | tee ${ECHO_ROOT}/logs/tree_sql.txt
+
+      - name: MySQL 기동/초기화 (선택)
         if: ${{ inputs.db_engine == 'mysql' || inputs.db_engine == 'both' }}
         shell: bash
         run: |
           set -euo pipefail
           docker rm -f mysql-echo >/dev/null 2>&1 || true
-          docker run -d --name mysql-echo --network echonet \
-            -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=fin \
-            -p 3306:3306 mysql:8.3
-          echo "[MYSQL] 대기 중..."
-          for i in {1..60}; do
-            if docker exec mysql-echo mysql -uroot -proot -e "SELECT 1;" >/dev/null 2>&1; then
-              echo "[MYSQL] ready"
-              break
-            fi
-            sleep 2
-          done
-          # schema & seed
-          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/001_schema.sql
-          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/010_seed.sql
-          # queries -> results
-          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/020_queries.sql | tee .github/echo/db/results/mysql/020_queries.out
+          docker run -d --name mysql-echo --network echonet -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=fin -p 3306:3306 mysql:8.3
+          echo "[MYSQL] waiting..."
+          for i in {1..90}; do docker exec mysql-echo mysql -uroot -proot -e "SELECT 1;" >/dev/null 2>&1 && break || sleep 2; done
+          docker exec -i mysql-echo mysql -uroot -proot < ${ECHO_ROOT}/db/sql/mysql/001_schema.sql
+          docker exec -i mysql-echo mysql -uroot -proot < ${ECHO_ROOT}/db/sql/mysql/010_seed.sql
+          docker exec -i mysql-echo mysql -uroot -proot < ${ECHO_ROOT}/db/sql/mysql/020_reports.sql \
+            | tee ${ECHO_ROOT}/db/results/mysql/020_reports.out
 
-      - name: Start Postgres (if selected) + init
+      - name: Postgres 기동/초기화 (선택)
         if: ${{ inputs.db_engine == 'postgres' || inputs.db_engine == 'both' }}
         shell: bash
         run: |
           set -euo pipefail
           docker rm -f pg-echo >/dev/null 2>&1 || true
-          docker run -d --name pg-echo --network echonet \
-            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
-            -p 5432:5432 postgres:16
-          echo "[POSTGRES] 대기 중..."
-          for i in {1..60}; do
-            if docker exec pg-echo pg_isready -U postgres >/dev/null 2>&1; then
-              echo "[POSTGRES] ready"
-              break
-            fi
-            sleep 2
-          done
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/001_schema.sql
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/002_objects.sql
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/010_seed.sql
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/020_queries.sql | tee .github/echo/db/results/postgres/020_queries.out
+          docker run -d --name pg-echo --network echonet -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres -p 5432:5432 postgres:16
+          echo "[POSTGRES] waiting..."
+          for i in {1..90}; do docker exec pg-echo pg_isready -U postgres >/dev/null 2>&1 && break || sleep 2; done
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < ${ECHO_ROOT}/db/sql/postgres/001_schema.sql
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < ${ECHO_ROOT}/db/sql/postgres/002_objects.sql
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < ${ECHO_ROOT}/db/sql/postgres/010_seed.sql
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < ${ECHO_ROOT}/db/sql/postgres/020_reports.sql \
+            | tee ${ECHO_ROOT}/db/results/postgres/020_reports.out
 
-      - name: Upload DB init artifacts
+      - name: DB 결과/로그 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: echo-db
+          name: db-results
           path: |
-            .github/echo/db/**
+            .github/echo/db/results/**
             .github/echo/logs/**
 
-  run-app-container:
+  run-app-with-perms:
+    name: "④ OPA 게이트 + AppArmor 적용(가능시) + 앱 컨테이너 기동/테스트"
     runs-on: ubuntu-latest
-    needs: [build-image, run-dbs-and-init]
+    needs: [bootstrap-echo-bundle, build-app-image, run-dbs-init]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Determine DB env
+      - name: echo-bundle 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: echo-bundle
+          path: .
+
+      - name: 도구 설치(opa eval용 jq 포함) + 선택 업그레이드
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl apparmor apparmor-utils
+          if [ "${{ inputs.do_upgrade }}" = "true" ]; then sudo DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade; fi
+
+      - name: ensure_echo + OPA 정책 평가
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ${ECHO_ROOT}/tools/ensure_echo.sh
+          docker pull openpolicyagent/opa:latest >/dev/null
+          docker run --rm -v "$PWD/${ECHO_ROOT}/perm/opa:/pol" openpolicyagent/opa:latest \
+            eval -f json -d /pol/policy.rego -i /pol/input.json "data.echo.allow" \
+            | tee ${ECHO_ROOT}/perm/opa/eval.json
+          ALLOW=$(jq -r '.result[0].expressions[0].value' ${ECHO_ROOT}/perm/opa/eval.json || echo "false")
+          echo "OPA_ALLOW=$ALLOW"
+          if [ "$ALLOW" != "true" ]; then echo "OPA policy denied container creation"; exit 1; fi
+
+      - name: DB 환경 결정
         id: dbenv
         shell: bash
         run: |
-          set -euo pipefail
           if [ "${{ inputs.db_engine }}" = "mysql" ] || [ "${{ inputs.db_engine }}" = "both" ]; then
-            echo "DB_ENGINE=mysql" >> $GITHUB_OUTPUT
-            echo "DB_HOST=mysql-echo" >> $GITHUB_OUTPUT
-            echo "DB_PORT=3306" >> $GITHUB_OUTPUT
-            echo "DB_USER=root" >> $GITHUB_OUTPUT
-            echo "DB_PASS=root" >> $GITHUB_OUTPUT
+            echo "DB_ENGINE=mysql" >> $GITHUB_OUTPUT; echo "DB_HOST=mysql-echo" >> $GITHUB_OUTPUT; echo "DB_PORT=3306" >> $GITHUB_OUTPUT; echo "DB_USER=root" >> $GITHUB_OUTPUT; echo "DB_PASS=root" >> $GITHUB_OUTPUT
           else
-            echo "DB_ENGINE=postgres" >> $GITHUB_OUTPUT
-            echo "DB_HOST=pg-echo" >> $GITHUB_OUTPUT
-            echo "DB_PORT=5432" >> $GITHUB_OUTPUT
-            echo "DB_USER=postgres" >> $GITHUB_OUTPUT
-            echo "DB_PASS=postgres" >> $GITHUB_OUTPUT
+            echo "DB_ENGINE=postgres" >> $GITHUB_OUTPUT; echo "DB_HOST=pg-echo" >> $GITHUB_OUTPUT; echo "DB_PORT=5432" >> $GITHUB_OUTPUT; echo "DB_USER=postgres" >> $GITHUB_OUTPUT; echo "DB_PASS=postgres" >> $GITHUB_OUTPUT
           fi
           echo "DB_NAME=fin" >> $GITHUB_OUTPUT
 
-      - name: Re-build (if needed) and run container on echonet
+      - name: (이 Job에서) 앱 이미지 재빌드 후 실행  # Job 간 이미지 공유가 안되므로 재빌드
+        shell: bash
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
-          APP_PORT: ${{ inputs.app_port }}
-        shell: bash
         run: |
           set -euo pipefail
-          # 최신 이미지가 이전 job에서 로컬에 이미 있음 (actions job마다 VM이 달라 다시 빌드)
-          docker build -t "${IMAGE_NAME}:latest" -f .github/echo/app/Dockerfile .github/echo/app
+          # build
+          sudo apt-get update -y && sudo apt-get install -y openjdk-${JAVA_VERSION}-jdk maven gradle >/dev/null
+          cd ${ECHO_ROOT}/app/spring
+          if [ "${{ inputs.build_tool }}" = "gradle" ]; then
+            gradle --no-daemon clean bootJar >/dev/null
+            cp build/libs/*.jar app.jar
+          else
+            mvn -B -q -DskipTests package spring-boot:repackage >/dev/null
+            cp target/*.jar app.jar
+          fi
+          docker build -t "${IMAGE_NAME}:latest" --build-arg JAR_FILE=app.jar -f Dockerfile .
+
+          # run with AppArmor if available
+          docker network create echonet >/dev/null 2>&1 || true
           docker rm -f app-echo >/dev/null 2>&1 || true
+          AA_OPT=""
+          if command -v aa-status >/dev/null 2>&1; then
+            if sudo aa-status | grep -q "profiles are loaded"; then
+              # 로드 시도
+              if command -v apparmor_parser >/dev/null 2>&1; then
+                sudo apparmor_parser -r -W ${ECHO_ROOT}/perm/apparmor/echo-app-profile || true
+              fi
+              AA_OPT="--security-opt apparmor=echo-app-profile"
+            fi
+          fi
           docker run -d --name app-echo --network echonet \
-            -e APP_NAME="Echo-FinDev" \
+            $AA_OPT \
             -e DB_ENGINE="${{ steps.dbenv.outputs.DB_ENGINE }}" \
             -e DB_HOST="${{ steps.dbenv.outputs.DB_HOST }}" \
             -e DB_PORT="${{ steps.dbenv.outputs.DB_PORT }}" \
             -e DB_USER="${{ steps.dbenv.outputs.DB_USER }}" \
             -e DB_PASS="${{ steps.dbenv.outputs.DB_PASS }}" \
             -e DB_NAME="${{ steps.dbenv.outputs.DB_NAME }}" \
-            -p "${APP_PORT}:8000" "${IMAGE_NAME}:latest"
-          echo "[APP] 기동 완료: http://localhost:${APP_PORT}"
+            -p "${{ inputs.app_port }}:8080" "${IMAGE_NAME}:latest"
+          echo "[APP] http://localhost:${{ inputs.app_port }}"
 
-      - name: Smoke test (optional)
+      - name: 스모크 테스트 (옵션)
         if: ${{ inputs.run_tests == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          # 단순 curl 테스트
           for path in "/" "/healthz" "/config"; do
             echo "[TEST] GET $path"
-            curl -fsS "http://localhost:${{ inputs.app_port }}${path}" | tee -a .github/echo/logs/app_curl.txt
+            curl -fsS "http://localhost:${{ inputs.app_port }}${path}" | tee -a ${ECHO_ROOT}/logs/app_curl.txt
             echo
           done
 
-      - name: Upload app logs
+      - name: 앱 로그 업로드
         uses: actions/upload-artifact@v4
         with:
-          name: echo-app
-          path: |
-            .github/echo/app/**
-            .github/echo/logs/**
-            .github/echo/perm/**
+          name: app-run-logs
+          path: .github/echo/logs/**
+
+  reports:
+    name: "⑤ 리포트 산출(쿼리 결과 수집)"
+    runs-on: ubuntu-latest
+    needs: [run-dbs-init]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: db-results
+          path: .
+
+      - name: 리포트 정리(+ README)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ${ECHO_ROOT}/reports
+          cp -r ${ECHO_ROOT}/db/results/** ${ECHO_ROOT}/reports/ || true
+          cat > ${ECHO_ROOT}/reports/README.md <<'MD'
+          # FinMega Echo Reports
+          - `db/results/*/020_reports.out` 에 쿼리 결과가 포함됩니다.
+          - 필요 시 CSV/Markdown 표 변환 및 GitHub Pages 배포를 추가하세요.
+          MD
+
+      - name: 리포트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: echo-reports
+          path: .github/echo/reports/**
