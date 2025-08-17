@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v6 - checksum-first)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v6.1)"
 
 permissions:
   contents: write
@@ -135,7 +135,7 @@ jobs:
           SNIP="${ECHO_ROOT}/snippets"
           SCRIPTS="${ECHO_ROOT}/scripts"
           mkdir -p "$SNIP" "$SCRIPTS"
-          # padding
+          # padding (최소 데이터 보장)
           head -c 65536 /dev/urandom > "${SNIP}/.padding"
           # sudoers
           cat > "${SNIP}/sudoers_${USERNAME}" <<EOF
@@ -240,7 +240,7 @@ jobs:
           [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
 
       # =======================
-      # Ubuntu: checksum-first
+      # Ubuntu: 체크섬-우선 단계
       # =======================
       - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치)"
         if: env.DISTRO == 'ubuntu'
@@ -248,7 +248,8 @@ jobs:
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
           mkdir -p ${ECHO_ROOT}/out
-          # 1) 후보 인덱스URLs (cdimage releases 우선)
+
+          # 1) 후보 인덱스URLs (cdimage 우선, 실패시 releases 폴백)
           SERIES=()
           case "${REL_HINT}" in
             24.*) SERIES=("noble");;
@@ -261,7 +262,6 @@ jobs:
             U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
             curl -fsI "$U" >/dev/null 2>&1 && INDEX_URL="$U" && break
           done
-          # releases.ubuntu.com 폴백(예: 24.04 고정)
           [ -z "$INDEX_URL" ] && INDEX_URL="https://releases.ubuntu.com/24.04/"
           echo "BASE_INDEX_URL=${INDEX_URL}" >> $GITHUB_ENV
 
@@ -275,21 +275,30 @@ jobs:
             gpg --keyid-format long --verify "${ECHO_ROOT}/out/SHA256SUMS.gpg" "${ECHO_ROOT}/out/SHA256SUMS" || echoe "[WARN] GPG 검증 실패(계속 진행)"
           fi
 
-          # 3) SHA256SUMS에서 정확 파일명 선택
+          # 3) SHA256SUMS 파싱(두 포맷 지원) → "HASH filename" 표준화
+          awk '
+            /^[0-9a-fA-F]{64}[ \t]+\*?[^ ]+\.iso$/ {
+              h=$1; f=$2; sub(/^\*/,"",f); print h, f; next
+            }
+            match($0,/^SHA256 *\(([^)]+\.iso)\) *= *([0-9a-fA-F]{64})/,m){
+              print m[2], m[1]
+            }
+          ' "${ECHO_ROOT}/out/SHA256SUMS" > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
+
+          # 4) 파일 선택: REL_HINT 있으면 해당, 없으면 최신 live-server
           REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
-          CAND=""
+          CAND_LINE=""
           if [ -n "${REL_HINT}" ]; then
-            CAND="$(grep -E " ubuntu-${REL_RX}(\.[0-9]+)?-live-server-amd64\.iso$" ${ECHO_ROOT}/out/SHA256SUMS | awk '{print $2}' | sort -V | tail -n1 || true)"
+            CAND_LINE="$(grep -E " ubuntu-${REL_RX}(\.[0-9]+)?-live-server-amd64\.iso$" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true)"
           fi
-          [ -z "$CAND" ] && CAND="$(grep -E ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-amd64\.iso$' ${ECHO_ROOT}/out/SHA256SUMS | awk '{print $2}' | sort -V | tail -n1 || true)"
-          [ -z "$CAND" ] && { echoe "[ERR] SHA256SUMS에서 live-server 항목을 찾지 못함"; exit 1; }
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(grep -E ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-amd64\.iso$' "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true)"
+          [ -z "$CAND_LINE" ] && { echoe "[ERR] SHA256SUMS에서 live-server 항목을 찾지 못함"; exit 1; }
+
+          EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
+          CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
           echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
 
-          # 4) EXPECT 해시 추출
-          EXPECT="$(grep -F " ${CAND}" ${ECHO_ROOT}/out/SHA256SUMS | awk '{print $1}')"
-          [ -n "$EXPECT" ] || { echoe "[ERR] 기대 해시 추출 실패"; exit 1; }
-
-          # 5) 동일 디렉터리/미러 세트에서 해당 파일만 다운로드 & 검증
+          # 5) 동일 디렉터리/미러 세트에서 해당 파일만 다운로드 & SHA256 검증
           urls=(
             "${INDEX_URL}${CAND}"
             "https://releases.ubuntu.com/${CAND%-live-server-amd64.iso}/${CAND}"
@@ -316,9 +325,6 @@ jobs:
           for ext in zsync list manifest; do
             curl -fsI "${INDEX_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${INDEX_URL}${CAND}.${ext}" || true
           done
-
-      # ===== Debian/Fedora/Alma/Rocky는 이전 버전대로 동작 (생략) =====
-      # 필요 시 동일한 "checksum-first" 방식으로 확장 가능
 
       - name: "Kickstart & Preseed 템플릿"
         run: |
@@ -362,10 +368,11 @@ jobs:
           cp -a "${TPL}/kickstart.ks" "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg"
           cp -a "${TPL}/preseed.cfg"  "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg"
 
-      - name: "합본 ISO (xorriso graft)"
+      - name: "합본 ISO (xorriso graft, /seed + /ks.cfg + /preseed.cfg)"
         if: ${{ github.event.inputs.combine_base_iso == 'true' }}
         run: |
           set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
           OUT="${ECHO_ROOT}/out"
           [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
           xorriso \
@@ -377,7 +384,6 @@ jobs:
             -boot_image any keep
           isoinfo -d -i "${OUT}/base-with-seed.iso" >/dev/null 2>&1 || { echo "combined iso invalid"; exit 1; }
           [ $(stat -c%s "${OUT}/base-with-seed.iso") -ge 10485760 ] || { echo "combined iso too small"; exit 1; }
-          printf "%s\n" "${OUT}/base-with-seed.iso" > "${ECHO_ROOT}/logs/combined_path.txt"
 
       - name: "Ubuntu: 부트 엔트리 주입(완전 자동 ISO)"
         if: env.DISTRO == 'ubuntu'
@@ -431,8 +437,10 @@ jobs:
             echoe "[ISO] $(basename "$f") size=${sz} iso=${iso}"
           done
           echo "[HINT] Ubuntu: autoinstall ds=nocloud;s=/cdrom/seed/"
+          echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
+          echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
 
-      - name: "아티팩트 업로드"
+      - name: "아티팩트 업로드(유효 파일만)"
         if: ${{ github.event.inputs.upload_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
