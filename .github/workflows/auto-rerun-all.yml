@@ -1,77 +1,227 @@
-## 전체 워크플로우 코드
-# 파일명: .github/workflows/release.yml
-# 설명: 이 워크플로우는 'v'로 시작하는 새 태그(예: v1.0.0)가 리포지토리에 푸시될 때마다
-#        Swift CLI 애플리케이션을 빌드하고 GitHub Release를 자동으로 생성합니다.
-
-name: Create GitHub Release
+name: "🩺 Workflows Health Check (Echo Everywhere, Clean)"
 
 on:
-  push:
-    tags:
-      - 'v*' # 'v1.0.0', 'v1.0.1-beta' 등 'v'로 시작하는 모든 태그에 의해 트리거
+  workflow_dispatch:
+    inputs:
+      lookback:
+        description: "최근 조회 실행 수 (기본 24)"
+        required: false
+        default: "24"
+      max_reruns:
+        description: "자동 재실행 최대 횟수/회 (기본 3)"
+        required: false
+        default: "3"
+      fail_rate_threshold:
+        description: "실패율 임계값 (0~1, 기본 0.5)"
+        required: false
+        default: "0.5"
+      fail_abs_threshold:
+        description: "절대 실패 횟수 임계값 (기본 3)"
+        required: false
+        default: "3"
+      replica_count:
+        description: "랩 복제본 개수 (기본 5)"
+        required: false
+        default: "5"
+      commit_changes:
+        description: "변경 커밋/푸시 여부 (true/false, 기본 true)"
+        required: false
+        default: "true"
+  schedule:
+    - cron: "0 * * * *" # 매시간 정각(UTC)
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
 
 jobs:
-  release:
-    runs-on: ubuntu-latest # macOS 바이너리가 필요한 경우 'macos-latest'로 변경
+  health-check:
+    name: "Health Check (EchoOps)"
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LOG_DIR: .github/logs
+      LAB_DIR: ci-labs/replicas
+      QUAR_DIR: ci-labs/quarantine
+      LOOKBACK_DEFAULT: "24"
+      MAX_RERUNS_DEFAULT: "3"
+      FAIL_RATE_THRESHOLD_DEFAULT: "0.5"
+      FAIL_ABS_THRESHOLD_DEFAULT: "3"
+      REPLICA_COUNT_DEFAULT: "5"
+      COMMIT_CHANGES_DEFAULT: "true"
+      # ✅ 모든 run 스텝에 에코/트레이스 자동 적용
+      BASH_ENV: ${{ runner.temp }}/echo_prologue.sh
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v5 # 리포지토리 코드를 가져옵니다.
+      - name: 🛠️ Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-    - name: Install Swift Toolchain
-      # 빌드 및 테스트 워크플로우와 동일한 Swift 버전 사용 권장
-      uses: swift-actions/setup-swift@v2
-      with:
-        swift-version: '5.10'
+      # ─────────────────────────────────────────────
+      # 🔊 Global Echo Prologue (모든 run: 자동 에코)
+      # ─────────────────────────────────────────────
+      - name: 🔊 Bootstrap Echo Prologue (GLOBAL)
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/echo_prologue.sh" <<'BASH'
+ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+E(){ printf '%s [ECHO] %s\n' "$(ts)" "$*"; }
+export PS4='+$(date -u +%Y-%m-%dT%H:%M:%SZ) [TRACE] '
+set -Eeuo pipefail
+set -x
+trap 'E "ERR:$? CMD:${BASH_COMMAND:-} LINE:${BASH_LINENO[*]:-}"' ERR
+trap 'E "EXIT:$?"' EXIT
+BASH
+          # 즉시 활성화 확인
+          source "$RUNNER_TEMP/echo_prologue.sh"
+          E "GLOBAL echo prologue installed"
 
-    - name: Get Project Name
-      id: get_project_name
-      run: |
-        # 리포지토리 이름이 Swift 실행 파일의 이름과 동일하다고 가정합니다.
-        # 필요하다면 Package.swift 파일에서 실제 실행 파일 이름을 파싱하도록 수정할 수 있습니다.
-        PROJECT_NAME=$(basename ${{ github.repository }})
-        echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
+      - name: 🧰 Install gh & jq
+        shell: bash
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq gh jq
 
-    - name: Build Release Executable
-      # Package.swift 파일이 리포지토리의 루트 디렉토리에 있다고 가정합니다.
-      run: swift build -c release
+      - name: 🔐 gh auth login
+        shell: bash
+        run: |
+          if ! gh auth status >/dev/null 2>&1; then
+            echo "${GH_TOKEN}" | gh auth login --with-token
+          fi
+          gh auth status || true
 
-    - name: Prepare Release Assets
-      id: prepare_assets
-      run: |
-        EXECUTABLE_NAME=${{ steps.get_project_name.outputs.project_name }}
-        TAG_NAME=${{ github.ref_name }} # 예: v1.0.0
-        RUNNER_OS_LOWER=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]') # 운영체제 이름을 소문자로 변환
-        ARCHIVE_NAME="${EXECUTABLE_NAME}-${TAG_NAME}-${RUNNER_OS_LOWER}.zip"
-        RELEASE_DIR="release_assets"
+      - name: 📂 Prepare dirs
+        shell: bash
+        run: |
+          mkdir -p "$LOG_DIR" "$LAB_DIR" "$QUAR_DIR"
+          echo "# Workflows Health Logs ($(ts))" > "$LOG_DIR/health_report.md"
+          E "dirs prepared: $LOG_DIR, $LAB_DIR, $QUAR_DIR"
 
-        mkdir -p "${RELEASE_DIR}"
+      - name: 🔍 Health check + auto-rerun + labs/quarantine
+        shell: bash
+        run: |
+          LOOKBACK="${{ github.event.inputs.lookback || env.LOOKBACK_DEFAULT }}"
+          MAX_RERUNS="${{ github.event.inputs.max_reruns || env.MAX_RERUNS_DEFAULT }}"
+          FAIL_RATE_THRESHOLD="${{ github.event.inputs.fail_rate_threshold || env.FAIL_RATE_THRESHOLD_DEFAULT }}"
+          FAIL_ABS_THRESHOLD="${{ github.event.inputs.fail_abs_threshold || env.FAIL_ABS_THRESHOLD_DEFAULT }}"
+          REPLICA_COUNT="${{ github.event.inputs.replica_count || env.REPLICA_COUNT_DEFAULT }}"
+          REPORT_MD="$LOG_DIR/health_report.md"
 
-        # 컴파일된 실행 파일 복사
-        cp ".build/release/${EXECUTABLE_NAME}" "${RELEASE_DIR}/${EXECUTABLE_NAME}"
+          {
+            echo ""
+            echo "# 🩺 Workflows Health Check Report ($(ts))"
+            echo ""
+            echo "| Workflow | Runs | OK | Fail | Cancel | FailRate | Last | ReRuns | Action |"
+            echo "|---|---:|---:|---:|---:|---:|---|---:|---|"
+          } >> "$REPORT_MD"
 
-        # 실행 파일을 압축 (zip)하여 릴리즈 자산으로 준비
-        cd "${RELEASE_DIR}"
-        zip -r "../${ARCHIVE_NAME}" "${EXECUTABLE_NAME}"
-        cd - # 원래 디렉토리로 돌아가기
-        echo "archive_path=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+          TOTAL_RERUNS=0
+          FAILED_WORKFLOWS=()
+          shopt -s nullglob
 
-    - name: Get Release Notes (Optional)
-      id: get_release_notes
-      run: |
-        # 릴리즈 노트를 생성하는 방법은 여러 가지가 있습니다. 여기서는 간단한 메시지를 사용합니다.
-        echo "release_body=🚀 New Release: ${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          for file in .github/workflows/*.{yml,yaml}; do
+            WF_FILE="$(basename "$file")"
+            E "check $WF_FILE"
+            RUNS_JSON="$(gh run list --workflow "$WF_FILE" --limit "$LOOKBACK" --json databaseId,conclusion,status,createdAt,headBranch 2>/dev/null || true)"
+            RUNS_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v2 # GitHub 릴리즈를 생성하는 액션입니다.
-      with:
-        tag_name: ${{ github.ref }} # 워크플로우를 트리거한 태그 (예: refs/tags/v1.0.0)
-        name: Release ${{ github.ref_name }} # GitHub 릴리즈에 표시될 이름 (예: v1.0.0)
-        body: ${{ steps.get_release_notes.outputs.release_body }} # 릴리즈 본문 내용
-        files: |
-          ${{ steps.prepare_assets.outputs.archive_path }} # 준비된 압축 파일 첨부
-          # 다른 첨부할 파일이 있다면 여기에 추가 (예: "path/to/my-doc.pdf")
-        draft: false # 초안으로 릴리즈를 생성하려면 true로 변경
-        prerelease: false # 사전 릴리즈(베타 등)인 경우 true로 변경
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub에서 자동으로 제공하는 토큰 (쓰기 권한 필요)
+            if [[ -z "$RUNS_JSON" || "$RUNS_COUNT" -eq 0 ]]; then
+              echo "| \`$WF_FILE\` | 0 | 0 | 0 | 0 | 0.00 | N/A | 0 | no-runs |" >> "$REPORT_MD"
+              continue
+            fi
+
+            SUC="$(jq '[.[] | select(.conclusion=="success")] | length' <<< "$RUNS_JSON")"
+            FAI="$(jq '[.[] | select(.conclusion=="failure")] | length' <<< "$RUNS_JSON")"
+            CAN="$(jq '[.[] | select(.conclusion=="cancelled")] | length' <<< "$RUNS_JSON")"
+            LAST_CONC="$(jq -r '.[0].conclusion // "unknown"' <<< "$RUNS_JSON")"
+
+            # 실패율 계산
+            FAIL_RATE="$(awk -v t="$RUNS_COUNT" -v f="$FAI" 'BEGIN{ if(t>0) printf "%.2f", f/t; else printf "0.00"; }')"
+
+            # 최근 실패/취소 재실행
+            RERUNS=0
+            if [[ "$MAX_RERUNS" -gt 0 ]]; then
+              jq -r '[.[] | select((.conclusion=="failure") or (.conclusion=="cancelled")) | .databaseId] | .[]?' <<< "$RUNS_JSON" \
+              | while read -r run_id; do
+                  [[ -z "$run_id" ]] && continue
+                  E "rerun $run_id ($WF_FILE)"
+                  gh run rerun "$run_id" || E "rerun failed id=$run_id"
+                  RERUNS=$((RERUNS+1))
+                  TOTAL_RERUNS=$((TOTAL_RERUNS+1))
+                  [[ "$RERUNS" -ge "$MAX_RERUNS" ]] && break
+                done
+            fi
+
+            # 임계 판단
+            OVER_RATE="$(awk -v r="$FAIL_RATE" -v th="$FAIL_RATE_THRESHOLD" 'BEGIN{ print (r+0 >= th+0) ? "1" : "0" }')"
+            if [[ "$FAI" =~ ^[0-9]+$ && "${FAIL_ABS_THRESHOLD}" =~ ^[0-9]+$ ]] && [ "$FAI" -ge "$FAIL_ABS_THRESHOLD" ]; then
+              OVER_ABS="1"
+            else
+              OVER_ABS="0"
+            fi
+
+            ACTION="ok"
+            if [[ "$OVER_RATE" == "1" || "$OVER_ABS" == "1" ]]; then
+              ACTION="labs/quarantine"
+              WF_BASE="${WF_FILE%.*}"
+              TS_ID="$(ts | tr ':T' '__' | tr -d 'Z')"
+              LAB_ROOT="$LAB_DIR/${WF_BASE}/${TS_ID}"
+              QUAR_ROOT="$QUAR_DIR/${WF_BASE}/${TS_ID}"
+
+              mkdir -p "$LAB_ROOT" "$QUAR_ROOT"
+              cp -f "$file" "$QUAR_ROOT/$WF_FILE"
+
+              for i in $(seq 1 "$REPLICA_COUNT"); do
+                LAB_COPY="$LAB_ROOT/${WF_BASE}-lab-${i}.yml"
+                # on: 블록을 workflow_dispatch만 남기고 복제
+                awk 'BEGIN{in_on=0}
+                     /^[[:space:]]*on:[[:space:]]*$/ {print "on:\n  workflow_dispatch:"; in_on=1; next}
+                     {if(in_on && $0 ~ /^[[:space:]]*[^[:space:]]/){in_on=0} if(!in_on) print}' "$file" > "$LAB_COPY"
+                # 이름 보강
+                if grep -q '^name:' "$LAB_COPY"; then
+                  sed -i "1s|^name:.*|name: ${WF_BASE} (LAB ${i})|" "$LAB_COPY"
+                else
+                  sed -i "1i name: ${WF_BASE} (LAB ${i})" "$LAB_COPY"
+                fi
+              done
+            fi
+
+            echo "| \`$WF_FILE\` | $RUNS_COUNT | $SUC | $FAI | $CAN | $FAIL_RATE | $LAST_CONC | $RERUNS | $ACTION |" >> "$REPORT_MD"
+          done
+
+          {
+            echo ""
+            echo "## Summary ($(ts))"
+            echo "- Total auto reruns attempted: **$TOTAL_RERUNS**"
+          } >> "$REPORT_MD"
+
+          # 콘솔/요약 출력
+          sed 's/^/[ECHO] /' "$REPORT_MD" || true
+          cat "$REPORT_MD" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 💾 Commit & Push report/labs/quarantine (echo)
+        if: ${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            E "no changes to commit"
+            exit 0
+          fi
+          git config user.name  "workflow-bot"
+          git config user.email "workflow-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(health): labs/quarantine & report ($(ts))"
+          # github.ref_name 가 비어있을 수 있으므로 기본값 처리
+          BRANCH="${{ github.ref_name }}"
+          if [ -z "$BRANCH" ]; then BRANCH="$(git rev-parse --abbrev-ref HEAD)"; fi
+          git push origin "HEAD:$BRANCH" || true
+          E "pushed changes to $BRANCH"
+
+      - name: 📎 Upload report & logs (echo)
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflows-health-${{ github.run_id }}
+          path: .github/logs
+          if-no-files-found: warn
