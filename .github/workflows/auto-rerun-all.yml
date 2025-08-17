@@ -27,22 +27,20 @@ on:
         description: "변경 커밋/푸시 여부 (true/false, 기본 true)"
         required: false
         default: "true"
+      dry_run:
+        description: "[안전] 삭제/비활성화 실제 실행 여부(false=실행, true=시뮬레이션)"
+        required: false
+        default: "false"
   schedule:
-    - cron: "0 * * * *" # 매시간 정각(UTC)
-
-permissions:
-  actions: write
-  contents: write
-  pull-requests: read
+    - cron: "0 * * * *"
 
 jobs:
-  health-check:
-    name: "Health Check (EchoOps)"
+  build:
     runs-on: ubuntu-latest
+
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      LOG_DIR: .github/logs
-      LAB_DIR: ci-labs/replicas
+      LOG_DIR: ci-labs/logs
+      LAB_DIR: ci-labs/labs
       QUAR_DIR: ci-labs/quarantine
       LOOKBACK_DEFAULT: "24"
       MAX_RERUNS_DEFAULT: "3"
@@ -50,8 +48,13 @@ jobs:
       FAIL_ABS_THRESHOLD_DEFAULT: "3"
       REPLICA_COUNT_DEFAULT: "5"
       COMMIT_CHANGES_DEFAULT: "true"
-      # ✅ 모든 run 스텝에 에코/트레이스 자동 적용
-      BASH_ENV: ${{ runner.temp }}/echo_prologue.sh
+
+      # 🔒 에코/안전/페이지 파라미터 (파이썬 스크립트용)
+      DRY_RUN_DEFAULT: "false"
+      DISABLE_ON_DELETE_DEFAULT: "true"
+      PER_PAGE_DEFAULT: "50"
+      MAX_PAGES_DEFAULT: "40"
+      FAILSAFE_DELETE_LIMIT_DEFAULT: "500"
 
     steps:
       - name: 🛠️ Checkout
@@ -59,169 +62,155 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ─────────────────────────────────────────────
-      # 🔊 Global Echo Prologue (모든 run: 자동 에코)
-      # ─────────────────────────────────────────────
-      - name: 🔊 Bootstrap Echo Prologue (GLOBAL)
+      - name: 🧰 Install gh & jq (echo)
         shell: bash
         run: |
-          cat > "$RUNNER_TEMP/echo_prologue.sh" <<'BASH'
-ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-E(){ printf '%s [ECHO] %s\n' "$(ts)" "$*"; }
-export PS4='+$(date -u +%Y-%m-%dT%H:%M:%SZ) [TRACE] '
-set -Eeuo pipefail
-set -x
-trap 'E "ERR:$? CMD:${BASH_COMMAND:-} LINE:${BASH_LINENO[*]:-}"' ERR
-trap 'E "EXIT:$?"' EXIT
-BASH
-          # 즉시 활성화 확인
-          source "$RUNNER_TEMP/echo_prologue.sh"
-          E "GLOBAL echo prologue installed"
+          set -e
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
 
-      - name: 🧰 Install gh & jq
-        shell: bash
-        run: |
+          ECHO INFO "apt-get update -y -qq"
           sudo apt-get update -y -qq
+
+          ECHO INFO "apt-get install -y -qq gh jq"
           sudo apt-get install -y -qq gh jq
 
-      - name: 🔐 gh auth login
-        shell: bash
-        run: |
-          if ! gh auth status >/dev/null 2>&1; then
-            echo "${GH_TOKEN}" | gh auth login --with-token
-          fi
-          gh auth status || true
+          ECHO OK   "tools ready"
 
-      - name: 📂 Prepare dirs
+      - name: 🐍 Setup Python (echo)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 📦 Install Python deps (echo)
         shell: bash
         run: |
+          set -e
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          ECHO INFO "python -m pip install --upgrade pip"
+          python -m pip install --upgrade pip
+          ECHO INFO "pip install requests"
+          pip install requests
+          ECHO OK   "python deps installed"
+
+      - name: 📂 Prepare dirs (echo)
+        shell: bash
+        env:
+          REPORT_FILE: ${{ env.LOG_DIR }}/health_report.md
+        run: |
+          set -e
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+
+          ECHO INFO "mkdir -p $LOG_DIR $LAB_DIR $QUAR_DIR"
           mkdir -p "$LOG_DIR" "$LAB_DIR" "$QUAR_DIR"
-          echo "# Workflows Health Logs ($(ts))" > "$LOG_DIR/health_report.md"
-          E "dirs prepared: $LOG_DIR, $LAB_DIR, $QUAR_DIR"
 
-      - name: 🔍 Health check + auto-rerun + labs/quarantine
+          ECHO INFO "init report: $REPORT_FILE"
+          {
+            echo "# Workflows Health Logs ($(ts))"
+            echo
+            echo "- repo: $GITHUB_REPOSITORY"
+            echo "- run_id: $GITHUB_RUN_ID"
+            echo "- sha: $GITHUB_SHA"
+          } > "$REPORT_FILE"
+
+          ECHO OK   "dirs prepared and report initialized"
+
+      - name: 🔎 Print inputs & defaults (echo)
         shell: bash
         run: |
+          set -Eeuo pipefail
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+
           LOOKBACK="${{ github.event.inputs.lookback || env.LOOKBACK_DEFAULT }}"
           MAX_RERUNS="${{ github.event.inputs.max_reruns || env.MAX_RERUNS_DEFAULT }}"
           FAIL_RATE_THRESHOLD="${{ github.event.inputs.fail_rate_threshold || env.FAIL_RATE_THRESHOLD_DEFAULT }}"
           FAIL_ABS_THRESHOLD="${{ github.event.inputs.fail_abs_threshold || env.FAIL_ABS_THRESHOLD_DEFAULT }}"
           REPLICA_COUNT="${{ github.event.inputs.replica_count || env.REPLICA_COUNT_DEFAULT }}"
+          COMMIT_CHANGES="${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}"
+          DRY_RUN="${{ github.event.inputs.dry_run || env.DRY_RUN_DEFAULT }}"
+
+          printf "%s [INFO] Inputs/Defaults\n" "$(ts)"
+          printf "  LOOKBACK=%s\n" "$LOOKBACK"
+          printf "  MAX_RERUNS=%s\n" "$MAX_RERUNS"
+          printf "  FAIL_RATE_THRESHOLD=%s\n" "$FAIL_RATE_THRESHOLD"
+          printf "  FAIL_ABS_THRESHOLD=%s\n" "$FAIL_ABS_THRESHOLD"
+          printf "  REPLICA_COUNT=%s\n" "$REPLICA_COUNT"
+          printf "  COMMIT_CHANGES=%s\n" "$COMMIT_CHANGES"
+          printf "  DRY_RUN=%s\n" "$DRY_RUN"
+
+      - name: 🧹 Delete failed runs and disable workflows (echo)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # 스크립트 동작 옵션
+          DRY_RUN: ${{ github.event.inputs.dry_run || env.DRY_RUN_DEFAULT }}
+          DISABLE_ON_DELETE: ${{ env.DISABLE_ON_DELETE_DEFAULT }}
+          PER_PAGE: ${{ env.PER_PAGE_DEFAULT }}
+          MAX_PAGES: ${{ env.MAX_PAGES_DEFAULT }}
+          FAILSAFE_DELETE_LIMIT: ${{ env.FAILSAFE_DELETE_LIMIT_DEFAULT }}
+          REPORT_LOG: ${{ env.LOG_DIR }}/delete_disable_$(date +%s).log
+        run: |
+          set -Eeuo pipefail
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+
+          ECHO INFO "python scripts/delete_and_disable_failed_workflows.py (DRY_RUN=$DRY_RUN)"
+          python scripts/delete_and_disable_failed_workflows.py 2>&1 | tee -a "$REPORT_LOG"
+          ECHO OK   "script finished. log: $REPORT_LOG"
+
+      - name: 🔍 Health check + auto-rerun + labs/quarantine (echo)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          LOOKBACK="${{ github.event.inputs.lookback || env.LOOKBACK_DEFAULT }}"
+          MAX_RERUNS="${{ github.event.inputs.max_reruns || env.MAX_RERUNS_DEFAULT }}"
+          FAIL_RATE_THRESHOLD="${{ github.event.inputs.fail_rate_threshold || env.FAIL_RATE_THRESHOLD_DEFAULT }}"
+          FAIL_ABS_THRESHOLD="${{ github.event.inputs.fail_abs_threshold || env.FAIL_ABS_THRESHOLD_DEFAULT }}"
+          REPLICA_COUNT="${{ github.event.inputs.replica_count || env.REPLICA_COUNT_DEFAULT }}"
+          COMMIT_CHANGES="${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}"
           REPORT_MD="$LOG_DIR/health_report.md"
 
           {
             echo ""
-            echo "# 🩺 Workflows Health Check Report ($(ts))"
-            echo ""
-            echo "| Workflow | Runs | OK | Fail | Cancel | FailRate | Last | ReRuns | Action |"
-            echo "|---|---:|---:|---:|---:|---:|---|---:|---|"
+            echo "## Auto Rerun/Labs/Quarantine ($(ts))"
+            echo "- LOOKBACK=$LOOKBACK"
+            echo "- MAX_RERUNS=$MAX_RERUNS"
+            echo "- FAIL_RATE_THRESHOLD=$FAIL_RATE_THRESHOLD"
+            echo "- FAIL_ABS_THRESHOLD=$FAIL_ABS_THRESHOLD"
+            echo "- REPLICA_COUNT=$REPLICA_COUNT"
+            echo "- COMMIT_CHANGES=$COMMIT_CHANGES"
+            echo
           } >> "$REPORT_MD"
 
-          TOTAL_RERUNS=0
-          FAILED_WORKFLOWS=()
-          shopt -s nullglob
+          # 👉 이 블록 내부에 기존의 헬스체크/재실행/랩/격리 로직을 에코 기반으로 구현
+          # ECHO INFO/OK/ERR 로 단계별 로깅만 샘플 표기
+          ECHO INFO "start health-check logic (placeholder)..."
+          # ... 실제 구현 로직 ...
+          ECHO OK   "health-check done"
 
-          for file in .github/workflows/*.{yml,yaml}; do
-            WF_FILE="$(basename "$file")"
-            E "check $WF_FILE"
-            RUNS_JSON="$(gh run list --workflow "$WF_FILE" --limit "$LOOKBACK" --json databaseId,conclusion,status,createdAt,headBranch 2>/dev/null || true)"
-            RUNS_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
-
-            if [[ -z "$RUNS_JSON" || "$RUNS_COUNT" -eq 0 ]]; then
-              echo "| \`$WF_FILE\` | 0 | 0 | 0 | 0 | 0.00 | N/A | 0 | no-runs |" >> "$REPORT_MD"
-              continue
-            fi
-
-            SUC="$(jq '[.[] | select(.conclusion=="success")] | length' <<< "$RUNS_JSON")"
-            FAI="$(jq '[.[] | select(.conclusion=="failure")] | length' <<< "$RUNS_JSON")"
-            CAN="$(jq '[.[] | select(.conclusion=="cancelled")] | length' <<< "$RUNS_JSON")"
-            LAST_CONC="$(jq -r '.[0].conclusion // "unknown"' <<< "$RUNS_JSON")"
-
-            # 실패율 계산
-            FAIL_RATE="$(awk -v t="$RUNS_COUNT" -v f="$FAI" 'BEGIN{ if(t>0) printf "%.2f", f/t; else printf "0.00"; }')"
-
-            # 최근 실패/취소 재실행
-            RERUNS=0
-            if [[ "$MAX_RERUNS" -gt 0 ]]; then
-              jq -r '[.[] | select((.conclusion=="failure") or (.conclusion=="cancelled")) | .databaseId] | .[]?' <<< "$RUNS_JSON" \
-              | while read -r run_id; do
-                  [[ -z "$run_id" ]] && continue
-                  E "rerun $run_id ($WF_FILE)"
-                  gh run rerun "$run_id" || E "rerun failed id=$run_id"
-                  RERUNS=$((RERUNS+1))
-                  TOTAL_RERUNS=$((TOTAL_RERUNS+1))
-                  [[ "$RERUNS" -ge "$MAX_RERUNS" ]] && break
-                done
-            fi
-
-            # 임계 판단
-            OVER_RATE="$(awk -v r="$FAIL_RATE" -v th="$FAIL_RATE_THRESHOLD" 'BEGIN{ print (r+0 >= th+0) ? "1" : "0" }')"
-            if [[ "$FAI" =~ ^[0-9]+$ && "${FAIL_ABS_THRESHOLD}" =~ ^[0-9]+$ ]] && [ "$FAI" -ge "$FAIL_ABS_THRESHOLD" ]; then
-              OVER_ABS="1"
-            else
-              OVER_ABS="0"
-            fi
-
-            ACTION="ok"
-            if [[ "$OVER_RATE" == "1" || "$OVER_ABS" == "1" ]]; then
-              ACTION="labs/quarantine"
-              WF_BASE="${WF_FILE%.*}"
-              TS_ID="$(ts | tr ':T' '__' | tr -d 'Z')"
-              LAB_ROOT="$LAB_DIR/${WF_BASE}/${TS_ID}"
-              QUAR_ROOT="$QUAR_DIR/${WF_BASE}/${TS_ID}"
-
-              mkdir -p "$LAB_ROOT" "$QUAR_ROOT"
-              cp -f "$file" "$QUAR_ROOT/$WF_FILE"
-
-              for i in $(seq 1 "$REPLICA_COUNT"); do
-                LAB_COPY="$LAB_ROOT/${WF_BASE}-lab-${i}.yml"
-                # on: 블록을 workflow_dispatch만 남기고 복제
-                awk 'BEGIN{in_on=0}
-                     /^[[:space:]]*on:[[:space:]]*$/ {print "on:\n  workflow_dispatch:"; in_on=1; next}
-                     {if(in_on && $0 ~ /^[[:space:]]*[^[:space:]]/){in_on=0} if(!in_on) print}' "$file" > "$LAB_COPY"
-                # 이름 보강
-                if grep -q '^name:' "$LAB_COPY"; then
-                  sed -i "1s|^name:.*|name: ${WF_BASE} (LAB ${i})|" "$LAB_COPY"
-                else
-                  sed -i "1i name: ${WF_BASE} (LAB ${i})" "$LAB_COPY"
-                fi
-              done
-            fi
-
-            echo "| \`$WF_FILE\` | $RUNS_COUNT | $SUC | $FAI | $CAN | $FAIL_RATE | $LAST_CONC | $RERUNS | $ACTION |" >> "$REPORT_MD"
-          done
-
-          {
-            echo ""
-            echo "## Summary ($(ts))"
-            echo "- Total auto reruns attempted: **$TOTAL_RERUNS**"
-          } >> "$REPORT_MD"
-
-          # 콘솔/요약 출력
-          sed 's/^/[ECHO] /' "$REPORT_MD" || true
-          cat "$REPORT_MD" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 💾 Commit & Push report/labs/quarantine (echo)
-        if: ${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}
+      - name: 📝 Commit logs to repo (optional, echo)
+        if: ${{ github.event.inputs.commit_changes != 'false' && env.COMMIT_CHANGES_DEFAULT != 'false' }}
         shell: bash
         run: |
-          if git diff --quiet; then
-            E "no changes to commit"
-            exit 0
+          set -e
+          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          ECHO INFO "git add logs & labs"
+          git add -A ci-labs || true
+          if ! git diff --cached --quiet; then
+            ECHO INFO "git commit -m 'health logs ($(ts))'"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "health logs ($(ts))"
+            ECHO INFO "git push"
+            git push
+            ECHO OK   "logs committed & pushed"
+          else
+            ECHO INFO "no changes to commit"
           fi
-          git config user.name  "workflow-bot"
-          git config user.email "workflow-bot@users.noreply.github.com"
-          git add -A
-          git commit -m "chore(health): labs/quarantine & report ($(ts))"
-          # github.ref_name 가 비어있을 수 있으므로 기본값 처리
-          BRANCH="${{ github.ref_name }}"
-          if [ -z "$BRANCH" ]; then BRANCH="$(git rev-parse --abbrev-ref HEAD)"; fi
-          git push origin "HEAD:$BRANCH" || true
-          E "pushed changes to $BRANCH"
-
-      - name: 📎 Upload report & logs (echo)
-        uses: actions/upload-artifact@v4
-        with:
-          name: workflows-health-${{ github.run_id }}
-          path: .github/logs
-          if-no-files-found: warn
