@@ -1,4 +1,7 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (Echo Everywhere)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate)"
+
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
@@ -8,7 +11,7 @@ on:
         default: "ubuntu"
         required: true
       release_hint:
-        description: "버전 힌트 (ubuntu: 24.04 / debian: 12 등, 비우면 자동)"
+        description: "버전 힌트 (예: ubuntu: 24.04 / debian: 12 등, 비우면 최신 탐색)"
         default: ""
         required: false
       hostname:
@@ -24,7 +27,7 @@ on:
         default: ""
         required: false
       packages:
-        description: "설치 패키지 목록"
+        description: "설치 패키지 목록(공백/콤마 구분)"
         default: "vim curl git htop unzip"
         required: false
       region:
@@ -32,7 +35,7 @@ on:
         default: "Asia/Seoul|en_US.UTF-8"
         required: true
       upload_artifacts:
-        description: "생성물 아티팩트 업로드 여부"
+        description: "생성물 아티팩트 업로드"
         default: "true"
         required: true
       do_upgrade:
@@ -40,35 +43,40 @@ on:
         default: "false"
         required: true
       combine_base_iso:
-        description: "배포판 ISO 자동 다운로드 후 seed 포함 합본 ISO 추가 생성"
+        description: "배포판 ISO 자동 다운로드 후 seed 합본 ISO 생성"
         default: "true"
         required: true
+  schedule:
+    - cron: "0 3 * * 0" # 매주 일요일 03:00 (Asia/Seoul 기준 GitHub 시간대 주의)
 
 jobs:
   build-seed-iso:
     runs-on: ubuntu-latest
+    env:
+      AUTO_UPDATE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
     steps:
       - name: "[ECHO] 시작"
         run: |
           set -euo pipefail
-          echo "[INIT] Linux Seed ISO + 권한 에코 워크플로우 시작"
+          echo "[INIT] Linux Seed ISO + 권한 에코 워크플로우 시작 (${GITHUB_WORKFLOW})"
 
       - name: "Checkout"
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: "환경 변수/디렉토리 준비 + Echo Helper"
         id: prep
         run: |
           set -euo pipefail
           export ECHO_ROOT=".github/echo_linux"
-          mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs,iso_src}
+          mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs,iso_src,records}
           echo "ECHO_ROOT=$ECHO_ROOT" >> $GITHUB_ENV
           cat > "$ECHO_ROOT/echo.sh" <<'EOS'
           echoe(){ printf "%s %s\n" "[$(date +'%F %T')]" "$*"; }
           EOS
           . "$ECHO_ROOT/echo.sh"
           echoe "[DIR] 구조 생성 완료: $ECHO_ROOT"
-          # 내부 기본값: create_sample_dirs는 입력 없이 기본 true로 처리
           echo "CREATE_DIRS=true" >> $GITHUB_ENV
 
       - name: "선택적 시스템 업그레이드 (런너)"
@@ -88,7 +96,7 @@ jobs:
           . ${ECHO_ROOT}/echo.sh
           echoe "[PKG] 도구 설치"
           sudo apt-get update -y
-          sudo apt-get install -y genisoimage xorriso cloud-guest-utils jq sed wget p7zip-full
+          sudo apt-get install -y curl wget jq sed genisoimage xorriso cloud-guest-utils p7zip-full
           echoe "[PKG] 설치 완료"
 
       - name: "입력값 정규화 및 기본값 계산"
@@ -106,7 +114,6 @@ jobs:
           TZ="${REGION%%|*}"
           LOCALE="${REGION##*|}"
           COMBINE="${{ github.event.inputs.combine_base_iso }}"
-          # 기본 릴리즈 힌트
           case "$DISTRO" in
             ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
             debian)  [ -z "$REL_HINT" ] && REL_HINT="12" ;;
@@ -124,6 +131,8 @@ jobs:
           echo "LOCALE=$LOCALE"     >> $GITHUB_ENV
           echo "PKGS=$PKGS"         >> $GITHUB_ENV
           echo "COMBINE=$COMBINE"   >> $GITHUB_ENV
+          # Ubuntu 24.04 계열 코드네임
+          if [ "$DISTRO" = "ubuntu" ]; then echo "CODENAME=noble" >> $GITHUB_ENV; fi
           echoe "[INPUT] DISTRO=$DISTRO REL_HINT=$REL_HINT HOSTNAME=$HN USER=$USERNAME TZ=$TZ LOCALE=$LOCALE"
 
       - name: "서버 접근 권한 에코 스니펫 생성 (sudo/sshd/firewall)"
@@ -209,7 +218,7 @@ jobs:
           else
             echo "# 여기에 ssh 공개키를 넣으세요" > "${SEED}/ssh/authorized_keys"
           fi
-          # user-data
+          # user-data (패키지 업데이트+업그레이드 활성)
           PKG_LINE=$(echo "$PKGS" | sed 's/[ ,]\+/ /g' | sed 's/ /, /g')
           cat > "${SEED}/nocloud/user-data" <<EOF
           #cloud-config
@@ -217,6 +226,8 @@ jobs:
           manage_etc_hosts: true
           locale: ${LOCALE}
           timezone: ${TZ}
+          package_update: true
+          package_upgrade: true
           users:
             - default
             - name: ${USERNAME}
@@ -225,7 +236,6 @@ jobs:
               shell: /bin/bash
               ssh_authorized_keys:
                 - $(head -n1 "${SEED}/ssh/authorized_keys")
-          package_update: true
           packages: [ ${PKG_LINE} ]
           runcmd:
             - [ bash, -lc, "echo '[CLOUD-INIT] seed 배치 시작'" ]
@@ -262,22 +272,140 @@ jobs:
           echo "seed_iso=${OUT}/seed.iso" >> $GITHUB_OUTPUT
           echoe "[ISO] Seed ISO 생성: ${OUT}/seed.iso"
 
-      - name: "배포판 ISO URL 계산 및 자동 다운로드"
+      - name: "배포판 ISO URL 계산 및 자동 다운로드 (ALL VERSIONS)"
         id: baseiso
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
-          case "$DISTRO" in
-            ubuntu)  BASE_URL="https://releases.ubuntu.com/${REL_HINT}/ubuntu-${REL_HINT}-live-server-amd64.iso" ;;
-            debian)  BASE_URL="https://cdimage.debian.org/debian-cd/current/amd64/iso-dvd/debian-${REL_HINT}.0.0-amd64-DVD-1.iso" ;;
-            rocky)   BASE_URL="https://download.rockylinux.org/pub/rocky/${REL_HINT}/isos/x86_64/Rocky-${REL_HINT}-x86_64-minimal.iso" ;;
-            alma)    BASE_URL="https://repo.almalinux.org/almalinux/${REL_HINT}/isos/x86_64/AlmaLinux-${REL_HINT}-latest-x86_64-minimal.iso" ;;
-            fedora)  BASE_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/${REL_HINT}/Server/x86_64/iso/Fedora-Server-dvd-x86_64-${REL_HINT}-1.2.iso" ;;
-          esac
-          echo "BASE_URL=$BASE_URL" >> $GITHUB_ENV
-          echoe "[INFO] ${DISTRO} 기본 ISO (참고/다운로드): ${BASE_URL}"
           mkdir -p ${ECHO_ROOT}/out
-          wget -O ${ECHO_ROOT}/out/base.iso "$BASE_URL" || echoe "[WARN] 기본 ISO 다운로드 실패(오프라인?)."
+
+          DISTRO="${DISTRO}"
+          REL_HINT="${REL_HINT}"
+
+          # helpers
+          try_fetch() {
+            local url="$1"; local out="$2"
+            echoe "[FETCH] ${url}"
+            if curl -fL --retry 3 --retry-delay 2 -o "${out}" "${url}"; then
+              echoe "[OK] ${out}"
+              echo "${url}" > "${ECHO_ROOT}/logs/iso_url.txt"
+              return 0
+            fi
+            echoe "[MISS] ${url}"
+            return 1
+          }
+          latest_from_index() { curl -fsSL "$1" | grep -oE "$2" | sort -V | tail -n1 || true; }
+
+          ISO_NAME=""; INDEX_URL=""
+
+          fetch_ubuntu() {
+            local SERIES=()
+            if [ -n "${REL_HINT}" ]; then
+              case "${REL_HINT}" in
+                24.*) SERIES=("noble");;
+                22.*) SERIES=("jammy");;
+                20.*) SERIES=("focal");;
+                *) SERIES=("noble" "jammy" "focal");;
+              esac
+            else
+              SERIES=("noble" "jammy" "focal")
+            fi
+            for CODENAME in "${SERIES[@]}"; do
+              INDEX_URL="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
+              if curl -fsI "${INDEX_URL}" >/dev/null; then
+                if [ -n "${REL_HINT}" ]; then
+                  ISO_NAME="$(curl -fsSL "${INDEX_URL}" | grep -oE "ubuntu-${REL_HINT//./\\.}(\\.[0-9]+)?-live-server-amd64\\.iso" | sort -V | tail -n1 || true)"
+                fi
+                [ -z "${ISO_NAME}" ] && ISO_NAME="$(latest_from_index "${INDEX_URL}" "ubuntu-[0-9]+\\.[0-9]+(\\.[0-9]+)?-live-server-amd64\\.iso")"
+                [ -n "${ISO_NAME}" ] && break
+              fi
+            done
+            if [ -z "${ISO_NAME}" ]; then
+              echoe "[WARN] Ubuntu 최신 ISO 탐지 실패 → releases 백업 경로 시도"
+              INDEX_URL="https://releases.ubuntu.com/24.04/"
+              ISO_NAME="ubuntu-24.04.3-live-server-amd64.iso"
+            fi
+            echoe "[INFO] Ubuntu ISO 결정: ${INDEX_URL}${ISO_NAME}"
+            echo "${ISO_NAME}" > "${ECHO_ROOT}/logs/iso_name.txt"
+            local CANDIDATES=(
+              "${INDEX_URL}${ISO_NAME}"
+              "https://ftp.usf.edu/pub/ubuntu-releases/${ISO_NAME%%-live-server-amd64.iso}/${ISO_NAME}"
+              "https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${ISO_NAME%%-live-server-amd64.iso}/release/${ISO_NAME}"
+              "https://releases.ubuntu.com/${ISO_NAME%%-live-server-amd64.iso}/${ISO_NAME}"
+            )
+            local ok=0
+            for U in "${CANDIDATES[@]}"; do
+              if try_fetch "$U" "${ECHO_ROOT}/out/base.iso"; then ok=1; break; fi
+            done
+            if [ $ok -eq 0 ]; then echoe "[WARN] Ubuntu ISO 다운로드 실패"; fi
+            for ext in zsync list manifest SHA256SUMS; do
+              curl -fL --retry 2 -o "${ECHO_ROOT}/out/${ISO_NAME}.${ext}" "${INDEX_URL}${ISO_NAME}.${ext}" || true
+            done
+          }
+
+          fetch_debian() {
+            local BASE="https://cdimage.debian.org/debian-cd"
+            local PATH_DVD="${BASE}/current/amd64/iso-dvd/"
+            local PATH_CD="${BASE}/current/amd64/iso-cd/"
+            if [ -n "${REL_HINT}" ]; then
+              PATH_DVD="${BASE}/${REL_HINT}.0.0/amd64/iso-dvd/"
+              PATH_CD="${BASE}/${REL_HINT}.0.0/amd64/iso-cd/"
+            fi
+            ISO_NAME="$(latest_from_index "${PATH_DVD}" "debian-[0-9]+(\\.[0-9]+)*-amd64-DVD-1\\.iso")"
+            [ -z "${ISO_NAME}" ] && ISO_NAME="$(latest_from_index "${PATH_CD}" "debian-[0-9]+(\\.[0-9]+)*-amd64-netinst\\.iso")"
+            [ -z "${ISO_NAME}" ] && { echoe "[WARN] Debian ISO 탐지 실패"; return; }
+            echo "${ISO_NAME}" > "${ECHO_ROOT}/logs/iso_name.txt"
+            try_fetch "${PATH_DVD}${ISO_NAME}" "${ECHO_ROOT}/out/base.iso" || \
+            try_fetch "${PATH_CD}${ISO_NAME}"  "${ECHO_ROOT}/out/base.iso" || \
+            echoe "[WARN] Debian ISO 다운로드 실패"
+            INDEX_URL="${PATH_DVD}"
+          }
+
+          fetch_rocky_or_alma() {
+            local vendor="$1"
+            local ROOT_URL; [ "$vendor" = "rocky" ] && ROOT_URL="https://download.rockylinux.org/pub/rocky/" || ROOT_URL="https://repo.almalinux.org/almalinux/"
+            local VER_DIR
+            if [ -n "${REL_HINT}" ]; then VER_DIR="${REL_HINT}/"; else VER_DIR="$(curl -fsSL "${ROOT_URL}" | grep -oE 'href=\"[0-9]+/' | grep -oE '[0-9]+' | sort -V | tail -n1)/"; fi
+            [ -z "${VER_DIR}" ] && VER_DIR="9/"
+            local ISO_DIR="${ROOT_URL}${VER_DIR}isos/x86_64/"
+            local PATTERN; [ "$vendor" = "rocky" ] && PATTERN="Rocky-[0-9]+(\\.[0-9]+)?-x86_64-minimal\\.iso" || PATTERN="AlmaLinux-[0-9]+(\\.[0-9]+)?-x86_64-minimal\\.iso"
+            ISO_NAME="$(latest_from_index "${ISO_DIR}" "${PATTERN}")"
+            [ -z "${ISO_NAME}" ] && { echoe "[WARN] ${vendor} ISO 탐지 실패"; return; }
+            echo "${ISO_NAME}" > "${ECHO_ROOT}/logs/iso_name.txt"
+            try_fetch "${ISO_DIR}${ISO_NAME}" "${ECHO_ROOT}/out/base.iso" || echoe "[WARN] ${vendor} ISO 다운로드 실패"
+            INDEX_URL="${ISO_DIR}"
+          }
+
+          fetch_fedora() {
+            local REL="${REL_HINT}"
+            if [ -z "${REL}" ]; then
+              REL="$(curl -fsSL "https://download.fedoraproject.org/pub/fedora/linux/releases/" | grep -oE 'href=\"[0-9]+/' | grep -oE '[0-9]+' | sort -V | tail -n1 || true)"
+            fi
+            [ -z "${REL}" ] && REL="40"
+            local ISO_DIR="https://download.fedoraproject.org/pub/fedora/linux/releases/${REL}/Server/x86_64/iso/"
+            ISO_NAME="$(latest_from_index "${ISO_DIR}" "Fedora-Server-dvd-x86_64-${REL}-[0-9]+\\.[0-9]+\\.iso|Fedora-Server-dvd-x86_64-${REL}-[0-9]+\\.iso|Fedora-Server-dvd-x86_64-${REL}\\.iso")"
+            [ -z "${ISO_NAME}" ] && { echoe "[WARN] Fedora ISO 탐지 실패"; return; }
+            echo "${ISO_NAME}" > "${ECHO_ROOT}/logs/iso_name.txt"
+            try_fetch "${ISO_DIR}${ISO_NAME}" "${ECHO_ROOT}/out/base.iso" || echoe "[WARN] Fedora ISO 다운로드 실패"
+            INDEX_URL="${ISO_DIR}"
+          }
+
+          case "${DISTRO}" in
+            ubuntu) fetch_ubuntu ;;
+            debian) fetch_debian ;;
+            rocky)  fetch_rocky_or_alma rocky ;;
+            alma)   fetch_rocky_or_alma alma ;;
+            fedora) fetch_fedora ;;
+            *) echoe "[ERR] 지원하지 않는 distro: ${DISTRO}"; exit 1 ;;
+          esac
+
+          # 로그/출력 공유
+          echo "BASE_INDEX_URL=${INDEX_URL}" >> $GITHUB_ENV
+          [ -f "${ECHO_ROOT}/logs/iso_name.txt" ] && echo "iso_name=$(cat ${ECHO_ROOT}/logs/iso_name.txt)" >> $GITHUB_OUTPUT || true
+
+          if [ ! -s "${ECHO_ROOT}/out/base.iso" ]; then
+            echoe "[WARN] base.iso 미생성 → 합본 단계는 건너뜁니다."
+          fi
 
       - name: "합본 ISO 생성 (xorriso graft, 부팅정보 유지)"
         if: ${{ github.event.inputs.combine_base_iso == 'true' }}
@@ -288,21 +416,43 @@ jobs:
             echoe "[SKIP] base.iso 미존재 → 합본 생략"
             exit 0
           fi
-          # base.iso에 /seed 트리 graft (부팅정보 keep)
           xorriso \
             -indev  "${ECHO_ROOT}/out/base.iso" \
             -outdev "${ECHO_ROOT}/out/base-with-seed.iso" \
             -map "${ECHO_ROOT}/iso_src/seed" /seed \
             -boot_image any keep
           echoe "[ISO] 합본 생성: ${ECHO_ROOT}/out/base-with-seed.iso"
-          # Ubuntu Autoinstall 안내 힌트 기록
           cat > ${ECHO_ROOT}/logs/autoinstall_hint.txt <<'EOF'
           [Ubuntu Autoinstall 힌트]
-          부팅 메뉴에서 'e' 입력 후, 커널 라인 끝의 '---' 뒤에 아래를 추가하세요:
+          부팅 메뉴에서 'e' 입력 → 커널 라인 끝 '---' 뒤에 추가:
             autoinstall ds=nocloud;s=/cdrom/seed/
-          저장/부팅(통상 Ctrl+X 또는 F10)하면 NoCloud Seed를 /cdrom/seed에서 읽습니다.
-          (다른 배포판은 두-ISO 방식으로 cloud-init seed 활용 권장)
+          저장/부팅(F10/Ctrl+X) → /cdrom/seed에서 NoCloud Seed를 읽습니다.
           EOF
+
+      - name: "자동 업데이트(주기 실행 시 최신 ISO 기록/커밋)"
+        if: env.AUTO_UPDATE == 'true'
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          DISTRO="${DISTRO}"
+          REC_DIR="${ECHO_ROOT}/records"
+          mkdir -p "${REC_DIR}"
+          CURR_ISO_NAME=""
+          [ -f "${ECHO_ROOT}/logs/iso_name.txt" ] && CURR_ISO_NAME="$(cat ${ECHO_ROOT}/logs/iso_name.txt)" || true
+          TARGET_FILE="${REC_DIR}/${DISTRO}_latest.txt"
+          PREV=""; [ -f "${TARGET_FILE}" ] && PREV="$(cat ${TARGET_FILE})" || true
+          echoe "[AUTO-UPDATE] 이전=${PREV:-<none>} / 현재=${CURR_ISO_NAME:-<none>}"
+          if [ -n "${CURR_ISO_NAME}" ] && [ "${CURR_ISO_NAME}" != "${PREV}" ]; then
+            echo "${CURR_ISO_NAME}" > "${TARGET_FILE}"
+            git config user.name  "gh-actions"
+            git config user.email "actions@users.noreply.github.com"
+            git add "${TARGET_FILE}"
+            git commit -m "chore(iso): ${DISTRO} 최신 ISO 갱신 → ${CURR_ISO_NAME}" || true
+            git push || true
+            echoe "[AUTO-UPDATE] 커밋/푸시 완료"
+          else
+            echoe "[AUTO-UPDATE] 갱신 없음"
+          fi
 
       - name: "로그/결과 요약"
         run: |
@@ -312,7 +462,7 @@ jobs:
           ls -alh ${ECHO_ROOT}/out || true
           ls -alh ${ECHO_ROOT}/seed || true
           echoe "[HINT] 두-ISO 방식: 1) 배포판 ISO 2) seed.iso (NoCloud)"
-          echoe "[HINT] 합본 사용 시 Ubuntu는 커널 파라미터에 'autoinstall ds=nocloud;s=/cdrom/seed/' 추가"
+          echoe "[HINT] 합본 사용 시 Ubuntu는 'autoinstall ds=nocloud;s=/cdrom/seed/' 커널 파라미터 추가"
 
       - name: "아티팩트 업로드"
         if: ${{ github.event.inputs.upload_artifacts == 'true' }}
@@ -328,4 +478,5 @@ jobs:
             .github/echo_linux/scripts/**
             .github/echo_linux/logs/**
             .github/echo_linux/iso_src/**
+            .github/echo_linux/records/**
           retention-days: 14
