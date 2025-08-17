@@ -1,66 +1,496 @@
-name: 🩺 Workflows Health Check
+name: "🏦 Echo FinDev Docker FullOps (컨테이너·이미지·파일·권한·DB·쿼리)"
 
 on:
   workflow_dispatch:
+    inputs:
+      db_engine:
+        description: "DB 엔진 선택 (mysql | postgres | both)"
+        required: true
+        default: "mysql"
+      app_port:
+        description: "애플리케이션 포트"
+        required: true
+        default: "8000"
+      image_name:
+        description: "빌드할 이미지 이름 (예: findevecho)"
+        required: true
+        default: "findevecho"
+      push_image:
+        description: "GHCR로 푸시 여부 (true/false)"
+        required: true
+        default: "false"
+      run_tests:
+        description: "간단 헬스/쿼리 테스트 실행 (true/false)"
+        required: true
+        default: "true"
   schedule:
-    - cron: '0 * * * *'  # 매시간 정각(UTC 기준)
+    - cron: "0 3 * * *"  # 매일 03:00 UTC (= 한국 12:00) 정기 점검/재생성
 
 jobs:
-  health-check:
-    name: Health Check All Workflows
+  prepare-echo-files:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub CLI가 자동으로 사용
-
     steps:
-      - name: 🛠️ Checkout repository
-        uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: 🚀 Install GitHub CLI
+      - name: Create echo directories & helper
+        shell: bash
         run: |
-          echo "[🚀] GitHub CLI 설치 중..."
-          sudo apt-get update && sudo apt-get install -y gh
-          echo "[✅] GitHub CLI 설치 완료"
+          set -euo pipefail
+          mkdir -p .github/echo/{app,db,queries,perm,logs,images,containers}
+          mkdir -p .github/echo/db/sql/{mysql,postgres}
+          mkdir -p .github/echo/db/results/{mysql,postgres}
+          cat > .github/echo/echo.sh <<'EOSH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+          echoe() { printf "[%s] %s\n" "$(ts)" "$*" | tee -a ".github/echo/logs/echo.log"; }
+          EOSH
+          chmod +x .github/echo/echo.sh
+          ./.github/echo/echo.sh echoe "[INIT] echo 디렉터리 및 헬퍼 생성 완료"
 
-      - name: 🔍 Health Check All Workflows
-        # 실패가 있어도 이 스텝은 항상 0으로 종료하도록 설정
-        continue-on-error: true
+      - name: Generate sample FastAPI app (echo logging everywhere)
+        shell: bash
         run: |
-          set +e
-          echo "[🔐] GitHub CLI 토큰 자동 사용"
-          echo "[🩺] 워크플로우 헬스체크 시작..."
+          set -euo pipefail
+          . .github/echo/echo.sh
+          echoe "[APP] 샘플 FastAPI 앱/도커파일 생성"
+          cat > .github/echo/app/app.py <<'PY'
+          import os, time
+          from fastapi import FastAPI
+          app = FastAPI()
 
-          FAILED=()
-          shopt -s nullglob
+          APP_NAME = os.getenv("APP_NAME", "Echo-FinDev")
+          DB_ENGINE = os.getenv("DB_ENGINE", "mysql")
+          DB_HOST = os.getenv("DB_HOST", "mysql-echo")
+          DB_PORT = os.getenv("DB_PORT", "3306" if DB_ENGINE=="mysql" else "5432")
+          DB_USER = os.getenv("DB_USER", "root" if DB_ENGINE=="mysql" else "postgres")
+          DB_PASS = os.getenv("DB_PASS", "root" if DB_ENGINE=="mysql" else "postgres")
+          DB_NAME = os.getenv("DB_NAME", "fin")
 
-          for file in .github/workflows/*.{yml,yaml}; do
-            WF_FILE=$(basename "$file")
-            echo "[🔍] 파일 확인: $WF_FILE"
+          def echo(msg: str):
+            print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {msg}", flush=True)
 
-            STATUS=$(gh run list \
-              --workflow "$WF_FILE" \
-              --limit 1 \
-              --json conclusion \
-              --jq '.[0].conclusion' 2>/dev/null)
+          @app.get("/")
+          def root():
+            echo(f"[APP] {APP_NAME} alive. DB={DB_ENGINE}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+            return {"ok": True, "app": APP_NAME, "db": DB_ENGINE}
 
-            if [ -z "$STATUS" ]; then
-              echo "[⚠️] '$WF_FILE' 실행 기록 없음, 스킵"
-              continue
+          @app.get("/healthz")
+          def health():
+            echo("[HEALTH] ok")
+            return {"status":"ok"}
+
+          @app.get("/config")
+          def config():
+            echo("[CONFIG] emit")
+            return {
+              "DB_ENGINE": DB_ENGINE,
+              "DB_HOST": DB_HOST,
+              "DB_PORT": DB_PORT,
+              "DB_USER": DB_USER,
+              "DB_NAME": DB_NAME,
+            }
+          PY
+
+          # requirements
+          cat > .github/echo/app/requirements.txt <<'REQ'
+          fastapi
+          uvicorn
+          REQ
+
+          # Dockerfile
+          cat > .github/echo/app/Dockerfile <<'DOCK'
+          FROM python:3.11-slim
+          ENV PYTHONDONTWRITEBYTECODE=1
+          ENV PYTHONUNBUFFERED=1
+          WORKDIR /app
+          COPY requirements.txt /app/
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY app.py /app/
+          EXPOSE 8000
+          CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+          DOCK
+
+          # .env (기본값, 런타임에 덮어씀)
+          cat > .github/echo/app/.env <<'ENVV'
+          APP_NAME=Echo-FinDev
+          DB_ENGINE=${DB_ENGINE:-mysql}
+          DB_HOST=${DB_HOST:-mysql-echo}
+          DB_PORT=${DB_PORT:-3306}
+          DB_USER=${DB_USER:-root}
+          DB_PASS=${DB_PASS:-root}
+          DB_NAME=fin
+          ENVV
+
+          echoe "[APP] 앱/도커파일/requirements/.env 생성 완료"
+
+      - name: Generate permission files (with echo)
+        shell: bash
+        run: |
+          set -euo pipefail
+          . .github/echo/echo.sh
+          echoe "[PERM] 권한 정책/스크립트 생성"
+          cat > .github/echo/perm/acl.policy <<'ACL'
+          # Echo permission file (sample).
+          # - 컨테이너/이미지/파일 생성 로그를 모두 허용(기본)
+          # - 민감 경로 쓰기 제한 (예: /etc, /root)
+          [allow]
+          paths.allow = [
+            "/app",
+            "/data",
+            "/logs",
+            "/var/log/echo"
+          ]
+          [deny]
+          paths.deny = [
+            "/etc",
+            "/root",
+            "/bin",
+            "/usr/sbin"
+          ]
+          ACL
+
+          cat > .github/echo/perm/apply-perm.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          echo "[PERM] applying ACL (mock) ..."
+          # 실제 ACL/SELinux/AppArmor 연동 대신 데모용 로그
+          echo "[PERM] allowed paths: /app,/data,/logs,/var/log/echo"
+          echo "[PERM] denied  paths: /etc,/root,/bin,/usr/sbin"
+          SH
+          chmod +x .github/echo/perm/apply-perm.sh
+          echoe "[PERM] 권한 파일 생성 완료"
+
+      - name: Generate finance DB schema & queries (MySQL/Postgres) with echo
+        shell: bash
+        run: |
+          set -euo pipefail
+          . .github/echo/echo.sh
+          echoe "[DB] 금융 스키마 및 쿼리 생성 (mysql/postgres)"
+
+          # 공통 테이블: customers, accounts, transactions, ledger
+          cat > .github/echo/db/sql/mysql/001_schema.sql <<'SQL'
+          CREATE DATABASE IF NOT EXISTS fin;
+          USE fin;
+
+          CREATE TABLE IF NOT EXISTS customers (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            name VARCHAR(128) NOT NULL,
+            email VARCHAR(256) UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS accounts (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            customer_id BIGINT NOT NULL,
+            account_number VARCHAR(32) UNIQUE NOT NULL,
+            balance DECIMAL(18,2) NOT NULL DEFAULT 0,
+            currency VARCHAR(8) NOT NULL DEFAULT 'KRW',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+          );
+
+          CREATE TABLE IF NOT EXISTS transactions (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            account_id BIGINT NOT NULL,
+            txn_type VARCHAR(16) NOT NULL, -- deposit/withdraw/transfer
+            amount DECIMAL(18,2) NOT NULL,
+            ref VARCHAR(64),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (account_id) REFERENCES accounts(id)
+          );
+
+          CREATE TABLE IF NOT EXISTS ledger (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            txn_id BIGINT NOT NULL,
+            debit_account BIGINT,
+            credit_account BIGINT,
+            amount DECIMAL(18,2) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          SQL
+
+          cat > .github/echo/db/sql/mysql/010_seed.sql <<'SQL'
+          USE fin;
+          INSERT INTO customers (name,email) VALUES
+            ('Alice','alice@example.com'),
+            ('Bob','bob@example.com');
+
+          INSERT INTO accounts (customer_id,account_number,balance,currency)
+            VALUES (1,'ACCT-0001',100000,'KRW'),
+                   (2,'ACCT-0002',50000,'KRW');
+
+          INSERT INTO transactions (account_id,txn_type,amount,ref)
+            VALUES (1,'deposit',25000,'INIT-1'),
+                   (2,'withdraw',10000,'INIT-2');
+          SQL
+
+          cat > .github/echo/db/sql/mysql/020_queries.sql <<'SQL'
+          USE fin;
+          -- 잔액 상위 고객
+          SELECT c.name, a.account_number, a.balance
+          FROM accounts a JOIN customers c ON a.customer_id=c.id
+          ORDER BY a.balance DESC LIMIT 10;
+
+          -- 일별 거래 수/금액
+          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total
+          FROM transactions
+          GROUP BY DATE(created_at)
+          ORDER BY d DESC;
+          SQL
+
+          # Postgres
+          cat > .github/echo/db/sql/postgres/001_schema.sql <<'SQL'
+          CREATE DATABASE fin;
+          SQL
+          cat > .github/echo/db/sql/postgres/002_objects.sql <<'SQL'
+          \c fin
+
+          CREATE TABLE IF NOT EXISTS customers (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(128) NOT NULL,
+            email VARCHAR(256) UNIQUE,
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+
+          CREATE TABLE IF NOT EXISTS accounts (
+            id BIGSERIAL PRIMARY KEY,
+            customer_id BIGINT NOT NULL REFERENCES customers(id),
+            account_number VARCHAR(32) UNIQUE NOT NULL,
+            balance NUMERIC(18,2) NOT NULL DEFAULT 0,
+            currency VARCHAR(8) NOT NULL DEFAULT 'KRW',
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+
+          CREATE TABLE IF NOT EXISTS transactions (
+            id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL REFERENCES accounts(id),
+            txn_type VARCHAR(16) NOT NULL,
+            amount NUMERIC(18,2) NOT NULL,
+            ref VARCHAR(64),
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+
+          CREATE TABLE IF NOT EXISTS ledger (
+            id BIGSERIAL PRIMARY KEY,
+            txn_id BIGINT NOT NULL,
+            debit_account BIGINT,
+            credit_account BIGINT,
+            amount NUMERIC(18,2) NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+          SQL
+
+          cat > .github/echo/db/sql/postgres/010_seed.sql <<'SQL'
+          \c fin
+          INSERT INTO customers (name,email) VALUES
+            ('Alice','alice@example.com'),
+            ('Bob','bob@example.com');
+
+          INSERT INTO accounts (customer_id,account_number,balance,currency)
+            VALUES (1,'ACCT-0001',100000,'KRW'),
+                   (2,'ACCT-0002',50000,'KRW');
+
+          INSERT INTO transactions (account_id,txn_type,amount,ref)
+            VALUES (1,'deposit',25000,'INIT-1'),
+                   (2,'withdraw',10000,'INIT-2');
+          SQL
+
+          cat > .github/echo/db/sql/postgres/020_queries.sql <<'SQL'
+          \c fin
+          -- 잔액 상위 고객
+          SELECT c.name, a.account_number, a.balance
+          FROM accounts a JOIN customers c ON a.customer_id=c.id
+          ORDER BY a.balance DESC LIMIT 10;
+
+          -- 일별 거래 수/금액
+          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total
+          FROM transactions
+          GROUP BY DATE(created_at)
+          ORDER BY d DESC;
+          SQL
+
+          . .github/echo/echo.sh
+          echoe "[DB] 스키마/시드/쿼리 스크립트 생성 완료"
+
+      - name: Show tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y tree >/dev/null 2>&1 || true
+          tree -a .github/echo | tee .github/echo/logs/tree.txt
+
+  build-image:
+    runs-on: ubuntu-latest
+    needs: prepare-echo-files
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image (echo)
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ts=$(date +%Y%m%d%H%M%S)
+          docker build -t "${IMAGE_NAME}:$ts" -t "${IMAGE_NAME}:latest" -f .github/echo/app/Dockerfile .github/echo/app
+          echo "IMAGE_TAG=${ts}" | tee .github/echo/images/image_tag.txt
+          docker images | tee .github/echo/images/images.txt
+
+      - name: (Optional) Push to GHCR
+        if: ${{ inputs.push_image == 'true' }}
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          docker login ghcr.io -u "${owner}" -p "${{ secrets.GITHUB_TOKEN }}"
+          ts=$(cat .github/echo/images/image_tag.txt | cut -d= -f2)
+          docker tag "${IMAGE_NAME}:$ts" "ghcr.io/${owner}/${IMAGE_NAME}:$ts"
+          docker tag "${IMAGE_NAME}:latest" "ghcr.io/${owner}/${IMAGE_NAME}:latest"
+          docker push "ghcr.io/${owner}/${IMAGE_NAME}:$ts"
+          docker push "ghcr.io/${owner}/${IMAGE_NAME}:latest"
+          echo "GHCR=ghcr.io/${owner}/${IMAGE_NAME}:$ts" | tee .github/echo/images/pushed.txt
+
+      - name: Upload image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: echo-images
+          path: |
+            .github/echo/images/*
+            .github/echo/logs/*
+
+  run-dbs-and-init:
+    runs-on: ubuntu-latest
+    needs: prepare-echo-files
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create docker network
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create echonet || true
+
+      - name: Start MySQL (if selected) + init
+        if: ${{ inputs.db_engine == 'mysql' || inputs.db_engine == 'both' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker rm -f mysql-echo >/dev/null 2>&1 || true
+          docker run -d --name mysql-echo --network echonet \
+            -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=fin \
+            -p 3306:3306 mysql:8.3
+          echo "[MYSQL] 대기 중..."
+          for i in {1..60}; do
+            if docker exec mysql-echo mysql -uroot -proot -e "SELECT 1;" >/dev/null 2>&1; then
+              echo "[MYSQL] ready"
+              break
             fi
+            sleep 2
+          done
+          # schema & seed
+          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/001_schema.sql
+          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/010_seed.sql
+          # queries -> results
+          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/020_queries.sql | tee .github/echo/db/results/mysql/020_queries.out
 
-            if [ "$STATUS" = "success" ]; then
-              echo "[✅] '$WF_FILE' 워크플로우 정상"
-            else
-              echo "[❌] '$WF_FILE' 마지막 실행 상태: $STATUS"
-              FAILED+=("$WF_FILE")
+      - name: Start Postgres (if selected) + init
+        if: ${{ inputs.db_engine == 'postgres' || inputs.db_engine == 'both' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker rm -f pg-echo >/dev/null 2>&1 || true
+          docker run -d --name pg-echo --network echonet \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            -p 5432:5432 postgres:16
+          echo "[POSTGRES] 대기 중..."
+          for i in {1..60}; do
+            if docker exec pg-echo pg_isready -U postgres >/dev/null 2>&1; then
+              echo "[POSTGRES] ready"
+              break
             fi
+            sleep 2
+          done
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/001_schema.sql
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/002_objects.sql
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/010_seed.sql
+          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/020_queries.sql | tee .github/echo/db/results/postgres/020_queries.out
+
+      - name: Upload DB init artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: echo-db
+          path: |
+            .github/echo/db/**
+            .github/echo/logs/**
+
+  run-app-container:
+    runs-on: ubuntu-latest
+    needs: [build-image, run-dbs-and-init]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine DB env
+        id: dbenv
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.db_engine }}" = "mysql" ] || [ "${{ inputs.db_engine }}" = "both" ]; then
+            echo "DB_ENGINE=mysql" >> $GITHUB_OUTPUT
+            echo "DB_HOST=mysql-echo" >> $GITHUB_OUTPUT
+            echo "DB_PORT=3306" >> $GITHUB_OUTPUT
+            echo "DB_USER=root" >> $GITHUB_OUTPUT
+            echo "DB_PASS=root" >> $GITHUB_OUTPUT
+          else
+            echo "DB_ENGINE=postgres" >> $GITHUB_OUTPUT
+            echo "DB_HOST=pg-echo" >> $GITHUB_OUTPUT
+            echo "DB_PORT=5432" >> $GITHUB_OUTPUT
+            echo "DB_USER=postgres" >> $GITHUB_OUTPUT
+            echo "DB_PASS=postgres" >> $GITHUB_OUTPUT
+          fi
+          echo "DB_NAME=fin" >> $GITHUB_OUTPUT
+
+      - name: Re-build (if needed) and run container on echonet
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          APP_PORT: ${{ inputs.app_port }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 최신 이미지가 이전 job에서 로컬에 이미 있음 (actions job마다 VM이 달라 다시 빌드)
+          docker build -t "${IMAGE_NAME}:latest" -f .github/echo/app/Dockerfile .github/echo/app
+          docker rm -f app-echo >/dev/null 2>&1 || true
+          docker run -d --name app-echo --network echonet \
+            -e APP_NAME="Echo-FinDev" \
+            -e DB_ENGINE="${{ steps.dbenv.outputs.DB_ENGINE }}" \
+            -e DB_HOST="${{ steps.dbenv.outputs.DB_HOST }}" \
+            -e DB_PORT="${{ steps.dbenv.outputs.DB_PORT }}" \
+            -e DB_USER="${{ steps.dbenv.outputs.DB_USER }}" \
+            -e DB_PASS="${{ steps.dbenv.outputs.DB_PASS }}" \
+            -e DB_NAME="${{ steps.dbenv.outputs.DB_NAME }}" \
+            -p "${APP_PORT}:8000" "${IMAGE_NAME}:latest"
+          echo "[APP] 기동 완료: http://localhost:${APP_PORT}"
+
+      - name: Smoke test (optional)
+        if: ${{ inputs.run_tests == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 단순 curl 테스트
+          for path in "/" "/healthz" "/config"; do
+            echo "[TEST] GET $path"
+            curl -fsS "http://localhost:${{ inputs.app_port }}${path}" | tee -a .github/echo/logs/app_curl.txt
+            echo
           done
 
-          if [ ${#FAILED[@]} -gt 0 ]; then
-            echo "[🚨] 헬스체크 실패 워크플로우: ${FAILED[*]}"
-          else
-            echo "[🎉] 모든 워크플로우 헬스체크 통과"
-          fi
-
-          # 항상 0으로 종료해서 에러 처리되지 않도록 함
-          exit 0
+      - name: Upload app logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: echo-app
+          path: |
+            .github/echo/app/**
+            .github/echo/logs/**
+            .github/echo/perm/**
