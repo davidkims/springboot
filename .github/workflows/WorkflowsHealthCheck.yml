@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v3)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v4)"
 
 permissions:
   contents: write
@@ -278,12 +278,11 @@ jobs:
             echoe "[FETCH] $url"
             if curl -fL --retry 3 --retry-delay 2 -o "$out.tmp" "$url"; then
               local size; size=$(stat -c%s "$out.tmp" || echo 0)
-              if [ "$size" -lt 524288000 ] && ! isoinfo -d -i "$out.tmp" >/dev/null 2>&1; then
+              if [ "$size" < 524288000 ] && ! isoinfo -d -i "$out.tmp" >/dev/null 2>&1; then
                 echoe "[MISS] ISO 유효성 실패(size=${size})"; rm -f "$out.tmp"; return 1
               fi
               mv "$out.tmp" "$out"
               echoe "[OK] $out ($(du -h "$out" | awk '{print $1}'))"
-              # ✅ 실제 성공 URL/파일명 기록 (검증/로그 일관성)
               ISO_URL_USED="$url"
               ISO_NAME_USED="${url##*/}"
               BASE_INDEX_URL_USED="${url%/*}/"
@@ -321,7 +320,6 @@ jobs:
                       "https://releases.ubuntu.com/${ISO_NAME%%-live-server-amd64.iso}/${ISO_NAME}"; do
               try_fetch "$U" "${ECHO_ROOT}/out/base.iso" && { SUCCESS=1; break; }
             done
-            # 체크 파일(있을 때만) — ✅ 실제 성공 디렉터리 기준(BASE_INDEX_URL from try_fetch)
             if [ -n "${BASE_INDEX_URL:-}" ]; then
               fetch_optional "${BASE_INDEX_URL}SHA256SUMS"      "${ECHO_ROOT}/out/SHA256SUMS"
               fetch_optional "${BASE_INDEX_URL}SHA256SUMS.gpg"  "${ECHO_ROOT}/out/SHA256SUMS.gpg"
@@ -340,11 +338,10 @@ jobs:
             [ -z "${ISO_NAME}" ] && ISO_NAME="$(latest_from_index "${PATH_CD}" "debian-[0-9]+(\\.[0-9]+)*-amd64-netinst\\.iso")"
             [ -z "${ISO_NAME}" ] && { echoe "[WARN] Debian ISO 탐지 실패"; return; }
             try_fetch "${PATH_DVD}${ISO_NAME}" "${ECHO_ROOT}/out/base.iso" || try_fetch "${PATH_CD}${ISO_NAME}" "${ECHO_ROOT}/out/base.iso" || true
-            # 체크 파일은 실제 성공 디렉터리 기준
             if [ -n "${BASE_INDEX_URL:-}" ]; then
               fetch_optional "${BASE_INDEX_URL}SHA256SUMS"      "${ECHO_ROOT}/out/SHA256SUMS"
               fetch_optional "${BASE_INDEX_URL}SHA256SUMS.sign" "${ECHO_ROOT}/out/SHA256SUMS.sign"
-            end
+            fi
           }
 
           fetch_rocky_or_alma() {
@@ -382,7 +379,6 @@ jobs:
             *) echoe "[ERR] 지원하지 않는 distro: ${DISTRO}"; exit 1 ;;
           esac
 
-          # 로그/공유 (ISO_NAME_USED가 최우선)
           if [ -n "${ISO_NAME_USED:-}" ]; then
             echo "ISO_NAME=${ISO_NAME_USED}" >> $GITHUB_ENV
           elif [ -n "${ISO_NAME:-}" ]; then
@@ -392,68 +388,104 @@ jobs:
             echoe "[WARN] base.iso 미생성 → 이후 합본/리빌드 건너뜀"
           fi
 
-      - name: "체크섬 및 서명 검증 (Ubuntu 정식 키) — 실제 디렉토리 기준 & 유연 매칭"
+      - name: "검증(Ubuntu) — SHA256/GPG (유연 매칭)"
         if: env.DISTRO == 'ubuntu'
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
           if [ ! -s "${ECHO_ROOT}/out/base.iso" ]; then echoe "[SKIP] base.iso 없음"; exit 0; fi
-
-          # BASE_INDEX_URL은 try_fetch 성공 시 설정됨
-          if [ -z "${BASE_INDEX_URL:-}" ]; then
-            echoe "[WARN] BASE_INDEX_URL 미지정 → 검증 스킵"; exit 0;
-          fi
-
-          # 최신 디렉토리에서 체크파일 확보(있을 때만)
+          if [ -z "${BASE_INDEX_URL:-}" ]; then echoe "[WARN] BASE_INDEX_URL 미지정 → 검증 스킵"; exit 0; fi
           curl -fsIL "${BASE_INDEX_URL}SHA256SUMS"     >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/SHA256SUMS"     "${BASE_INDEX_URL}SHA256SUMS"     || true
           curl -fsIL "${BASE_INDEX_URL}SHA256SUMS.gpg" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/SHA256SUMS.gpg" "${BASE_INDEX_URL}SHA256SUMS.gpg" || true
-          if [ ! -s "${ECHO_ROOT}/out/SHA256SUMS" ]; then
-            echoe "[INFO] SHA256SUMS 없음(미러/일시 이슈) → SHA 검증 스킵"; exit 0
-          fi
-
-          echoe "[GPG] Ubuntu CD Image Automatic Signing Keys 가져오기"
+          [ -s "${ECHO_ROOT}/out/SHA256SUMS" ] || { echoe "[INFO] SHA256SUMS 없음 → 스킵"; exit 0; }
           gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
             0xC5986B4F1257FFA86632CBA746181433FBB75451 \
             0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
-
           if [ -s "${ECHO_ROOT}/out/SHA256SUMS.gpg" ]; then
-            echoe "[VERIFY] SHA256SUMS 서명 확인"
-            if ! gpg --keyid-format long --verify "${ECHO_ROOT}/out/SHA256SUMS.gpg" "${ECHO_ROOT}/out/SHA256SUMS"; then
-              echoe "[WARN] GPG 검증 실패(키서버/네트워크 가능) → SHA 비교만 진행"
-            fi
+            gpg --keyid-format long --verify "${ECHO_ROOT}/out/SHA256SUMS.gpg" "${ECHO_ROOT}/out/SHA256SUMS" || echoe "[WARN] GPG 검증 실패(가능)"
           fi
-
-          echoe "[SHA256] ISO 체크"
           ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-
-          # 1) 정확 파일명으로 기대치 탐색 (ISO_NAME는 ISO_NAME_USED 우선)
           ISO_TARGET="${ISO_NAME:-}"
           EXPECT="$(grep -F " ${ISO_TARGET}" ${ECHO_ROOT}/out/SHA256SUMS | awk '{print $1}' || true)"
-
-          # 2) 없으면 같은 디렉토리의 최신 live-server 항목으로 대체
           if [ -z "${EXPECT}" ]; then
-            echoe "[WARN] SHA256SUMS에 ${ISO_TARGET} 항목 없음 → 최신 live-server 항목으로 대체 시도"
+            echoe "[WARN] 정확 매칭 실패 → 최신 live-server 항목으로 대체"
             ALT_LINE="$(grep -E 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-amd64\.iso$' ${ECHO_ROOT}/out/SHA256SUMS | sort -V | tail -n1 || true)"
             EXPECT="$(echo "${ALT_LINE}" | awk '{print $1}')"
-            ALT_NAME="$(echo "${ALT_LINE}" | awk '{print $2}')"
-            if [ -n "${EXPECT}" ]; then
-              echoe "[INFO] 대체 항목: ${ALT_NAME}"
-            fi
+          fi
+          [ -z "${EXPECT}" ] && { echoe "[INFO] 매칭 없음 → SHA 스킵"; exit 0; }
+          echoe "[SHA256] EXPECT=${EXPECT} ACTUAL=${ACTUAL}"
+          [ "${EXPECT}" = "${ACTUAL}" ] || { echoe "[FAIL] SHA256 불일치"; exit 1; }
+          echoe "[OK] Ubuntu SHA256 검증 통과"
+
+      - name: "검증(Debian) — SHA256/GPG (debian-cd 키 자동탐색)"
+        if: env.DISTRO == 'debian'
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          if [ ! -s "${ECHO_ROOT}/out/base.iso" ]; then echoe "[SKIP] base.iso 없음"; exit 0; fi
+          if [ -z "${BASE_INDEX_URL:-}" ]; then echoe "[WARN] BASE_INDEX_URL 미지정 → 검증 스킵"; exit 0; fi
+          curl -fsIL "${BASE_INDEX_URL}SHA256SUMS"      >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/SHA256SUMS"      "${BASE_INDEX_URL}SHA256SUMS"      || true
+          curl -fsIL "${BASE_INDEX_URL}SHA256SUMS.sign" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/SHA256SUMS.sign" "${BASE_INDEX_URL}SHA256SUMS.sign" || true
+          [ -s "${ECHO_ROOT}/out/SHA256SUMS" ] || { echoe "[INFO] SHA256SUMS 없음 → 스킵"; exit 0; }
+
+          # debian-cd 키 자동 탐색 (WKD + keys.openpgp.org 백업)
+          gpg --auto-key-locate wkd,hkps --keyserver hkps://keys.openpgp.org --locate-keys debian-cd@lists.debian.org || true
+          if [ -s "${ECHO_ROOT}/out/SHA256SUMS.sign" ]; then
+            gpg --verify "${ECHO_ROOT}/out/SHA256SUMS.sign" "${ECHO_ROOT}/out/SHA256SUMS" || echoe "[WARN] GPG 검증 실패(가능)"
           fi
 
+          ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
+          ISO_TARGET="${ISO_NAME:-}"
+          EXPECT="$(grep -F " ${ISO_TARGET}" ${ECHO_ROOT}/out/SHA256SUMS | awk '{print $1}' || true)"
           if [ -z "${EXPECT}" ]; then
-            echoe "[INFO] SHA256SUMS에서 매칭 항목 없음 → SHA 검증 스킵(다운로드/미러 이슈일 수 있음)"
-            exit 0
+            echoe "[WARN] 정확 매칭 실패 → DVD-1/netinst 최신 항목 대체"
+            ALT_LINE="$(grep -E 'debian-[0-9]+(\.[0-9]+)*-amd64-(DVD-1|netinst)\.iso$' ${ECHO_ROOT}/out/SHA256SUMS | sort -V | tail -n1 || true)"
+            EXPECT="$(echo "${ALT_LINE}" | awk '{print $1}')"
           fi
+          [ -z "${EXPECT}" ] && { echoe "[INFO] 매칭 없음 → SHA 스킵"; exit 0; }
+          echoe "[SHA256] EXPECT=${EXPECT} ACTUAL=${ACTUAL}"
+          [ "${EXPECT}" = "${ACTUAL}" ] || { echoe "[FAIL] SHA256 불일치"; exit 1; }
+          echoe "[OK] Debian SHA256 검증 통과"
+
+      - name: "검증(Fedora) — CHECKSUM/GPG (fedora-<REL>-primary 자동탐색)"
+        if: env.DISTRO == 'fedora'
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          if [ ! -s "${ECHO_ROOT}/out/base.iso" ]; then echoe "[SKIP] base.iso 없음"; exit 0; fi
+          if [ -z "${BASE_INDEX_URL:-}" ]; then echoe "[WARN] BASE_INDEX_URL 미지정 → 검증 스킵"; exit 0; fi
+
+          curl -fsIL "${BASE_INDEX_URL}CHECKSUM"     >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/CHECKSUM"     "${BASE_INDEX_URL}CHECKSUM"     || true
+          curl -fsIL "${BASE_INDEX_URL}CHECKSUM.sig" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/CHECKSUM.sig" "${BASE_INDEX_URL}CHECKSUM.sig" || true
+          [ -s "${ECHO_ROOT}/out/CHECKSUM" ] || { echoe "[INFO] CHECKSUM 없음 → 스킵"; exit 0; }
+
+          # fedora-REL-primary 키 자동 탐색(WKD + keys.openpgp.org), REL_HINT 기본 40
+          REL="${REL_HINT:-40}"
+          gpg --auto-key-locate wkd,hkps --keyserver hkps://keys.openpgp.org --locate-keys "fedora-${REL}-primary@fedoraproject.org" || true
+          if [ -s "${ECHO_ROOT}/out/CHECKSUM.sig" ]; then
+            gpg --verify "${ECHO_ROOT}/out/CHECKSUM.sig" "${ECHO_ROOT}/out/CHECKSUM" || echoe "[WARN] GPG 검증 실패(가능)"
+          fi
+
+          ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
+          # Fedora CHECKSUM 포맷: "SHA256 (filename) = HASH" 또는 HASH  filename
+          EXPECT="$(awk '
+            BEGIN{IGNORECASE=1}
+            /SHA256 *\(/ && /\)=/ {
+              # SHA256 (file) = hash
+              gsub(/\r/,"")
+              fn=$0; sub(/^.*\(/,"",fn); sub(/\).*$/,"",fn)
+              if (fn==ENVIRON["ISO_NAME"]) { split($0,a,"="); gsub(/^[ \t]+|[ \t]+$/,"",a[2]); print a[2]; exit }
+            }
+            /^[0-9a-fA-F]{64}[ \t]/ {
+              # hash  filename
+              hash=$1; $1=""; gsub(/^[ \t]+/,"",$0); if ($0==ENVIRON["ISO_NAME"]) { print hash; exit }
+            }
+          ' "${ECHO_ROOT}/out/CHECKSUM")"
+          [ -z "${EXPECT}" ] && { echoe "[INFO] CHECKSUM에서 매칭 없음 → SHA 스킵"; exit 0; }
 
           echoe "[SHA256] EXPECT=${EXPECT} ACTUAL=${ACTUAL}"
-          if [ "${EXPECT}" != "${ACTUAL}" ]; then
-            echoe "[FAIL] SHA256 불일치 → 파일 폐기 권장"
-            exit 1
-          fi
-
-          echoe "[OK] SHA256(및 가능 시 GPG) 검증 통과"
-          printf "OK %s\n" "${ISO_TARGET}" > "${ECHO_ROOT}/logs/sha256_check.txt"
+          [ "${EXPECT}" = "${ACTUAL}" ] || { echoe "[FAIL] SHA256 불일치"; exit 1; }
+          echoe "[OK] Fedora SHA256 검증 통과"
 
       - name: "Kickstart(Anaconda) & Preseed 템플릿 생성/에코"
         run: |
@@ -605,7 +637,7 @@ jobs:
           echoe "[HINT] Ubuntu 합본: 'autoinstall ds=nocloud;s=/cdrom/seed/'"
           echoe "[HINT] Ubuntu 완전 자동 ISO: base-with-seed-autoinstall.iso 그대로 부팅"
 
-      - name: "아티팩트 업로드"
+      - name: "아티팩트 업लोड"
         if: ${{ github.event.inputs.upload_artifacts == 'true' }}
         uses: actions/upload-artifact@v4
         with:
