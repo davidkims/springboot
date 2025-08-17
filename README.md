@@ -6,3 +6,19 @@ This README was last updated by a GitHub Actions workflow.
 Current Python version: Python 3.13.6
 Number of Python files: 8
 Number of Java files: 0
+
+### AWS Environment Setup
+
+Use `scripts/aws_setup.sh` to install and configure the AWS CLI, update system
+packages, create a sample IAM policy, optionally create an IAM user and
+download its access keys, and verify connectivity by listing S3 buckets.
+
+```bash
+bash scripts/aws_setup.sh
+```
+
+To create an IAM user and keys, set `AWS_SETUP_IAM_USER` to the desired user
+name. Credentials are saved to `aws_access_key_<user>.json` in the current
+directory. Ensure valid AWS credentials are available before running the
+script.
+
