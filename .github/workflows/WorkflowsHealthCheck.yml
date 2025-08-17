@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       distro:
-        description: "배포판 (ubuntu|debian|rocky|alma|fedora) — seed ISO는 공통 사용"
+        description: "배포판 (ubuntu|debian|rocky|alma|fedora)"
         default: "ubuntu"
         required: true
       release_hint:
-        description: "배포판 버전 힌트 (ubuntu: 24.04 / debian: 12 등). 비워두면 자동 기본값"
+        description: "버전 힌트 (ubuntu: 24.04 / debian: 12 등, 비우면 자동)"
         default: ""
         required: false
       hostname:
@@ -20,32 +20,28 @@ on:
         default: "finops"
         required: true
       ssh_public_key:
-        description: "접속용 공개키 (ssh-ed25519 또는 ssh-rsa)"
+        description: "접속용 공개키 (ssh-ed25519/ssh-rsa)"
         default: ""
         required: false
       packages:
-        description: "설치 패키지(콤마/공백 구분 허용)"
+        description: "설치 패키지 목록"
         default: "vim curl git htop unzip"
         required: false
-      timezone:
-        description: "타임존"
-        default: "Asia/Seoul"
-        required: true
-      locale:
-        description: "로케일"
-        default: "en_US.UTF-8"
-        required: true
-      create_sample_dirs:
-        description: "샘플 디렉토리 생성 (/srv/app,/var/log/app 등)"
-        default: "true"
+      region:
+        description: "타임존/로케일 (예: Asia/Seoul|en_US.UTF-8)"
+        default: "Asia/Seoul|en_US.UTF-8"
         required: true
       upload_artifacts:
-        description: "생성물 아티팩트 업로드"
+        description: "생성물 아티팩트 업로드 여부"
         default: "true"
         required: true
       do_upgrade:
-        description: "런너에서 apt full-upgrade 실행"
+        description: "런너 apt full-upgrade 실행"
         default: "false"
+        required: true
+      combine_base_iso:
+        description: "배포판 ISO 자동 다운로드 후 seed 포함 합본 ISO 추가 생성"
+        default: "true"
         required: true
 
 jobs:
@@ -65,13 +61,15 @@ jobs:
         run: |
           set -euo pipefail
           export ECHO_ROOT=".github/echo_linux"
-          mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs}
+          mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs,iso_src}
           echo "ECHO_ROOT=$ECHO_ROOT" >> $GITHUB_ENV
           cat > "$ECHO_ROOT/echo.sh" <<'EOS'
           echoe(){ printf "%s %s\n" "[$(date +'%F %T')]" "$*"; }
           EOS
           . "$ECHO_ROOT/echo.sh"
           echoe "[DIR] 구조 생성 완료: $ECHO_ROOT"
+          # 내부 기본값: create_sample_dirs는 입력 없이 기본 true로 처리
+          echo "CREATE_DIRS=true" >> $GITHUB_ENV
 
       - name: "선택적 시스템 업그레이드 (런너)"
         if: ${{ github.event.inputs.do_upgrade == 'true' }}
@@ -90,7 +88,7 @@ jobs:
           . ${ECHO_ROOT}/echo.sh
           echoe "[PKG] 도구 설치"
           sudo apt-get update -y
-          sudo apt-get install -y genisoimage xorriso cloud-guest-utils jq sed
+          sudo apt-get install -y genisoimage xorriso cloud-guest-utils jq sed wget p7zip-full
           echoe "[PKG] 설치 완료"
 
       - name: "입력값 정규화 및 기본값 계산"
@@ -103,10 +101,11 @@ jobs:
           HN="${{ github.event.inputs.hostname }}"
           USERNAME="${{ github.event.inputs.username }}"
           SSH_KEY="${{ github.event.inputs.ssh_public_key }}"
-          TZ="${{ github.event.inputs.timezone }}"
-          LOCALE="${{ github.event.inputs.locale }}"
           PKGS="${{ github.event.inputs.packages }}"
-          CREATE_DIRS="${{ github.event.inputs.create_sample_dirs }}"
+          REGION="${{ github.event.inputs.region }}"
+          TZ="${REGION%%|*}"
+          LOCALE="${REGION##*|}"
+          COMBINE="${{ github.event.inputs.combine_base_iso }}"
           # 기본 릴리즈 힌트
           case "$DISTRO" in
             ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
@@ -124,8 +123,8 @@ jobs:
           echo "TZ=$TZ"             >> $GITHUB_ENV
           echo "LOCALE=$LOCALE"     >> $GITHUB_ENV
           echo "PKGS=$PKGS"         >> $GITHUB_ENV
-          echo "CREATE_DIRS=$CREATE_DIRS" >> $GITHUB_ENV
-          echoe "[INPUT] DISTRO=$DISTRO REL_HINT=$REL_HINT HOSTNAME=$HN USER=$USERNAME"
+          echo "COMBINE=$COMBINE"   >> $GITHUB_ENV
+          echoe "[INPUT] DISTRO=$DISTRO REL_HINT=$REL_HINT HOSTNAME=$HN USER=$USERNAME TZ=$TZ LOCALE=$LOCALE"
 
       - name: "서버 접근 권한 에코 스니펫 생성 (sudo/sshd/firewall)"
         run: |
@@ -192,7 +191,7 @@ jobs:
           echo "[DONE] 권한/디렉토리 구성 완료"
           EOF
           chmod +x "${SCRIPTS}/apply_permissions.sh"
-          # 변수 치환용 env 템플릿(서버에서 사용할 수 있도록 export)
+          # 변수 치환용 env 템플릿
           cat > "${SCRIPTS}/env.seed" <<EOF
           export USERNAME="${USERNAME}"
           export CREATE_DIRS="${CREATE_DIRS}"
@@ -204,7 +203,7 @@ jobs:
           . ${ECHO_ROOT}/echo.sh
           SEED="${ECHO_ROOT}/seed"
           mkdir -p "$SEED"/{nocloud,ssh,snippets}
-          # SSH 키 저장 (없으면 임시 안내 파일)
+          # SSH 키 저장
           if [ -n "${SSH_KEY}" ]; then
             echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys"
           else
@@ -243,7 +242,7 @@ jobs:
           instance-id: iid-${HOSTNAME}-$(date +%s)
           local-hostname: ${HOSTNAME}
           EOF
-          # seed 내부에 스니펫/스크립트 포함 (ISO 마운트 경로에서 /media/seed 로 보이도록 구성할 예정)
+          # seed 포함 자원 복사
           cp -a "${ECHO_ROOT}/snippets" "${SEED}/"
           cp -a "${ECHO_ROOT}/scripts"  "${SEED}/"
           echoe "[SEED] user-data/meta-data 생성 완료"
@@ -254,18 +253,17 @@ jobs:
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
           OUT="${ECHO_ROOT}/out"
-          # ISO: /media/seed 경로에 노출되도록 디렉토리 구성
           mkdir -p "${ECHO_ROOT}/iso_src/seed"
           cp -a "${ECHO_ROOT}/seed/nocloud" "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/seed/snippets" "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
-          # ISO 생성
           genisoimage -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
           echo "seed_iso=${OUT}/seed.iso" >> $GITHUB_OUTPUT
           echoe "[ISO] Seed ISO 생성: ${OUT}/seed.iso"
 
-      - name: "선택: 배포판 기본 ISO URL 안내(참고용)"
+      - name: "배포판 ISO URL 계산 및 자동 다운로드"
+        id: baseiso
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
@@ -276,7 +274,35 @@ jobs:
             alma)    BASE_URL="https://repo.almalinux.org/almalinux/${REL_HINT}/isos/x86_64/AlmaLinux-${REL_HINT}-latest-x86_64-minimal.iso" ;;
             fedora)  BASE_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/${REL_HINT}/Server/x86_64/iso/Fedora-Server-dvd-x86_64-${REL_HINT}-1.2.iso" ;;
           esac
-          echo "[INFO] ${DISTRO} 기본 ISO (참고): ${BASE_URL}" | tee -a ${ECHO_ROOT}/logs/iso_url.txt
+          echo "BASE_URL=$BASE_URL" >> $GITHUB_ENV
+          echoe "[INFO] ${DISTRO} 기본 ISO (참고/다운로드): ${BASE_URL}"
+          mkdir -p ${ECHO_ROOT}/out
+          wget -O ${ECHO_ROOT}/out/base.iso "$BASE_URL" || echoe "[WARN] 기본 ISO 다운로드 실패(오프라인?)."
+
+      - name: "합본 ISO 생성 (xorriso graft, 부팅정보 유지)"
+        if: ${{ github.event.inputs.combine_base_iso == 'true' }}
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          if [ ! -s "${ECHO_ROOT}/out/base.iso" ]; then
+            echoe "[SKIP] base.iso 미존재 → 합본 생략"
+            exit 0
+          fi
+          # base.iso에 /seed 트리 graft (부팅정보 keep)
+          xorriso \
+            -indev  "${ECHO_ROOT}/out/base.iso" \
+            -outdev "${ECHO_ROOT}/out/base-with-seed.iso" \
+            -map "${ECHO_ROOT}/iso_src/seed" /seed \
+            -boot_image any keep
+          echoe "[ISO] 합본 생성: ${ECHO_ROOT}/out/base-with-seed.iso"
+          # Ubuntu Autoinstall 안내 힌트 기록
+          cat > ${ECHO_ROOT}/logs/autoinstall_hint.txt <<'EOF'
+          [Ubuntu Autoinstall 힌트]
+          부팅 메뉴에서 'e' 입력 후, 커널 라인 끝의 '---' 뒤에 아래를 추가하세요:
+            autoinstall ds=nocloud;s=/cdrom/seed/
+          저장/부팅(통상 Ctrl+X 또는 F10)하면 NoCloud Seed를 /cdrom/seed에서 읽습니다.
+          (다른 배포판은 두-ISO 방식으로 cloud-init seed 활용 권장)
+          EOF
 
       - name: "로그/결과 요약"
         run: |
@@ -285,7 +311,8 @@ jobs:
           echoe "[SUMMARY] 생성 파일"
           ls -alh ${ECHO_ROOT}/out || true
           ls -alh ${ECHO_ROOT}/seed || true
-          echoe "[HINT] 생성된 seed.iso를 VM에 CD-ROM 두 장으로 연결: 1) 배포판 ISO 2) seed.iso (NoCloud)"
+          echoe "[HINT] 두-ISO 방식: 1) 배포판 ISO 2) seed.iso (NoCloud)"
+          echoe "[HINT] 합본 사용 시 Ubuntu는 커널 파라미터에 'autoinstall ds=nocloud;s=/cdrom/seed/' 추가"
 
       - name: "아티팩트 업로드"
         if: ${{ github.event.inputs.upload_artifacts == 'true' }}
@@ -294,6 +321,8 @@ jobs:
           name: linux-seed-iso-and-echo
           path: |
             .github/echo_linux/out/seed.iso
+            .github/echo_linux/out/base.iso
+            .github/echo_linux/out/base-with-seed.iso
             .github/echo_linux/seed/**
             .github/echo_linux/snippets/**
             .github/echo_linux/scripts/**
