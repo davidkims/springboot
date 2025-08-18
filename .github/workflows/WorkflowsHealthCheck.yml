@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.0)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.1-Storage)"
 
 permissions:
   contents: write
@@ -39,7 +39,7 @@ on:
         default: "Asia/Seoul|en_US.UTF-8"
         required: true
       options:
-        description: "추가 옵션: 콤마로 조합 (가능 값: upgrade,combine,upload)"
+        description: "추가 옵션(콤마로 조합): upgrade,combine,upload,lvm,mdadm,zfs,btrfs,restic,borgbackup,rclone,duplicity"
         default: "combine,upload"
         required: false
   schedule:
@@ -76,7 +76,7 @@ jobs:
           echoe "[DIR] 준비 완료"
           echo "CREATE_DIRS=true" >> $GITHUB_ENV
 
-      - name: "입력값 정규화 (+ options 파싱)"
+      - name: "입력값 정규화 (+ options 파싱/플래그)"
         run: |
           set -euo pipefail
           DISTRO="${{ github.event.inputs.distro }}"
@@ -91,11 +91,22 @@ jobs:
           TZ="${REGION%%|*}"
           LOCALE="${REGION##*|}"
 
-          # options → 플래그
           has_opt(){ echo ",$OPTIONS," | grep -q ",$1," ; }
+
+          # 기본 토글
           DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has_opt upgrade && echo true || echo false)
           COMBINE=$([ "$AUTO_UPDATE" = "true" ] || has_opt combine && echo true || echo false)
           UPLOAD=$([ "$AUTO_UPDATE" = "true" ] || has_opt upload && echo true || echo false)
+
+          # 스토리지/백업 토글
+          F_LVM=$([ "$AUTO_UPDATE" = "true" ] || has_opt lvm && echo true || echo false)
+          F_MDADM=$([ "$AUTO_UPDATE" = "true" ] || has_opt mdadm && echo true || echo false)
+          F_ZFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt zfs && echo true || echo false)
+          F_BTRFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt btrfs && echo true || echo false)
+          F_RESTIC=$([ "$AUTO_UPDATE" = "true" ] || has_opt restic && echo true || echo false)
+          F_BORG=$([ "$AUTO_UPDATE" = "true" ] || has_opt borgbackup && echo true || echo false)
+          F_RCLONE=$([ "$AUTO_UPDATE" = "true" ] || has_opt rclone && echo true || echo false)
+          F_DUPLICITY=$([ "$AUTO_UPDATE" = "true" ] || has_opt duplicity && echo true || echo false)
 
           case "$DISTRO" in
             ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
@@ -120,6 +131,14 @@ jobs:
             echo "UPLOAD=$UPLOAD"
             echo "DO_UPGRADE=$DO_UPGRADE"
             echo "UBUNTU_ARCH=$ARCH"
+            echo "F_LVM=$F_LVM"
+            echo "F_MDADM=$F_MDADM"
+            echo "F_ZFS=$F_ZFS"
+            echo "F_BTRFS=$F_BTRFS"
+            echo "F_RESTIC=$F_RESTIC"
+            echo "F_BORG=$F_BORG"
+            echo "F_RCLONE=$F_RCLONE"
+            echo "F_DUPLICITY=$F_DUPLICITY"
           } >> $GITHUB_ENV
 
           [ "$DISTRO" = "ubuntu" ] && echo "CODENAME=noble" >> $GITHUB_ENV
@@ -131,12 +150,28 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
           sudo apt-get -y autoremove || true
 
-      - name: "필수 패키지 설치"
+      - name: "필수/확장 패키지 설치 (스토리지/백업 연동)"
         run: |
+          set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y curl wget jq sed file \
-            genisoimage xorriso cloud-guest-utils \
-            p7zip-full gnupg squashfs-tools gawk libcdio-utils perl
+          sudo apt-get install -y software-properties-common || true
+          sudo add-apt-repository -y universe || true
+          BASE_PKGS="curl wget jq sed file genisoimage xorriso cloud-guest-utils p7zip-full gnupg squashfs-tools gawk libcdio-utils perl"
+          sudo apt-get install -y $BASE_PKGS
+
+          # (참고) 아래 패키지 설치는 런너용이며, 대상 머신 설치는 cloud-init의 packages에 자동 반영됨
+          PKGS_EXTRA=""
+          [ "${F_LVM}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA lvm2"
+          [ "${F_MDADM}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA mdadm"
+          [ "${F_ZFS}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA zfsutils-linux"
+          [ "${F_BTRFS}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA btrfs-progs"
+          [ "${F_RESTIC}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA restic"
+          [ "${F_BORG}" = "true" ]      && PKGS_EXTRA="$PKGS_EXTRA borgbackup"
+          [ "${F_RCLONE}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA rclone"
+          [ "${F_DUPLICITY}" = "true" ] && PKGS_EXTRA="$PKGS_EXTRA duplicity"
+          if [ -n "$PKGS_EXTRA" ]; then
+            sudo apt-get install -y $PKGS_EXTRA
+          fi
 
       - name: "권한/방화벽 스니펫(+패딩) & 서버 적용 스크립트"
         run: |
@@ -189,159 +224,228 @@ jobs:
           chmod +x "${SCRIPTS}/apply_permissions.sh"
           printf "export USERNAME=%q\nexport CREATE_DIRS=%q\n" "${USERNAME}" "true" > "${SCRIPTS}/env.seed"
 
-      - name: "cloud-init seed 구성 생성"
-        run: |
-          set -euo pipefail
-          SEED="${ECHO_ROOT}/seed"
-          mkdir -p "$SEED"/{nocloud,ssh,snippets}
-          if [ -n "${SSH_KEY}" ]; then
-            echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys"
-          else
-            echo "# 여기에 ssh 공개키를 넣으세요" > "${SEED}/ssh/authorized_keys"
-          fi
-          PKG_LINE=$(echo "$PKGS" | sed 's/[ ,]\+/ /g' | sed 's/ /, /g')
-          cat > "${SEED}/nocloud/user-data" <<EOF
-          #cloud-config
-          hostname: ${HOSTNAME}
-          manage_etc_hosts: true
-          locale: ${LOCALE}
-          timezone: ${TZ}
-          package_update: true
-          package_upgrade: true
-          users:
-            - default
-            - name: ${USERNAME}
-              groups: [sudo, adm, netdev]
-              sudo: ALL=(ALL) NOPASSWD:ALL
-              shell: /bin/bash
-              ssh_authorized_keys:
-                - $(head -n1 "${SEED}/ssh/authorized_keys")
-          packages: [ ${PKG_LINE} ]
-          runcmd:
-            - [ bash, -lc, "install -d -m 755 /root/seed/snippets /root/seed/ssh /root/seed/scripts" ]
-            - [ bash, -lc, "cp -a /media/seed/snippets/* /root/seed/snippets/ || true" ]
-            - [ bash, -lc, "cp -a /media/seed/ssh/* /root/seed/ssh/ || true" ]
-            - [ bash, -lc, "cp -a /media/seed/scripts/* /root/seed/scripts/ || true" ]
-            - [ bash, -lc, "USERNAME='${USERNAME}' CREATE_DIRS='true' bash /root/seed/scripts/apply_permissions.sh" ]
-          EOF
-          cat > "${SEED}/nocloud/meta-data" <<EOF
-          instance-id: iid-${HOSTNAME}-$(date +%s)
-          local-hostname: ${HOSTNAME}
-          EOF
-          cp -a "${ECHO_ROOT}/snippets" "${SEED}/"
-          cp -a "${ECHO_ROOT}/scripts"  "${SEED}/"
-
-      - name: "Seed ISO 생성(+유효성)"
-        run: |
-          set -euo pipefail
-          OUT="${ECHO_ROOT}/out"
-          mkdir -p "${ECHO_ROOT}/iso_src/seed"
-          cp -a "${ECHO_ROOT}/seed/nocloud" "${ECHO_ROOT}/iso_src/seed/"
-          cp -a "${ECHO_ROOT}/seed/snippets" "${ECHO_ROOT}/iso_src/seed/"
-          cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
-          cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
-          genisoimage -quiet -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
-          isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
-          [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
-
-      - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치) — dual-index + arch + robust fallback"
-        if: env.DISTRO == 'ubuntu'
+      - name: "스토리지/백업 스크립트(에코) 생성"
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
-          mkdir -p ${ECHO_ROOT}/out ${ECHO_ROOT}/tmp
-          ARCH="${UBUNTU_ARCH}"
-          SERIES=()
-          case "${REL_HINT}" in
-            24.*) SERIES=("noble");;
-            22.*) SERIES=("jammy");;
-            20.*) SERIES=("focal");;
-            *) SERIES=("noble" "jammy" "focal");;
-          esac
-          CDIMAGE_URL=""
-          for CODENAME in "${SERIES[@]}"; do
-            U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
-            if curl -fsI "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
+          SCRIPTS="${ECHO_ROOT}/scripts"
+          mkdir -p "${SCRIPTS}"
+
+          # 공통 환경 예시(seed에 제공) — 실제값 채워 사용
+          cat > "${SCRIPTS}/env.storage.example" <<'EOF'
+          # ===== LVM/RAID =====
+          export LVM_TARGET_DISKS=""     # ex) "/dev/sdb /dev/sdc"
+          export LVM_VG_NAME="vgdata"
+          export LVM_LV_NAME="lvdata"
+          export LVM_FS_TYPE="ext4"
+          export LVM_MOUNTPOINT="/srv/data"
+          export RAID_LEVEL="1"          # 0/1/5/6/10 …
+          export RAID_DEV="/dev/md0"
+
+          # ===== ZFS =====
+          export ZPOOL_NAME="zpool0"
+          export ZFS_DISKS=""            # ex) "/dev/sdb /dev/sdc"
+          export ZFS_DATASET="zpool0/data"
+          export ZFS_MOUNTPOINT="/srv/zdata"
+
+          # ===== BTRFS =====
+          export BTRFS_TARGET_DEV=""
+          export BTRFS_MOUNTPOINT="/srv/bdata"
+          export BTRFS_SUBVOLS="home data logs"
+
+          # ===== Restic =====
+          export RESTIC_REPOSITORY=""    # ex) s3:s3.amazonaws.com/bucket/path or rclone:remote:bucket
+          export RESTIC_PASSWORD=""
+          # (S3) export AWS_ACCESS_KEY_ID= ; export AWS_SECRET_ACCESS_KEY=
+
+          # ===== BorgBackup =====
+          export BORG_REPO=""            # ex) ssh://user@host:22/~/repo
+          export BORG_PASSPHRASE=""
+
+          # ===== Rclone =====
+          export RCLONE_REMOTE=""        # ex) myremote:bucket/path
+          # rclone.conf -> /root/.config/rclone/rclone.conf
+
+          # ===== Duplicity =====
+          export DUP_TARGET_URL=""       # ex) b2://bucket/path or s3://bucket/path
+          export DUP_PASSPHRASE=""
+
+          # ===== 공통 =====
+          export DRY_RUN="true"          # "true"면 실제 작업 미수행(로그만)
+          EOF
+
+          # LVM/RAID 자동 구성
+          cat > "${SCRIPTS}/storage_lvm_mdadm.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          echo "[LVM/RAID] starting (DRY_RUN=${DRY_RUN:-true})"
+          if [ -z "${LVM_TARGET_DISKS:-}" ]; then
+            echo "[LVM/RAID] LVM_TARGET_DISKS not set -> SKIP"; exit 0
+          fi
+          if [ -n "${RAID_LEVEL:-}" ] && [ -n "${RAID_DEV:-}" ]; then
+            echo "[LVM/RAID] mdadm --create ${RAID_DEV} --level=${RAID_LEVEL} --raid-devices=$(echo $LVM_TARGET_DISKS | wc -w) $LVM_TARGET_DISKS"
+            [ "${DRY_RUN:-true}" = "true" ] || mdadm --create "${RAID_DEV}" --level="${RAID_LEVEL}" --raid-devices=$(echo $LVM_TARGET_DISKS | wc -w) $LVM_TARGET_DISKS
+            PV_TARGET="${RAID_DEV}"
+          else
+            PV_TARGET="$(echo $LVM_TARGET_DISKS | awk '{print $1}')"
+          fi
+          echo "[LVM] pvcreate ${PV_TARGET}"
+          echo "[LVM] vgcreate ${LVM_VG_NAME:-vgdata} ${PV_TARGET}"
+          echo "[LVM] lvcreate -l 100%FREE -n ${LVM_LV_NAME:-lvdata} ${LVM_VG_NAME:-vgdata}"
+          if [ "${DRY_RUN:-true}" != "true" ]; then
+            pvcreate "${PV_TARGET}"
+            vgcreate "${LVM_VG_NAME:-vgdata}" "${PV_TARGET}"
+            lvcreate -l 100%FREE -n "${LVM_LV_NAME:-lvdata}" "${LVM_VG_NAME:-vgdata}"
+          fi
+          LV_PATH="/dev/${LVM_VG_NAME:-vgdata}/${LVM_LV_NAME:-lvdata}"
+          FS="${LVM_FS_TYPE:-ext4}"
+          echo "[FS] mkfs.${FS} ${LV_PATH}"
+          [ "${DRY_RUN:-true}" = "true" ] || mkfs.${FS} "${LV_PATH}"
+          MP="${LVM_MOUNTPOINT:-/srv/data}"
+          mkdir -p "${MP}"
+          UUID="$(blkid -s UUID -o value "${LV_PATH}" || true)"
+          if [ -n "${UUID}" ]; then
+            LINE="UUID=${UUID} ${MP} ${FS} defaults 0 2"
+          else
+            LINE="${LV_PATH} ${MP} ${FS} defaults 0 2"
+          fi
+          echo "[FSTAB] ${LINE}"
+          if [ "${DRY_RUN:-true}" != "true" ]; then
+            grep -q "${LV_PATH}" /etc/fstab || echo "${LINE}" >> /etc/fstab
+            mount -a || true
+          fi
+          echo "[LVM/RAID] done"
+          EOF
+          chmod +x "${SCRIPTS}/storage_lvm_mdadm.sh"
+
+          # ZFS
+          cat > "${SCRIPTS}/zfs_setup.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          echo "[ZFS] starting (DRY_RUN=${DRY_RUN:-true})"
+          command -v zpool >/dev/null 2>&1 || { echo "[ZFS] zpool not found -> SKIP"; exit 0; }
+          [ -n "${ZFS_DISKS:-}" ] || { echo "[ZFS] ZFS_DISKS not set -> SKIP"; exit 0; }
+          POOL="${ZPOOL_NAME:-zpool0}"
+          echo "[ZFS] zpool create ${POOL} ${ZFS_DISKS}"
+          [ "${DRY_RUN:-true}" = "true" ] || zpool create -f "${POOL}" ${ZFS_DISKS}
+          DS="${ZFS_DATASET:-${POOL}/data}"
+          MP="${ZFS_MOUNTPOINT:-/srv/zdata}"
+          echo "[ZFS] zfs create ${DS} ; zfs set mountpoint=${MP} ${DS}"
+          if [ "${DRY_RUN:-true}" != "true" ]; then
+            zfs create -p "${DS}" || true
+            zfs set mountpoint="${MP}" "${DS}"
+            mkdir -p "${MP}"
+          fi
+          echo "[ZFS] done"
+          EOF
+          chmod +x "${SCRIPTS}/zfs_setup.sh"
+
+          # Btrfs
+          cat > "${SCRIPTS}/btrfs_setup.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          echo "[BTRFS] starting (DRY_RUN=${DRY_RUN:-true})"
+          command -v mkfs.btrfs >/dev/null 2>&1 || { echo "[BTRFS] mkfs.btrfs not found -> SKIP"; exit 0; }
+          [ -n "${BTRFS_TARGET_DEV:-}" ] || { echo "[BTRFS] BTRFS_TARGET_DEV not set -> SKIP"; exit 0; }
+          MP="${BTRFS_MOUNTPOINT:-/srv/bdata}"
+          SUBS="${BTRFS_SUBVOLS:-home data logs}"
+
+          echo "[BTRFS] mkfs.btrfs -f ${BTRFS_TARGET_DEV}"
+          [ "${DRY_RUN:-true}" = "true" ] || mkfs.btrfs -f "${BTRFS_TARGET_DEV}"
+
+          TMP="/mnt/.btrfs-tmp"
+          mkdir -p "${TMP}"
+          echo "[BTRFS] mount ${BTRFS_TARGET_DEV} ${TMP}"
+          [ "${DRY_RUN:-true}" = "true" ] || mount "${BTRFS_TARGET_DEV}" "${TMP}"
+
+          for s in ${SUBS}; do
+            echo "[BTRFS] btrfs subvolume create ${TMP}/${s}"
+            [ "${DRY_RUN:-true}" = "true" ] || btrfs subvolume create "${TMP}/${s}"
           done
-          YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
-          RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
-          echo "CDIMAGE_URL=${CDIMAGE_URL}"  >> $GITHUB_ENV
-          echo "RELEASES_URL=${RELEASES_URL}" >> $GITHUB_ENV
-          fetch_sums () {
-            local base="$1" tag="$2"
-            local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
-            local gpg="${ECHO_ROOT}/out/SHA256SUMS.${tag}.gpg"
-            [ -n "$base" ] || return 0
-            curl -fL -o "$sums" "${base}SHA256SUMS" || true
-            curl -fL -o "$gpg"  "${base}SHA256SUMS.gpg" || true
-            if [ -s "$sums" ] && [ -s "$gpg" ]; then
-              gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
-                0xC5986B4F1257FFA86632CBA746181433FBB75451 \
-                0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
-              gpg --keyid-format long --verify "$gpg" "$sums" || echoe "[WARN] GPG 검증 실패(${tag}) - 계속"
-            fi
-          }
-          fetch_sums "${CDIMAGE_URL}"  "cdimage"
-          fetch_sums "${RELEASES_URL}" "releases"
-          [ -s "${ECHO_ROOT}/out/SHA256SUMS.cdimage" ] || [ -s "${ECHO_ROOT}/out/SHA256SUMS.releases" ] || { echoe "[ERR] 두 인덱스 모두에서 SHA256SUMS 확보 실패"; exit 1; }
-          cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
-            | perl -0777 -ne '
-                while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
-                while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
-              ' \
-            | awk '{print tolower($1), $2}' \
-            | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
-          echo "[DEBUG] Parsed ISO entries (top 100):"
-          head -n 100 "${ECHO_ROOT}/out/SHA256SUMS.parsed" || true
-          pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
-          REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
-          CAND_LINE=""
-          [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*server.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*desktop.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line ' ubuntu-'"${REL_RX}"'.*\.iso$')"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
-          [ -n "$CAND_LINE" ] || { echoe "[ERR] SHA256SUMS에서 사용할 수 있는 *.iso 후보를 찾지 못했습니다."; exit 1; }
-          EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
-          CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
-          echo "[PICK] ${CAND} (expected sha256=${EXPECT})"
-          echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
-          base_candidates=()
-          [ -n "${CDIMAGE_URL}" ]  && base_candidates+=("${CDIMAGE_URL}")
-          base_candidates+=("${RELEASES_URL}")
-          YYMM_FROM_NAME="$(printf '%s\n' "${CAND}" | sed -nE 's/^ubuntu-([0-9]{2}\.[0-9]{2}).*/\1/p')"
-          [ -n "${YYMM_FROM_NAME}" ] && base_candidates+=("https://releases.ubuntu.com/${YYMM_FROM_NAME}/")
-          urls=()
-          for B in "${base_candidates[@]}"; do urls+=("${B}${CAND}"); done
-          urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
-          urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
-          ok=0
-          for u in "${urls[@]}"; do
-            echoe "[FETCH] $u"
-            if curl -fL --retry 3 --retry-delay 2 -o "${ECHO_ROOT}/out/base.iso" "$u"; then
-              ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-              if [ "${EXPECT}" = "${ACTUAL}" ]; then
-                echoe "[OK] SHA256 일치 (${CAND})"
-                echo "ISO_URL_USED=$u" >> $GITHUB_ENV
-                ok=1; break
-              else
-                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도"
-              fi
+
+          [ "${DRY_RUN:-true}" = "true" ] || umount "${TMP}"
+          rmdir "${TMP}" || true
+
+          mkdir -p "${MP}"
+          for s in ${SUBS}; do
+            mkdir -p "${MP}/${s}"
+            LINE="${BTRFS_TARGET_DEV} ${MP}/${s} btrfs defaults,subvol=${s} 0 0"
+            echo "[FSTAB] ${LINE}"
+            if [ "${DRY_RUN:-true}" != "true" ]; then
+              grep -q " ${MP}/${s} " /etc/fstab || echo "${LINE}" >> /etc/fstab
             fi
           done
-          [ "$ok" -eq 1 ] || { echoe "[FAIL] 모든 미러에서 SHA256 불일치/실패"; exit 1; }
-          for ext in zsync list manifest; do
-            curl -fsI "${RELEASES_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${RELEASES_URL}${CAND}.${ext}" || true
-            if [ -n "${CDIMAGE_URL}" ]; then
-              curl -fsI "${CDIMAGE_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${CDIMAGE_URL}${CAND}.${ext}" || true
-            fi
-          done
-          cp -a "${ECHO_ROOT}/out/SHA256SUMS.parsed" "${ECHO_ROOT}/logs/" || true
+          [ "${DRY_RUN:-true}" = "true" ] || mount -a || true
+          echo "[BTRFS] done"
+          EOF
+          chmod +x "${SCRIPTS}/btrfs_setup.sh"
+
+          # Restic
+          cat > "${SCRIPTS}/restic_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v restic >/dev/null 2>&1 || { echo "[restic] not found -> SKIP"; exit 0; }
+          [ -n "${RESTIC_REPOSITORY:-}" ] || { echo "[restic] RESTIC_REPOSITORY not set -> SKIP"; exit 0; }
+          [ -n "${RESTIC_PASSWORD:-}" ] || { echo "[restic] RESTIC_PASSWORD not set -> SKIP"; exit 0; }
+          export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+          echo "[restic] repo check/init"
+          restic snapshots >/dev/null 2>&1 || restic init
+          echo "[restic] first backup /etc /home /srv"
+          restic backup /etc /home /srv || true
+          echo "[restic] done"
+          EOF
+          chmod +x "${SCRIPTS}/restic_init.sh"
+
+          # Borg
+          cat > "${SCRIPTS}/borg_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v borg >/dev/null 2>&1 || { echo "[borg] not found -> SKIP"; exit 0; }
+          [ -n "${BORG_REPO:-}" ] || { echo "[borg] BORG_REPO not set -> SKIP"; exit 0; }
+          export BORG_REPO BORG_PASSPHRASE
+          echo "[borg] repo init (if needed)"
+          borg list >/dev/null 2>&1 || borg init --encryption=repokey-blake2
+          echo "[borg] create archive"
+          borg create --stats ::first-$(date +%Y%m%d%H%M) /etc /home /srv || true
+          echo "[borg] prune (keep 7 daily)"
+          borg prune --keep-daily=7 || true
+          echo "[borg] done"
+          EOF
+          chmod +x "${SCRIPTS}/borg_init.sh"
+
+          # Rclone
+          cat > "${SCRIPTS}/rclone_check.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v rclone >/dev/null 2>&1 || { echo "[rclone] not found -> SKIP"; exit 0; }
+          [ -n "${RCLONE_REMOTE:-}" ] || { echo "[rclone] RCLONE_REMOTE not set -> SKIP"; exit 0; }
+          echo "[rclone] ls ${RCLONE_REMOTE}"
+          rclone ls "${RCLONE_REMOTE}" >/root/rclone_ls.txt 2>&1 || true
+          echo "[rclone] done"
+          EOF
+          chmod +x "${SCRIPTS}/rclone_check.sh"
+
+          # Duplicity
+          cat > "${SCRIPTS}/duplicity_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v duplicity >/dev/null 2>&1 || { echo "[duplicity] not found -> SKIP"; exit 0; }
+          [ -n "${DUP_TARGET_URL:-}" ] || { echo "[duplicity] DUP_TARGET_URL not set -> SKIP"; exit 0; }
+          export PASSPHRASE="${DUP_PASSPHRASE:-}"
+          echo "[duplicity] backing up /etc /home /srv -> ${DUP_TARGET_URL}"
+          duplicity /etc "file:///root/dup_local/etc" || true
+          duplicity /home "file:///root/dup_local/home" || true
+          duplicity /srv  "${DUP_TARGET_URL}" || true
+          echo "[duplicity] done"
+          EOF
+          chmod +x "${SCRIPTS}/duplicity_init.sh"
 
       - name: "Kickstart & Preseed 템플릿"
         run: |
@@ -384,6 +488,204 @@ jobs:
           EOF
           cp -a "${TPL}/kickstart.ks" "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg"
           cp -a "${TPL}/preseed.cfg"  "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg"
+
+      - name: "cloud-init seed 구성 생성 (+ 스토리지/백업 runcmd 연결)"
+        run: |
+          set -euo pipefail
+          SEED="${ECHO_ROOT}/seed"
+          mkdir -p "$SEED"/{nocloud,ssh,snippets,scripts}
+          if [ -n "${SSH_KEY}" ]; then
+            echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys"
+          else
+            echo "# 여기에 ssh 공개키를 넣으세요" > "${SEED}/ssh/authorized_keys"
+          fi
+
+          # 선택된 기능용 추가 패키지(대상 머신 설치용) 구성
+          EXTRA_PKGS=""
+          [ "${F_LVM}" = "true" ]       && EXTRA_PKGS="$EXTRA_PKGS lvm2"
+          [ "${F_MDADM}" = "true" ]     && EXTRA_PKGS="$EXTRA_PKGS mdadm"
+          [ "${F_ZFS}" = "true" ]       && EXTRA_PKGS="$EXTRA_PKGS zfsutils-linux"
+          [ "${F_BTRFS}" = "true" ]     && EXTRA_PKGS="$EXTRA_PKGS btrfs-progs"
+          [ "${F_RESTIC}" = "true" ]    && EXTRA_PKGS="$EXTRA_PKGS restic"
+          [ "${F_BORG}" = "true" ]      && EXTRA_PKGS="$EXTRA_PKGS borgbackup"
+          [ "${F_RCLONE}" = "true" ]    && EXTRA_PKGS="$EXTRA_PKGS rclone"
+          [ "${F_DUPLICITY}" = "true" ] && EXTRA_PKGS="$EXTRA_PKGS duplicity"
+
+          # 입력 PKGS + EXTRA_PKGS → 중복 제거 콤마 리스트
+          COMBINED_PKGS="$(printf "%s %s\n" "$PKGS" "$EXTRA_PKGS" | tr ',;' ' ' | tr -s ' ' ' ')"
+          PKG_LINE=$(echo "$COMBINED_PKGS" | awk '{for(i=1;i<=NF;i++) if(!seen[$i]++){printf (n++?", ":"") $i}}')
+
+          # 스토리지/백업 환경 예시 파일 동봉(사용 시 /root/seed/scripts/env.storage 수정)
+          cp -a "${ECHO_ROOT}/scripts/env.storage.example" "${SEED}/scripts/env.storage"
+
+          cat > "${SEED}/nocloud/user-data" <<EOF
+          #cloud-config
+          hostname: ${HOSTNAME}
+          manage_etc_hosts: true
+          locale: ${LOCALE}
+          timezone: ${TZ}
+          package_update: true
+          package_upgrade: true
+          users:
+            - default
+            - name: ${USERNAME}
+              groups: [sudo, adm, netdev]
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              shell: /bin/bash
+              ssh_authorized_keys:
+                - $(head -n1 "${SEED}/ssh/authorized_keys")
+          packages: [ ${PKG_LINE} ]
+          runcmd:
+            - [ bash, -lc, "install -d -m 755 /root/seed/snippets /root/seed/ssh /root/seed/scripts" ]
+            - [ bash, -lc, "cp -a /media/seed/snippets/* /root/seed/snippets/ || true" ]
+            - [ bash, -lc, "cp -a /media/seed/ssh/* /root/seed/ssh/ || true" ]
+            - [ bash, -lc, "cp -a /media/seed/scripts/* /root/seed/scripts/ || true" ]
+            - [ bash, -lc, "USERNAME='${USERNAME}' CREATE_DIRS='true' bash /root/seed/scripts/apply_permissions.sh" ]
+            # ===== Storage / Backup (조건부 실행) =====
+            - [ bash, -lc, "[[ '${F_LVM}' == 'true' || '${F_MDADM}' == 'true' ]] && bash /root/seed/scripts/storage_lvm_mdadm.sh || true" ]
+            - [ bash, -lc, "[[ '${F_ZFS}' == 'true' ]] && bash /root/seed/scripts/zfs_setup.sh || true" ]
+            - [ bash, -lc, "[[ '${F_BTRFS}' == 'true' ]] && bash /root/seed/scripts/btrfs_setup.sh || true" ]
+            - [ bash, -lc, "[[ '${F_RESTIC}' == 'true' ]] && bash /root/seed/scripts/restic_init.sh || true" ]
+            - [ bash, -lc, "[[ '${F_BORG}' == 'true' ]] && bash /root/seed/scripts/borg_init.sh || true" ]
+            - [ bash, -lc, "[[ '${F_RCLONE}' == 'true' ]] && bash /root/seed/scripts/rclone_check.sh || true" ]
+            - [ bash, -lc, "[[ '${F_DUPLICITY}' == 'true' ]] && bash /root/seed/scripts/duplicity_init.sh || true" ]
+          EOF
+
+          cat > "${SEED}/nocloud/meta-data" <<EOF
+          instance-id: iid-${HOSTNAME}-$(date +%s)
+          local-hostname: ${HOSTNAME}
+          EOF
+
+          cp -a "${ECHO_ROOT}/snippets" "${SEED}/"
+          cp -a "${ECHO_ROOT}/scripts"  "${SEED}/"
+
+      - name: "Seed ISO 생성(+유효성)"
+        run: |
+          set -euo pipefail
+          OUT="${ECHO_ROOT}/out"
+          mkdir -p "${ECHO_ROOT}/iso_src/seed"
+          cp -a "${ECHO_ROOT}/seed/nocloud" "${ECHO_ROOT}/iso_src/seed/"
+          cp -a "${ECHO_ROOT}/seed/snippets" "${ECHO_ROOT}/iso_src/seed/"
+          cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
+          cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
+          genisoimage -quiet -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
+          isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
+          [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
+
+      # =======================
+      # Ubuntu: 체크섬-우선 — dual-index + arch + robust fallback
+      # =======================
+      - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치) — dual-index + arch + robust fallback"
+        if: env.DISTRO == 'ubuntu'
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          mkdir -p ${ECHO_ROOT}/out ${ECHO_ROOT}/tmp
+          ARCH="${UBUNTU_ARCH}"
+          # 0) REL_HINT→코드네임 추정
+          SERIES=()
+          case "${REL_HINT}" in
+            24.*) SERIES=("noble");;
+            22.*) SERIES=("jammy");;
+            20.*) SERIES=("focal");;
+            *) SERIES=("noble" "jammy" "focal");;
+          esac
+          # 1) 후보 인덱스 2종: cdimage + releases
+          CDIMAGE_URL=""
+          for CODENAME in "${SERIES[@]}"; do
+            U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
+            if curl -fsI "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
+          done
+          YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
+          RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
+          echo "CDIMAGE_URL=${CDIMAGE_URL}"  >> $GITHUB_ENV
+          echo "RELEASES_URL=${RELEASES_URL}" >> $GITHUB_ENV
+
+          fetch_sums () {
+            local base="$1" tag="$2"
+            local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
+            local gpg="${ECHO_ROOT}/out/SHA256SUMS.${tag}.gpg"
+            [ -n "$base" ] || return 0
+            curl -fL -o "$sums" "${base}SHA256SUMS" || true
+            curl -fL -o "$gpg"  "${base}SHA256SUMS.gpg" || true
+            if [ -s "$sums" ] && [ -s "$gpg" ]; then
+              gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
+                0xC5986B4F1257FFA86632CBA746181433FBB75451 \
+                0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
+              gpg --keyid-format long --verify "$gpg" "$sums" || echoe "[WARN] GPG 검증 실패(${tag}) - 계속"
+            fi
+          }
+          fetch_sums "${CDIMAGE_URL}"  "cdimage"
+          fetch_sums "${RELEASES_URL}" "releases"
+          [ -s "${ECHO_ROOT}/out/SHA256SUMS.cdimage" ] || [ -s "${ECHO_ROOT}/out/SHA256SUMS.releases" ] || { echoe "[ERR] 두 인덱스 모두에서 SHA256SUMS 확보 실패"; exit 1; }
+
+          # 3) 병합 파싱 → "HASH filename"
+          cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
+            | perl -0777 -ne '
+                while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
+                while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
+              ' \
+            | awk '{print tolower($1), $2}' \
+            | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
+          echo "[DEBUG] Parsed ISO entries (top 100):"
+          head -n 100 "${ECHO_ROOT}/out/SHA256SUMS.parsed" || true
+
+          # 4) 후보 선택(아키텍처/버전 고려)
+          pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
+          REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
+          CAND_LINE=""
+          [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*server.*-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*desktop.*-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line ' ubuntu-'"${REL_RX}"'.*\.iso$')"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
+          [ -n "$CAND_LINE" ] || { echoe "[ERR] SHA256SUMS에서 사용할 수 있는 *.iso 후보를 찾지 못했습니다."; exit 1; }
+          EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
+          CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
+          echo "[PICK] ${CAND} (expected sha256=${EXPECT})"
+          echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
+
+          # 5) 다운로드 URL (원본 디렉터리 + 미러 후보)
+          base_candidates=()
+          [ -n "${CDIMAGE_URL}" ]  && base_candidates+=("${CDIMAGE_URL}")
+          base_candidates+=("${RELEASES_URL}")
+          YYMM_FROM_NAME="$(printf '%s\n' "${CAND}" | sed -nE 's/^ubuntu-([0-9]{2}\.[0-9]{2}).*/\1/p')"
+          [ -n "${YYMM_FROM_NAME}" ] && base_candidates+=("https://releases.ubuntu.com/${YYMM_FROM_NAME}/")
+          urls=()
+          for B in "${base_candidates[@]}"; do urls+=("${B}${CAND}"); done
+          urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
+          urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
+
+          # 6) 다운로드 & SHA256 검증
+          ok=0
+          for u in "${urls[@]}"; do
+            echoe "[FETCH] $u"
+            if curl -fL --retry 3 --retry-delay 2 -o "${ECHO_ROOT}/out/base.iso" "$u"; then
+              ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
+              if [ "${EXPECT}" = "${ACTUAL}" ]; then
+                echoe "[OK] SHA256 일치 (${CAND})"
+                echo "ISO_URL_USED=$u" >> $GITHUB_ENV
+                ok=1; break
+              else
+                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도"
+              fi
+            fi
+          done
+          [ "$ok" -eq 1 ] || { echoe "[FAIL] 모든 미러에서 SHA256 불일치/실패"; exit 1; }
+
+          # 7) 부가 파일(선택)
+          for ext in zsync list manifest; do
+            curl -fsI "${RELEASES_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${RELEASES_URL}${CAND}.${ext}" || true
+            if [ -n "${CDIMAGE_URL}" ]; then
+              curl -fsI "${CDIMAGE_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${CDIMAGE_URL}${CAND}.${ext}" || true
+            fi
+          done
+          cp -a "${ECHO_ROOT}/out/SHA256SUMS.parsed" "${ECHO_ROOT}/logs/" || true
 
       - name: "합본 ISO (xorriso graft, /seed + /ks.cfg + /preseed.cfg)"
         if: env.COMBINE == 'true'
@@ -456,6 +758,7 @@ jobs:
           echo "[HINT] Ubuntu: autoinstall ds=nocloud;s=/cdrom/seed/"
           echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
           echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
+          echo "[HINT] Storage/Backup: /root/seed/scripts/env.storage 파일을 실제 값으로 설정 후 DRY_RUN=false 로 변경"
 
       - name: "아티팩트 업로드(유효 파일만)"
         if: env.UPLOAD == 'true'
