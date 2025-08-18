@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.1.0)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.0)"
 
 permissions:
   contents: write
@@ -38,14 +38,10 @@ on:
         description: "타임존/로케일 (예: Asia/Seoul|en_US.UTF-8)"
         default: "Asia/Seoul|en_US.UTF-8"
         required: true
-      combine_base_iso:
-        description: "배포판 ISO 자동 다운로드 후 seed 합본 ISO 생성"
-        default: "true"
-        required: true
-      encryption:
-        description: "아티팩트 암호화 모드 (none | pgp:<ARMOR> | pgp-keyid:<KEYID> | age:<RECIPIENT>)"
-        default: "none"
-        required: true
+      options:
+        description: "추가 옵션: 콤마로 조합 (가능 값: upgrade,combine,upload)"
+        default: "combine,upload"
+        required: false
   schedule:
     - cron: "0 3 * * 0"
 
@@ -65,22 +61,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ✅ 항상 실행: 런너 OS 최신화 (보안/호환성)
-      - name: "런너 업데이트(항상)"
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
-          sudo apt-get -y autoremove || true
-
-      - name: "필수 패키지 설치 (+암호화 도구)"
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl wget jq sed file \
-            genisoimage xorriso cloud-guest-utils \
-            p7zip-full gnupg squashfs-tools gawk libcdio-utils perl \
-            age
-
       - name: "기본 디렉토리/유틸"
         run: |
           set -euo pipefail
@@ -96,7 +76,7 @@ jobs:
           echoe "[DIR] 준비 완료"
           echo "CREATE_DIRS=true" >> $GITHUB_ENV
 
-      - name: "입력값 정규화"
+      - name: "입력값 정규화 (+ options 파싱)"
         run: |
           set -euo pipefail
           DISTRO="${{ github.event.inputs.distro }}"
@@ -107,10 +87,16 @@ jobs:
           PKGS="${{ github.event.inputs.packages }}"
           REGION="${{ github.event.inputs.region }}"
           ARCH="${{ github.event.inputs.arch }}"
-          ENC="${{ github.event.inputs.encryption }}"
+          OPTIONS="$(echo "${{ github.event.inputs.options }}" | tr 'A-Z' 'a-z' | tr -d ' ')"
           TZ="${REGION%%|*}"
           LOCALE="${REGION##*|}"
-          COMBINE="${{ github.event.inputs.combine_base_iso }}"
+
+          # options → 플래그
+          has_opt(){ echo ",$OPTIONS," | grep -q ",$1," ; }
+          DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has_opt upgrade && echo true || echo false)
+          COMBINE=$([ "$AUTO_UPDATE" = "true" ] || has_opt combine && echo true || echo false)
+          UPLOAD=$([ "$AUTO_UPDATE" = "true" ] || has_opt upload && echo true || echo false)
+
           case "$DISTRO" in
             ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
             debian)  [ -z "$REL_HINT" ] && REL_HINT="12" ;;
@@ -120,6 +106,7 @@ jobs:
             *) echo "지원하지 않는 distro: $DISTRO" >&2; exit 1 ;;
           esac
           case "$ARCH" in amd64|arm64) ;; * ) echo "지원하지 않는 arch: $ARCH" >&2; exit 1;; esac
+
           {
             echo "DISTRO=$DISTRO"
             echo "REL_HINT=$REL_HINT"
@@ -130,10 +117,26 @@ jobs:
             echo "LOCALE=$LOCALE"
             echo "PKGS=$PKGS"
             echo "COMBINE=$COMBINE"
+            echo "UPLOAD=$UPLOAD"
+            echo "DO_UPGRADE=$DO_UPGRADE"
             echo "UBUNTU_ARCH=$ARCH"
-            echo "ENCRYPTION_MODE=$ENC"
           } >> $GITHUB_ENV
+
           [ "$DISTRO" = "ubuntu" ] && echo "CODENAME=noble" >> $GITHUB_ENV
+
+      - name: "런너 업데이트(선택)"
+        if: env.DO_UPGRADE == 'true'
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
+          sudo apt-get -y autoremove || true
+
+      - name: "필수 패키지 설치"
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl wget jq sed file \
+            genisoimage xorriso cloud-guest-utils \
+            p7zip-full gnupg squashfs-tools gawk libcdio-utils perl
 
       - name: "권한/방화벽 스니펫(+패딩) & 서버 적용 스크립트"
         run: |
@@ -142,13 +145,10 @@ jobs:
           SNIP="${ECHO_ROOT}/snippets"
           SCRIPTS="${ECHO_ROOT}/scripts"
           mkdir -p "$SNIP" "$SCRIPTS"
-          # 최소 데이터 보장 패딩(0바이트 방지)
           head -c 65536 /dev/urandom > "${SNIP}/.padding"
-          # sudoers
           cat > "${SNIP}/sudoers_${USERNAME}" <<EOF
           ${USERNAME} ALL=(ALL) NOPASSWD:ALL
           EOF
-          # sshd
           cat > "${SNIP}/sshd_${USERNAME}.conf" <<'EOF'
           PasswordAuthentication no
           PermitRootLogin no
@@ -156,7 +156,6 @@ jobs:
           ChallengeResponseAuthentication no
           UsePAM yes
           EOF
-          # ufw
           cat > "${SNIP}/ufw_init.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -168,7 +167,6 @@ jobs:
           ufw status verbose || true
           EOF
           chmod +x "${SNIP}/ufw_init.sh"
-          # 권한 적용 스크립트
           cat > "${SCRIPTS}/apply_permissions.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -181,7 +179,7 @@ jobs:
           fi
           install -m 440 /root/seed/snippets/sudoers_${USERNAME} /etc/sudoers.d/${USERNAME}
           install -d -m 755 /etc/ssh/sshd_config.d
-          install -m 644 /root/seed/snippets/sshd_${USERNAME}..conf /etc/ssh/sshd_config.d/99-custom.conf
+          install -m 644 /root/seed/snippets/sshd_${USERNAME}.conf /etc/ssh/sshd_config.d/99-custom.conf
           systemctl restart ssh || systemctl restart sshd || true
           bash /root/seed/snippets/ufw_init.sh || true
           if [ "${CREATE_DIRS:-true}" = "true" ]; then
@@ -246,11 +244,8 @@ jobs:
           isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
           [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
 
-      # Ubuntu: 체크섬-우선 — dual-index + arch + robust fallback
       - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치) — dual-index + arch + robust fallback"
         if: env.DISTRO == 'ubuntu'
-        env:
-          UBUNTU_ARCH: ${{ env.UBUNTU_ARCH }}
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
@@ -391,7 +386,7 @@ jobs:
           cp -a "${TPL}/preseed.cfg"  "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg"
 
       - name: "합본 ISO (xorriso graft, /seed + /ks.cfg + /preseed.cfg)"
-        if: ${{ github.event.inputs.combine_base_iso == 'true' }}
+        if: env.COMBINE == 'true'
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
@@ -448,110 +443,30 @@ jobs:
           isoinfo -d -i "${OUT}/base-with-seed-autoinstall.iso" >/dev/null 2>&1 || { echo "autoinstall iso invalid"; exit 1; }
           [ $(stat -c%s "${OUT}/base-with-seed-autoinstall.iso") -ge 10485760 ] || { echo "autoinstall iso too small"; exit 1; }
 
-      # ==========================
-      # 🔐 암호화(옵션) — 아티팩트 전환
-      # ==========================
-      - name: "암호화 준비(파서/키셋)"
-        run: |
-          set -euo pipefail
-          ENC="${ENCRYPTION_MODE:-none}"
-          echo "ENC_EFFECTIVE=$ENC" >> $GITHUB_ENV
-          # PGP keyid 모드이면 키서버에서 가져오기
-          if [[ "$ENC" =~ ^pgp-keyid: ]]; then
-            KEYID="${ENC#pgp-keyid:}"
-            gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys "$KEYID"
-          fi
-          # PGP armor 모드면 파일로 저장 후 import
-          if [[ "$ENC" =~ ^pgp: ]]; then
-            ARM="${ENC#pgp:}"
-            printf "%s\n" "$ARM" > "${ECHO_ROOT}/tmp/enc.pub.asc"
-            gpg --import "${ECHO_ROOT}/tmp/enc.pub.asc" >/dev/null 2>&1 || true
-          fi
-
-      - name: "아티팩트 암호화 실행(선택)"
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          ENC="${ENCRYPTION_MODE:-none}"
-          ROOT="${ECHO_ROOT}"
-          OUT="${ECHO_ROOT}/out"
-          MAN="${ECHO_ROOT}/logs/encryption_manifest.txt"
-          echoe "[ENC] 모드=${ENC}"
-          echo "# Encryption Manifest $(date -Is)" > "$MAN"
-          echo "# mode=${ENC}" >> "$MAN"
-          [ "$ENC" = "none" ] && { echoe "[ENC] skip"; exit 0; }
-
-          encrypt_file_pgp() {
-            local src="$1"; local dst="$2"
-            # 수신자 자동 선택: 첫 번째 공개키 (또는 armor 입력)
-            local rcpt
-            if [[ "${ENCRYPTION_MODE}" =~ ^pgp-keyid: ]]; then
-              rcpt="${ENCRYPTION_MODE#pgp-keyid:}"
-            elif [[ "${ENCRYPTION_MODE}" =~ ^pgp: ]]; then
-              # armor를 직접 recipient로 쓸 수 없으므로 로컬 keyring에 import된 키를 trust-local로 사용
-              # 임의로 첫 fingerprint 하나 선택
-              rcpt="$(gpg --list-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
-            fi
-            [ -n "$rcpt" ] || { echo "[ENC][PGP] recipient not found"; return 1; }
-            gpg --batch --yes --trust-model always --output "$dst" --encrypt --recipient "$rcpt" "$src"
-          }
-          encrypt_file_age() {
-            local src="$1"; local dst="$2"
-            local rcpt="${ENCRYPTION_MODE#age:}"
-            echo -n "" | age -r "$rcpt" >/dev/null 2>&1 || true
-            age -o "$dst" -r "$rcpt" "$src"
-          }
-
-          do_enc() {
-            local f="$1"
-            [ -f "$f" ] || return 0
-            case "$ENC" in
-              pgp:*|pgp-keyid:*)
-                encrypt_file_pgp "$f" "$f.gpg" || { echo "[ENC] PGP failed: $f"; return 1; }
-                echo "$(sha256sum "$f" | awk '{print $1}'),$(basename "$f"),$(sha256sum "$f.gpg" | awk '{print $1}'),$(basename "$f.gpg")" >> "$MAN"
-                rm -f "$f"
-                ;;
-              age:*)
-                encrypt_file_age "$f" "$f.age" || { echo "[ENC] age failed: $f"; return 1; }
-                echo "$(sha256sum "$f" | awk '{print $1}'),$(basename "$f"),$(sha256sum "$f.age" | awk '{print $1}'),$(basename "$f.age")" >> "$MAN"
-                rm -f "$f"
-                ;;
-              *) echo "[ENC] unknown mode"; return 1 ;;
-            esac
-          }
-
-          # ISO 및 부가 디렉토리 순회 암호화
-          find "${OUT}" -maxdepth 1 -type f \( -name "*.iso" -o -name "*.zsync" -o -name "*.list" -o -name "*.manifest" \) -print0 | while IFS= read -r -d '' f; do do_enc "$f"; done
-          for d in seed snippets scripts templates records iso_src logs; do
-            [ -d "${ECHO_ROOT}/$d" ] || continue
-            find "${ECHO_ROOT}/$d" -type f -print0 | while IFS= read -r -d '' f; do
-              # 체크섬/서명 원본은 참고용으로 그대로 둘 수 있으나, 보안정책상 모두 암호화
-              do_enc "$f" || true
-            done
-          done
-          echoe "[ENC] 완료. manifest: $MAN"
-
       - name: "검증(요약) & 힌트"
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
-          for f in ${ECHO_ROOT}/out/*; do
+          for f in ${ECHO_ROOT}/out/*.iso; do
             [ -e "$f" ] || continue
             sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
-            isoinfo -d -i "$f" >/dev/null 2>&1 && iso=OK || iso=SKIP
-            echoe "[OUT] $(basename "$f") size=${sz} iso=${iso}"
+            isoinfo -d -i "$f" >/dev/null 2>&1 && iso=OK || iso=FAIL
+            echoe "[ISO] $(basename "$f") size=${sz} iso=${iso}"
           done
           echo "[HINT] Ubuntu: autoinstall ds=nocloud;s=/cdrom/seed/"
           echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
           echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
-          echo "[HINT] 암호화 사용 시, .gpg 또는 .age 파일을 해당 수신자 키로 복호화하세요."
 
-      - name: "아티팩트 업로드(항상)"
+      - name: "아티팩트 업로드(유효 파일만)"
+        if: env.UPLOAD == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: linux-seed-iso-and-echo
           path: |
-            .github/echo_linux/out/**
+            .github/echo_linux/out/seed.iso
+            .github/echo_linux/out/base.iso
+            .github/echo_linux/out/base-with-seed.iso
+            .github/echo_linux/out/base-with-seed-autoinstall.iso
             .github/echo_linux/seed/**
             .github/echo_linux/snippets/**
             .github/echo_linux/scripts/**
