@@ -1,496 +1,780 @@
-name: "🏦 Echo FinDev Docker FullOps (컨테이너·이미지·파일·권한·DB·쿼리)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.1-Storage)"
+
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
     inputs:
-      db_engine:
-        description: "DB 엔진 선택 (mysql | postgres | both)"
+      distro:
+        description: "배포판 (ubuntu|debian|rocky|alma|fedora)"
+        default: "ubuntu"
         required: true
-        default: "mysql"
-      app_port:
-        description: "애플리케이션 포트"
+      release_hint:
+        description: "버전 힌트 (ubuntu: 24.04 / debian: 12 등, 비우면 최신)"
+        default: ""
+        required: false
+      arch:
+        description: "아키텍처 (amd64|arm64)"
+        default: "amd64"
         required: true
-        default: "8000"
-      image_name:
-        description: "빌드할 이미지 이름 (예: findevecho)"
+      hostname:
+        description: "호스트명"
+        default: "fin-linux"
         required: true
-        default: "findevecho"
-      push_image:
-        description: "GHCR로 푸시 여부 (true/false)"
+      username:
+        description: "관리자 사용자명"
+        default: "finops"
         required: true
-        default: "false"
-      run_tests:
-        description: "간단 헬스/쿼리 테스트 실행 (true/false)"
+      ssh_public_key:
+        description: "접속용 공개키 (ssh-ed25519/ssh-rsa)"
+        default: ""
+        required: false
+      packages:
+        description: "설치 패키지 목록(공백/콤마 구분)"
+        default: "vim curl git htop unzip"
+        required: false
+      region:
+        description: "타임존/로케일 (예: Asia/Seoul|en_US.UTF-8)"
+        default: "Asia/Seoul|en_US.UTF-8"
         required: true
-        default: "true"
+      options:
+        description: "추가 옵션(콤마로 조합): upgrade,combine,upload,lvm,mdadm,zfs,btrfs,restic,borgbackup,rclone,duplicity"
+        default: "combine,upload"
+        required: false
   schedule:
-    - cron: "0 3 * * *"  # 매일 03:00 UTC (= 한국 12:00) 정기 점검/재생성
+    - cron: "0 3 * * 0"
 
 jobs:
-  prepare-echo-files:
+  build-seed-iso:
     runs-on: ubuntu-latest
+    env:
+      AUTO_UPDATE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
     steps:
-      - name: Checkout
+      - name: "[ECHO] 시작"
+        run: |
+          set -euo pipefail
+          echo "[INIT] Linux Seed ISO + 권한 에코 워크플로우 시작 (${GITHUB_WORKFLOW})"
+
+      - name: "Checkout"
         uses: actions/checkout@v4
-
-      - name: Create echo directories & helper
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .github/echo/{app,db,queries,perm,logs,images,containers}
-          mkdir -p .github/echo/db/sql/{mysql,postgres}
-          mkdir -p .github/echo/db/results/{mysql,postgres}
-          cat > .github/echo/echo.sh <<'EOSH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
-          echoe() { printf "[%s] %s\n" "$(ts)" "$*" | tee -a ".github/echo/logs/echo.log"; }
-          EOSH
-          chmod +x .github/echo/echo.sh
-          ./.github/echo/echo.sh echoe "[INIT] echo 디렉터리 및 헬퍼 생성 완료"
-
-      - name: Generate sample FastAPI app (echo logging everywhere)
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .github/echo/echo.sh
-          echoe "[APP] 샘플 FastAPI 앱/도커파일 생성"
-          cat > .github/echo/app/app.py <<'PY'
-          import os, time
-          from fastapi import FastAPI
-          app = FastAPI()
-
-          APP_NAME = os.getenv("APP_NAME", "Echo-FinDev")
-          DB_ENGINE = os.getenv("DB_ENGINE", "mysql")
-          DB_HOST = os.getenv("DB_HOST", "mysql-echo")
-          DB_PORT = os.getenv("DB_PORT", "3306" if DB_ENGINE=="mysql" else "5432")
-          DB_USER = os.getenv("DB_USER", "root" if DB_ENGINE=="mysql" else "postgres")
-          DB_PASS = os.getenv("DB_PASS", "root" if DB_ENGINE=="mysql" else "postgres")
-          DB_NAME = os.getenv("DB_NAME", "fin")
-
-          def echo(msg: str):
-            print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {msg}", flush=True)
-
-          @app.get("/")
-          def root():
-            echo(f"[APP] {APP_NAME} alive. DB={DB_ENGINE}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
-            return {"ok": True, "app": APP_NAME, "db": DB_ENGINE}
-
-          @app.get("/healthz")
-          def health():
-            echo("[HEALTH] ok")
-            return {"status":"ok"}
-
-          @app.get("/config")
-          def config():
-            echo("[CONFIG] emit")
-            return {
-              "DB_ENGINE": DB_ENGINE,
-              "DB_HOST": DB_HOST,
-              "DB_PORT": DB_PORT,
-              "DB_USER": DB_USER,
-              "DB_NAME": DB_NAME,
-            }
-          PY
-
-          # requirements
-          cat > .github/echo/app/requirements.txt <<'REQ'
-          fastapi
-          uvicorn
-          REQ
-
-          # Dockerfile
-          cat > .github/echo/app/Dockerfile <<'DOCK'
-          FROM python:3.11-slim
-          ENV PYTHONDONTWRITEBYTECODE=1
-          ENV PYTHONUNBUFFERED=1
-          WORKDIR /app
-          COPY requirements.txt /app/
-          RUN pip install --no-cache-dir -r requirements.txt
-          COPY app.py /app/
-          EXPOSE 8000
-          CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-          DOCK
-
-          # .env (기본값, 런타임에 덮어씀)
-          cat > .github/echo/app/.env <<'ENVV'
-          APP_NAME=Echo-FinDev
-          DB_ENGINE=${DB_ENGINE:-mysql}
-          DB_HOST=${DB_HOST:-mysql-echo}
-          DB_PORT=${DB_PORT:-3306}
-          DB_USER=${DB_USER:-root}
-          DB_PASS=${DB_PASS:-root}
-          DB_NAME=fin
-          ENVV
-
-          echoe "[APP] 앱/도커파일/requirements/.env 생성 완료"
-
-      - name: Generate permission files (with echo)
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .github/echo/echo.sh
-          echoe "[PERM] 권한 정책/스크립트 생성"
-          cat > .github/echo/perm/acl.policy <<'ACL'
-          # Echo permission file (sample).
-          # - 컨테이너/이미지/파일 생성 로그를 모두 허용(기본)
-          # - 민감 경로 쓰기 제한 (예: /etc, /root)
-          [allow]
-          paths.allow = [
-            "/app",
-            "/data",
-            "/logs",
-            "/var/log/echo"
-          ]
-          [deny]
-          paths.deny = [
-            "/etc",
-            "/root",
-            "/bin",
-            "/usr/sbin"
-          ]
-          ACL
-
-          cat > .github/echo/perm/apply-perm.sh <<'SH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          echo "[PERM] applying ACL (mock) ..."
-          # 실제 ACL/SELinux/AppArmor 연동 대신 데모용 로그
-          echo "[PERM] allowed paths: /app,/data,/logs,/var/log/echo"
-          echo "[PERM] denied  paths: /etc,/root,/bin,/usr/sbin"
-          SH
-          chmod +x .github/echo/perm/apply-perm.sh
-          echoe "[PERM] 권한 파일 생성 완료"
-
-      - name: Generate finance DB schema & queries (MySQL/Postgres) with echo
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .github/echo/echo.sh
-          echoe "[DB] 금융 스키마 및 쿼리 생성 (mysql/postgres)"
-
-          # 공통 테이블: customers, accounts, transactions, ledger
-          cat > .github/echo/db/sql/mysql/001_schema.sql <<'SQL'
-          CREATE DATABASE IF NOT EXISTS fin;
-          USE fin;
-
-          CREATE TABLE IF NOT EXISTS customers (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            name VARCHAR(128) NOT NULL,
-            email VARCHAR(256) UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-
-          CREATE TABLE IF NOT EXISTS accounts (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            customer_id BIGINT NOT NULL,
-            account_number VARCHAR(32) UNIQUE NOT NULL,
-            balance DECIMAL(18,2) NOT NULL DEFAULT 0,
-            currency VARCHAR(8) NOT NULL DEFAULT 'KRW',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-          );
-
-          CREATE TABLE IF NOT EXISTS transactions (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            account_id BIGINT NOT NULL,
-            txn_type VARCHAR(16) NOT NULL, -- deposit/withdraw/transfer
-            amount DECIMAL(18,2) NOT NULL,
-            ref VARCHAR(64),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (account_id) REFERENCES accounts(id)
-          );
-
-          CREATE TABLE IF NOT EXISTS ledger (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            txn_id BIGINT NOT NULL,
-            debit_account BIGINT,
-            credit_account BIGINT,
-            amount DECIMAL(18,2) NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-          SQL
-
-          cat > .github/echo/db/sql/mysql/010_seed.sql <<'SQL'
-          USE fin;
-          INSERT INTO customers (name,email) VALUES
-            ('Alice','alice@example.com'),
-            ('Bob','bob@example.com');
-
-          INSERT INTO accounts (customer_id,account_number,balance,currency)
-            VALUES (1,'ACCT-0001',100000,'KRW'),
-                   (2,'ACCT-0002',50000,'KRW');
-
-          INSERT INTO transactions (account_id,txn_type,amount,ref)
-            VALUES (1,'deposit',25000,'INIT-1'),
-                   (2,'withdraw',10000,'INIT-2');
-          SQL
-
-          cat > .github/echo/db/sql/mysql/020_queries.sql <<'SQL'
-          USE fin;
-          -- 잔액 상위 고객
-          SELECT c.name, a.account_number, a.balance
-          FROM accounts a JOIN customers c ON a.customer_id=c.id
-          ORDER BY a.balance DESC LIMIT 10;
-
-          -- 일별 거래 수/금액
-          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total
-          FROM transactions
-          GROUP BY DATE(created_at)
-          ORDER BY d DESC;
-          SQL
-
-          # Postgres
-          cat > .github/echo/db/sql/postgres/001_schema.sql <<'SQL'
-          CREATE DATABASE fin;
-          SQL
-          cat > .github/echo/db/sql/postgres/002_objects.sql <<'SQL'
-          \c fin
-
-          CREATE TABLE IF NOT EXISTS customers (
-            id BIGSERIAL PRIMARY KEY,
-            name VARCHAR(128) NOT NULL,
-            email VARCHAR(256) UNIQUE,
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-
-          CREATE TABLE IF NOT EXISTS accounts (
-            id BIGSERIAL PRIMARY KEY,
-            customer_id BIGINT NOT NULL REFERENCES customers(id),
-            account_number VARCHAR(32) UNIQUE NOT NULL,
-            balance NUMERIC(18,2) NOT NULL DEFAULT 0,
-            currency VARCHAR(8) NOT NULL DEFAULT 'KRW',
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-
-          CREATE TABLE IF NOT EXISTS transactions (
-            id BIGSERIAL PRIMARY KEY,
-            account_id BIGINT NOT NULL REFERENCES accounts(id),
-            txn_type VARCHAR(16) NOT NULL,
-            amount NUMERIC(18,2) NOT NULL,
-            ref VARCHAR(64),
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-
-          CREATE TABLE IF NOT EXISTS ledger (
-            id BIGSERIAL PRIMARY KEY,
-            txn_id BIGINT NOT NULL,
-            debit_account BIGINT,
-            credit_account BIGINT,
-            amount NUMERIC(18,2) NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-          SQL
-
-          cat > .github/echo/db/sql/postgres/010_seed.sql <<'SQL'
-          \c fin
-          INSERT INTO customers (name,email) VALUES
-            ('Alice','alice@example.com'),
-            ('Bob','bob@example.com');
-
-          INSERT INTO accounts (customer_id,account_number,balance,currency)
-            VALUES (1,'ACCT-0001',100000,'KRW'),
-                   (2,'ACCT-0002',50000,'KRW');
-
-          INSERT INTO transactions (account_id,txn_type,amount,ref)
-            VALUES (1,'deposit',25000,'INIT-1'),
-                   (2,'withdraw',10000,'INIT-2');
-          SQL
-
-          cat > .github/echo/db/sql/postgres/020_queries.sql <<'SQL'
-          \c fin
-          -- 잔액 상위 고객
-          SELECT c.name, a.account_number, a.balance
-          FROM accounts a JOIN customers c ON a.customer_id=c.id
-          ORDER BY a.balance DESC LIMIT 10;
-
-          -- 일별 거래 수/금액
-          SELECT DATE(created_at) AS d, COUNT(*) AS cnt, SUM(amount) AS total
-          FROM transactions
-          GROUP BY DATE(created_at)
-          ORDER BY d DESC;
-          SQL
-
-          . .github/echo/echo.sh
-          echoe "[DB] 스키마/시드/쿼리 스크립트 생성 완료"
-
-      - name: Show tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y >/dev/null 2>&1 || true
-          sudo apt-get install -y tree >/dev/null 2>&1 || true
-          tree -a .github/echo | tee .github/echo/logs/tree.txt
-
-  build-image:
-    runs-on: ubuntu-latest
-    needs: prepare-echo-files
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build Docker image (echo)
-        env:
-          IMAGE_NAME: ${{ inputs.image_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ts=$(date +%Y%m%d%H%M%S)
-          docker build -t "${IMAGE_NAME}:$ts" -t "${IMAGE_NAME}:latest" -f .github/echo/app/Dockerfile .github/echo/app
-          echo "IMAGE_TAG=${ts}" | tee .github/echo/images/image_tag.txt
-          docker images | tee .github/echo/images/images.txt
-
-      - name: (Optional) Push to GHCR
-        if: ${{ inputs.push_image == 'true' }}
-        env:
-          IMAGE_NAME: ${{ inputs.image_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          docker login ghcr.io -u "${owner}" -p "${{ secrets.GITHUB_TOKEN }}"
-          ts=$(cat .github/echo/images/image_tag.txt | cut -d= -f2)
-          docker tag "${IMAGE_NAME}:$ts" "ghcr.io/${owner}/${IMAGE_NAME}:$ts"
-          docker tag "${IMAGE_NAME}:latest" "ghcr.io/${owner}/${IMAGE_NAME}:latest"
-          docker push "ghcr.io/${owner}/${IMAGE_NAME}:$ts"
-          docker push "ghcr.io/${owner}/${IMAGE_NAME}:latest"
-          echo "GHCR=ghcr.io/${owner}/${IMAGE_NAME}:$ts" | tee .github/echo/images/pushed.txt
-
-      - name: Upload image artifacts
-        uses: actions/upload-artifact@v4
         with:
-          name: echo-images
-          path: |
-            .github/echo/images/*
-            .github/echo/logs/*
+          fetch-depth: 0
 
-  run-dbs-and-init:
-    runs-on: ubuntu-latest
-    needs: prepare-echo-files
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create docker network
-        shell: bash
+      - name: "기본 디렉토리/유틸"
         run: |
           set -euo pipefail
-          docker network create echonet || true
+          export ECHO_ROOT=".github/echo_linux"
+          mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs,iso_src,records,tmp,templates}
+          echo "ECHO_ROOT=$ECHO_ROOT" >> $GITHUB_ENV
+          cat > "$ECHO_ROOT/echo.sh" <<'EOS'
+          echoe(){ printf "%s %s\n" "[$(date +'%F %T')]" "$*"; }
+          req_min_size(){ f="$1"; min="$2"; [ -s "$f" ] || return 1; sz=$(stat -c%s "$f" 2>/dev/null || echo 0); [ "$sz" -ge "$min" ]; }
+          is_iso(){ f="$1"; isoinfo -d -i "$f" >/dev/null 2>&1; }
+          EOS
+          . "$ECHO_ROOT/echo.sh"
+          echoe "[DIR] 준비 완료"
+          echo "CREATE_DIRS=true" >> $GITHUB_ENV
 
-      - name: Start MySQL (if selected) + init
-        if: ${{ inputs.db_engine == 'mysql' || inputs.db_engine == 'both' }}
-        shell: bash
+      - name: "입력값 정규화 (+ options 파싱/플래그)"
         run: |
           set -euo pipefail
-          docker rm -f mysql-echo >/dev/null 2>&1 || true
-          docker run -d --name mysql-echo --network echonet \
-            -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=fin \
-            -p 3306:3306 mysql:8.3
-          echo "[MYSQL] 대기 중..."
-          for i in {1..60}; do
-            if docker exec mysql-echo mysql -uroot -proot -e "SELECT 1;" >/dev/null 2>&1; then
-              echo "[MYSQL] ready"
-              break
-            fi
-            sleep 2
-          done
-          # schema & seed
-          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/001_schema.sql
-          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/010_seed.sql
-          # queries -> results
-          docker exec -i mysql-echo mysql -uroot -proot < .github/echo/db/sql/mysql/020_queries.sql | tee .github/echo/db/results/mysql/020_queries.out
+          DISTRO="${{ github.event.inputs.distro }}"
+          REL_HINT="${{ github.event.inputs.release_hint }}"
+          HN="${{ github.event.inputs.hostname }}"
+          USERNAME="${{ github.event.inputs.username }}"
+          SSH_KEY="${{ github.event.inputs.ssh_public_key }}"
+          PKGS="${{ github.event.inputs.packages }}"
+          REGION="${{ github.event.inputs.region }}"
+          ARCH="${{ github.event.inputs.arch }}"
+          OPTIONS="$(echo "${{ github.event.inputs.options }}" | tr 'A-Z' 'a-z' | tr -d ' ')"
+          TZ="${REGION%%|*}"
+          LOCALE="${REGION##*|}"
 
-      - name: Start Postgres (if selected) + init
-        if: ${{ inputs.db_engine == 'postgres' || inputs.db_engine == 'both' }}
-        shell: bash
+          has_opt(){ echo ",$OPTIONS," | grep -q ",$1," ; }
+
+          # 기본 토글
+          DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has_opt upgrade && echo true || echo false)
+          COMBINE=$([ "$AUTO_UPDATE" = "true" ] || has_opt combine && echo true || echo false)
+          UPLOAD=$([ "$AUTO_UPDATE" = "true" ] || has_opt upload && echo true || echo false)
+
+          # 스토리지/백업 토글
+          F_LVM=$([ "$AUTO_UPDATE" = "true" ] || has_opt lvm && echo true || echo false)
+          F_MDADM=$([ "$AUTO_UPDATE" = "true" ] || has_opt mdadm && echo true || echo false)
+          F_ZFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt zfs && echo true || echo false)
+          F_BTRFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt btrfs && echo true || echo false)
+          F_RESTIC=$([ "$AUTO_UPDATE" = "true" ] || has_opt restic && echo true || echo false)
+          F_BORG=$([ "$AUTO_UPDATE" = "true" ] || has_opt borgbackup && echo true || echo false)
+          F_RCLONE=$([ "$AUTO_UPDATE" = "true" ] || has_opt rclone && echo true || echo false)
+          F_DUPLICITY=$([ "$AUTO_UPDATE" = "true" ] || has_opt duplicity && echo true || echo false)
+
+          case "$DISTRO" in
+            ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
+            debian)  [ -z "$REL_HINT" ] && REL_HINT="12" ;;
+            rocky)   [ -z "$REL_HINT" ] && REL_HINT="9" ;;
+            alma)    [ -z "$REL_HINT" ] && REL_HINT="9" ;;
+            fedora)  [ -z "$REL_HINT" ] && REL_HINT="40" ;;
+            *) echo "지원하지 않는 distro: $DISTRO" >&2; exit 1 ;;
+          esac
+          case "$ARCH" in amd64|arm64) ;; * ) echo "지원하지 않는 arch: $ARCH" >&2; exit 1;; esac
+
+          {
+            echo "DISTRO=$DISTRO"
+            echo "REL_HINT=$REL_HINT"
+            echo "HOSTNAME=$HN"
+            echo "USERNAME=$USERNAME"
+            echo "SSH_KEY=$SSH_KEY"
+            echo "TZ=$TZ"
+            echo "LOCALE=$LOCALE"
+            echo "PKGS=$PKGS"
+            echo "COMBINE=$COMBINE"
+            echo "UPLOAD=$UPLOAD"
+            echo "DO_UPGRADE=$DO_UPGRADE"
+            echo "UBUNTU_ARCH=$ARCH"
+            echo "F_LVM=$F_LVM"
+            echo "F_MDADM=$F_MDADM"
+            echo "F_ZFS=$F_ZFS"
+            echo "F_BTRFS=$F_BTRFS"
+            echo "F_RESTIC=$F_RESTIC"
+            echo "F_BORG=$F_BORG"
+            echo "F_RCLONE=$F_RCLONE"
+            echo "F_DUPLICITY=$F_DUPLICITY"
+          } >> $GITHUB_ENV
+
+          [ "$DISTRO" = "ubuntu" ] && echo "CODENAME=noble" >> $GITHUB_ENV
+
+      - name: "런너 업데이트(선택)"
+        if: env.DO_UPGRADE == 'true'
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
+          sudo apt-get -y autoremove || true
+
+      - name: "필수/확장 패키지 설치 (스토리지/백업 연동)"
         run: |
           set -euo pipefail
-          docker rm -f pg-echo >/dev/null 2>&1 || true
-          docker run -d --name pg-echo --network echonet \
-            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
-            -p 5432:5432 postgres:16
-          echo "[POSTGRES] 대기 중..."
-          for i in {1..60}; do
-            if docker exec pg-echo pg_isready -U postgres >/dev/null 2>&1; then
-              echo "[POSTGRES] ready"
-              break
-            fi
-            sleep 2
-          done
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/001_schema.sql
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/002_objects.sql
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/010_seed.sql
-          docker exec -i pg-echo psql -U postgres -f /dev/stdin < .github/echo/db/sql/postgres/020_queries.sql | tee .github/echo/db/results/postgres/020_queries.out
+          sudo apt-get update -y
+          sudo apt-get install -y software-properties-common || true
+          sudo add-apt-repository -y universe || true
+          BASE_PKGS="curl wget jq sed file genisoimage xorriso cloud-guest-utils p7zip-full gnupg squashfs-tools gawk libcdio-utils perl"
+          sudo apt-get install -y $BASE_PKGS
 
-      - name: Upload DB init artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: echo-db
-          path: |
-            .github/echo/db/**
-            .github/echo/logs/**
-
-  run-app-container:
-    runs-on: ubuntu-latest
-    needs: [build-image, run-dbs-and-init]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Determine DB env
-        id: dbenv
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ inputs.db_engine }}" = "mysql" ] || [ "${{ inputs.db_engine }}" = "both" ]; then
-            echo "DB_ENGINE=mysql" >> $GITHUB_OUTPUT
-            echo "DB_HOST=mysql-echo" >> $GITHUB_OUTPUT
-            echo "DB_PORT=3306" >> $GITHUB_OUTPUT
-            echo "DB_USER=root" >> $GITHUB_OUTPUT
-            echo "DB_PASS=root" >> $GITHUB_OUTPUT
-          else
-            echo "DB_ENGINE=postgres" >> $GITHUB_OUTPUT
-            echo "DB_HOST=pg-echo" >> $GITHUB_OUTPUT
-            echo "DB_PORT=5432" >> $GITHUB_OUTPUT
-            echo "DB_USER=postgres" >> $GITHUB_OUTPUT
-            echo "DB_PASS=postgres" >> $GITHUB_OUTPUT
+          # (참고) 아래 패키지 설치는 런너용이며, 대상 머신 설치는 cloud-init의 packages에 자동 반영됨
+          PKGS_EXTRA=""
+          [ "${F_LVM}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA lvm2"
+          [ "${F_MDADM}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA mdadm"
+          [ "${F_ZFS}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA zfsutils-linux"
+          [ "${F_BTRFS}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA btrfs-progs"
+          [ "${F_RESTIC}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA restic"
+          [ "${F_BORG}" = "true" ]      && PKGS_EXTRA="$PKGS_EXTRA borgbackup"
+          [ "${F_RCLONE}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA rclone"
+          [ "${F_DUPLICITY}" = "true" ] && PKGS_EXTRA="$PKGS_EXTRA duplicity"
+          if [ -n "$PKGS_EXTRA" ]; then
+            sudo apt-get install -y $PKGS_EXTRA
           fi
-          echo "DB_NAME=fin" >> $GITHUB_OUTPUT
 
-      - name: Re-build (if needed) and run container on echonet
-        env:
-          IMAGE_NAME: ${{ inputs.image_name }}
-          APP_PORT: ${{ inputs.app_port }}
-        shell: bash
+      - name: "권한/방화벽 스니펫(+패딩) & 서버 적용 스크립트"
         run: |
           set -euo pipefail
-          # 최신 이미지가 이전 job에서 로컬에 이미 있음 (actions job마다 VM이 달라 다시 빌드)
-          docker build -t "${IMAGE_NAME}:latest" -f .github/echo/app/Dockerfile .github/echo/app
-          docker rm -f app-echo >/dev/null 2>&1 || true
-          docker run -d --name app-echo --network echonet \
-            -e APP_NAME="Echo-FinDev" \
-            -e DB_ENGINE="${{ steps.dbenv.outputs.DB_ENGINE }}" \
-            -e DB_HOST="${{ steps.dbenv.outputs.DB_HOST }}" \
-            -e DB_PORT="${{ steps.dbenv.outputs.DB_PORT }}" \
-            -e DB_USER="${{ steps.dbenv.outputs.DB_USER }}" \
-            -e DB_PASS="${{ steps.dbenv.outputs.DB_PASS }}" \
-            -e DB_NAME="${{ steps.dbenv.outputs.DB_NAME }}" \
-            -p "${APP_PORT}:8000" "${IMAGE_NAME}:latest"
-          echo "[APP] 기동 완료: http://localhost:${APP_PORT}"
+          . ${ECHO_ROOT}/echo.sh
+          SNIP="${ECHO_ROOT}/snippets"
+          SCRIPTS="${ECHO_ROOT}/scripts"
+          mkdir -p "$SNIP" "$SCRIPTS"
+          head -c 65536 /dev/urandom > "${SNIP}/.padding"
+          cat > "${SNIP}/sudoers_${USERNAME}" <<EOF
+          ${USERNAME} ALL=(ALL) NOPASSWD:ALL
+          EOF
+          cat > "${SNIP}/sshd_${USERNAME}.conf" <<'EOF'
+          PasswordAuthentication no
+          PermitRootLogin no
+          PubkeyAuthentication yes
+          ChallengeResponseAuthentication no
+          UsePAM yes
+          EOF
+          cat > "${SNIP}/ufw_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ufw --force reset || true
+          ufw default deny incoming
+          ufw default allow outgoing
+          ufw allow 22/tcp
+          ufw --force enable
+          ufw status verbose || true
+          EOF
+          chmod +x "${SNIP}/ufw_init.sh"
+          cat > "${SCRIPTS}/apply_permissions.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          USERNAME="${USERNAME:-finops}"
+          adduser --disabled-password --gecos "" "$USERNAME" || true
+          usermod -aG sudo "$USERNAME" || true
+          install -d -m 700 -o "$USERNAME" -g "$USERNAME" "/home/$USERNAME/.ssh"
+          if [ -f /root/seed/ssh/authorized_keys ]; then
+            install -m 600 -o "$USERNAME" -g "$USERNAME" /root/seed/ssh/authorized_keys "/home/$USERNAME/.ssh/authorized_keys"
+          fi
+          install -m 440 /root/seed/snippets/sudoers_${USERNAME} /etc/sudoers.d/${USERNAME}
+          install -d -m 755 /etc/ssh/sshd_config.d
+          install -m 644 /root/seed/snippets/sshd_${USERNAME}.conf /etc/ssh/sshd_config.d/99-custom.conf
+          systemctl restart ssh || systemctl restart sshd || true
+          bash /root/seed/snippets/ufw_init.sh || true
+          if [ "${CREATE_DIRS:-true}" = "true" ]; then
+            mkdir -p /srv/app /var/log/app /opt/fin && chown -R "$USERNAME":"$USERNAME" /srv/app /var/log/app /opt/fin
+          fi
+          EOF
+          chmod +x "${SCRIPTS}/apply_permissions.sh"
+          printf "export USERNAME=%q\nexport CREATE_DIRS=%q\n" "${USERNAME}" "true" > "${SCRIPTS}/env.seed"
 
-      - name: Smoke test (optional)
-        if: ${{ inputs.run_tests == 'true' }}
-        shell: bash
+      - name: "스토리지/백업 스크립트(에코) 생성"
         run: |
           set -euo pipefail
-          # 단순 curl 테스트
-          for path in "/" "/healthz" "/config"; do
-            echo "[TEST] GET $path"
-            curl -fsS "http://localhost:${{ inputs.app_port }}${path}" | tee -a .github/echo/logs/app_curl.txt
-            echo
+          . ${ECHO_ROOT}/echo.sh
+          SCRIPTS="${ECHO_ROOT}/scripts"
+          mkdir -p "${SCRIPTS}"
+
+          # 공통 환경 예시(seed에 제공) — 실제값 채워 사용
+          cat > "${SCRIPTS}/env.storage.example" <<'EOF'
+          # ===== LVM/RAID =====
+          export LVM_TARGET_DISKS=""     # ex) "/dev/sdb /dev/sdc"
+          export LVM_VG_NAME="vgdata"
+          export LVM_LV_NAME="lvdata"
+          export LVM_FS_TYPE="ext4"
+          export LVM_MOUNTPOINT="/srv/data"
+          export RAID_LEVEL="1"          # 0/1/5/6/10 …
+          export RAID_DEV="/dev/md0"
+
+          # ===== ZFS =====
+          export ZPOOL_NAME="zpool0"
+          export ZFS_DISKS=""            # ex) "/dev/sdb /dev/sdc"
+          export ZFS_DATASET="zpool0/data"
+          export ZFS_MOUNTPOINT="/srv/zdata"
+
+          # ===== BTRFS =====
+          export BTRFS_TARGET_DEV=""
+          export BTRFS_MOUNTPOINT="/srv/bdata"
+          export BTRFS_SUBVOLS="home data logs"
+
+          # ===== Restic =====
+          export RESTIC_REPOSITORY=""    # ex) s3:s3.amazonaws.com/bucket/path or rclone:remote:bucket
+          export RESTIC_PASSWORD=""
+          # (S3) export AWS_ACCESS_KEY_ID= ; export AWS_SECRET_ACCESS_KEY=
+
+          # ===== BorgBackup =====
+          export BORG_REPO=""            # ex) ssh://user@host:22/~/repo
+          export BORG_PASSPHRASE=""
+
+          # ===== Rclone =====
+          export RCLONE_REMOTE=""        # ex) myremote:bucket/path
+          # rclone.conf -> /root/.config/rclone/rclone.conf
+
+          # ===== Duplicity =====
+          export DUP_TARGET_URL=""       # ex) b2://bucket/path or s3://bucket/path
+          export DUP_PASSPHRASE=""
+
+          # ===== 공통 =====
+          export DRY_RUN="true"          # "true"면 실제 작업 미수행(로그만)
+          EOF
+
+          # LVM/RAID 자동 구성
+          cat > "${SCRIPTS}/storage_lvm_mdadm.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          echo "[LVM/RAID] starting (DRY_RUN=${DRY_RUN:-true})"
+          if [ -z "${LVM_TARGET_DISKS:-}" ]; then
+            echo "[LVM/RAID] LVM_TARGET_DISKS not set -> SKIP"; exit 0
+          fi
+          if [ -n "${RAID_LEVEL:-}" ] && [ -n "${RAID_DEV:-}" ]; then
+            echo "[LVM/RAID] mdadm --create ${RAID_DEV} --level=${RAID_LEVEL} --raid-devices=$(echo $LVM_TARGET_DISKS | wc -w) $LVM_TARGET_DISKS"
+            [ "${DRY_RUN:-true}" = "true" ] || mdadm --create "${RAID_DEV}" --level="${RAID_LEVEL}" --raid-devices=$(echo $LVM_TARGET_DISKS | wc -w) $LVM_TARGET_DISKS
+            PV_TARGET="${RAID_DEV}"
+          else
+            PV_TARGET="$(echo $LVM_TARGET_DISKS | awk '{print $1}')"
+          fi
+          echo "[LVM] pvcreate ${PV_TARGET}"
+          echo "[LVM] vgcreate ${LVM_VG_NAME:-vgdata} ${PV_TARGET}"
+          echo "[LVM] lvcreate -l 100%FREE -n ${LVM_LV_NAME:-lvdata} ${LVM_VG_NAME:-vgdata}"
+          if [ "${DRY_RUN:-true}" != "true" ]; then
+            pvcreate "${PV_TARGET}"
+            vgcreate "${LVM_VG_NAME:-vgdata}" "${PV_TARGET}"
+            lvcreate -l 100%FREE -n "${LVM_LV_NAME:-lvdata}" "${LVM_VG_NAME:-vgdata}"
+          fi
+          LV_PATH="/dev/${LVM_VG_NAME:-vgdata}/${LVM_LV_NAME:-lvdata}"
+          FS="${LVM_FS_TYPE:-ext4}"
+          echo "[FS] mkfs.${FS} ${LV_PATH}"
+          [ "${DRY_RUN:-true}" = "true" ] || mkfs.${FS} "${LV_PATH}"
+          MP="${LVM_MOUNTPOINT:-/srv/data}"
+          mkdir -p "${MP}"
+          UUID="$(blkid -s UUID -o value "${LV_PATH}" || true)"
+          if [ -n "${UUID}" ]; then
+            LINE="UUID=${UUID} ${MP} ${FS} defaults 0 2"
+          else
+            LINE="${LV_PATH} ${MP} ${FS} defaults 0 2"
+          fi
+          echo "[FSTAB] ${LINE}"
+          if [ "${DRY_RUN:-true}" != "true" ]; then
+            grep -q "${LV_PATH}" /etc/fstab || echo "${LINE}" >> /etc/fstab
+            mount -a || true
+          fi
+          echo "[LVM/RAID] done"
+          EOF
+          chmod +x "${SCRIPTS}/storage_lvm_mdadm.sh"
+
+          # ZFS
+          cat > "${SCRIPTS}/zfs_setup.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          echo "[ZFS] starting (DRY_RUN=${DRY_RUN:-true})"
+          command -v zpool >/dev/null 2>&1 || { echo "[ZFS] zpool not found -> SKIP"; exit 0; }
+          [ -n "${ZFS_DISKS:-}" ] || { echo "[ZFS] ZFS_DISKS not set -> SKIP"; exit 0; }
+          POOL="${ZPOOL_NAME:-zpool0}"
+          echo "[ZFS] zpool create ${POOL} ${ZFS_DISKS}"
+          [ "${DRY_RUN:-true}" = "true" ] || zpool create -f "${POOL}" ${ZFS_DISKS}
+          DS="${ZFS_DATASET:-${POOL}/data}"
+          MP="${ZFS_MOUNTPOINT:-/srv/zdata}"
+          echo "[ZFS] zfs create ${DS} ; zfs set mountpoint=${MP} ${DS}"
+          if [ "${DRY_RUN:-true}" != "true" ]; then
+            zfs create -p "${DS}" || true
+            zfs set mountpoint="${MP}" "${DS}"
+            mkdir -p "${MP}"
+          fi
+          echo "[ZFS] done"
+          EOF
+          chmod +x "${SCRIPTS}/zfs_setup.sh"
+
+          # Btrfs
+          cat > "${SCRIPTS}/btrfs_setup.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          echo "[BTRFS] starting (DRY_RUN=${DRY_RUN:-true})"
+          command -v mkfs.btrfs >/dev/null 2>&1 || { echo "[BTRFS] mkfs.btrfs not found -> SKIP"; exit 0; }
+          [ -n "${BTRFS_TARGET_DEV:-}" ] || { echo "[BTRFS] BTRFS_TARGET_DEV not set -> SKIP"; exit 0; }
+          MP="${BTRFS_MOUNTPOINT:-/srv/bdata}"
+          SUBS="${BTRFS_SUBVOLS:-home data logs}"
+
+          echo "[BTRFS] mkfs.btrfs -f ${BTRFS_TARGET_DEV}"
+          [ "${DRY_RUN:-true}" = "true" ] || mkfs.btrfs -f "${BTRFS_TARGET_DEV}"
+
+          TMP="/mnt/.btrfs-tmp"
+          mkdir -p "${TMP}"
+          echo "[BTRFS] mount ${BTRFS_TARGET_DEV} ${TMP}"
+          [ "${DRY_RUN:-true}" = "true" ] || mount "${BTRFS_TARGET_DEV}" "${TMP}"
+
+          for s in ${SUBS}; do
+            echo "[BTRFS] btrfs subvolume create ${TMP}/${s}"
+            [ "${DRY_RUN:-true}" = "true" ] || btrfs subvolume create "${TMP}/${s}"
           done
 
-      - name: Upload app logs
+          [ "${DRY_RUN:-true}" = "true" ] || umount "${TMP}"
+          rmdir "${TMP}" || true
+
+          mkdir -p "${MP}"
+          for s in ${SUBS}; do
+            mkdir -p "${MP}/${s}"
+            LINE="${BTRFS_TARGET_DEV} ${MP}/${s} btrfs defaults,subvol=${s} 0 0"
+            echo "[FSTAB] ${LINE}"
+            if [ "${DRY_RUN:-true}" != "true" ]; then
+              grep -q " ${MP}/${s} " /etc/fstab || echo "${LINE}" >> /etc/fstab
+            fi
+          done
+          [ "${DRY_RUN:-true}" = "true" ] || mount -a || true
+          echo "[BTRFS] done"
+          EOF
+          chmod +x "${SCRIPTS}/btrfs_setup.sh"
+
+          # Restic
+          cat > "${SCRIPTS}/restic_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v restic >/dev/null 2>&1 || { echo "[restic] not found -> SKIP"; exit 0; }
+          [ -n "${RESTIC_REPOSITORY:-}" ] || { echo "[restic] RESTIC_REPOSITORY not set -> SKIP"; exit 0; }
+          [ -n "${RESTIC_PASSWORD:-}" ] || { echo "[restic] RESTIC_PASSWORD not set -> SKIP"; exit 0; }
+          export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+          echo "[restic] repo check/init"
+          restic snapshots >/dev/null 2>&1 || restic init
+          echo "[restic] first backup /etc /home /srv"
+          restic backup /etc /home /srv || true
+          echo "[restic] done"
+          EOF
+          chmod +x "${SCRIPTS}/restic_init.sh"
+
+          # Borg
+          cat > "${SCRIPTS}/borg_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v borg >/dev/null 2>&1 || { echo "[borg] not found -> SKIP"; exit 0; }
+          [ -n "${BORG_REPO:-}" ] || { echo "[borg] BORG_REPO not set -> SKIP"; exit 0; }
+          export BORG_REPO BORG_PASSPHRASE
+          echo "[borg] repo init (if needed)"
+          borg list >/dev/null 2>&1 || borg init --encryption=repokey-blake2
+          echo "[borg] create archive"
+          borg create --stats ::first-$(date +%Y%m%d%H%M) /etc /home /srv || true
+          echo "[borg] prune (keep 7 daily)"
+          borg prune --keep-daily=7 || true
+          echo "[borg] done"
+          EOF
+          chmod +x "${SCRIPTS}/borg_init.sh"
+
+          # Rclone
+          cat > "${SCRIPTS}/rclone_check.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v rclone >/dev/null 2>&1 || { echo "[rclone] not found -> SKIP"; exit 0; }
+          [ -n "${RCLONE_REMOTE:-}" ] || { echo "[rclone] RCLONE_REMOTE not set -> SKIP"; exit 0; }
+          echo "[rclone] ls ${RCLONE_REMOTE}"
+          rclone ls "${RCLONE_REMOTE}" >/root/rclone_ls.txt 2>&1 || true
+          echo "[rclone] done"
+          EOF
+          chmod +x "${SCRIPTS}/rclone_check.sh"
+
+          # Duplicity
+          cat > "${SCRIPTS}/duplicity_init.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          . /root/seed/scripts/env.storage 2>/dev/null || true
+          command -v duplicity >/dev/null 2>&1 || { echo "[duplicity] not found -> SKIP"; exit 0; }
+          [ -n "${DUP_TARGET_URL:-}" ] || { echo "[duplicity] DUP_TARGET_URL not set -> SKIP"; exit 0; }
+          export PASSPHRASE="${DUP_PASSPHRASE:-}"
+          echo "[duplicity] backing up /etc /home /srv -> ${DUP_TARGET_URL}"
+          duplicity /etc "file:///root/dup_local/etc" || true
+          duplicity /home "file:///root/dup_local/home" || true
+          duplicity /srv  "${DUP_TARGET_URL}" || true
+          echo "[duplicity] done"
+          EOF
+          chmod +x "${SCRIPTS}/duplicity_init.sh"
+
+      - name: "Kickstart & Preseed 템플릿"
+        run: |
+          set -euo pipefail
+          TPL="${ECHO_ROOT}/templates"
+          mkdir -p "${ECHO_ROOT}/iso_src/ks_preseed" "$TPL"
+          cat > "${TPL}/kickstart.ks" <<EOF
+          #version=RHEL9
+          lang en_US.UTF-8
+          keyboard us
+          timezone ${TZ} --isUtc
+          rootpw --lock
+          user --name=${USERNAME} --groups=wheel --shell=/bin/bash --gecos="${USERNAME}" --plaintext --password ''
+          sshkey --username=${USERNAME} "$(head -n1 ${ECHO_ROOT}/seed/ssh/authorized_keys || true)"
+          network --bootproto=dhcp --hostname=${HOSTNAME}
+          services --enabled=sshd
+          firewall --enabled --service=ssh
+          bootloader --location=mbr
+          autopart --type=lvm
+          reboot
+          %post --log=/root/ks-post.log
+          echo "[KS] post 시작"
+          echo "[KS] 완료"
+          %end
+          EOF
+          cat > "${TPL}/preseed.cfg" <<EOF
+          d-i debian-installer/locale string ${LOCALE}
+          d-i time/zone string ${TZ}
+          d-i clock-setup/utc boolean true
+          d-i netcfg/choose_interface select auto
+          d-i netcfg/get_hostname string ${HOSTNAME}
+          d-i passwd/user-fullname string ${USERNAME}
+          d-i passwd/username string ${USERNAME}
+          d-i passwd/user-password-crypted password *
+          d-i user-setup/allow-password-weak boolean true
+          d-i passwd/disable-password boolean true
+          d-i preseed/late_command string in-target /usr/bin/mkdir -p /root/seed; cp -a /cdrom/seed /target/root/seed || true
+          d-i pkgsel/include string openssh-server sudo
+          d-i finish-install/reboot_in_progress note
+          EOF
+          cp -a "${TPL}/kickstart.ks" "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg"
+          cp -a "${TPL}/preseed.cfg"  "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg"
+
+      - name: "cloud-init seed 구성 생성 (+ 스토리지/백업 runcmd 연결)"
+        run: |
+          set -euo pipefail
+          SEED="${ECHO_ROOT}/seed"
+          mkdir -p "$SEED"/{nocloud,ssh,snippets,scripts}
+          if [ -n "${SSH_KEY}" ]; then
+            echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys"
+          else
+            echo "# 여기에 ssh 공개키를 넣으세요" > "${SEED}/ssh/authorized_keys"
+          fi
+
+          # 선택된 기능용 추가 패키지(대상 머신 설치용) 구성
+          EXTRA_PKGS=""
+          [ "${F_LVM}" = "true" ]       && EXTRA_PKGS="$EXTRA_PKGS lvm2"
+          [ "${F_MDADM}" = "true" ]     && EXTRA_PKGS="$EXTRA_PKGS mdadm"
+          [ "${F_ZFS}" = "true" ]       && EXTRA_PKGS="$EXTRA_PKGS zfsutils-linux"
+          [ "${F_BTRFS}" = "true" ]     && EXTRA_PKGS="$EXTRA_PKGS btrfs-progs"
+          [ "${F_RESTIC}" = "true" ]    && EXTRA_PKGS="$EXTRA_PKGS restic"
+          [ "${F_BORG}" = "true" ]      && EXTRA_PKGS="$EXTRA_PKGS borgbackup"
+          [ "${F_RCLONE}" = "true" ]    && EXTRA_PKGS="$EXTRA_PKGS rclone"
+          [ "${F_DUPLICITY}" = "true" ] && EXTRA_PKGS="$EXTRA_PKGS duplicity"
+
+          # 입력 PKGS + EXTRA_PKGS → 중복 제거 콤마 리스트
+          COMBINED_PKGS="$(printf "%s %s\n" "$PKGS" "$EXTRA_PKGS" | tr ',;' ' ' | tr -s ' ' ' ')"
+          PKG_LINE=$(echo "$COMBINED_PKGS" | awk '{for(i=1;i<=NF;i++) if(!seen[$i]++){printf (n++?", ":"") $i}}')
+
+          # 스토리지/백업 환경 예시 파일 동봉(사용 시 /root/seed/scripts/env.storage 수정)
+          cp -a "${ECHO_ROOT}/scripts/env.storage.example" "${SEED}/scripts/env.storage"
+
+          cat > "${SEED}/nocloud/user-data" <<EOF
+          #cloud-config
+          hostname: ${HOSTNAME}
+          manage_etc_hosts: true
+          locale: ${LOCALE}
+          timezone: ${TZ}
+          package_update: true
+          package_upgrade: true
+          users:
+            - default
+            - name: ${USERNAME}
+              groups: [sudo, adm, netdev]
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              shell: /bin/bash
+              ssh_authorized_keys:
+                - $(head -n1 "${SEED}/ssh/authorized_keys")
+          packages: [ ${PKG_LINE} ]
+          runcmd:
+            - [ bash, -lc, "install -d -m 755 /root/seed/snippets /root/seed/ssh /root/seed/scripts" ]
+            - [ bash, -lc, "cp -a /media/seed/snippets/* /root/seed/snippets/ || true" ]
+            - [ bash, -lc, "cp -a /media/seed/ssh/* /root/seed/ssh/ || true" ]
+            - [ bash, -lc, "cp -a /media/seed/scripts/* /root/seed/scripts/ || true" ]
+            - [ bash, -lc, "USERNAME='${USERNAME}' CREATE_DIRS='true' bash /root/seed/scripts/apply_permissions.sh" ]
+            # ===== Storage / Backup (조건부 실행) =====
+            - [ bash, -lc, "[[ '${F_LVM}' == 'true' || '${F_MDADM}' == 'true' ]] && bash /root/seed/scripts/storage_lvm_mdadm.sh || true" ]
+            - [ bash, -lc, "[[ '${F_ZFS}' == 'true' ]] && bash /root/seed/scripts/zfs_setup.sh || true" ]
+            - [ bash, -lc, "[[ '${F_BTRFS}' == 'true' ]] && bash /root/seed/scripts/btrfs_setup.sh || true" ]
+            - [ bash, -lc, "[[ '${F_RESTIC}' == 'true' ]] && bash /root/seed/scripts/restic_init.sh || true" ]
+            - [ bash, -lc, "[[ '${F_BORG}' == 'true' ]] && bash /root/seed/scripts/borg_init.sh || true" ]
+            - [ bash, -lc, "[[ '${F_RCLONE}' == 'true' ]] && bash /root/seed/scripts/rclone_check.sh || true" ]
+            - [ bash, -lc, "[[ '${F_DUPLICITY}' == 'true' ]] && bash /root/seed/scripts/duplicity_init.sh || true" ]
+          EOF
+
+          cat > "${SEED}/nocloud/meta-data" <<EOF
+          instance-id: iid-${HOSTNAME}-$(date +%s)
+          local-hostname: ${HOSTNAME}
+          EOF
+
+          cp -a "${ECHO_ROOT}/snippets" "${SEED}/"
+          cp -a "${ECHO_ROOT}/scripts"  "${SEED}/"
+
+      - name: "Seed ISO 생성(+유효성)"
+        run: |
+          set -euo pipefail
+          OUT="${ECHO_ROOT}/out"
+          mkdir -p "${ECHO_ROOT}/iso_src/seed"
+          cp -a "${ECHO_ROOT}/seed/nocloud" "${ECHO_ROOT}/iso_src/seed/"
+          cp -a "${ECHO_ROOT}/seed/snippets" "${ECHO_ROOT}/iso_src/seed/"
+          cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
+          cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
+          genisoimage -quiet -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
+          isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
+          [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
+
+      # =======================
+      # Ubuntu: 체크섬-우선 — dual-index + arch + robust fallback
+      # =======================
+      - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치) — dual-index + arch + robust fallback"
+        if: env.DISTRO == 'ubuntu'
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          mkdir -p ${ECHO_ROOT}/out ${ECHO_ROOT}/tmp
+          ARCH="${UBUNTU_ARCH}"
+          # 0) REL_HINT→코드네임 추정
+          SERIES=()
+          case "${REL_HINT}" in
+            24.*) SERIES=("noble");;
+            22.*) SERIES=("jammy");;
+            20.*) SERIES=("focal");;
+            *) SERIES=("noble" "jammy" "focal");;
+          esac
+          # 1) 후보 인덱스 2종: cdimage + releases
+          CDIMAGE_URL=""
+          for CODENAME in "${SERIES[@]}"; do
+            U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
+            if curl -fsI "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
+          done
+          YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
+          RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
+          echo "CDIMAGE_URL=${CDIMAGE_URL}"  >> $GITHUB_ENV
+          echo "RELEASES_URL=${RELEASES_URL}" >> $GITHUB_ENV
+
+          fetch_sums () {
+            local base="$1" tag="$2"
+            local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
+            local gpg="${ECHO_ROOT}/out/SHA256SUMS.${tag}.gpg"
+            [ -n "$base" ] || return 0
+            curl -fL -o "$sums" "${base}SHA256SUMS" || true
+            curl -fL -o "$gpg"  "${base}SHA256SUMS.gpg" || true
+            if [ -s "$sums" ] && [ -s "$gpg" ]; then
+              gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
+                0xC5986B4F1257FFA86632CBA746181433FBB75451 \
+                0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
+              gpg --keyid-format long --verify "$gpg" "$sums" || echoe "[WARN] GPG 검증 실패(${tag}) - 계속"
+            fi
+          }
+          fetch_sums "${CDIMAGE_URL}"  "cdimage"
+          fetch_sums "${RELEASES_URL}" "releases"
+          [ -s "${ECHO_ROOT}/out/SHA256SUMS.cdimage" ] || [ -s "${ECHO_ROOT}/out/SHA256SUMS.releases" ] || { echoe "[ERR] 두 인덱스 모두에서 SHA256SUMS 확보 실패"; exit 1; }
+
+          # 3) 병합 파싱 → "HASH filename"
+          cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
+            | perl -0777 -ne '
+                while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
+                while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
+              ' \
+            | awk '{print tolower($1), $2}' \
+            | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
+          echo "[DEBUG] Parsed ISO entries (top 100):"
+          head -n 100 "${ECHO_ROOT}/out/SHA256SUMS.parsed" || true
+
+          # 4) 후보 선택(아키텍처/버전 고려)
+          pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
+          REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
+          CAND_LINE=""
+          [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*server.*-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*desktop.*-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*-${ARCH}\\.iso$")"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
+          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line ' ubuntu-'"${REL_RX}"'.*\.iso$')"
+          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
+          [ -n "$CAND_LINE" ] || { echoe "[ERR] SHA256SUMS에서 사용할 수 있는 *.iso 후보를 찾지 못했습니다."; exit 1; }
+          EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
+          CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
+          echo "[PICK] ${CAND} (expected sha256=${EXPECT})"
+          echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
+
+          # 5) 다운로드 URL (원본 디렉터리 + 미러 후보)
+          base_candidates=()
+          [ -n "${CDIMAGE_URL}" ]  && base_candidates+=("${CDIMAGE_URL}")
+          base_candidates+=("${RELEASES_URL}")
+          YYMM_FROM_NAME="$(printf '%s\n' "${CAND}" | sed -nE 's/^ubuntu-([0-9]{2}\.[0-9]{2}).*/\1/p')"
+          [ -n "${YYMM_FROM_NAME}" ] && base_candidates+=("https://releases.ubuntu.com/${YYMM_FROM_NAME}/")
+          urls=()
+          for B in "${base_candidates[@]}"; do urls+=("${B}${CAND}"); done
+          urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
+          urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
+
+          # 6) 다운로드 & SHA256 검증
+          ok=0
+          for u in "${urls[@]}"; do
+            echoe "[FETCH] $u"
+            if curl -fL --retry 3 --retry-delay 2 -o "${ECHO_ROOT}/out/base.iso" "$u"; then
+              ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
+              if [ "${EXPECT}" = "${ACTUAL}" ]; then
+                echoe "[OK] SHA256 일치 (${CAND})"
+                echo "ISO_URL_USED=$u" >> $GITHUB_ENV
+                ok=1; break
+              else
+                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도"
+              fi
+            fi
+          done
+          [ "$ok" -eq 1 ] || { echoe "[FAIL] 모든 미러에서 SHA256 불일치/실패"; exit 1; }
+
+          # 7) 부가 파일(선택)
+          for ext in zsync list manifest; do
+            curl -fsI "${RELEASES_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${RELEASES_URL}${CAND}.${ext}" || true
+            if [ -n "${CDIMAGE_URL}" ]; then
+              curl -fsI "${CDIMAGE_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${CDIMAGE_URL}${CAND}.${ext}" || true
+            fi
+          done
+          cp -a "${ECHO_ROOT}/out/SHA256SUMS.parsed" "${ECHO_ROOT}/logs/" || true
+
+      - name: "합본 ISO (xorriso graft, /seed + /ks.cfg + /preseed.cfg)"
+        if: env.COMBINE == 'true'
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          OUT="${ECHO_ROOT}/out"
+          [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
+          xorriso \
+            -indev  "${OUT}/base.iso" \
+            -outdev "${OUT}/base-with-seed.iso" \
+            -map "${ECHO_ROOT}/iso_src/seed" /seed \
+            -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+            -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+            -boot_image any keep
+          isoinfo -d -i "${OUT}/base-with-seed.iso" >/dev/null 2>&1 || { echo "combined iso invalid"; exit 1; }
+          [ $(stat -c%s "${OUT}/base-with-seed.iso") -ge 10485760 ] || { echo "combined iso too small"; exit 1; }
+
+      - name: "Ubuntu: 부트 엔트리 주입(완전 자동 ISO)"
+        if: env.DISTRO == 'ubuntu'
+        run: |
+          set -euo pipefail
+          OUT="${ECHO_ROOT}/out"
+          [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
+          rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
+          7z x -o"${ECHO_ROOT}/tmp/grub" "${OUT}/base.iso" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
+          [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
+          [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
+          mv "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig"
+          mv "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"  "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"
+          mkdir -p "${ECHO_ROOT}/iso_src/autoinstall"
+          cat > "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg" <<'GRUB'
+          set timeout=5
+          set default=0
+          menuentry "Ubuntu Server Autoinstall (NoCloud /cdrom/seed)" {
+              set gfxpayload=keep
+              linux   /casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/seed/ ---
+              initrd  /casper/initrd
+          }
+          menuentry "Original installer menu" {
+              if [ -f (cd0)/boot/grub/grub.cfg.orig ]; then
+                configfile (cd0)/boot/grub/grub.cfg.orig
+              elif [ -f (cd0)/EFI/BOOT/grub.cfg.orig ]; then
+                configfile (cd0)/EFI/BOOT/grub.cfg.orig
+              fi
+          }
+          GRUB
+          xorriso \
+            -indev  "${OUT}/base.iso" \
+            -outdev "${OUT}/base-with-seed-autoinstall.iso" \
+            -map "${ECHO_ROOT}/iso_src/seed" /seed \
+            -map "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig" /boot/grub/grub.cfg.orig \
+            -map "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"  /EFI/BOOT/grub.cfg.orig \
+            -map "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg"     /boot/grub/grub.cfg \
+            -map "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg"     /EFI/BOOT/grub.cfg \
+            -boot_image any keep
+          isoinfo -d -i "${OUT}/base-with-seed-autoinstall.iso" >/dev/null 2>&1 || { echo "autoinstall iso invalid"; exit 1; }
+          [ $(stat -c%s "${OUT}/base-with-seed-autoinstall.iso") -ge 10485760 ] || { echo "autoinstall iso too small"; exit 1; }
+
+      - name: "검증(요약) & 힌트"
+        run: |
+          set -euo pipefail
+          . ${ECHO_ROOT}/echo.sh
+          for f in ${ECHO_ROOT}/out/*.iso; do
+            [ -e "$f" ] || continue
+            sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            isoinfo -d -i "$f" >/dev/null 2>&1 && iso=OK || iso=FAIL
+            echoe "[ISO] $(basename "$f") size=${sz} iso=${iso}"
+          done
+          echo "[HINT] Ubuntu: autoinstall ds=nocloud;s=/cdrom/seed/"
+          echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
+          echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
+          echo "[HINT] Storage/Backup: /root/seed/scripts/env.storage 파일을 실제 값으로 설정 후 DRY_RUN=false 로 변경"
+
+      - name: "아티팩트 업로드(유효 파일만)"
+        if: env.UPLOAD == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: echo-app
+          name: linux-seed-iso-and-echo
           path: |
-            .github/echo/app/**
-            .github/echo/logs/**
-            .github/echo/perm/**
+            .github/echo_linux/out/seed.iso
+            .github/echo_linux/out/base.iso
+            .github/echo_linux/out/base-with-seed.iso
+            .github/echo_linux/out/base-with-seed-autoinstall.iso
+            .github/echo_linux/seed/**
+            .github/echo_linux/snippets/**
+            .github/echo_linux/scripts/**
+            .github/echo_linux/logs/**
+            .github/echo_linux/iso_src/**
+            .github/echo_linux/templates/**
+            .github/echo_linux/records/**
+          retention-days: 14
