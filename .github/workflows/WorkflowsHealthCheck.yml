@@ -1,4 +1,4 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.3-Storage+Upgrade+EchoSkeleton)"
+name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.8-AllDistros+Extras+AutoPart)"
 
 permissions:
   contents: write
@@ -39,7 +39,7 @@ on:
         default: "Asia/Seoul|en_US.UTF-8"
         required: true
       options:
-        description: "추가 옵션(콤마로 조합): upgrade,combine,upload,lvm,mdadm,zfs,btrfs,restic,borgbackup,rclone,duplicity"
+        description: "추가 옵션(콤마로 조합): all,upgrade,combine,upload,lvm,mdadm,zfs,btrfs,restic,borgbackup,rclone,duplicity"
         default: "combine,upload"
         required: false
   schedule:
@@ -61,14 +61,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: "기본 디렉토리/유틸"
+      - name: "기본 디렉토리/유틸 + 스켈레톤"
         run: |
           set -euo pipefail
           export ECHO_ROOT=".github/echo_linux"
           mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs,iso_src,records,tmp,templates}
-          # 자주 쓰는 하위 디렉토리도 선제 생성
           mkdir -p "$ECHO_ROOT"/seed/{nocloud,ssh,snippets,scripts} \
-                   "$ECHO_ROOT"/iso_src/{seed,ks_preseed,autoinstall} \
+                   "$ECHO_ROOT"/iso_src/{seed,ks_preseed,autoinstall,extras} \
                    "$ECHO_ROOT"/tmp/grub/{boot/grub,EFI/BOOT}
           echo "ECHO_ROOT=$ECHO_ROOT" >> $GITHUB_ENV
           cat > "$ECHO_ROOT/echo.sh" <<'EOS'
@@ -77,10 +76,21 @@ jobs:
           is_iso(){ f="$1"; isoinfo -d -i "$f" >/dev/null 2>&1; }
           EOS
           . "$ECHO_ROOT/echo.sh"
-          echoe "[DIR] 준비 완료"
+          # SSH authorized_keys 플레이스홀더
+          if [ -n "${{ github.event.inputs.ssh_public_key }}" ]; then
+            printf "%s\n" "${{ github.event.inputs.ssh_public_key }}" > "$ECHO_ROOT/seed/ssh/authorized_keys"
+          else
+            echo "# 여기에 ssh 공개키를 넣으세요" > "$ECHO_ROOT/seed/ssh/authorized_keys"
+          fi
+          # extras/README
+          cat > "$ECHO_ROOT/iso_src/extras/README.txt" <<'R'
+          * 이 ISO에는 /seed(Cloud-Init), /ks.cfg(Kickstart), /preseed.cfg(Debian) 및 /extras가 포함됩니다.
+          * 설치 후 /root/seed/scripts/env.storage 파일을 실제 환경에 맞게 편집하세요.
+          R
+          echoe "[DIR] 스켈레톤 준비 완료"
           echo "CREATE_DIRS=true" >> $GITHUB_ENV
 
-      - name: "입력값 정규화 (+ options 파싱/플래그)"
+      - name: "입력값 정규화 (+ options 파싱)"
         run: |
           set -euo pipefail
           DISTRO="${{ github.event.inputs.distro }}"
@@ -94,24 +104,22 @@ jobs:
           OPTIONS="$(echo "${{ github.event.inputs.options }}" | tr 'A-Z' 'a-z' | tr -d ' ')"
           TZ="${REGION%%|*}"
           LOCALE="${REGION##*|}"
+          has(){ echo ",$OPTIONS," | grep -q ",$1," ; }
 
-          has_opt(){ echo ",$OPTIONS," | grep -q ",$1," ; }
+          DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has upgrade && echo true || echo false)   # runner
+          F_HOST_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has upgrade && echo true || echo false) # target
+          COMBINE=$([ "$AUTO_UPDATE" = "true" ] || has combine && echo true || echo false)
+          UPLOAD=$([ "$AUTO_UPDATE" = "true" ] || has upload && echo true || echo false)
+          BUILD_ALL=$([ "$AUTO_UPDATE" = "true" ] || has all && echo true || echo false)
 
-          # 업그레이드/합본/업로드
-          DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has_opt upgrade && echo true || echo false)  # Runner
-          F_HOST_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has_opt upgrade && echo true || echo false)  # Target
-          COMBINE=$([ "$AUTO_UPDATE" = "true" ] || has_opt combine && echo true || echo false)
-          UPLOAD=$([ "$AUTO_UPDATE" = "true" ] || has_opt upload && echo true || echo false)
-
-          # 스토리지/백업 토글
-          F_LVM=$([ "$AUTO_UPDATE" = "true" ] || has_opt lvm && echo true || echo false)
-          F_MDADM=$([ "$AUTO_UPDATE" = "true" ] || has_opt mdadm && echo true || echo false)
-          F_ZFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt zfs && echo true || echo false)
-          F_BTRFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt btrfs && echo true || echo false)
-          F_RESTIC=$([ "$AUTO_UPDATE" = "true" ] || has_opt restic && echo true || echo false)
-          F_BORG=$([ "$AUTO_UPDATE" = "true" ] || has_opt borgbackup && echo true || echo false)
-          F_RCLONE=$([ "$AUTO_UPDATE" = "true" ] || has_opt rclone && echo true || echo false)
-          F_DUPLICITY=$([ "$AUTO_UPDATE" = "true" ] || has_opt duplicity && echo true || echo false)
+          F_LVM=$([ "$AUTO_UPDATE" = "true" ] || has lvm && echo true || echo false)
+          F_MDADM=$([ "$AUTO_UPDATE" = "true" ] || has mdadm && echo true || echo false)
+          F_ZFS=$([ "$AUTO_UPDATE" = "true" ] || has zfs && echo true || echo false)
+          F_BTRFS=$([ "$AUTO_UPDATE" = "true" ] || has btrfs && echo true || echo false)
+          F_RESTIC=$([ "$AUTO_UPDATE" = "true" ] || has restic && echo true || echo false)
+          F_BORG=$([ "$AUTO_UPDATE" = "true" ] || has borgbackup && echo true || echo false)
+          F_RCLONE=$([ "$AUTO_UPDATE" = "true" ] || has rclone && echo true || echo false)
+          F_DUPLICITY=$([ "$AUTO_UPDATE" = "true" ] || has duplicity && echo true || echo false)
 
           case "$DISTRO" in
             ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
@@ -137,6 +145,7 @@ jobs:
             echo "DO_UPGRADE=$DO_UPGRADE"
             echo "F_HOST_UPGRADE=$F_HOST_UPGRADE"
             echo "UBUNTU_ARCH=$ARCH"
+            echo "BUILD_ALL=$BUILD_ALL"
             echo "F_LVM=$F_LVM"
             echo "F_MDADM=$F_MDADM"
             echo "F_ZFS=$F_ZFS"
@@ -149,54 +158,6 @@ jobs:
 
           [ "$DISTRO" = "ubuntu" ] && echo "CODENAME=noble" >> $GITHUB_ENV
 
-      - name: "시드 스켈레톤 & SSH 키 프리시드(플레이스홀더 생성)"
-        run: |
-          set -euo pipefail
-          E="$ECHO_ROOT"
-          # 디렉토리 보장
-          mkdir -p "$E/seed/ssh" "$E/seed/snippets" "$E/seed/scripts" "$E/seed/nocloud"
-          mkdir -p "$E/iso_src/seed" "$E/iso_src/ks_preseed" "$E/iso_src/autoinstall" "$E/tmp/grub/boot/grub" "$E/tmp/grub/EFI/BOOT"
-          # authorized_keys 사전 생성(입력값 있으면 적용, 없으면 주석)
-          if [ -n "${SSH_KEY:-}" ]; then
-            printf "%s\n" "${SSH_KEY}" > "$E/seed/ssh/authorized_keys"
-          else
-            echo "# 여기에 ssh 공개키를 넣으세요" > "$E/seed/ssh/authorized_keys"
-          fi
-          # env.storage 예시도 미리 위치시켜 사용자 가이드 제공
-          cat > "$E/scripts/env.storage.example" <<'EOF'
-          # ===== LVM/RAID =====
-          export LVM_TARGET_DISKS=""     # ex) "/dev/sdb /dev/sdc"
-          export LVM_VG_NAME="vgdata"
-          export LVM_LV_NAME="lvdata"
-          export LVM_FS_TYPE="ext4"
-          export LVM_MOUNTPOINT="/srv/data"
-          export RAID_LEVEL="1"
-          export RAID_DEV="/dev/md0"
-          # ===== ZFS =====
-          export ZPOOL_NAME="zpool0"
-          export ZFS_DISKS=""
-          export ZFS_DATASET="zpool0/data"
-          export ZFS_MOUNTPOINT="/srv/zdata"
-          # ===== BTRFS =====
-          export BTRFS_TARGET_DEV=""
-          export BTRFS_MOUNTPOINT="/srv/bdata"
-          export BTRFS_SUBVOLS="home data logs"
-          # ===== Restic =====
-          export RESTIC_REPOSITORY=""
-          export RESTIC_PASSWORD=""
-          # (S3) export AWS_ACCESS_KEY_ID= ; export AWS_SECRET_ACCESS_KEY=
-          # ===== BorgBackup =====
-          export BORG_REPO=""
-          export BORG_PASSPHRASE=""
-          # ===== Rclone =====
-          export RCLONE_REMOTE=""
-          # ===== Duplicity =====
-          export DUP_TARGET_URL=""
-          export DUP_PASSPHRASE=""
-          # ===== 공통 =====
-          export DRY_RUN="true"
-          EOF
-
       - name: "런너 업데이트(선택)"
         if: env.DO_UPGRADE == 'true'
         run: |
@@ -204,7 +165,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
           sudo apt-get -y autoremove || true
 
-      - name: "필수/확장 패키지 설치 (스토리지/백업 연동)"
+      - name: "필수/확장 패키지 설치"
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -221,16 +182,13 @@ jobs:
           [ "${F_BORG}" = "true" ]      && PKGS_EXTRA="$PKGS_EXTRA borgbackup"
           [ "${F_RCLONE}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA rclone"
           [ "${F_DUPLICITY}" = "true" ] && PKGS_EXTRA="$PKGS_EXTRA duplicity"
-          if [ -n "$PKGS_EXTRA" ]; then
-            sudo apt-get install -y $PKGS_EXTRA
-          fi
+          [ -n "$PKGS_EXTRA" ] && sudo apt-get install -y $PKGS_EXTRA
 
-      - name: "권한/방화벽 스니펫(+패딩) & 서버 적용 스크립트"
+      - name: "권한/방화벽 스니펫 & 서버 적용 스크립트"
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
-          SNIP="${ECHO_ROOT}/snippets"
-          SCRIPTS="${ECHO_ROOT}/scripts"
+          SNIP="${ECHO_ROOT}/snippets"; SCRIPTS="${ECHO_ROOT}/scripts"
           mkdir -p "$SNIP" "$SCRIPTS"
           head -c 65536 /dev/urandom > "${SNIP}/.padding"
           cat > "${SNIP}/sudoers_${USERNAME}" <<EOF
@@ -276,15 +234,47 @@ jobs:
           chmod +x "${SCRIPTS}/apply_permissions.sh"
           printf "export USERNAME=%q\nexport CREATE_DIRS=%q\n" "${USERNAME}" "true" > "${SCRIPTS}/env.seed"
 
-      - name: "스토리지/백업 + 업그레이드 스크립트(에코) 생성"
+      - name: "스토리지/백업 + 업그레이드 스크립트(에코)"
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
           SCRIPTS="${ECHO_ROOT}/scripts"
           mkdir -p "${SCRIPTS}"
-
-          # env.storage.example는 앞단에서 생성됨. 사용자 편의상 seed에도 사본 제공
-          cp -a "${ECHO_ROOT}/scripts/env.storage.example" "${ECHO_ROOT}/seed/scripts/env.storage" || true
+          # env.storage 예시(Seed에도 복사)
+          cat > "${SCRIPTS}/env.storage.example" <<'EOF'
+          # ===== LVM/RAID =====
+          export LVM_TARGET_DISKS=""     # ex) "/dev/sdb /dev/sdc"
+          export LVM_VG_NAME="vgdata"
+          export LVM_LV_NAME="lvdata"
+          export LVM_FS_TYPE="ext4"
+          export LVM_MOUNTPOINT="/srv/data"
+          export RAID_LEVEL="1"
+          export RAID_DEV="/dev/md0"
+          # ===== ZFS =====
+          export ZPOOL_NAME="zpool0"
+          export ZFS_DISKS=""
+          export ZFS_DATASET="zpool0/data"
+          export ZFS_MOUNTPOINT="/srv/zdata"
+          # ===== BTRFS =====
+          export BTRFS_TARGET_DEV=""
+          export BTRFS_MOUNTPOINT="/srv/bdata"
+          export BTRFS_SUBVOLS="home data logs"
+          # ===== Restic =====
+          export RESTIC_REPOSITORY=""
+          export RESTIC_PASSWORD=""
+          # (S3) export AWS_ACCESS_KEY_ID= ; export AWS_SECRET_ACCESS_KEY=
+          # ===== BorgBackup =====
+          export BORG_REPO=""
+          export BORG_PASSPHRASE=""
+          # ===== Rclone =====
+          export RCLONE_REMOTE=""
+          # ===== Duplicity =====
+          export DUP_TARGET_URL=""
+          export DUP_PASSPHRASE=""
+          # ===== 공통 =====
+          export DRY_RUN="true"
+          EOF
+          cp -a "${SCRIPTS}/env.storage.example" "${ECHO_ROOT}/seed/scripts/env.storage" || true
 
           # LVM/RAID
           cat > "${SCRIPTS}/storage_lvm_mdadm.sh" <<'EOF'
@@ -366,16 +356,14 @@ jobs:
           SUBS="${BTRFS_SUBVOLS:-home data logs}"
           echo "[BTRFS] mkfs.btrfs -f ${BTRFS_TARGET_DEV}"
           [ "${DRY_RUN:-true}" = "true" ] || mkfs.btrfs -f "${BTRFS_TARGET_DEV}"
-          TMP="/mnt/.btrfs-tmp"
-          mkdir -p "${TMP}"
+          TMP="/mnt/.btrfs-tmp"; mkdir -p "${TMP}"
           echo "[BTRFS] mount ${BTRFS_TARGET_DEV} ${TMP}"
           [ "${DRY_RUN:-true}" = "true" ] || mount "${BTRFS_TARGET_DEV}" "${TMP}"
           for s in ${SUBS}; do
             echo "[BTRFS] btrfs subvolume create ${TMP}/${s}"
             [ "${DRY_RUN:-true}" = "true" ] || btrfs subvolume create "${TMP}/${s}"
           done
-          [ "${DRY_RUN:-true}" = "true" ] || umount "${TMP}"
-          rmdir "${TMP}" || true
+          [ "${DRY_RUN:-true}" = "true" ] || umount "${TMP}"; rmdir "${TMP}" || true
           mkdir -p "${MP}"
           for s in ${SUBS}; do
             mkdir -p "${MP}/${s}"
@@ -407,7 +395,7 @@ jobs:
           EOF
           chmod +x "${SCRIPTS}/restic_init.sh"
 
-          # Borg
+          # Borg  (★ 오타 수정: 대괄호 제거)
           cat > "${SCRIPTS}/borg_init.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -423,7 +411,7 @@ jobs:
           borg prune --keep-daily=7 || true
           echo "[borg] done"
           EOF
-          chmod +x "${SCRIPTS}/borg_init.sh"]
+          chmod +x "${SCRIPTS}/borg_init.sh"
 
           # Rclone
           cat > "${SCRIPTS}/rclone_check.sh" <<'EOF'
@@ -482,11 +470,32 @@ jobs:
           EOF
           chmod +x "${SCRIPTS}/host_upgrade.sh"
 
-      - name: "Kickstart & Preseed 템플릿"
+      - name: "Kickstart & Preseed 템플릿(자동 파티셔닝/RAID 조건부)"
         run: |
           set -euo pipefail
           TPL="${ECHO_ROOT}/templates"
           mkdir -p "${ECHO_ROOT}/iso_src/ks_preseed" "$TPL"
+
+          # Kickstart 파티셔닝 블록(기본 LVM, RAID 옵션 시 2디스크 RAID1+LVM 예시)
+          if [ "${F_MDADM}" = "true" ]; then
+            read -r -d '' KSPART <<'K'
+          clearpart --all --initlabel
+          part raid.11 --ondisk=sda --size=1024
+          part raid.12 --ondisk=sdb --size=1024
+          raid /boot --device=md0 --level=1 raid.11 raid.12
+          part raid.21 --ondisk=sda --size=1 --grow
+          part raid.22 --ondisk=sdb --size=1 --grow
+          raid pv.01 --device=md1 --level=1 raid.21 raid.22
+          volgroup vg0 pv.01
+          logvol swap --vg=vg0 --name=swap --size=2048
+          logvol / --vg=vg0 --name=root --size=10240 --grow --fstype=xfs
+          K
+          else
+            read -r -d '' KSPART <<'K'
+          autopart --type=lvm
+          K
+          fi
+
           cat > "${TPL}/kickstart.ks" <<EOF
           #version=RHEL9
           lang en_US.UTF-8
@@ -499,40 +508,80 @@ jobs:
           services --enabled=sshd
           firewall --enabled --service=ssh
           bootloader --location=mbr
-          autopart --type=lvm
+          ${KSPART}
           reboot
           %post --log=/root/ks-post.log
           echo "[KS] post 시작"
           echo "[KS] 완료"
           %end
           EOF
-          cat > "${TPL}/preseed.cfg" <<EOF
-          d-i debian-installer/locale string ${LOCALE}
-          d-i time/zone string ${TZ}
+
+          # Debian Preseed(자동 LVM 레시피 + /boot 1G, / 나머지, swap 2G)
+          cat > "${TPL}/preseed.cfg" <<'EOF'
+          d-i debian-installer/locale string en_US.UTF-8
+          d-i console-setup/ask_detect boolean false
+          d-i keyboard-configuration/xkb-keymap select us
+
+          d-i time/zone string Etc/UTC
           d-i clock-setup/utc boolean true
+
           d-i netcfg/choose_interface select auto
-          d-i netcfg/get_hostname string ${HOSTNAME}
-          d-i passwd/user-fullname string ${USERNAME}
-          d-i passwd/username string ${USERNAME}
+          d-i netcfg/get_hostname string fin-linux
+
+          d-i partman-auto/method string lvm
+          d-i partman-lvm/device_remove_lvm boolean true
+          d-i partman-md/device_remove_md boolean true
+          d-i partman/confirm_nooverwrite boolean true
+          d-i partman/choose_partition select finish
+          d-i partman/confirm boolean true
+          d-i partman/confirm_write_new_label boolean true
+          d-i partman/confirm_write_new_label_again boolean true
+          d-i partman/confirm_nooverwrite boolean true
+
+          d-i partman-auto/expert_recipe string                         \
+              root-lvm ::                                               \
+                1024 1024 1024 ext4                                     \
+                    $primary{ } $bootable{ } method{ format }           \
+                    format{ } use_filesystem{ } filesystem{ ext4 }      \
+                    mountpoint{ /boot }                                 \
+                .                                                       \
+                2000 2000 2000 linux-swap                               \
+                    method{ swap } format{ }                            \
+                .                                                       \
+                10000 10000 -1 ext4                                     \
+                    method{ format } use_filesystem{ } filesystem{ ext4 } \
+                    mountpoint{ / }                                     \
+                .
+
+          d-i partman-auto/choose_recipe select root-lvm
+          d-i partman/confirm_finish boolean true
+          d-i partman/finish/choose_partition select finish
+          d-i partman/finish/answer string Yes
+
+          d-i pkgsel/include string openssh-server sudo
+          d-i passwd/user-fullname string finops
+          d-i passwd/username string finops
           d-i passwd/user-password-crypted password *
           d-i user-setup/allow-password-weak boolean true
           d-i passwd/disable-password boolean true
-          d-i preseed/late_command string in-target /usr/bin/mkdir -p /root/seed; cp -a /cdrom/seed /target/root/seed || true
-          d-i pkgsel/include string openssh-server sudo
+
+          d-i preseed/late_command string \
+            in-target /usr/bin/mkdir -p /root/seed; \
+            cp -a /cdrom/seed /target/root/seed || true; \
+            cp -a /cdrom/extras /target/root/extras || true
+
           d-i finish-install/reboot_in_progress note
           EOF
+
           cp -a "${TPL}/kickstart.ks" "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg"
           cp -a "${TPL}/preseed.cfg"  "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg"
 
-      - name: "cloud-init seed 구성 생성 (+ 스토리지/백업/업그레이드 runcmd)"
+      - name: "cloud-init seed 구성 생성 (+ runcmd: 스토리지/백업/업그레이드)"
         run: |
           set -euo pipefail
           SEED="${ECHO_ROOT}/seed"
           mkdir -p "$SEED"/{nocloud,ssh,snippets,scripts}
-          # SSH 키는 스켈레톤 단계에서 이미 생성됨(필요 시 여기서도 보강)
-          if [ -n "${SSH_KEY}" ]; then
-            echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys"
-          fi
+          [ -n "${SSH_KEY}" ] && echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys" || true
 
           EXTRA_PKGS=""
           if [ "${F_HOST_UPGRADE}" = "true" ] && { [ "${DISTRO}" = "ubuntu" ] || [ "${DISTRO}" = "debian" ]; }; then
@@ -550,7 +599,6 @@ jobs:
           COMBINED_PKGS="$(printf "%s %s\n" "$PKGS" "$EXTRA_PKGS" | tr ',;' ' ' | tr -s ' ' ' ')"
           PKG_LINE=$(echo "$COMBINED_PKGS" | awk '{for(i=1;i<=NF;i++) if(!seen[$i]++){printf (n++?", ":"") $i}}')
 
-          # seed/scripts/env.storage 사본 보장
           cp -a "${ECHO_ROOT}/scripts/env.storage.example" "${SEED}/scripts/env.storage" || true
 
           cat > "${SEED}/nocloud/user-data" <<EOF
@@ -603,265 +651,312 @@ jobs:
           cp -a "${ECHO_ROOT}/seed/snippets" "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
+          # extras도 ISO에 함께 포함
+          cp -a "${ECHO_ROOT}/iso_src/extras" "${ECHO_ROOT}/iso_src/seed/"
           genisoimage -quiet -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
           isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
           [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
 
       # =======================
-      # Ubuntu ISO: 체크섬-우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치)
+      # ISO 다운로드/검증 + 주입/부팅패치 (Single or All)
       # =======================
-      - name: "Ubuntu ISO: 체크섬-우선"
-        if: env.DISTRO == 'ubuntu'
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          mkdir -p ${ECHO_ROOT}/out ${ECHO_ROOT}/tmp
-          ARCH="${UBUNTU_ARCH}"
-          SERIES=()
-          case "${REL_HINT}" in
-            24.*) SERIES=("noble");;
-            22.*) SERIES=("jammy");;
-            20.*) SERIES=("focal");;
-            *) SERIES=("noble" "jammy" "focal");;
-          esac
-          CDIMAGE_URL=""
-          for CODENAME in "${SERIES[@]}"; do
-            U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
-            if curl -fsI "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
-          done
-          YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
-          RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
-          echo "CDIMAGE_URL=${CDIMAGE_URL}"  >> $GITHUB_ENV
-          echo "RELEASES_URL=${RELEASES_URL}" >> $GITHUB_ENV
-          fetch_sums () {
-            local base="$1" tag="$2"
-            local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
-            local gpg="${ECHO_ROOT}/out/SHA256SUMS.${tag}.gpg"
-            [ -n "$base" ] || return 0
-            curl -fL -o "$sums" "${base}SHA256SUMS" || true
-            curl -fL -o "$gpg"  "${base}SHA256SUMS.gpg" || true
-            if [ -s "$sums" ] && [ -s "$gpg" ]; then
-              gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
-                0xC5986B4F1257FFA86632CBA746181433FBB75451 \
-                0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
-              gpg --keyid-format long --verify "$gpg" "$sums" || echoe "[WARN] GPG 검증 실패(${tag}) - 계속"
-            fi
-          }
-          fetch_sums "${CDIMAGE_URL}"  "cdimage"
-          fetch_sums "${RELEASES_URL}" "releases"
-          [ -s "${ECHO_ROOT}/out/SHA256SUMS.cdimage" ] || [ -s "${ECHO_ROOT}/out/SHA256SUMS.releases" ] || { echoe "[ERR] 두 인덱스 모두에서 SHA256SUMS 확보 실패"; exit 1; }
-          cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
-            | perl -0777 -ne '
-                while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
-                while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
-              ' \
-            | awk '{print tolower($1), $2}' \
-            | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
-          pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
-          REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
-          CAND_LINE=""
-          [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*server.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*desktop.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line ' ubuntu-'"${REL_RX}"'.*\.iso$')"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
-          [ -n "$CAND_LINE" ] || { echoe "[ERR] SHA256SUMS에서 사용할 수 있는 *.iso 후보를 찾지 못했습니다."; exit 1; }
-          EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
-          CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
-          echo "[PICK] ${CAND} (expected sha256=${EXPECT})"
-          echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
-          base_candidates=()
-          [ -n "${CDIMAGE_URL}" ]  && base_candidates+=("${CDIMAGE_URL}")
-          base_candidates+=("${RELEASES_URL}")
-          YYMM_FROM_NAME="$(printf '%s\n' "${CAND}" | sed -nE 's/^ubuntu-([0-9]{2}\.[0-9]{2}).*/\1/p')"
-          [ -n "${YYMM_FROM_NAME}" ] && base_candidates+=("https://releases.ubuntu.com/${YYMM_FROM_NAME}/")
-          urls=()
-          for B in "${base_candidates[@]}"; do urls+=("${B}${CAND}"); done
-          urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
-          urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
-          ok=0
-          for u in "${urls[@]}"; do
-            echoe "[FETCH] $u"
-            if curl -fL --retry 3 --retry-delay 2 -o "${ECHO_ROOT}/out/base.iso" "$u"; then
-              ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-              if [ "${EXPECT}" = "${ACTUAL}" ]; then
-                echoe "[OK] SHA256 일치 (${CAND})"
-                echo "ISO_URL_USED=$u" >> $GITHUB_ENV
-                ok=1; break
-              else
-                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도"
-              fi
-            fi
-          done
-          [ "$ok" -eq 1 ] || { echoe "[FAIL] 모든 미러에서 SHA256 불일치/실패"; exit 1; }
-          for ext in zsync list manifest; do
-            curl -fsI "${RELEASES_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${RELEASES_URL}${CAND}.${ext}" || true
-            if [ -n "${CDIMAGE_URL}" ]; then
-              curl -fsI "${CDIMAGE_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${CDIMAGE_URL}${CAND}.${ext}" || true
-            fi
-          done
-          cp -a "${ECHO_ROOT}/out/SHA256SUMS.parsed" "${ECHO_ROOT}/logs/" || true
-
-      - name: "Debian ISO: 자동 선택/다운로드/검증"
-        if: env.DISTRO == 'debian'
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          mkdir -p ${ECHO_ROOT}/out
-          ARCH="${UBUNTU_ARCH}"
-          BASES=(
-            "https://cdimage.debian.org/debian-cd/current/${ARCH}/iso-cd/"
-            "https://cdimage.debian.org/debian-cd/current/${ARCH}/iso-dvd/"
-          )
-          SUMS_URL=""
-          for B in "${BASES[@]}"; do
-            if curl -fsI "${B}SHA256SUMS" >/dev/null 2>&1; then SUMS_URL="${B}SHA256SUMS"; BASE="$B"; break; fi
-          done
-          [ -n "$SUMS_URL" ] || { echo "[ERR] Debian SHA256SUMS 미발견"; exit 1; }
-          curl -fsSL -o "${ECHO_ROOT}/out/DEBIAN_SHA256SUMS" "$SUMS_URL"
-          CAND="$(awk '{print $2}' ${ECHO_ROOT}/out/DEBIAN_SHA256SUMS | grep -E 'debian-[0-9]+(\.[0-9]+)*-'"${ARCH}"'-(netinst|DVD-1)\.iso$' | tail -n1)"
-          [ -n "$CAND" ] || CAND="$(awk '{print $2}' ${ECHO_ROOT}/out/DEBIAN_SHA256SUMS | tail -n1)"
-          EXPECT="$(grep -E " ${CAND}$" ${ECHO_ROOT}/out/DEBIAN_SHA256SUMS | awk '{print $1}')"
-          echo "[PICK] $CAND (sha256=$EXPECT)"
-          curl -fL -o "${ECHO_ROOT}/out/base.iso" "${BASE}${CAND}"
-          ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-          [ "$EXPECT" = "$ACTUAL" ] || { echo "[ERR] Debian SHA256 mismatch"; exit 1; }
-
-      - name: "Rocky ISO: 자동 선택/다운로드/검증"
-        if: env.DISTRO == 'rocky'
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          ARCH_MAP="$( [ "${UBUNTU_ARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64" )"
-          BASE="https://download.rockylinux.org/pub/rocky/${REL_HINT}/isos/${ARCH_MAP}/"
-          curl -fsSL -o "${ECHO_ROOT}/out/ROCKY_CHECKSUM" "${BASE}CHECKSUM"
-          perl -0777 -ne 'while(/([A-Fa-f0-9]{64}).*?([A-Za-z0-9._-]+\.iso)/g){print lc($1)." ".$2."\n"}' "${ECHO_ROOT}/out/ROCKY_CHECKSUM" \
-            | grep -E "Rocky-${REL_HINT}.*(${ARCH_MAP}).*(minimal|dvd|boot).*\.iso$" \
-            | sort -k2,2V | tail -n1 > "${ECHO_ROOT}/out/ROCKY_LIST"
-          [ -s "${ECHO_ROOT}/out/ROCKY_LIST" ] || { echo "[ERR] Rocky ISO 후보 없음"; exit 1; }
-          EXPECT="$(awk '{print $1}' ${ECHO_ROOT}/out/ROCKY_LIST)"
-          CAND="$(awk '{print $2}' ${ECHO_ROOT}/out/ROCKY_LIST)"
-          echo "[PICK] $CAND (sha256=$EXPECT)"
-          curl -fL -o "${ECHO_ROOT}/out/base.iso" "${BASE}${CAND}"
-          ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-          [ "$EXPECT" = "$ACTUAL" ] || { echo "[ERR] Rocky SHA256 mismatch"; exit 1; }
-
-      - name: "AlmaLinux ISO: 자동 선택/다운로드/검증"
-        if: env.DISTRO == 'alma'
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          ARCH_MAP="$( [ "${UBUNTU_ARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64" )"
-          BASE="https://repo.almalinux.org/almalinux/${REL_HINT}/isos/${ARCH_MAP}/"
-          curl -fsSL -o "${ECHO_ROOT}/out/ALMA_CHECKSUM" "${BASE}CHECKSUM"
-          perl -0777 -ne 'while(/([A-Fa-f0-9]{64}).*?([A-Za-z0-9._-]+\.iso)/g){print lc($1)." ".$2."\n"}' "${ECHO_ROOT}/out/ALMA_CHECKSUM" \
-            | grep -E "(AlmaLinux|Alma)(${REL_HINT}).*(${ARCH_MAP}).*(minimal|boot).*\.iso$" \
-            | sort -k2,2V | tail -n1 > "${ECHO_ROOT}/out/ALMA_LIST"
-          [ -s "${ECHO_ROOT}/out/ALMA_LIST" ] || { echo "[ERR] AlmaLinux ISO 후보 없음"; exit 1; }
-          EXPECT="$(awk '{print $1}' ${ECHO_ROOT}/out/ALMA_LIST)"
-          CAND="$(awk '{print $2}' ${ECHO_ROOT}/out/ALMA_LIST)"
-          echo "[PICK] $CAND (sha256=$EXPECT)"
-          curl -fL -o "${ECHO_ROOT}/out/base.iso" "${BASE}${CAND}"
-          ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-          [ "$EXPECT" = "$ACTUAL" ] || { echo "[ERR] AlmaLinux SHA256 mismatch"; exit 1; }
-
-      - name: "Fedora ISO: 자동 선택/다운로드/검증"
-        if: env.DISTRO == 'fedora'
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          ARCH_MAP="$( [ "${UBUNTU_ARCH}" = "arm64" ] && echo "aarch64" || echo "x86_64" )"
-          BASE="https://download.fedoraproject.org/pub/fedora/linux/releases/${REL_HINT}/Server/${ARCH_MAP}/iso/"
-          curl -fL -o "${ECHO_ROOT}/out/FEDORA_CHECKSUM" "${BASE}Fedora-Server-${REL_HINT}-${ARCH_MAP}-CHECKSUM" || \
-          curl -fL -o "${ECHO_ROOT}/out/FEDORA_CHECKSUM" "${BASE}CHECKSUM"
-          perl -0777 -ne 'while(/([A-Fa-f0-9]{64}).*?([A-Za-z0-9._-]+\.iso)/g){print lc($1)." ".$2."\n"}' "${ECHO_ROOT}/out/FEDORA_CHECKSUM" \
-            | grep -E "Fedora-Server-.*(${ARCH_MAP}).*(dvd).*\.iso$" \
-            | sort -k2,2V | tail -n1 > "${ECHO_ROOT}/out/FEDORA_LIST"
-          [ -s "${ECHO_ROOT}/out/FEDORA_LIST" ] || { echo "[ERR] Fedora ISO 후보 없음"; exit 1; }
-          EXPECT="$(awk '{print $1}' ${ECHO_ROOT}/out/FEDORA_LIST)"
-          CAND="$(awk '{print $2}' ${ECHO_ROOT}/out/FEDORA_LIST)"
-          echo "[PICK] $CAND (sha256=$EXPECT)"
-          curl -fL -o "${ECHO_ROOT}/out/base.iso" "${BASE}${CAND}"
-          ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-          [ "$EXPECT" = "$ACTUAL" ] || { echo "[ERR] Fedora SHA256 mismatch"; exit 1; }
-
-      - name: "합본 ISO (xorriso graft, /seed + /ks.cfg + /preseed.cfg)"
-        if: env.COMBINE == 'true'
+      - name: "ISO들 빌드/주입/부팅패치(단일 또는 ALL)"
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
           OUT="${ECHO_ROOT}/out"
-          [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
-          xorriso \
-            -indev  "${OUT}/base.iso" \
-            -outdev "${OUT}/base-with-seed.iso" \
-            -map "${ECHO_ROOT}/iso_src/seed" /seed \
-            -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
-            -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
-            -boot_image any keep
-          isoinfo -d -i "${OUT}/base-with-seed.iso" >/dev/null 2>&1 || { echo "combined iso invalid"; exit 1; }
-          [ $(stat -c%s "${OUT}/base-with-seed.iso") -ge 10485760 ] || { echo "combined iso too small"; exit 1; }
 
-      - name: "Ubuntu: 부트 엔트리 주입(완전 자동 ISO)"
-        if: env.DISTRO == 'ubuntu'
-        run: |
-          set -euo pipefail
-          OUT="${ECHO_ROOT}/out"
-          [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
-          rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
-          7z x -o"${ECHO_ROOT}/tmp/grub" "${OUT}/base.iso" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
-          [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
-          [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
-          mv "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig"
-          mv "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"  "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"
-          mkdir -p "${ECHO_ROOT}/iso_src/autoinstall"
-          cat > "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg" <<'GRUB'
-          set timeout=5
-          set default=0
-          menuentry "Ubuntu Server Autoinstall (NoCloud /cdrom/seed)" {
-              set gfxpayload=keep
-              linux   /casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/seed/ ---
-              initrd  /casper/initrd
-          }
-          menuentry "Original installer menu" {
-              if [ -f (cd0)/boot/grub/grub.cfg.orig ]; then
-                configfile (cd0)/boot/grub/grub.cfg.orig
-              elif [ -f (cd0)/EFI/BOOT/grub.cfg.orig ]; then
-                configfile (cd0)/EFI/BOOT/grub.cfg.orig
+          build_ubuntu(){ # $1: REL_HINT  $2: ARCH (amd64|arm64)
+            local REL_HINT="$1" ARCH="$2"
+            echoe "[UBUNTU] build start"
+            mkdir -p "${ECHO_ROOT}/tmp"
+            local SERIES=()
+            case "${REL_HINT}" in
+              24.*) SERIES=("noble");;
+              22.*) SERIES=("jammy");;
+              20.*) SERIES=("focal");;
+              *) SERIES=("noble" "jammy" "focal");;
+            esac
+            local CDIMAGE_URL=""
+            for CODENAME in "${SERIES[@]}"; do
+              U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
+              if curl -fsI "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
+            done
+            local YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
+            local RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
+            fetch_sums () {
+              local base="$1" tag="$2"
+              local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
+              local gpg="${ECHO_ROOT}/out/SHA256SUMS.${tag}.gpg"
+              [ -n "$base" ] || return 0
+              curl -fL -o "$sums" "${base}SHA256SUMS" || true
+              curl -fL -o "$gpg"  "${base}SHA256SUMS.gpg" || true
+              if [ -s "$sums" ] && [ -s "$gpg" ]; then
+                gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
+                  0xC5986B4F1257FFA86632CBA746181433FBB75451 \
+                  0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
+                gpg --keyid-format long --verify "$gpg" "$sums" || echoe "[WARN] GPG 검증 실패(${tag}) - 계속"
               fi
+            }
+            fetch_sums "${CDIMAGE_URL}"  "cdimage"
+            fetch_sums "${RELEASES_URL}" "releases"
+            cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
+              | perl -0777 -ne '
+                  while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
+                  while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
+                ' \
+              | awk '{print tolower($1), $2}' \
+              | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
+            pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
+            local REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
+            local CAND_LINE=""
+            [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
+            [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
+            [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
+            [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
+            [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
+            [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
+            [ -n "$CAND_LINE" ] || { echoe "[ERR] Ubuntu 후보 없음"; return 1; }
+            local EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
+            local CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
+            local urls=("${CDIMAGE_URL}${CAND}" "${RELEASES_URL}${CAND}")
+            urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
+            urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
+            local ok=0
+            for u in "${urls[@]}"; do
+              echoe "[FETCH] $u"
+              if curl -fL --retry 3 --retry-delay 2 -o "${OUT}/base-ubuntu.iso" "$u"; then
+                ACTUAL="$(sha256sum ${OUT}/base-ubuntu.iso | awk '{print $1}')"
+                [ "${EXPECT}" = "${ACTUAL}" ] && ok=1 && break
+              fi
+            done
+            [ "$ok" -eq 1 ] || { echoe "[FAIL] Ubuntu SHA 불일치/실패"; return 1; }
+            # 주입
+            xorriso -indev "${OUT}/base-ubuntu.iso" -outdev "${OUT}/base-ubuntu-with-seed.iso" \
+              -map "${ECHO_ROOT}/iso_src/seed" /seed \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+              -map "${ECHO_ROOT}/iso_src/extras" /extras \
+              -boot_image any keep
+            # Ubuntu GRUB 자동항목
+            rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
+            7z x -o"${ECHO_ROOT}/tmp/grub" "${OUT}/base-ubuntu.iso" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
+            [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
+            [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
+            mv "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig"
+            mv "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"  "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"
+            cat > "${ECHO_ROOT}/iso_src/autoinstall/ubuntu.grub" <<'GRUB'
+            set timeout=5
+            set default=0
+            menuentry "Ubuntu Server Autoinstall (NoCloud /cdrom/seed)" {
+                set gfxpayload=keep
+                linux   /casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/seed/ ---
+                initrd  /casper/initrd
+            }
+            menuentry "Original installer menu" {
+                if [ -f (cd0)/boot/grub/grub.cfg.orig ]; then
+                  configfile (cd0)/boot/grub/grub.cfg.orig
+                elif [ -f (cd0)/EFI/BOOT/grub.cfg.orig ]; then
+                  configfile (cd0)/EFI/BOOT/grub.cfg.orig
+                fi
+            }
+            GRUB
+            xorriso -indev "${OUT}/base-ubuntu.iso" -outdev "${OUT}/base-ubuntu-with-seed-autoinstall.iso" \
+              -map "${ECHO_ROOT}/iso_src/seed" /seed \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+              -map "${ECHO_ROOT}/iso_src/extras" /extras \
+              -map "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig" /boot/grub/grub.cfg.orig \
+              -map "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"  /EFI/BOOT/grub.cfg.orig \
+              -map "${ECHO_ROOT}/iso_src/autoinstall/ubuntu.grub"  /boot/grub/grub.cfg \
+              -map "${ECHO_ROOT}/iso_src/autoinstall/ubuntu.grub"  /EFI/BOOT/grub.cfg \
+              -boot_image any keep
+            echoe "[UBUNTU] done"
           }
-          GRUB
-          xorriso \
-            -indev  "${OUT}/base.iso" \
-            -outdev "${OUT}/base-with-seed-autoinstall.iso" \
-            -map "${ECHO_ROOT}/iso_src/seed" /seed \
-            -map "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig" /boot/grub/grub.cfg.orig \
-            -map "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"  /EFI/BOOT/grub.cfg.orig \
-            -map "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg"     /boot/grub/grub.cfg \
-            -map "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg"     /EFI/BOOT/grub.cfg \
-            -boot_image any keep
-          isoinfo -d -i "${OUT}/base-with-seed-autoinstall.iso" >/dev/null 2>&1 || { echo "autoinstall iso invalid"; exit 1; }
-          [ $(stat -c%s "${OUT}/base-with-seed-autoinstall.iso") -ge 10485760 ] || { echo "autoinstall iso too small"; exit 1; }
+
+          build_debian(){ # REL_HINT ARCH
+            local REL_HINT="$1" ARCH="$2"
+            echoe "[DEBIAN] build start"
+            ARCH="$([ "$ARCH" = "arm64" ] && echo "arm64" || echo "amd64")"
+            local BASES=(
+              "https://cdimage.debian.org/debian-cd/current/${ARCH}/iso-cd/"
+              "https://cdimage.debian.org/debian-cd/current/${ARCH}/iso-dvd/"
+            )
+            local SUMS_URL="" BASE=""
+            for B in "${BASES[@]}"; do
+              if curl -fsI "${B}SHA256SUMS" >/dev/null 2>&1; then SUMS_URL="${B}SHA256SUMS"; BASE="$B"; break; fi
+            done
+            [ -n "$SUMS_URL" ] || { echoe "[ERR] Debian SHA256SUMS 미발견"; return 1; }
+            curl -fsSL -o "${OUT}/DEBIAN_SHA256SUMS" "$SUMS_URL"
+            local CAND
+            CAND="$(awk '{print $2}' ${OUT}/DEBIAN_SHA256SUMS | grep -E "debian-[0-9]+(\.[0-9]+)*-${ARCH}-(netinst|DVD-1)\.iso$" | tail -n1)"
+            [ -n "$CAND" ] || CAND="$(awk '{print $2}' ${OUT}/DEBIAN_SHA256SUMS | tail -n1)"
+            local EXPECT="$(grep -E " ${CAND}$" ${OUT}/DEBIAN_SHA256SUMS | awk '{print $1}')"
+            curl -fL -o "${OUT}/base-debian.iso" "${BASE}${CAND}"
+            local ACTUAL="$(sha256sum ${OUT}/base-debian.iso | awk '{print $1}')"
+            [ "$EXPECT" = "$ACTUAL" ] || { echoe "[ERR] Debian SHA256 mismatch"; return 1; }
+            # 주입
+            xorriso -indev "${OUT}/base-debian.iso" -outdev "${OUT}/base-debian-with-seed.iso" \
+              -map "${ECHO_ROOT}/iso_src/seed" /seed \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+              -map "${ECHO_ROOT}/iso_src/extras" /extras \
+              -boot_image any keep
+            # GRUB 자동항목 (netinst/DVD 공통 경로 시도)
+            rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
+            7z x -o"${ECHO_ROOT}/tmp/grub" "${OUT}/base-debian.iso" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
+            [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
+            [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
+            mv "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig"
+            mv "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"  "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"
+            cat > "${ECHO_ROOT}/iso_src/autoinstall/debian.grub" <<'GRUB'
+            set timeout=5
+            set default=0
+            menuentry "Debian Auto Install (preseed=/cdrom/preseed.cfg)" {
+                set gfxpayload=keep
+                linux   /install.amd/vmlinuz auto=true priority=critical preseed/file=/cdrom/preseed.cfg ---
+                initrd  /install.amd/initrd.gz
+            }
+            menuentry "Original installer menu" {
+                if [ -f (cd0)/boot/grub/grub.cfg.orig ]; then
+                  configfile (cd0)/boot/grub/grub.cfg.orig
+                elif [ -f (cd0)/EFI/BOOT/grub.cfg.orig ]; then
+                  configfile (cd0)/EFI/BOOT/grub.cfg.orig
+                fi
+            }
+            GRUB
+            xorriso -indev "${OUT}/base-debian.iso" -outdev "${OUT}/base-debian-with-seed-autoinstall.iso" \
+              -map "${ECHO_ROOT}/iso_src/seed" /seed \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+              -map "${ECHO_ROOT}/iso_src/extras" /extras \
+              -map "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig" /boot/grub/grub.cfg.orig \
+              -map "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"  /EFI/BOOT/grub.cfg.orig \
+              -map "${ECHO_ROOT}/iso_src/autoinstall/debian.grub"  /boot/grub/grub.cfg \
+              -map "${ECHO_ROOT}/iso_src/autoinstall/debian.grub"  /EFI/BOOT/grub.cfg \
+              -boot_image any keep
+            echoe "[DEBIAN] done"
+          }
+
+          build_rhel_like(){ # distro rocky|alma|fedora   REL_HINT   ARCH(amd64|arm64)
+            local D="$1" REL_HINT="$2" ARCH="$3" ARCH_MAP
+            echoe "[${D^^}] build start"
+            ARCH_MAP="$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")"
+            if [ "$D" = "rocky" ]; then
+              local BASE="https://download.rockylinux.org/pub/rocky/${REL_HINT}/isos/${ARCH_MAP}/"
+              curl -fsSL -o "${OUT}/R_CHECKSUM" "${BASE}CHECKSUM"
+              perl -0777 -ne 'while(/([A-Fa-f0-9]{64}).*?([A-Za-z0-9._-]+\.iso)/g){print lc($1)." ".$2."\n"}' "${OUT}/R_CHECKSUM" \
+                | grep -E "Rocky-${REL_HINT}.*(${ARCH_MAP}).*(minimal|dvd|boot).*\.iso$" \
+                | sort -k2,2V | tail -n1 > "${OUT}/R_LIST"
+              [ -s "${OUT}/R_LIST" ] || { echoe "[ERR] Rocky ISO 후보 없음"; return 1; }
+              local EXPECT="$(awk '{print $1}' ${OUT}/R_LIST)"
+              local CAND="$(awk '{print $2}' ${OUT}/R_LIST)"
+              curl -fL -o "${OUT}/base-rocky.iso" "${BASE}${CAND}"
+              local ACTUAL="$(sha256sum ${OUT}/base-rocky.iso | awk '{print $1}')"
+              [ "$EXPECT" = "$ACTUAL" ] || { echoe "[ERR] Rocky SHA256 mismatch"; return 1; }
+              local BASEISO="${OUT}/base-rocky.iso"; local PREFIX="rocky"
+            elif [ "$D" = "alma" ]; then
+              local BASE="https://repo.almalinux.org/almalinux/${REL_HINT}/isos/${ARCH_MAP}/"
+              curl -fsSL -o "${OUT}/A_CHECKSUM" "${BASE}CHECKSUM"
+              perl -0777 -ne 'while(/([A-Fa-f0-9]{64}).*?([A-Za-z0-9._-]+\.iso)/g){print lc($1)." ".$2."\n"}' "${OUT}/A_CHECKSUM" \
+                | grep -E "(AlmaLinux|Alma)(${REL_HINT}).*(${ARCH_MAP}).*(minimal|boot|dvd).*\.iso$" \
+                | sort -k2,2V | tail -n1 > "${OUT}/A_LIST"
+              [ -s "${OUT}/A_LIST" ] || { echoe "[ERR] AlmaLinux ISO 후보 없음"; return 1; }
+              local EXPECT="$(awk '{print $1}' ${OUT}/A_LIST)"
+              local CAND="$(awk '{print $2}' ${OUT}/A_LIST)"
+              curl -fL -o "${OUT}/base-alma.iso" "${BASE}${CAND}"
+              local ACTUAL="$(sha256sum ${OUT}/base-alma.iso | awk '{print $1}')"
+              [ "$EXPECT" = "$ACTUAL" ] || { echoe "[ERR] AlmaLinux SHA256 mismatch"; return 1; }
+              local BASEISO="${OUT}/base-alma.iso"; local PREFIX="alma"
+            else # fedora
+              local BASE="https://download.fedoraproject.org/pub/fedora/linux/releases/${REL_HINT}/Server/${ARCH_MAP}/iso/"
+              curl -fL -o "${OUT}/F_CHECKSUM" "${BASE}Fedora-Server-${REL_HINT}-${ARCH_MAP}-CHECKSUM" || \
+              curl -fL -o "${OUT}/F_CHECKSUM" "${BASE}CHECKSUM"
+              perl -0777 -ne 'while(/([A-Fa-f0-9]{64}).*?([A-Za-z0-9._-]+\.iso)/g){print lc($1)." ".$2."\n"}' "${OUT}/F_CHECKSUM" \
+                | grep -E "Fedora-Server-.*(${ARCH_MAP}).*(dvd).*\.iso$" \
+                | sort -k2,2V | tail -n1 > "${OUT}/F_LIST"
+              [ -s "${OUT}/F_LIST" ] || { echoe "[ERR] Fedora ISO 후보 없음"; return 1; }
+              local EXPECT="$(awk '{print $1}' ${OUT}/F_LIST)"
+              local CAND="$(awk '{print $2}' ${OUT}/F_LIST)"
+              curl -fL -o "${OUT}/base-fedora.iso" "${BASE}${CAND}"
+              local ACTUAL="$(sha256sum ${OUT}/base-fedora.iso | awk '{print $1}')"
+              [ "$EXPECT" = "$ACTUAL" ] || { echoe "[ERR] Fedora SHA256 mismatch"; return 1; }
+              local BASEISO="${OUT}/base-fedora.iso"; local PREFIX="fedora"
+            fi
+            # 주입
+            xorriso -indev "${BASEISO}" -outdev "${OUT}/base-${PREFIX}-with-seed.iso" \
+              -map "${ECHO_ROOT}/iso_src/seed" /seed \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+              -map "${ECHO_ROOT}/iso_src/extras" /extras \
+              -boot_image any keep
+            # EFI GRUB 자동항목(ks)
+            rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
+            7z x -o"${ECHO_ROOT}/tmp/grub" "${BASEISO}" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
+            [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
+            [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
+            mv "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig"
+            mv "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"  "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"
+            cat > "${ECHO_ROOT}/iso_src/autoinstall/${PREFIX}.grub" <<'GRUB'
+            set timeout=5
+            set default=0
+            menuentry "Auto Kickstart (inst.ks=cdrom:/ks.cfg)" {
+                set gfxpayload=keep
+                linux   /images/pxeboot/vmlinuz inst.ks=cdrom:/ks.cfg inst.repo=cdrom:
+                initrd  /images/pxeboot/initrd.img
+            }
+            menuentry "Original installer menu" {
+                if [ -f (cd0)/boot/grub/grub.cfg.orig ]; then
+                  configfile (cd0)/boot/grub/grub.cfg.orig
+                elif [ -f (cd0)/EFI/BOOT/grub.cfg.orig ]; then
+                  configfile (cd0)/EFI/BOOT/grub.cfg.orig
+                fi
+            }
+            GRUB
+            xorriso -indev "${BASEISO}" -outdev "${OUT}/base-${PREFIX}-with-seed-autoinstall.iso" \
+              -map "${ECHO_ROOT}/iso_src/seed" /seed \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
+              -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
+              -map "${ECHO_ROOT}/iso_src/extras" /extras \
+              -map "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig" /boot/grub/grub.cfg.orig \
+              -map "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"  /EFI/BOOT/grub.cfg.orig \
+              -map "${ECHO_ROOT}/iso_src/autoinstall/${PREFIX}.grub"  /boot/grub/grub.cfg \
+              -map "${ECHO_ROOT}/iso_src/autoinstall/${PREFIX}.grub"  /EFI/BOOT/grub.cfg \
+              -boot_image any keep
+            echoe "[${D^^}] done"
+          }
+
+          # 실행 모드: ALL 또는 단일
+          if [ "${BUILD_ALL}" = "true" ]; then
+            build_ubuntu "${REL_HINT}" "${UBUNTU_ARCH}" || true
+            build_debian "${REL_HINT}" "${UBUNTU_ARCH}" || true
+            build_rhel_like rocky "${REL_HINT}" "${UBUNTU_ARCH}" || true
+            build_rhel_like alma  "${REL_HINT}" "${UBUNTU_ARCH}" || true
+            build_rhel_like fedora "${REL_HINT}" "${UBUNTU_ARCH}" || true
+          else
+            case "${DISTRO}" in
+              ubuntu) build_ubuntu "${REL_HINT}" "${UBUNTU_ARCH}" ;;
+              debian) build_debian "${REL_HINT}" "${UBUNTU_ARCH}" ;;
+              rocky)  build_rhel_like rocky  "${REL_HINT}" "${UBUNTU_ARCH}" ;;
+              alma)   build_rhel_like alma   "${REL_HINT}" "${UBUNTU_ARCH}" ;;
+              fedora) build_rhel_like fedora "${REL_HINT}" "${UBUNTU_ARCH}" ;;
+            esac
+          fi
 
       - name: "검증(요약) & 힌트"
         run: |
           set -euo pipefail
           . ${ECHO_ROOT}/echo.sh
+          shopt -s nullglob
           for f in ${ECHO_ROOT}/out/*.iso; do
-            [ -e "$f" ] || continue
             sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
             isoinfo -d -i "$f" >/dev/null 2>&1 && iso=OK || iso=FAIL
             echoe "[ISO] $(basename "$f") size=${sz} iso=${iso}"
           done
           echo "[HINT] Ubuntu: autoinstall ds=nocloud;s=/cdrom/seed/"
-          echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
+          echo "[HINT] RHEL계(Fedora/Rocky/Alma): inst.ks=cdrom:/ks.cfg"
           echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
-          echo "[HINT] Storage/Backup: /root/seed/scripts/env.storage 편집 후 DRY_RUN=false 설정"
+          echo "[HINT] 설치 후 /root/seed/scripts/env.storage 편집(필요 시 DRY_RUN=false)"
 
       - name: "아티팩트 업로드(유효 파일만)"
         if: env.UPLOAD == 'true'
@@ -869,10 +964,7 @@ jobs:
         with:
           name: linux-seed-iso-and-echo
           path: |
-            .github/echo_linux/out/seed.iso
-            .github/echo_linux/out/base.iso
-            .github/echo_linux/out/base-with-seed.iso
-            .github/echo_linux/out/base-with-seed-autoinstall.iso
+            .github/echo_linux/out/*.iso
             .github/echo_linux/seed/**
             .github/echo_linux/snippets/**
             .github/echo_linux/scripts/**
