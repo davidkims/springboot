@@ -1,0 +1,89 @@
+---
+name: "🐧 Linux ISO 다운로드 봇"
+
+permissions:
+  contents: write
+
+'on':
+  workflow_dispatch:
+    inputs:
+      distro:
+        description: "배포판 (ubuntu|debian|rocky|alma|fedora)"
+        default: "ubuntu"
+        required: true
+      release_hint:
+        description: "버전 힌트 (비우면 최신)"
+        default: ""
+        required: false
+      arch:
+        description: "아키텍처 (amd64|arm64)"
+        default: "amd64"
+        required: true
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  fetch-iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch ISO image
+        env:
+          DISTRO: ${{ github.event.inputs.distro || 'ubuntu' }}
+          RELEASE_HINT: ${{ github.event.inputs.release_hint }}
+          ARCH: ${{ github.event.inputs.arch || 'amd64' }}
+        run: |
+          set -euo pipefail
+          mkdir -p iso-out
+          case "$DISTRO" in
+            ubuntu)
+              REL="${RELEASE_HINT:-24.04}"
+              YYMM=$(echo "$REL" | cut -d. -f1-2)
+              BASE="https://releases.ubuntu.com/${YYMM}/"
+              FILE=$(curl -fsSL "${BASE}SHA256SUMS" | awk '/ubuntu-'${REL}'.*-live-server-'${ARCH}'.iso/{print $2;exit}')
+              curl -fL -o "iso-out/${FILE}" "${BASE}${FILE}"
+              SHA_EXPECTED=$(curl -fsSL "${BASE}SHA256SUMS" | awk '/ubuntu-'${REL}'.*-live-server-'${ARCH}'.iso/{print $1;exit}')
+              echo "${SHA_EXPECTED}  iso-out/${FILE}" | sha256sum -c -
+              ;;
+            debian)
+              REL="${RELEASE_HINT:-12.5.0}"
+              BASE="https://cdimage.debian.org/debian-cd/current/${ARCH}/iso-cd/"
+              FILE=$(curl -fsSL "${BASE}SHA256SUMS" | awk '/debian-'${REL}'-'${ARCH}'-netinst.iso/{print $2;exit}')
+              curl -fL -o "iso-out/${FILE}" "${BASE}${FILE}"
+              SHA_EXPECTED=$(curl -fsSL "${BASE}SHA256SUMS" | awk '/debian-'${REL}'-'${ARCH}'-netinst.iso/{print $1;exit}')
+              echo "${SHA_EXPECTED}  iso-out/${FILE}" | sha256sum -c -
+              ;;
+            rocky)
+              REL="${RELEASE_HINT:-9.5}"
+              ARCH_MAP=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
+              BASE="https://download.rockylinux.org/pub/rocky/${REL}/isos/${ARCH_MAP}/"
+              FILE=$(curl -fsSL "${BASE}CHECKSUM" | awk '/Rocky-'${REL}'.*minimal.*'${ARCH_MAP}'.iso/{print $2;exit}')
+              curl -fL -o "iso-out/${FILE}" "${BASE}${FILE}"
+              ;;
+            alma)
+              REL="${RELEASE_HINT:-9.5}"
+              ARCH_MAP=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
+              BASE="https://repo.almalinux.org/almalinux/${REL}/isos/${ARCH_MAP}/"
+              FILE=$(curl -fsSL "${BASE}CHECKSUM" | awk '/AlmaLinux-'${REL}'.*minimal.*'${ARCH_MAP}'.iso/{print $2;exit}')
+              curl -fL -o "iso-out/${FILE}" "${BASE}${FILE}"
+              ;;
+            fedora)
+              REL="${RELEASE_HINT:-40}"
+              ARCH_MAP=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
+              BASE="https://download.fedoraproject.org/pub/fedora/linux/releases/${REL}/Server/${ARCH_MAP}/iso/"
+              FILE=$(curl -fsSL "${BASE}Fedora-Server-${REL}-${ARCH_MAP}-CHECKSUM" | awk '/Fedora-Server-'${REL}'.*dvd.*'${ARCH_MAP}'.iso/{print $2;exit}')
+              curl -fL -o "iso-out/${FILE}" "${BASE}${FILE}"
+              ;;
+            *)
+              echo "unsupported distro: $DISTRO" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-iso
+          path: iso-out/*
+          retention-days: 1
