@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch ISO image (auto-detect + verify)
+      - name: Fetch ISO image (hardened)
         env:
           DISTRO: ${{ github.event.inputs.distro || 'ubuntu' }}
           RELEASE_HINT: ${{ github.event.inputs.release_hint }}
@@ -35,210 +35,161 @@ jobs:
         run: |
           set -euo pipefail
 
-          ua="GitHubActions/ISO-Fetcher (+https://github.com/actions) curl/7.x"
-          retry_flags="--retry 5 --retry-delay 2 --retry-connrefused --fail -L --connect-timeout 15 --max-time 600 -A \"$ua\""
+          ua="GitHubActions-ISO-Fetcher (+https://github.com/actions)"
+          echo "::group::Detect & Download"
 
-          # util: safe curl that prints helpful errors
-          curl_s() { 
-            # usage: curl_s URL [extra curl args...]
+          # ---------- helpers ----------
+          curl_s() {
+            # usage: curl_s URL [extra curl args]
             local url="$1"; shift || true
             echo "[curl] GET $url" 1>&2
-            # shellcheck disable=SC2086
-            curl ${retry_flags} "$@" "$url"
+            curl --fail -L --show-error \
+                 --connect-timeout 20 --max-time 600 \
+                 --retry 5 --retry-delay 2 --retry-all-errors \
+                 -A "$ua" "$@" "$url"
+          }
+
+          sanitize_filename() {
+            # stdin에서 라인을 받아 .iso로 끝나는 파일명만 깔끔히 추출
+            awk '
+              {
+                # 패턴1: "<sha>  *filename.iso"
+                # 패턴2: "SHA256 (filename.iso) = <sha>"
+                # 패턴3: "<sha>  ./path/filename.iso"
+                if (match($0, /\(([^)]+\.iso)\)/, m)) {
+                  f=m[1];
+                } else if (match($0, /[[:space:]\*]+([[:graph:]]+\.iso)/, m)) {
+                  f=m[1];
+                }
+                gsub(/^\.\/+/, "", f);  # ./ 제거
+                if (f ~ /\.iso$/) { print f; exit }
+              }
+            '
+          }
+
+          extract_sha256() {
+            # stdin에서 64-hex 해시 추출
+            awk 'match($0, /\b[0-9a-fA-F]{64}\b/, m){ print m[0]; exit }'
+          }
+
+          arch_map_deb_rpm() {
+            case "$1" in amd64|arm64) echo "$1";; *) echo "amd64";; esac
+          }
+          arch_map_rhel() {
+            case "$1" in amd64) echo "x86_64";; arm64) echo "aarch64";; *) echo "x86_64";; esac
           }
 
           mkdir -p iso-out tmp
 
-          echo "::group::Detect & Download"
           case "$DISTRO" in
             ubuntu)
-              # RELEASE_HINT 예: 24.04, 24.04.1 등 (비우면 최신)
-              # releases.ubuntu.com/<YY.MM>/SHA256SUMS 에서 live-server ISO를 찾음
-              # 최신 탐색: 루트 인덱스에서 YY.MM 디렉터리 후보를 모아 sort -V 로 최신 선택
-              ARCH_MAP="$ARCH" # amd64|arm64 그대로 사용
+              # release_hint 비면 releases.ubuntu.com 인덱스에서 최신 YY.MM 추출
               if [ -n "${RELEASE_HINT:-}" ]; then
                 YYMM="$(echo "$RELEASE_HINT" | cut -d. -f1-2)"
                 candidates="$YYMM"
               else
-                # 전체 인덱스에서 X.YY 형태 디렉터리 추출 (24.04, 24.04.1 등은 하위 SHA256SUMS로 확인)
                 index_html="$(curl_s https://releases.ubuntu.com/)"
-                # 링크들 중 2자리.2자리 버전 패턴만 뽑기
                 candidates="$(printf '%s\n' "$index_html" \
-                  | grep -Eo '>2[0-9]\.[0-9]{2}(/|")' \
-                  | sed -E 's/[>"]|\/$//g' \
+                  | grep -Eo '>[0-9]{2}\.[0-9]{2}/' | tr -d '>/ ' \
                   | sort -V | uniq)"
               fi
 
+              ARCHD="$(arch_map_deb_rpm "$ARCH")"
               found=""
               for yymm in $candidates; do
                 base="https://releases.ubuntu.com/${yymm}/"
                 echo "[ubuntu] probing $base" 1>&2
-                # SHA256SUMS 가져와 live-server-ARCH.iso 라인을 찾는다
                 if sha_txt="$(curl_s "${base}SHA256SUMS" 2>/dev/null)"; then
-                  # 우분투 SHA 파일은 두 포맷이 혼재할 수 있으므로 모두 대응
-                  # 1) <hash>  <filename>
-                  # 2) SHA256 (<filename>) = <hash>
-                  # live-server ISO 우선, 없으면 desktop도 fallback
-                  fname="$(printf '%s\n' "$sha_txt" \
-                    | awk -v a="$ARCH_MAP" -v r="$RELEASE_HINT" '
-                      # 포맷1
-                      $0 ~ /ubuntu-.*live-server-.*\.iso/ && $0 ~ a {
-                        if (r == "" || $0 ~ r) { print $2; exit }
-                      }
-                      # 포맷2
-                      $0 ~ /SHA256 \(ubuntu-.*live-server-.*\.iso\) =/ && $0 ~ a {
-                        if (r == "" || $0 ~ r) {
-                          match($0, /\((.*\.iso)\)/, m);
-                          if (m[1] != "") { print m[1]; exit }
-                        }
-                      }
-                    ' )"
-                  if [ -z "${fname:-}" ]; then
-                    # fallback: desktop ISO
-                    fname="$(printf '%s\n' "$sha_txt" \
-                      | awk -v a="$ARCH_MAP" -v r="$RELEASE_HINT" '
-                        $0 ~ /ubuntu-.*desktop-.*\.iso/ && $0 ~ a {
-                          if (r == "" || $0 ~ r) { print $2; exit }
-                        }
-                        $0 ~ /SHA256 \(ubuntu-.*desktop-.*\.iso\) =/ && $0 ~ a {
-                          if (r == "" || $0 ~ r) {
-                            match($0, /\((.*\.iso)\)/, m);
-                            if (m[1] != "") { print m[1]; exit }
-                          }
-                        }
-                      ' )"
+                  # live-server 우선, 없으면 desktop 폴백
+                  line="$(printf '%s\n' "$sha_txt" \
+                    | grep -E "ubuntu-.*-(live-server|desktop)-${ARCHD}\.iso" \
+                    | { [ -n "${RELEASE_HINT:-}" ] && grep -F "ubuntu-${RELEASE_HINT}" || cat; } \
+                    | head -n1 || true)"
+                  if [ -z "${line:-}" ]; then
+                    # release_hint로 못 찾으면 해당 YYMM의 첫 ISO 라인 사용
+                    line="$(printf '%s\n' "$sha_txt" \
+                      | grep -E "ubuntu-[0-9]{2}\.[0-9]{2}(\.[0-9]+)?-(live-server|desktop)-${ARCHD}\.iso" \
+                      | sort -Vr | head -n1 || true)"
                   fi
-                  if [ -n "${fname:-}" ]; then
-                    # 해시 추출
-                    hash="$(printf '%s\n' "$sha_txt" | awk -v f="$fname" '
-                      # 포맷1
-                      $2 == f { print $1; exit }
-                      # 포맷2
-                      {
-                        # SHA256 (filename) = hash
-                        match($0, /SHA256 \(([^)]+)\) = ([[:xdigit:]]{64})/, m);
-                        if (m[1] == f) { print m[2]; exit }
-                      }
-                    ')"
-                    url="${base}${fname}"
-                    echo "[ubuntu] Selected: $url" 1>&2
-                    curl_s "$url" -o "iso-out/${fname}"
-                    if [ -n "${hash:-}" ]; then
-                      echo "${hash}  iso-out/${fname}" | sha256sum -c -
-                    else
-                      echo "[warn] SHA256 hash not found in SHA256SUMS; skipping verify" 1>&2
-                    fi
-                    found="yes"
-                    break
+                  test -n "${line:-}" || continue
+
+                  fname="$(printf '%s\n' "$line" | sanitize_filename)"
+                  test -n "${fname:-}" || continue
+                  hash="$(printf '%s\n' "$line" | extract_sha256 || true)"
+
+                  echo "[ubuntu] Selected: ${base}${fname}" 1>&2
+                  curl_s "${base}${fname}" -o "iso-out/${fname}"
+                  if [ -n "${hash:-}" ]; then
+                    echo "${hash}  iso-out/${fname}" | sha256sum -c -
                   fi
+                  found="yes"; break
                 fi
               done
-              if [ -z "$found" ]; then
-                echo "::error::Ubuntu ISO를 찾지 못했습니다. release_hint를 구체화해보세요. (예: 24.04.1)" ; exit 1
-              fi
+              test -n "$found" || { echo "::error::Ubuntu ISO를 찾지 못했습니다. release_hint를 구체화해 보세요 (예: 24.04.1)."; exit 1; }
               ;;
 
             debian)
-              # Debian: current 디렉터리의 SHA256SUMS에서 netinst ISO 선택
-              ARCH_MAP="$ARCH" # amd64|arm64
-              base="https://cdimage.debian.org/debian-cd/current/${ARCH_MAP}/iso-cd/"
+              ARCHD="$(arch_map_deb_rpm "$ARCH")"
+              base="https://cdimage.debian.org/debian-cd/current/${ARCHD}/iso-cd/"
               sha_txt="$(curl_s "${base}SHA256SUMS")"
-              # release_hint가 있으면 해당 버전 우선, 없으면 최신 한 개 선택
-              fname="$(printf '%s\n' "$sha_txt" \
-                | awk -v a="$ARCH_MAP" -v r="${RELEASE_HINT:-}" '
-                  /debian-[0-9]+\.[0-9]+(\.[0-9]+)?-.*-netinst\.iso/ && $0 ~ a {
-                    if (r == "" || $0 ~ r) { print $2; exit }
-                  }
-                ')"
-              if [ -z "${fname:-}" ]; then
-                # fallback: 첫 번째 netinst
-                fname="$(printf '%s\n' "$sha_txt" \
-                  | awk '/debian-[0-9]+\.[0-9]+(\.[0-9]+)?-.*-netinst\.iso/{print $2;exit}')"
+              line="$(printf '%s\n' "$sha_txt" \
+                | grep -E "debian-[0-9]+\.[0-9]+(\.[0-9]+)?-${ARCHD}-netinst\.iso" \
+                | { [ -n "${RELEASE_HINT:-}" ] && grep -F "debian-${RELEASE_HINT}-${ARCHD}-netinst.iso" || cat; } \
+                | head -n1 || true)"
+              if [ -z "${line:-}" ]; then
+                line="$(printf '%s\n' "$sha_txt" \
+                  | grep -E "debian-[0-9]+\.[0-9]+(\.[0-9]+)?-${ARCHD}-netinst\.iso" \
+                  | sort -Vr | head -n1 || true)"
               fi
-              test -n "${fname:-}" || { echo "::error::Debian netinst ISO를 찾지 못했습니다."; exit 1; }
-              hash="$(printf '%s\n' "$sha_txt" | awk -v f="$fname" '$2==f{print $1;exit}')"
+              test -n "${line:-}" || { echo "::error::Debian netinst ISO를 찾지 못했습니다."; exit 1; }
+
+              fname="$(printf '%s\n' "$line" | sanitize_filename)"
+              hash="$(printf '%s\n' "$line" | extract_sha256 || true)"
               curl_s "${base}${fname}" -o "iso-out/${fname}"
-              if [ -n "${hash:-}" ]; then
-                echo "${hash}  iso-out/${fname}" | sha256sum -c -
-              fi
+              [ -n "${hash:-}" ] && echo "${hash}  iso-out/${fname}" | sha256sum -c -
               ;;
 
             rocky)
-              # Rocky: CHECKSUM 파일에 "SHA256 (Rocky-9.5-x86_64-minimal.iso) = <hash>" 형태
-              ARCH_MAP=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
-              REL="${RELEASE_HINT:-9}"  # 힌트가 비어있으면 메이저 최신 라인 스캔
-              # isos/<arch>/ 디렉터리 목록을 읽어 최신 마이너를 추정
-              base_root="https://download.rockylinux.org/pub/rocky/"
-              arch_dir="isos/${ARCH_MAP}/"
-              idx="$(curl_s "${base_root}")"
-              rel=$(printf '%s\n' "$idx" \
-                    | grep -Eo '>[0-9]+(\.[0-9]+)?/' | tr -d '>/ ' \
-                    | ( [ -n "$REL" ] && grep -E "^${REL}(\.|/|$)" || cat ) \
-                    | sort -V | tail -n1 )
+              ARCHR="$(arch_map_rhel "$ARCH")"
+              root="https://download.rockylinux.org/pub/rocky/"
+              idx="$(curl_s "$root")"
+              # release_hint가 비어있으면 최신 메이저/마이너 선택
+              rel="$(printf '%s\n' "$idx" | grep -Eo '>[0-9]+(\.[0-9]+)?/' | tr -d '>/ ' \
+                    | { [ -n "${RELEASE_HINT:-}" ] && grep -E "^${RELEASE_HINT}(\.|/|$)" || cat; } \
+                    | sort -V | tail -n1)"
               test -n "${rel:-}" || { echo "::error::Rocky 릴리스를 찾지 못했습니다."; exit 1; }
-              base="${base_root}${rel}/${arch_dir}"
+              base="${root}${rel}/isos/${ARCHR}/"
               ck="$(curl_s "${base}CHECKSUM")"
-              # minimal ISO 우선, 없으면 dvd ISO
-              fname="$(printf '%s\n' "$ck" \
-                | awk -v a="$ARCH_MAP" -v r="${rel}" '
-                  /Rocky-.*-minimal.*\.iso/ && $0 ~ a { 
-                    match($0, /\(([^)]+)\)/, m); if (m[1]!=""){print m[1]; exit}
-                  }')"
-              if [ -z "${fname:-}" ]; then
-                fname="$(printf '%s\n' "$ck" \
-                  | awk -v a="$ARCH_MAP" '
-                    /Rocky-.*\.iso/ && $0 ~ a {
-                      match($0, /\(([^)]+)\)/, m); if (m[1]!=""){print m[1]; exit}
-                  }')"
-              fi
-              test -n "${fname:-}" || { echo "::error::Rocky ISO 파일명을 찾지 못했습니다."; exit 1; }
-              hash="$(printf '%s\n' "$ck" | awk -v f="$fname" '
-                match($0, /SHA256 \(([^)]+)\) = ([[:xdigit:]]{64})/, m){ if(m[1]==f){print m[2]; exit}}
-              ')"
+              line="$(printf '%s\n' "$ck" \
+                | grep -Ei "Rocky-.*(minimal|dvd).*${ARCHR}.*\.iso" | head -n1 || true)"
+              test -n "${line:-}" || { echo "::error::Rocky ISO 라인을 찾지 못했습니다."; exit 1; }
+              fname="$(printf '%s\n' "$line" | sanitize_filename)"
+              hash="$(printf '%s\n' "$line" | extract_sha256 || true)"
               curl_s "${base}${fname}" -o "iso-out/${fname}"
-              if [ -n "${hash:-}" ]; then
-                echo "${hash}  iso-out/${fname}" | sha256sum -c -
-              fi
+              [ -n "${hash:-}" ] && echo "${hash}  iso-out/${fname}" | sha256sum -c -
               ;;
 
             alma)
-              # Alma: repo.almalinux.org/almalinux/<rel>/isos/<arch>/CHECKSUM
-              ARCH_MAP=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
-              # 릴리스 자동탐색
+              ARCHR="$(arch_map_rhel "$ARCH")"
               root="https://repo.almalinux.org/almalinux/"
               idx="$(curl_s "$root")"
               rel="$(printf '%s\n' "$idx" | grep -Eo '>[0-9]+\.[0-9]+/' | tr -d '>/ ' \
-                    | ( [ -n "${RELEASE_HINT:-}" ] && grep -E "^${RELEASE_HINT}(\.|/|$)" || cat ) \
+                    | { [ -n "${RELEASE_HINT:-}" ] && grep -E "^${RELEASE_HINT}(\.|/|$)" || cat; } \
                     | sort -V | tail -n1)"
               test -n "${rel:-}" || { echo "::error::Alma 릴리스를 찾지 못했습니다."; exit 1; }
-              base="${root}${rel}/isos/${ARCH_MAP}/"
+              base="${root}${rel}/isos/${ARCHR}/"
               ck="$(curl_s "${base}CHECKSUM")"
-              fname="$(printf '%s\n' "$ck" \
-                | awk -v a="$ARCH_MAP" '
-                    /AlmaLinux-.*-minimal.*\.iso/ && $0 ~ a {
-                      match($0, /\(([^)]+)\)/, m); if (m[1]!=""){print m[1]; exit}
-                  }')"
-              if [ -z "${fname:-}" ]; then
-                fname="$(printf '%s\n' "$ck" \
-                  | awk -v a="$ARCH_MAP" '
-                    /AlmaLinux-.*\.iso/ && $0 ~ a {
-                      match($0, /\(([^)]+)\)/, m); if (m[1]!=""){print m[1]; exit}
-                  }')"
-              fi
-              test -n "${fname:-}" || { echo "::error::Alma ISO 파일명을 찾지 못했습니다."; exit 1; }
-              hash="$(printf '%s\n' "$ck" | awk -v f="$fname" '
-                match($0, /SHA256 \(([^)]+)\) = ([[:xdigit:]]{64})/, m){ if(m[1]==f){print m[2]; exit}}
-              ')"
+              line="$(printf '%s\n' "$ck" \
+                | grep -Ei "AlmaLinux-.*(minimal|dvd).*${ARCHR}.*\.iso" | head -n1 || true)"
+              test -n "${line:-}" || { echo "::error::Alma ISO 라인을 찾지 못했습니다."; exit 1; }
+              fname="$(printf '%s\n' "$line" | sanitize_filename)"
+              hash="$(printf '%s\n' "$line" | extract_sha256 || true)"
               curl_s "${base}${fname}" -o "iso-out/${fname}"
-              if [ -n "${hash:-}" ]; then
-                echo "${hash}  iso-out/${fname}" | sha256sum -c -
-              fi
+              [ -n "${hash:-}" ] && echo "${hash}  iso-out/${fname}" | sha256sum -c -
               ;;
 
             fedora)
-              # Fedora Server: /releases/<REL>/Server/<arch>/iso/ + Fedora-Server-<REL>-<arch>-CHECKSUM
-              ARCH_MAP=$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x86_64")
-              # release_hint 없으면 최신 릴리스 확인
+              ARCHR="$(arch_map_rhel "$ARCH")"
               root="https://download.fedoraproject.org/pub/fedora/linux/releases/"
               if [ -n "${RELEASE_HINT:-}" ]; then
                 rel="$RELEASE_HINT"
@@ -246,38 +197,25 @@ jobs:
                 idx="$(curl_s "$root")"
                 rel="$(printf '%s\n' "$idx" | grep -Eo '>[0-9]{2}/' | tr -d '>/ ' | sort -V | tail -n1)"
               fi
-              base="${root}${rel}/Server/${ARCH_MAP}/iso/"
-              ckn="Fedora-Server-${rel}-${ARCH_MAP}-CHECKSUM"
+              base="${root}${rel}/Server/${ARCHR}/iso/"
+              ckn="Fedora-Server-${rel}-${ARCHR}-CHECKSUM"
               ck="$(curl_s "${base}${ckn}")"
-              # DVD ISO 우선 선택
-              fname="$(printf '%s\n' "$ck" | awk -v a="$ARCH_MAP" '
-                /Fedora-Server-.*-dvd-.*\.iso/ && $0 ~ a {print $2; exit}
-                { if (match($0, /\(([^)]+dvd[^)]+\.iso)\)\s*=\s*([[:xdigit:]]{64})/, m)) { print m[1]; exit } }
-              ')"
-              if [ -z "${fname:-}" ]; then
-                # 어떤 경우엔 netinst만 있을 수 있음
-                fname="$(printf '%s\n' "$ck" | awk -v a="$ARCH_MAP" '
-                  /Fedora-Server-.*-netinst-.*\.iso/ && $0 ~ a {print $2; exit}
-                  { if (match($0, /\(([^)]+netinst[^)]+\.iso)\)\s*=\s*([[:xdigit:]]{64})/, m)) { print m[1]; exit } }
-                ')"
-              fi
-              test -n "${fname:-}" || { echo "::error::Fedora ISO 파일명을 찾지 못했습니다."; exit 1; }
-              hash="$(printf '%s\n' "$ck" | awk -v f="$fname" '
-                $2==f { print $1; exit }
-                { if (match($0, /\(([^)]+)\)\s*=\s*([[:xdigit:]]{64})/, m)) { if (m[1]==f){ print m[2]; exit } } }
-              ')"
+              line="$(printf '%s\n' "$ck" \
+                | grep -Ei "Fedora-Server-${rel}.*(dvd|netinst).*${ARCHR}.*\.iso" | head -n1 || true)"
+              test -n "${line:-}" || { echo "::error::Fedora ISO 라인을 찾지 못했습니다."; exit 1; }
+              fname="$(printf '%s\n' "$line" | sanitize_filename)"
+              hash="$(printf '%s\n' "$line" | extract_sha256 || true)"
               curl_s "${base}${fname}" -o "iso-out/${fname}"
-              if [ -n "${hash:-}" ]; then
-                echo "${hash}  iso-out/${fname}" | sha256sum -c -
-              fi
+              [ -n "${hash:-}" ] && echo "${hash}  iso-out/${fname}" | sha256sum -c -
               ;;
 
             *)
-              echo "::error::unsupported distro: $DISTRO"
-              exit 1
-              ;;
+              echo "::error::unsupported distro: $DISTRO"; exit 1;;
           esac
+
           echo "::endgroup::"
+          echo "[OK] Download complete:"
+          ls -lh iso-out
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
