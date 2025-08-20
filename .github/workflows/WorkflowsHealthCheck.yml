@@ -109,6 +109,7 @@ jobs:
           OPTIONS="$(echo "${{ github.event.inputs.options }}" | tr 'A-Z' 'a-z' | tr -d ' ')"
           TZ="${REGION%%|*}"
           LOCALE="${REGION##*|}"
+
           has(){ echo ",$OPTIONS," | grep -q ",$1," ; }
 
           DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has upgrade && echo true || echo false)      # runner
@@ -192,7 +193,6 @@ jobs:
             -o Dpkg::Options::="--force-confdef" \
             -o Dpkg::Options::="--force-confold" \
             install $BASE_PKGS
-
           PKGS_EXTRA=""
           [ "${F_LVM:-false}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA lvm2"
           [ "${F_MDADM:-false}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA mdadm"
@@ -266,6 +266,7 @@ jobs:
           fi
           EOF
           chmod +x "${SCRIPTS}/apply_permissions.sh"
+
           printf "export USERNAME=%q\nexport CREATE_DIRS=%q\n" "${USERNAME}" "true" > "${SCRIPTS}/env.seed"
 
       - name: "스토리지/백업 + 업그레이드 스크립트(에코)"
@@ -506,36 +507,21 @@ jobs:
           EOF
           chmod +x "${SCRIPTS}/host_upgrade.sh"
 
-      - name: "Kickstart & Preseed 템플릿(자동 파티셔닝/RAID 조건부) - FIXED"
+      - name: "Kickstart & Preseed 템플릿(자동 파티셔닝/RAID 조건부) - FIXED + UEFI/BIOS 자동"
         run: |
           set -Eeuo pipefail
           trap 'rc=$?; echo "[TPL] failed: ${BASH_COMMAND} (rc=${rc})" >&2; exit $rc' ERR
           TPL="${ECHO_ROOT}/templates"
           mkdir -p "${ECHO_ROOT}/iso_src/ks_preseed" "$TPL"
 
-          # 🔧 read -d '' 제거: 안전한 heredoc → 명령치환
+          # ✅ heredoc 대신 ANSI-C quoting: YAML 들여쓰기와 무관하게 안전
           if [ "${F_MDADM}" = "true" ]; then
-            KSPART="$(cat <<'K'
-          clearpart --all --initlabel
-          part raid.11 --ondisk=sda --size=1024
-          part raid.12 --ondisk=sdb --size=1024
-          raid /boot --device=md0 --level=1 raid.11 raid.12
-          part raid.21 --ondisk=sda --size=1 --grow
-          part raid.22 --ondisk=sdb --size=1 --grow
-          raid pv.01 --device=md1 --level=1 raid.21 raid.22
-          volgroup vg0 pv.01
-          logvol swap --vg=vg0 --name=swap --size=2048
-          logvol / --vg=vg0 --name=root --size=10240 --grow --fstype=xfs
-K
-)"
+            KSPART=$'clearpart --all --initlabel\npart raid.11 --ondisk=sda --size=1024\npart raid.12 --ondisk=sdb --size=1024\nraid /boot --device=md0 --level=1 raid.11 raid.12\npart raid.21 --ondisk=sda --size=1 --grow\npart raid.22 --ondisk=sdb --size=1 --grow\nraid pv.01 --device=md1 --level=1 raid.21 raid.22\nvolgroup vg0 pv.01\nlogvol swap --vg=vg0 --name=swap --size=2048\nlogvol / --vg=vg0 --name=root --size=10240 --grow --fstype=xfs'
           else
-            KSPART="$(cat <<'K'
-          autopart --type=lvm
-K
-)"
+            KSPART=$'autopart --type=lvm'
           fi
 
-          # Kickstart 템플릿 생성
+          # Kickstart 템플릿: UEFI/BIOS 자동 감지하여 bootloader 라인 동적 주입
           cat > "${TPL}/kickstart.ks" <<EOF
           #version=RHEL9
           lang en_US.UTF-8
@@ -546,12 +532,31 @@ K
           sshkey --username=${USERNAME} "$(head -n1 ${ECHO_ROOT}/seed/ssh/authorized_keys 2>/dev/null || true)"
           network --bootproto=dhcp --hostname=${HOSTNAME}
           services --enabled=sshd
-          firewall --enabled --service=ssh
-          bootloader --location=mbr
+          firewall --enabled=ssh
+
+          # 부트로더: %pre에서 /tmp/bootloader.ks 생성 후 포함
+          %pre --log=/tmp/ks-pre.log
+          #!/bin/bash
+          set -euo pipefail
+          if [ -d /sys/firmware/efi ]; then
+            # UEFI: 파티션 테이블에 EFI 파티션이 필요하므로 자동 파티셔닝시 anaconda가 생성
+            echo "bootloader --location=boot" > /tmp/bootloader.ks
+          else
+            echo "bootloader --location=mbr" > /tmp/bootloader.ks
+          fi
+          %end
+
+          %include /tmp/bootloader.ks
+
           ${KSPART}
           reboot
+
           %post --log=/root/ks-post.log
           echo "[KS] post 시작"
+          # mdadm 구성 파일 고정(있다면 덤프)
+          if command -v mdadm >/dev/null 2>&1; then
+            mdadm --detail --scan > /etc/mdadm.conf || true
+          fi
           echo "[KS] 완료"
           %end
           EOF
@@ -686,7 +691,6 @@ K
           cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
           cp -a "${ECHO_ROOT}/iso_src/extras" "${ECHO_ROOT}/iso_src/seed/"
-
           genisoimage -quiet -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
           isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
           [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
@@ -703,7 +707,6 @@ K
             local REL_HINT="$1" ARCH="$2"
             echoe "[UBUNTU] build start"
             mkdir -p "${ECHO_ROOT}/tmp"
-
             local SERIES=()
             case "${REL_HINT}" in
               24.*) SERIES=("noble");;
@@ -711,13 +714,11 @@ K
               20.*) SERIES=("focal");;
               *) SERIES=("noble" "jammy" "focal");;
             esac
-
             local CDIMAGE_URL=""
             for CODENAME in "${SERIES[@]}"; do
               U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
               if $CURL -I "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
             done
-
             local YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
             local RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
 
@@ -759,7 +760,6 @@ K
 
             local EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
             local CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
-
             local urls=("${CDIMAGE_URL}${CAND}" "${RELEASES_URL}${CAND}")
             urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
             urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
@@ -815,7 +815,6 @@ K
               -map "${ECHO_ROOT}/iso_src/autoinstall/ubuntu.grub"  /boot/grub/grub.cfg \
               -map "${ECHO_ROOT}/iso_src/autoinstall/ubuntu.grub"  /EFI/BOOT/grub.cfg \
               -boot_image any keep
-
             echoe "[UBUNTU] done"
           }
 
@@ -833,10 +832,12 @@ K
             done
             [ -n "$SUMS_URL" ] || { echoe "[ERR] Debian SHA256SUMS 미발견"; return 1; }
             $CURL -o "${OUT}/DEBIAN_SHA256SUMS" "$SUMS_URL"
+
             local CAND
             CAND="$(awk '{print $2}' ${OUT}/DEBIAN_SHA256SUMS | grep -E "debian-[0-9]+(\.[0-9]+)*-${ARCH}-(netinst|DVD-1)\.iso$" | tail -n1)"
             [ -n "$CAND" ] || CAND="$(awk '{print $2}' ${OUT}/DEBIAN_SHA256SUMS | tail -n1)"
             local EXPECT="$(grep -E " ${CAND}$" ${OUT}/DEBIAN_SHA256SUMS | awk '{print $1}')"
+
             $CURL -o "${OUT}/base-debian.iso" "${BASE}${CAND}"
             local ACTUAL="$(sha256sum ${OUT}/base-debian.iso | awk '{print $1}')"
             [ "$EXPECT" = "$ACTUAL" ] || { echoe "[ERR] Debian SHA256 mismatch"; return 1; }
@@ -848,7 +849,7 @@ K
               -map "${ECHO_ROOT}/iso_src/extras" /extras \
               -boot_image any keep
 
-            rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
+            rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT}"
             7z x -o"${ECHO_ROOT}/tmp/grub" "${OUT}/base-debian.iso" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
             [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
             [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
@@ -882,7 +883,6 @@ K
               -map "${ECHO_ROOT}/iso_src/autoinstall/debian.grub"  /boot/grub/grub.cfg \
               -map "${ECHO_ROOT}/iso_src/autoinstall/debian.grub"  /EFI/BOOT/grub.cfg \
               -boot_image any keep
-
             echoe "[DEBIAN] done"
           }
 
@@ -976,7 +976,6 @@ K
               -map "${ECHO_ROOT}/iso_src/autoinstall/${PREFIX}.grub"  /boot/grub/grub.cfg \
               -map "${ECHO_ROOT}/iso_src/autoinstall/${PREFIX}.grub"  /EFI/BOOT/grub.cfg \
               -boot_image any keep
-
             echoe "[${D^^}] done"
           }
 
