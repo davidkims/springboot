@@ -1,780 +1,432 @@
-name: "🐧 Linux 최신 설치 & Cloud-Init Seed ISO + Echo 권한 (ALL Versions + AutoUpdate + FullAuto v7.1-Storage)"
-
-permissions:
-  contents: write
+name: "🧹 Actions Failed Cleaner (Auto Token + Auto-Enable + FORCE Delete Files + Echo)"
 
 on:
   workflow_dispatch:
     inputs:
-      distro:
-        description: "배포판 (ubuntu|debian|rocky|alma|fedora)"
-        default: "ubuntu"
+      lookback_hours:
+        description: "몇 시간 이내 실패 run만 삭제 (기본 720=30일)"
+        default: "720"
         required: true
-      release_hint:
-        description: "버전 힌트 (ubuntu: 24.04 / debian: 12 등, 비우면 최신)"
+      disable_on_failure:
+        description: "최근 실행이 실패한 워크플로우를 비활성화(Disable)"
+        default: "true"
+        required: true
+      enable_on_success:
+        description: "최근 실행이 성공한 워크플로우를 자동 재활성화(Enable)"
+        default: "true"
+        required: true
+      success_streak:
+        description: "재활성화 조건: 최근 연속 성공 횟수"
+        default: "1"
+        required: true
+      delete_limit:
+        description: "최대 삭제 run 개수 상한"
+        default: "1000"
+        required: true
+      dry_run:
+        description: "실제 수행 대신 출력만 (true/false)"
+        default: "false"
+        required: true
+      protect_patterns:
+        description: "비활성화/삭제 제외 패턴(, 구분, 예: 'health,deploy')"
         default: ""
         required: false
-      arch:
-        description: "아키텍처 (amd64|arm64)"
-        default: "amd64"
+      # === 강제 파일 삭제 관련 옵션 ===
+      hard_delete_workflow_files:
+        description: "실패 워크플로우의 YAML 파일을 기본 브랜치에서 즉시 강제 삭제"
+        default: "true"
         required: true
-      hostname:
-        description: "호스트명"
-        default: "fin-linux"
+      create_pr_instead_of_direct_commit:
+        description: "직접 커밋 대신 PR 생성으로 삭제(보수 모드)"
+        default: "false"
         required: true
-      username:
-        description: "관리자 사용자명"
-        default: "finops"
+      backup_before_delete:
+        description: "삭제 전 백업 브랜치에 워크플로우 파일 보관"
+        default: "false"
         required: true
-      ssh_public_key:
-        description: "접속용 공개키 (ssh-ed25519/ssh-rsa)"
-        default: ""
-        required: false
-      packages:
-        description: "설치 패키지 목록(공백/콤마 구분)"
-        default: "vim curl git htop unzip"
-        required: false
-      region:
-        description: "타임존/로케일 (예: Asia/Seoul|en_US.UTF-8)"
-        default: "Asia/Seoul|en_US.UTF-8"
+      backup_branch:
+        description: "백업 브랜치 이름 (backup_before_delete=true일 때 사용)"
+        default: "workflow-purge-backup"
         required: true
-      options:
-        description: "추가 옵션(콤마로 조합): upgrade,combine,upload,lvm,mdadm,zfs,btrfs,restic,borgbackup,rclone,duplicity"
-        default: "combine,upload"
-        required: false
-  schedule:
-    - cron: "0 3 * * 0"
+      delete_branch_name:
+        description: "PR 모드에서 사용할 작업 브랜치 이름"
+        default: "workflow-purge-branch"
+        required: true
+      commit_message_prefix:
+        description: "커밋 메시지 접두사"
+        default: "[FORCE-PURGE]"
+        required: true
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+env:
+  TARGET_OWNER: "davidkims"
+  TARGET_REPO: "springboot"
 
 jobs:
-  build-seed-iso:
+  clean-and-toggle-and-purge:
     runs-on: ubuntu-latest
-    env:
-      AUTO_UPDATE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
     steps:
-      - name: "[ECHO] 시작"
-        run: |
-          set -euo pipefail
-          echo "[INIT] Linux Seed ISO + 권한 에코 워크플로우 시작 (${GITHUB_WORKFLOW})"
-
-      - name: "Checkout"
+      - name: ⬇️ Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: "기본 디렉토리/유틸"
+      - name: 🔧 Install openssl & jq + Echo
         run: |
-          set -euo pipefail
-          export ECHO_ROOT=".github/echo_linux"
-          mkdir -p "$ECHO_ROOT"/{logs,seed,out,snippets,scripts,ssh,dirs,iso_src,records,tmp,templates}
-          echo "ECHO_ROOT=$ECHO_ROOT" >> $GITHUB_ENV
-          cat > "$ECHO_ROOT/echo.sh" <<'EOS'
-          echoe(){ printf "%s %s\n" "[$(date +'%F %T')]" "$*"; }
-          req_min_size(){ f="$1"; min="$2"; [ -s "$f" ] || return 1; sz=$(stat -c%s "$f" 2>/dev/null || echo 0); [ "$sz" -ge "$min" ]; }
-          is_iso(){ f="$1"; isoinfo -d -i "$f" >/dev/null 2>&1; }
-          EOS
-          . "$ECHO_ROOT/echo.sh"
-          echoe "[DIR] 준비 완료"
-          echo "CREATE_DIRS=true" >> $GITHUB_ENV
+          set -Eeuo pipefail
+          echo "[INIT] Installing openssl & jq ..."
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y openssl jq >/dev/null 2>&1
+          echo "[OK] Tools ready."
 
-      - name: "입력값 정규화 (+ options 파싱/플래그)"
+      - name: 🔑 Acquire Admin Token (Auto) — PAT → App → GITHUB_TOKEN
+        id: tok
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_INSTALLATION_ID: ${{ secrets.APP_INSTALLATION_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          DISTRO="${{ github.event.inputs.distro }}"
-          REL_HINT="${{ github.event.inputs.release_hint }}"
-          HN="${{ github.event.inputs.hostname }}"
-          USERNAME="${{ github.event.inputs.username }}"
-          SSH_KEY="${{ github.event.inputs.ssh_public_key }}"
-          PKGS="${{ github.event.inputs.packages }}"
-          REGION="${{ github.event.inputs.region }}"
-          ARCH="${{ github.event.inputs.arch }}"
-          OPTIONS="$(echo "${{ github.event.inputs.options }}" | tr 'A-Z' 'a-z' | tr -d ' ')"
-          TZ="${REGION%%|*}"
-          LOCALE="${REGION##*|}"
+          set -Eeuo pipefail
+          echo "[TOK] Start acquiring token ..."
+          MASK(){ echo "::add-mask::$1"; }
+          USE_TOKEN=""
 
-          has_opt(){ echo ",$OPTIONS," | grep -q ",$1," ; }
-
-          # 기본 토글
-          DO_UPGRADE=$([ "$AUTO_UPDATE" = "true" ] || has_opt upgrade && echo true || echo false)
-          COMBINE=$([ "$AUTO_UPDATE" = "true" ] || has_opt combine && echo true || echo false)
-          UPLOAD=$([ "$AUTO_UPDATE" = "true" ] || has_opt upload && echo true || echo false)
-
-          # 스토리지/백업 토글
-          F_LVM=$([ "$AUTO_UPDATE" = "true" ] || has_opt lvm && echo true || echo false)
-          F_MDADM=$([ "$AUTO_UPDATE" = "true" ] || has_opt mdadm && echo true || echo false)
-          F_ZFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt zfs && echo true || echo false)
-          F_BTRFS=$([ "$AUTO_UPDATE" = "true" ] || has_opt btrfs && echo true || echo false)
-          F_RESTIC=$([ "$AUTO_UPDATE" = "true" ] || has_opt restic && echo true || echo false)
-          F_BORG=$([ "$AUTO_UPDATE" = "true" ] || has_opt borgbackup && echo true || echo false)
-          F_RCLONE=$([ "$AUTO_UPDATE" = "true" ] || has_opt rclone && echo true || echo false)
-          F_DUPLICITY=$([ "$AUTO_UPDATE" = "true" ] || has_opt duplicity && echo true || echo false)
-
-          case "$DISTRO" in
-            ubuntu)  [ -z "$REL_HINT" ] && REL_HINT="24.04" ;;
-            debian)  [ -z "$REL_HINT" ] && REL_HINT="12" ;;
-            rocky)   [ -z "$REL_HINT" ] && REL_HINT="9" ;;
-            alma)    [ -z "$REL_HINT" ] && REL_HINT="9" ;;
-            fedora)  [ -z "$REL_HINT" ] && REL_HINT="40" ;;
-            *) echo "지원하지 않는 distro: $DISTRO" >&2; exit 1 ;;
-          esac
-          case "$ARCH" in amd64|arm64) ;; * ) echo "지원하지 않는 arch: $ARCH" >&2; exit 1;; esac
-
-          {
-            echo "DISTRO=$DISTRO"
-            echo "REL_HINT=$REL_HINT"
-            echo "HOSTNAME=$HN"
-            echo "USERNAME=$USERNAME"
-            echo "SSH_KEY=$SSH_KEY"
-            echo "TZ=$TZ"
-            echo "LOCALE=$LOCALE"
-            echo "PKGS=$PKGS"
-            echo "COMBINE=$COMBINE"
-            echo "UPLOAD=$UPLOAD"
-            echo "DO_UPGRADE=$DO_UPGRADE"
-            echo "UBUNTU_ARCH=$ARCH"
-            echo "F_LVM=$F_LVM"
-            echo "F_MDADM=$F_MDADM"
-            echo "F_ZFS=$F_ZFS"
-            echo "F_BTRFS=$F_BTRFS"
-            echo "F_RESTIC=$F_RESTIC"
-            echo "F_BORG=$F_BORG"
-            echo "F_RCLONE=$F_RCLONE"
-            echo "F_DUPLICITY=$F_DUPLICITY"
-          } >> $GITHUB_ENV
-
-          [ "$DISTRO" = "ubuntu" ] && echo "CODENAME=noble" >> $GITHUB_ENV
-
-      - name: "런너 업데이트(선택)"
-        if: env.DO_UPGRADE == 'true'
-        run: |
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
-          sudo apt-get -y autoremove || true
-
-      - name: "필수/확장 패키지 설치 (스토리지/백업 연동)"
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y software-properties-common || true
-          sudo add-apt-repository -y universe || true
-          BASE_PKGS="curl wget jq sed file genisoimage xorriso cloud-guest-utils p7zip-full gnupg squashfs-tools gawk libcdio-utils perl"
-          sudo apt-get install -y $BASE_PKGS
-
-          # (참고) 아래 패키지 설치는 런너용이며, 대상 머신 설치는 cloud-init의 packages에 자동 반영됨
-          PKGS_EXTRA=""
-          [ "${F_LVM}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA lvm2"
-          [ "${F_MDADM}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA mdadm"
-          [ "${F_ZFS}" = "true" ]       && PKGS_EXTRA="$PKGS_EXTRA zfsutils-linux"
-          [ "${F_BTRFS}" = "true" ]     && PKGS_EXTRA="$PKGS_EXTRA btrfs-progs"
-          [ "${F_RESTIC}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA restic"
-          [ "${F_BORG}" = "true" ]      && PKGS_EXTRA="$PKGS_EXTRA borgbackup"
-          [ "${F_RCLONE}" = "true" ]    && PKGS_EXTRA="$PKGS_EXTRA rclone"
-          [ "${F_DUPLICITY}" = "true" ] && PKGS_EXTRA="$PKGS_EXTRA duplicity"
-          if [ -n "$PKGS_EXTRA" ]; then
-            sudo apt-get install -y $PKGS_EXTRA
-          fi
-
-      - name: "권한/방화벽 스니펫(+패딩) & 서버 적용 스크립트"
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          SNIP="${ECHO_ROOT}/snippets"
-          SCRIPTS="${ECHO_ROOT}/scripts"
-          mkdir -p "$SNIP" "$SCRIPTS"
-          head -c 65536 /dev/urandom > "${SNIP}/.padding"
-          cat > "${SNIP}/sudoers_${USERNAME}" <<EOF
-          ${USERNAME} ALL=(ALL) NOPASSWD:ALL
-          EOF
-          cat > "${SNIP}/sshd_${USERNAME}.conf" <<'EOF'
-          PasswordAuthentication no
-          PermitRootLogin no
-          PubkeyAuthentication yes
-          ChallengeResponseAuthentication no
-          UsePAM yes
-          EOF
-          cat > "${SNIP}/ufw_init.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          ufw --force reset || true
-          ufw default deny incoming
-          ufw default allow outgoing
-          ufw allow 22/tcp
-          ufw --force enable
-          ufw status verbose || true
-          EOF
-          chmod +x "${SNIP}/ufw_init.sh"
-          cat > "${SCRIPTS}/apply_permissions.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          USERNAME="${USERNAME:-finops}"
-          adduser --disabled-password --gecos "" "$USERNAME" || true
-          usermod -aG sudo "$USERNAME" || true
-          install -d -m 700 -o "$USERNAME" -g "$USERNAME" "/home/$USERNAME/.ssh"
-          if [ -f /root/seed/ssh/authorized_keys ]; then
-            install -m 600 -o "$USERNAME" -g "$USERNAME" /root/seed/ssh/authorized_keys "/home/$USERNAME/.ssh/authorized_keys"
-          fi
-          install -m 440 /root/seed/snippets/sudoers_${USERNAME} /etc/sudoers.d/${USERNAME}
-          install -d -m 755 /etc/ssh/sshd_config.d
-          install -m 644 /root/seed/snippets/sshd_${USERNAME}.conf /etc/ssh/sshd_config.d/99-custom.conf
-          systemctl restart ssh || systemctl restart sshd || true
-          bash /root/seed/snippets/ufw_init.sh || true
-          if [ "${CREATE_DIRS:-true}" = "true" ]; then
-            mkdir -p /srv/app /var/log/app /opt/fin && chown -R "$USERNAME":"$USERNAME" /srv/app /var/log/app /opt/fin
-          fi
-          EOF
-          chmod +x "${SCRIPTS}/apply_permissions.sh"
-          printf "export USERNAME=%q\nexport CREATE_DIRS=%q\n" "${USERNAME}" "true" > "${SCRIPTS}/env.seed"
-
-      - name: "스토리지/백업 스크립트(에코) 생성"
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          SCRIPTS="${ECHO_ROOT}/scripts"
-          mkdir -p "${SCRIPTS}"
-
-          # 공통 환경 예시(seed에 제공) — 실제값 채워 사용
-          cat > "${SCRIPTS}/env.storage.example" <<'EOF'
-          # ===== LVM/RAID =====
-          export LVM_TARGET_DISKS=""     # ex) "/dev/sdb /dev/sdc"
-          export LVM_VG_NAME="vgdata"
-          export LVM_LV_NAME="lvdata"
-          export LVM_FS_TYPE="ext4"
-          export LVM_MOUNTPOINT="/srv/data"
-          export RAID_LEVEL="1"          # 0/1/5/6/10 …
-          export RAID_DEV="/dev/md0"
-
-          # ===== ZFS =====
-          export ZPOOL_NAME="zpool0"
-          export ZFS_DISKS=""            # ex) "/dev/sdb /dev/sdc"
-          export ZFS_DATASET="zpool0/data"
-          export ZFS_MOUNTPOINT="/srv/zdata"
-
-          # ===== BTRFS =====
-          export BTRFS_TARGET_DEV=""
-          export BTRFS_MOUNTPOINT="/srv/bdata"
-          export BTRFS_SUBVOLS="home data logs"
-
-          # ===== Restic =====
-          export RESTIC_REPOSITORY=""    # ex) s3:s3.amazonaws.com/bucket/path or rclone:remote:bucket
-          export RESTIC_PASSWORD=""
-          # (S3) export AWS_ACCESS_KEY_ID= ; export AWS_SECRET_ACCESS_KEY=
-
-          # ===== BorgBackup =====
-          export BORG_REPO=""            # ex) ssh://user@host:22/~/repo
-          export BORG_PASSPHRASE=""
-
-          # ===== Rclone =====
-          export RCLONE_REMOTE=""        # ex) myremote:bucket/path
-          # rclone.conf -> /root/.config/rclone/rclone.conf
-
-          # ===== Duplicity =====
-          export DUP_TARGET_URL=""       # ex) b2://bucket/path or s3://bucket/path
-          export DUP_PASSPHRASE=""
-
-          # ===== 공통 =====
-          export DRY_RUN="true"          # "true"면 실제 작업 미수행(로그만)
-          EOF
-
-          # LVM/RAID 자동 구성
-          cat > "${SCRIPTS}/storage_lvm_mdadm.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          echo "[LVM/RAID] starting (DRY_RUN=${DRY_RUN:-true})"
-          if [ -z "${LVM_TARGET_DISKS:-}" ]; then
-            echo "[LVM/RAID] LVM_TARGET_DISKS not set -> SKIP"; exit 0
-          fi
-          if [ -n "${RAID_LEVEL:-}" ] && [ -n "${RAID_DEV:-}" ]; then
-            echo "[LVM/RAID] mdadm --create ${RAID_DEV} --level=${RAID_LEVEL} --raid-devices=$(echo $LVM_TARGET_DISKS | wc -w) $LVM_TARGET_DISKS"
-            [ "${DRY_RUN:-true}" = "true" ] || mdadm --create "${RAID_DEV}" --level="${RAID_LEVEL}" --raid-devices=$(echo $LVM_TARGET_DISKS | wc -w) $LVM_TARGET_DISKS
-            PV_TARGET="${RAID_DEV}"
+          if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
+            echo "[TOK] Using provided GH_ADMIN_TOKEN (PAT)."
+            USE_TOKEN="${GH_ADMIN_TOKEN}"
+          elif [ -n "${APP_ID:-}" ] && [ -n "${APP_INSTALLATION_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "[TOK] Minting GitHub App installation token ..."
+            NOW=$(date -u +%s); IAT=$((NOW - 60)); EXP=$((NOW + 540))
+            HEADER_BASE64=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+            PAYLOAD=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$IAT" "$EXP" "$APP_ID")
+            PAYLOAD_BASE64=$(printf '%s' "$PAYLOAD" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+            UNSIGNED="${HEADER_BASE64}.${PAYLOAD_BASE64}"
+            KEYFILE="app_private_key.pem"; printf "%s" "$APP_PRIVATE_KEY" > "$KEYFILE"; chmod 600 "$KEYFILE"
+            SIGNATURE=$(printf '%s' "$UNSIGNED" | openssl dgst -sha256 -sign "$KEYFILE" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+            JWT="${UNSIGNED}.${SIGNATURE}"; MASK "$JWT"
+            INSTALL_TOKEN_JSON=$(curl -fsSL \
+              -H "Authorization: Bearer ${JWT}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -X POST "https://api.github.com/app/installations/${APP_INSTALLATION_ID}/access_tokens")
+            USE_TOKEN=$(echo "$INSTALL_TOKEN_JSON" | jq -r '.token')
+            [ -z "$USE_TOKEN" -o "$USE_TOKEN" = "null" ] && { echo "[ERR] Failed to mint installation token." >&2; exit 1; }
+            MASK "$USE_TOKEN"; echo "[TOK] App installation token acquired."
           else
-            PV_TARGET="$(echo $LVM_TARGET_DISKS | awk '{print $1}')"
-          fi
-          echo "[LVM] pvcreate ${PV_TARGET}"
-          echo "[LVM] vgcreate ${LVM_VG_NAME:-vgdata} ${PV_TARGET}"
-          echo "[LVM] lvcreate -l 100%FREE -n ${LVM_LV_NAME:-lvdata} ${LVM_VG_NAME:-vgdata}"
-          if [ "${DRY_RUN:-true}" != "true" ]; then
-            pvcreate "${PV_TARGET}"
-            vgcreate "${LVM_VG_NAME:-vgdata}" "${PV_TARGET}"
-            lvcreate -l 100%FREE -n "${LVM_LV_NAME:-lvdata}" "${LVM_VG_NAME:-vgdata}"
-          fi
-          LV_PATH="/dev/${LVM_VG_NAME:-vgdata}/${LVM_LV_NAME:-lvdata}"
-          FS="${LVM_FS_TYPE:-ext4}"
-          echo "[FS] mkfs.${FS} ${LV_PATH}"
-          [ "${DRY_RUN:-true}" = "true" ] || mkfs.${FS} "${LV_PATH}"
-          MP="${LVM_MOUNTPOINT:-/srv/data}"
-          mkdir -p "${MP}"
-          UUID="$(blkid -s UUID -o value "${LV_PATH}" || true)"
-          if [ -n "${UUID}" ]; then
-            LINE="UUID=${UUID} ${MP} ${FS} defaults 0 2"
-          else
-            LINE="${LV_PATH} ${MP} ${FS} defaults 0 2"
-          fi
-          echo "[FSTAB] ${LINE}"
-          if [ "${DRY_RUN:-true}" != "true" ]; then
-            grep -q "${LV_PATH}" /etc/fstab || echo "${LINE}" >> /etc/fstab
-            mount -a || true
-          fi
-          echo "[LVM/RAID] done"
-          EOF
-          chmod +x "${SCRIPTS}/storage_lvm_mdadm.sh"
-
-          # ZFS
-          cat > "${SCRIPTS}/zfs_setup.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          echo "[ZFS] starting (DRY_RUN=${DRY_RUN:-true})"
-          command -v zpool >/dev/null 2>&1 || { echo "[ZFS] zpool not found -> SKIP"; exit 0; }
-          [ -n "${ZFS_DISKS:-}" ] || { echo "[ZFS] ZFS_DISKS not set -> SKIP"; exit 0; }
-          POOL="${ZPOOL_NAME:-zpool0}"
-          echo "[ZFS] zpool create ${POOL} ${ZFS_DISKS}"
-          [ "${DRY_RUN:-true}" = "true" ] || zpool create -f "${POOL}" ${ZFS_DISKS}
-          DS="${ZFS_DATASET:-${POOL}/data}"
-          MP="${ZFS_MOUNTPOINT:-/srv/zdata}"
-          echo "[ZFS] zfs create ${DS} ; zfs set mountpoint=${MP} ${DS}"
-          if [ "${DRY_RUN:-true}" != "true" ]; then
-            zfs create -p "${DS}" || true
-            zfs set mountpoint="${MP}" "${DS}"
-            mkdir -p "${MP}"
-          fi
-          echo "[ZFS] done"
-          EOF
-          chmod +x "${SCRIPTS}/zfs_setup.sh"
-
-          # Btrfs
-          cat > "${SCRIPTS}/btrfs_setup.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          echo "[BTRFS] starting (DRY_RUN=${DRY_RUN:-true})"
-          command -v mkfs.btrfs >/dev/null 2>&1 || { echo "[BTRFS] mkfs.btrfs not found -> SKIP"; exit 0; }
-          [ -n "${BTRFS_TARGET_DEV:-}" ] || { echo "[BTRFS] BTRFS_TARGET_DEV not set -> SKIP"; exit 0; }
-          MP="${BTRFS_MOUNTPOINT:-/srv/bdata}"
-          SUBS="${BTRFS_SUBVOLS:-home data logs}"
-
-          echo "[BTRFS] mkfs.btrfs -f ${BTRFS_TARGET_DEV}"
-          [ "${DRY_RUN:-true}" = "true" ] || mkfs.btrfs -f "${BTRFS_TARGET_DEV}"
-
-          TMP="/mnt/.btrfs-tmp"
-          mkdir -p "${TMP}"
-          echo "[BTRFS] mount ${BTRFS_TARGET_DEV} ${TMP}"
-          [ "${DRY_RUN:-true}" = "true" ] || mount "${BTRFS_TARGET_DEV}" "${TMP}"
-
-          for s in ${SUBS}; do
-            echo "[BTRFS] btrfs subvolume create ${TMP}/${s}"
-            [ "${DRY_RUN:-true}" = "true" ] || btrfs subvolume create "${TMP}/${s}"
-          done
-
-          [ "${DRY_RUN:-true}" = "true" ] || umount "${TMP}"
-          rmdir "${TMP}" || true
-
-          mkdir -p "${MP}"
-          for s in ${SUBS}; do
-            mkdir -p "${MP}/${s}"
-            LINE="${BTRFS_TARGET_DEV} ${MP}/${s} btrfs defaults,subvol=${s} 0 0"
-            echo "[FSTAB] ${LINE}"
-            if [ "${DRY_RUN:-true}" != "true" ]; then
-              grep -q " ${MP}/${s} " /etc/fstab || echo "${LINE}" >> /etc/fstab
+            echo "[TOK] No PAT/App creds. Checking if this job runs on the target repo ..."
+            if [ "${{ github.repository_owner }}" = "${TARGET_OWNER}" ] && [ "${{ github.event.repository.name }}" = "${TARGET_REPO}" ]; then
+              echo "[TOK] Using GITHUB_TOKEN on target repo."
+              USE_TOKEN="${GITHUB_TOKEN}"
+            else
+              echo "[ERR] No token source available. Provide PAT or App creds, or run on target repo." >&2
+              exit 2
             fi
-          done
-          [ "${DRY_RUN:-true}" = "true" ] || mount -a || true
-          echo "[BTRFS] done"
-          EOF
-          chmod +x "${SCRIPTS}/btrfs_setup.sh"
-
-          # Restic
-          cat > "${SCRIPTS}/restic_init.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          command -v restic >/dev/null 2>&1 || { echo "[restic] not found -> SKIP"; exit 0; }
-          [ -n "${RESTIC_REPOSITORY:-}" ] || { echo "[restic] RESTIC_REPOSITORY not set -> SKIP"; exit 0; }
-          [ -n "${RESTIC_PASSWORD:-}" ] || { echo "[restic] RESTIC_PASSWORD not set -> SKIP"; exit 0; }
-          export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-          echo "[restic] repo check/init"
-          restic snapshots >/dev/null 2>&1 || restic init
-          echo "[restic] first backup /etc /home /srv"
-          restic backup /etc /home /srv || true
-          echo "[restic] done"
-          EOF
-          chmod +x "${SCRIPTS}/restic_init.sh"
-
-          # Borg
-          cat > "${SCRIPTS}/borg_init.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          command -v borg >/dev/null 2>&1 || { echo "[borg] not found -> SKIP"; exit 0; }
-          [ -n "${BORG_REPO:-}" ] || { echo "[borg] BORG_REPO not set -> SKIP"; exit 0; }
-          export BORG_REPO BORG_PASSPHRASE
-          echo "[borg] repo init (if needed)"
-          borg list >/dev/null 2>&1 || borg init --encryption=repokey-blake2
-          echo "[borg] create archive"
-          borg create --stats ::first-$(date +%Y%m%d%H%M) /etc /home /srv || true
-          echo "[borg] prune (keep 7 daily)"
-          borg prune --keep-daily=7 || true
-          echo "[borg] done"
-          EOF
-          chmod +x "${SCRIPTS}/borg_init.sh"
-
-          # Rclone
-          cat > "${SCRIPTS}/rclone_check.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          command -v rclone >/dev/null 2>&1 || { echo "[rclone] not found -> SKIP"; exit 0; }
-          [ -n "${RCLONE_REMOTE:-}" ] || { echo "[rclone] RCLONE_REMOTE not set -> SKIP"; exit 0; }
-          echo "[rclone] ls ${RCLONE_REMOTE}"
-          rclone ls "${RCLONE_REMOTE}" >/root/rclone_ls.txt 2>&1 || true
-          echo "[rclone] done"
-          EOF
-          chmod +x "${SCRIPTS}/rclone_check.sh"
-
-          # Duplicity
-          cat > "${SCRIPTS}/duplicity_init.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          . /root/seed/scripts/env.storage 2>/dev/null || true
-          command -v duplicity >/dev/null 2>&1 || { echo "[duplicity] not found -> SKIP"; exit 0; }
-          [ -n "${DUP_TARGET_URL:-}" ] || { echo "[duplicity] DUP_TARGET_URL not set -> SKIP"; exit 0; }
-          export PASSPHRASE="${DUP_PASSPHRASE:-}"
-          echo "[duplicity] backing up /etc /home /srv -> ${DUP_TARGET_URL}"
-          duplicity /etc "file:///root/dup_local/etc" || true
-          duplicity /home "file:///root/dup_local/home" || true
-          duplicity /srv  "${DUP_TARGET_URL}" || true
-          echo "[duplicity] done"
-          EOF
-          chmod +x "${SCRIPTS}/duplicity_init.sh"
-
-      - name: "Kickstart & Preseed 템플릿"
-        run: |
-          set -euo pipefail
-          TPL="${ECHO_ROOT}/templates"
-          mkdir -p "${ECHO_ROOT}/iso_src/ks_preseed" "$TPL"
-          cat > "${TPL}/kickstart.ks" <<EOF
-          #version=RHEL9
-          lang en_US.UTF-8
-          keyboard us
-          timezone ${TZ} --isUtc
-          rootpw --lock
-          user --name=${USERNAME} --groups=wheel --shell=/bin/bash --gecos="${USERNAME}" --plaintext --password ''
-          sshkey --username=${USERNAME} "$(head -n1 ${ECHO_ROOT}/seed/ssh/authorized_keys || true)"
-          network --bootproto=dhcp --hostname=${HOSTNAME}
-          services --enabled=sshd
-          firewall --enabled --service=ssh
-          bootloader --location=mbr
-          autopart --type=lvm
-          reboot
-          %post --log=/root/ks-post.log
-          echo "[KS] post 시작"
-          echo "[KS] 완료"
-          %end
-          EOF
-          cat > "${TPL}/preseed.cfg" <<EOF
-          d-i debian-installer/locale string ${LOCALE}
-          d-i time/zone string ${TZ}
-          d-i clock-setup/utc boolean true
-          d-i netcfg/choose_interface select auto
-          d-i netcfg/get_hostname string ${HOSTNAME}
-          d-i passwd/user-fullname string ${USERNAME}
-          d-i passwd/username string ${USERNAME}
-          d-i passwd/user-password-crypted password *
-          d-i user-setup/allow-password-weak boolean true
-          d-i passwd/disable-password boolean true
-          d-i preseed/late_command string in-target /usr/bin/mkdir -p /root/seed; cp -a /cdrom/seed /target/root/seed || true
-          d-i pkgsel/include string openssh-server sudo
-          d-i finish-install/reboot_in_progress note
-          EOF
-          cp -a "${TPL}/kickstart.ks" "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg"
-          cp -a "${TPL}/preseed.cfg"  "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg"
-
-      - name: "cloud-init seed 구성 생성 (+ 스토리지/백업 runcmd 연결)"
-        run: |
-          set -euo pipefail
-          SEED="${ECHO_ROOT}/seed"
-          mkdir -p "$SEED"/{nocloud,ssh,snippets,scripts}
-          if [ -n "${SSH_KEY}" ]; then
-            echo "${SSH_KEY}" > "${SEED}/ssh/authorized_keys"
-          else
-            echo "# 여기에 ssh 공개키를 넣으세요" > "${SEED}/ssh/authorized_keys"
           fi
 
-          # 선택된 기능용 추가 패키지(대상 머신 설치용) 구성
-          EXTRA_PKGS=""
-          [ "${F_LVM}" = "true" ]       && EXTRA_PKGS="$EXTRA_PKGS lvm2"
-          [ "${F_MDADM}" = "true" ]     && EXTRA_PKGS="$EXTRA_PKGS mdadm"
-          [ "${F_ZFS}" = "true" ]       && EXTRA_PKGS="$EXTRA_PKGS zfsutils-linux"
-          [ "${F_BTRFS}" = "true" ]     && EXTRA_PKGS="$EXTRA_PKGS btrfs-progs"
-          [ "${F_RESTIC}" = "true" ]    && EXTRA_PKGS="$EXTRA_PKGS restic"
-          [ "${F_BORG}" = "true" ]      && EXTRA_PKGS="$EXTRA_PKGS borgbackup"
-          [ "${F_RCLONE}" = "true" ]    && EXTRA_PKGS="$EXTRA_PKGS rclone"
-          [ "${F_DUPLICITY}" = "true" ] && EXTRA_PKGS="$EXTRA_PKGS duplicity"
+          echo "::add-mask::$USE_TOKEN"
+          echo "GH_ADMIN_TOKEN=$USE_TOKEN" >> "$GITHUB_ENV"
+          echo "token_ready=true" >> "$GITHUB_OUTPUT"
 
-          # 입력 PKGS + EXTRA_PKGS → 중복 제거 콤마 리스트
-          COMBINED_PKGS="$(printf "%s %s\n" "$PKGS" "$EXTRA_PKGS" | tr ',;' ' ' | tr -s ' ' ' ')"
-          PKG_LINE=$(echo "$COMBINED_PKGS" | awk '{for(i=1;i<=NF;i++) if(!seen[$i]++){printf (n++?", ":"") $i}}')
-
-          # 스토리지/백업 환경 예시 파일 동봉(사용 시 /root/seed/scripts/env.storage 수정)
-          cp -a "${ECHO_ROOT}/scripts/env.storage.example" "${SEED}/scripts/env.storage"
-
-          cat > "${SEED}/nocloud/user-data" <<EOF
-          #cloud-config
-          hostname: ${HOSTNAME}
-          manage_etc_hosts: true
-          locale: ${LOCALE}
-          timezone: ${TZ}
-          package_update: true
-          package_upgrade: true
-          users:
-            - default
-            - name: ${USERNAME}
-              groups: [sudo, adm, netdev]
-              sudo: ALL=(ALL) NOPASSWD:ALL
-              shell: /bin/bash
-              ssh_authorized_keys:
-                - $(head -n1 "${SEED}/ssh/authorized_keys")
-          packages: [ ${PKG_LINE} ]
-          runcmd:
-            - [ bash, -lc, "install -d -m 755 /root/seed/snippets /root/seed/ssh /root/seed/scripts" ]
-            - [ bash, -lc, "cp -a /media/seed/snippets/* /root/seed/snippets/ || true" ]
-            - [ bash, -lc, "cp -a /media/seed/ssh/* /root/seed/ssh/ || true" ]
-            - [ bash, -lc, "cp -a /media/seed/scripts/* /root/seed/scripts/ || true" ]
-            - [ bash, -lc, "USERNAME='${USERNAME}' CREATE_DIRS='true' bash /root/seed/scripts/apply_permissions.sh" ]
-            # ===== Storage / Backup (조건부 실행) =====
-            - [ bash, -lc, "[[ '${F_LVM}' == 'true' || '${F_MDADM}' == 'true' ]] && bash /root/seed/scripts/storage_lvm_mdadm.sh || true" ]
-            - [ bash, -lc, "[[ '${F_ZFS}' == 'true' ]] && bash /root/seed/scripts/zfs_setup.sh || true" ]
-            - [ bash, -lc, "[[ '${F_BTRFS}' == 'true' ]] && bash /root/seed/scripts/btrfs_setup.sh || true" ]
-            - [ bash, -lc, "[[ '${F_RESTIC}' == 'true' ]] && bash /root/seed/scripts/restic_init.sh || true" ]
-            - [ bash, -lc, "[[ '${F_BORG}' == 'true' ]] && bash /root/seed/scripts/borg_init.sh || true" ]
-            - [ bash, -lc, "[[ '${F_RCLONE}' == 'true' ]] && bash /root/seed/scripts/rclone_check.sh || true" ]
-            - [ bash, -lc, "[[ '${F_DUPLICITY}' == 'true' ]] && bash /root/seed/scripts/duplicity_init.sh || true" ]
-          EOF
-
-          cat > "${SEED}/nocloud/meta-data" <<EOF
-          instance-id: iid-${HOSTNAME}-$(date +%s)
-          local-hostname: ${HOSTNAME}
-          EOF
-
-          cp -a "${ECHO_ROOT}/snippets" "${SEED}/"
-          cp -a "${ECHO_ROOT}/scripts"  "${SEED}/"
-
-      - name: "Seed ISO 생성(+유효성)"
+      - name: 🛡️ Preflight & Config Echo
         run: |
-          set -euo pipefail
-          OUT="${ECHO_ROOT}/out"
-          mkdir -p "${ECHO_ROOT}/iso_src/seed"
-          cp -a "${ECHO_ROOT}/seed/nocloud" "${ECHO_ROOT}/iso_src/seed/"
-          cp -a "${ECHO_ROOT}/seed/snippets" "${ECHO_ROOT}/iso_src/seed/"
-          cp -a "${ECHO_ROOT}/seed/ssh"      "${ECHO_ROOT}/iso_src/seed/"
-          cp -a "${ECHO_ROOT}/seed/scripts"  "${ECHO_ROOT}/iso_src/seed/"
-          genisoimage -quiet -output "${OUT}/seed.iso" -volid cidata -joliet -rock "${ECHO_ROOT}/iso_src/seed"
-          isoinfo -d -i "${OUT}/seed.iso" >/dev/null 2>&1 || { echo "seed.iso invalid"; exit 1; }
-          [ $(stat -c%s "${OUT}/seed.iso") -ge 65536 ] || { echo "seed.iso too small"; exit 1; }
+          set -Eeuo pipefail
+          echo "[CHECK] TARGET_OWNER=${TARGET_OWNER}"
+          echo "[CHECK] TARGET_REPO=${TARGET_REPO}"
+          echo "[CHECK] lookback_hours=${{ github.event.inputs.lookback_hours }}"
+          echo "[CHECK] disable_on_failure=${{ github.event.inputs.disable_on_failure }}"
+          echo "[CHECK] enable_on_success=${{ github.event.inputs.enable_on_success }}"
+          echo "[CHECK] success_streak=${{ github.event.inputs.success_streak }}"
+          echo "[CHECK] delete_limit=${{ github.event.inputs.delete_limit }}"
+          echo "[CHECK] dry_run=${{ github.event.inputs.dry_run }}"
+          echo "[CHECK] protect_patterns='${{ github.event.inputs.protect_patterns }}'"
+          echo "[CHECK] hard_delete_workflow_files=${{ github.event.inputs.hard_delete_workflow_files }}"
+          echo "[CHECK] create_pr_instead_of_direct_commit=${{ github.event.inputs.create_pr_instead_of_direct_commit }}"
+          echo "[CHECK] backup_before_delete=${{ github.event.inputs.backup_before_delete }}"
+          echo "[CHECK] backup_branch=${{ github.event.inputs.backup_branch }}"
+          echo "[CHECK] delete_branch_name=${{ github.event.inputs.delete_branch_name }}"
+          echo "[CHECK] commit_message_prefix='${{ github.event.inputs.commit_message_prefix }}'"
 
-      # =======================
-      # Ubuntu: 체크섬-우선 — dual-index + arch + robust fallback
-      # =======================
-      - name: "Ubuntu ISO: 체크섬 우선(서명 검증 → 파일명 선택 → 다운로드 → SHA 일치) — dual-index + arch + robust fallback"
-        if: env.DISTRO == 'ubuntu'
+      - name: 📄 Generate cleaner+purger program (scripts/failed_cleaner.sh)
         run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          mkdir -p ${ECHO_ROOT}/out ${ECHO_ROOT}/tmp
-          ARCH="${UBUNTU_ARCH}"
-          # 0) REL_HINT→코드네임 추정
-          SERIES=()
-          case "${REL_HINT}" in
-            24.*) SERIES=("noble");;
-            22.*) SERIES=("jammy");;
-            20.*) SERIES=("focal");;
-            *) SERIES=("noble" "jammy" "focal");;
-          esac
-          # 1) 후보 인덱스 2종: cdimage + releases
-          CDIMAGE_URL=""
-          for CODENAME in "${SERIES[@]}"; do
-            U="https://cdimage.ubuntu.com/releases/${CODENAME}/release/"
-            if curl -fsI "$U" >/dev/null 2>&1; then CDIMAGE_URL="$U"; break; fi
-          done
-          YYMM="$(printf '%s\n' "${REL_HINT:-24.04}" | sed -nE 's/^([0-9]{2}\.[0-9]{2}).*/\1/p')"
-          RELEASES_URL="https://releases.ubuntu.com/${YYMM:-24.04}/"
-          echo "CDIMAGE_URL=${CDIMAGE_URL}"  >> $GITHUB_ENV
-          echo "RELEASES_URL=${RELEASES_URL}" >> $GITHUB_ENV
+          set -Eeuo pipefail
+          mkdir -p scripts
+          cat > scripts/failed_cleaner.sh <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          trap 'rc=$?; echo "[CLEANER][ERR] ${BASH_COMMAND} (rc=${rc})" >&2; exit $rc' ERR
+          echoe(){ printf "%s\n" "$*"; }
 
-          fetch_sums () {
-            local base="$1" tag="$2"
-            local sums="${ECHO_ROOT}/out/SHA256SUMS.${tag}"
-            local gpg="${ECHO_ROOT}/out/SHA256SUMS.${tag}.gpg"
-            [ -n "$base" ] || return 0
-            curl -fL -o "$sums" "${base}SHA256SUMS" || true
-            curl -fL -o "$gpg"  "${base}SHA256SUMS.gpg" || true
-            if [ -s "$sums" ] && [ -s "$gpg" ]; then
-              gpg --keyid-format long --keyserver hkps://keyserver.ubuntu.com --recv-keys \
-                0xC5986B4F1257FFA86632CBA746181433FBB75451 \
-                0x843938DF228D22F7B3742BC0D94AA3F0EFE21092 || true
-              gpg --keyid-format long --verify "$gpg" "$sums" || echoe "[WARN] GPG 검증 실패(${tag}) - 계속"
+          OWNER="${TARGET_OWNER}"
+          REPO="${TARGET_REPO}"
+          TOKEN="${GH_ADMIN_TOKEN}"
+
+          LOOKBACK_HOURS="${LOOKBACK_HOURS:-720}"
+          DISABLE_ON_FAIL="${DISABLE_ON_FAILURE:-true}"
+          ENABLE_ON_SUCCESS="${ENABLE_ON_SUCCESS:-true}"
+          SUCCESS_STREAK="${SUCCESS_STREAK:-1}"
+          DELETE_LIMIT="${DELETE_LIMIT:-1000}"
+          DRY_RUN="${DRY_RUN:-false}"
+          PROTECT_PATTERNS="${PROTECT_PATTERNS:-}"
+
+          HARD_DELETE="${HARD_DELETE_WORKFLOW_FILES:-true}"
+          PR_MODE="${CREATE_PR_INSTEAD_OF_DIRECT_COMMIT:-false}"
+          BACKUP_BEFORE_DELETE="${BACKUP_BEFORE_DELETE:-false}"
+          BACKUP_BRANCH="${BACKUP_BRANCH:-workflow-purge-backup}"
+          DELETE_BRANCH="${DELETE_BRANCH_NAME:-workflow-purge-branch}"
+          COMMIT_PREFIX="${COMMIT_MESSAGE_PREFIX:-[FORCE-PURGE]}"
+
+          API="https://api.github.com"
+          HDR_AUTH="Authorization: Bearer ${TOKEN}"
+          HDR_ACC="Accept: application/vnd.github+json"
+          HDR_VER="X-GitHub-Api-Version: 2022-11-28"
+
+          api_get(){ curl -fsSL -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
+          api_post(){ curl -fsS -X POST -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$2" "$1"; }
+          api_put(){ curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$2" "$1"; }
+          api_delete(){ curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
+
+          now_epoch="$(date -u +%s)"
+          cutoff_epoch=$(( now_epoch - LOOKBACK_HOURS*3600 ))
+
+          echoe "[CFG] OWNER=${OWNER} REPO=${REPO}"
+          echoe "[CFG] DISABLE_ON_FAIL=${DISABLE_ON_FAIL} ENABLE_ON_SUCCESS=${ENABLE_ON_SUCCESS} SUCCESS_STREAK=${SUCCESS_STREAK}"
+          echoe "[CFG] HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
+          echoe "[CFG] BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH=${DELETE_BRANCH} COMMIT_PREFIX=${COMMIT_PREFIX}"
+          echoe "[CFG] DELETE_LIMIT=${DELETE_LIMIT} DRY_RUN=${DRY_RUN} LOOKBACK_HOURS=${LOOKBACK_HOURS} cutoff_epoch=${cutoff_epoch}"
+          echoe "[CFG] PROTECT_PATTERNS=${PROTECT_PATTERNS}"
+
+          # === Repo 정보 및 기본 브랜치 획득 ===
+          repo_json="$(api_get "${API}/repos/${OWNER}/${REPO}")"
+          default_branch="$(echo "${repo_json}" | jq -r '.default_branch')"
+          echoe "[INFO] default_branch=${default_branch}"
+
+          # === 브랜치(ref) 준비 (PR 모드 또는 백업 필요 시) ===
+          base_ref_json="$(api_get "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${default_branch}")"
+          base_sha="$(echo "${base_ref_json}" | jq -r '.object.sha')"
+          echoe "[INFO] base_sha=${base_sha}"
+
+          create_branch_if_missing(){
+            local branch="$1"
+            # 존재 여부 확인
+            if curl -fsS -o /dev/null -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${branch}"; then
+              echoe "[BRANCH] ${branch} already exists."
+              return 0
             fi
+            echoe "[BRANCH] creating ${branch} from ${default_branch} (${base_sha})"
+            [ "${DRY_RUN}" = "true" ] && { echoe "[DRY] create ref ${branch}"; return 0; }
+            api_post "${API}/repos/${OWNER}/${REPO}/git/refs" "$(jq -n --arg ref "refs/heads/${branch}" --arg sha "${base_sha}" '{ref:$ref, sha:$sha}')" >/dev/null
           }
-          fetch_sums "${CDIMAGE_URL}"  "cdimage"
-          fetch_sums "${RELEASES_URL}" "releases"
-          [ -s "${ECHO_ROOT}/out/SHA256SUMS.cdimage" ] || [ -s "${ECHO_ROOT}/out/SHA256SUMS.releases" ] || { echoe "[ERR] 두 인덱스 모두에서 SHA256SUMS 확보 실패"; exit 1; }
 
-          # 3) 병합 파싱 → "HASH filename"
-          cat "${ECHO_ROOT}/out/SHA256SUMS.cdimage" "${ECHO_ROOT}/out/SHA256SUMS.releases" 2>/dev/null \
-            | perl -0777 -ne '
-                while(/([a-f0-9]{64})\s+\*([^\s]+\.iso)/gi){ print lc($1)." ".$2."\n"; }
-                while(/SHA256\s*\(([^)]+\.iso)\)\s*=\s*([a-f0-9]{64})/gi){ print lc($2)." ".$1."\n"; }
-              ' \
-            | awk '{print tolower($1), $2}' \
-            | sort -u -k2,2 > "${ECHO_ROOT}/out/SHA256SUMS.parsed"
-          echo "[DEBUG] Parsed ISO entries (top 100):"
-          head -n 100 "${ECHO_ROOT}/out/SHA256SUMS.parsed" || true
+          # === 파일 삭제/백업 보조 ===
+          get_file_sha(){
+            local path="$1" branch="$2"
+            api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${branch}" | jq -r '.sha'
+          }
+          delete_file_on_branch(){
+            local path="$1" branch="$2" msg="$3"
+            local sha
+            sha="$(get_file_sha "${path}" "${branch}")"
+            if [ -z "${sha}" ] || [ "${sha}" = "null" ]; then
+              echoe "[DEL-FILE] Not found: ${path} on ${branch}"
+              return 0
+            fi
+            echoe "[DEL-FILE] ${path} (sha=${sha}) on ${branch}"
+            if [ "${DRY_RUN}" = "true" ]; then
+              echoe "[DRY] DELETE ${path} on ${branch} msg='${msg}'"
+              return 0
+            fi
+            curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" \
+              -d "$(jq -n --arg message "${msg}" --arg sha "${sha}" --arg branch "${branch}" '{message:$message, sha:$sha, branch:$branch}')" \
+              "${API}/repos/${OWNER}/${REPO}/contents/${path}" >/dev/null
+          }
+          copy_file_between_branches(){
+            local path="$1" from_branch="$2" to_branch="$3" msg="$4"
+            local blob_json file_sha file_content encoding
+            blob_json="$(api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${from_branch}")"
+            file_sha="$(echo "${blob_json}" | jq -r '.sha')"
+            encoding="$(echo "${blob_json}" | jq -r '.encoding')"
+            if [ "${file_sha}" = "null" ] || [ -z "${file_sha}" ]; then
+              echoe "[BACKUP] Skip copy (missing): ${path}"
+              return 0
+            fi
+            content_b64="$(echo "${blob_json}" | jq -r '.content' | tr -d '\n')"
+            if [ "${DRY_RUN}" = "true" ]; then
+              echoe "[DRY] COPY ${path} ${from_branch} -> ${to_branch} msg='${msg}'"
+              return 0
+            fi
+            # put to target branch (create/update)
+            curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" \
+              -d "$(jq -n --arg message "${msg}" --arg content "${content_b64}" --arg branch "${to_branch}" '{message:$message, content:$content, branch:$branch}')" \
+              "${API}/repos/${OWNER}/${REPO}/contents/${path}" >/dev/null
+          }
 
-          # 4) 후보 선택(아키텍처/버전 고려)
-          pick_line() { local rx="$1"; grep -Eia "$rx" "${ECHO_ROOT}/out/SHA256SUMS.parsed" | sort -k2,2V | tail -n1 || true; }
-          REL_RX="$(printf '%s' "${REL_HINT}" | sed 's/\./\\./g')"
-          CAND_LINE=""
-          [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}(\\.[0-9]+)?-live-server-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-live-server-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*server.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*server.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*desktop.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*desktop.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line " ubuntu-${REL_RX}.*-${ARCH}\\.iso$")"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*-'"${ARCH}"'\.iso$')"
-          [ -z "$CAND_LINE" ] && [ -n "${REL_HINT}" ] && CAND_LINE="$(pick_line ' ubuntu-'"${REL_RX}"'.*\.iso$')"
-          [ -z "$CAND_LINE" ] && CAND_LINE="$(pick_line ' ubuntu-.*\.iso$')"
-          [ -n "$CAND_LINE" ] || { echoe "[ERR] SHA256SUMS에서 사용할 수 있는 *.iso 후보를 찾지 못했습니다."; exit 1; }
-          EXPECT="$(echo "${CAND_LINE}" | awk '{print $1}')"
-          CAND="$(echo "${CAND_LINE}" | awk '{print $2}')"
-          echo "[PICK] ${CAND} (expected sha256=${EXPECT})"
-          echo "ISO_NAME=${CAND}" >> $GITHUB_ENV
+          is_protected_workflow(){
+            local name="$1" path="$2"
+            if [ -z "${PROTECT_PATTERNS}" ]; then return 1; fi
+            IFS=',' read -r -a pats <<< "${PROTECT_PATTERNS}"
+            for p in "${pats[@]}"; do
+              p_trim="$(echo "$p" | xargs)"; [ -z "${p_trim}" ] && continue
+              if [[ "${name,,}" == *"${p_trim,,}"* ]] || [[ "${path,,}" == *"${p_trim,,}"* ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
 
-          # 5) 다운로드 URL (원본 디렉터리 + 미러 후보)
-          base_candidates=()
-          [ -n "${CDIMAGE_URL}" ]  && base_candidates+=("${CDIMAGE_URL}")
-          base_candidates+=("${RELEASES_URL}")
-          YYMM_FROM_NAME="$(printf '%s\n' "${CAND}" | sed -nE 's/^ubuntu-([0-9]{2}\.[0-9]{2}).*/\1/p')"
-          [ -n "${YYMM_FROM_NAME}" ] && base_candidates+=("https://releases.ubuntu.com/${YYMM_FROM_NAME}/")
-          urls=()
-          for B in "${base_candidates[@]}"; do urls+=("${B}${CAND}"); done
-          urls+=("https://mirror.unix-solutions.be/ubuntu-cdimage/releases/${CAND%-${ARCH}.iso}/release/${CAND}")
-          urls+=("https://ftp.osuosl.org/pub/ubuntu-releases/${CAND%-${ARCH}.iso}/${CAND}")
+          # === 워크플로우 목록 ===
+          echoe "[STEP] Fetch workflows ..."
+          workflows_json="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows?per_page=100")"
+          count_wf="$(echo "${workflows_json}" | jq '.workflows | length')"
+          echoe "[INFO] workflows=${count_wf}"
 
-          # 6) 다운로드 & SHA256 검증
-          ok=0
-          for u in "${urls[@]}"; do
-            echoe "[FETCH] $u"
-            if curl -fL --retry 3 --retry-delay 2 -o "${ECHO_ROOT}/out/base.iso" "$u"; then
-              ACTUAL="$(sha256sum ${ECHO_ROOT}/out/base.iso | awk '{print $1}')"
-              if [ "${EXPECT}" = "${ACTUAL}" ]; then
-                echoe "[OK] SHA256 일치 (${CAND})"
-                echo "ISO_URL_USED=$u" >> $GITHUB_ENV
-                ok=1; break
+          deleted_runs=0; disabled_wf=0; enabled_wf=0; deleted_files=0; backed_up_files=0
+          declare -a delete_paths
+
+          # 백업/PR 모드 준비
+          if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then create_branch_if_missing "${BACKUP_BRANCH}"; fi
+          if [ "${PR_MODE}" = "true" ]; then create_branch_if_missing "${DELETE_BRANCH}"; fi
+
+          # === 각 워크플로우 처리 ===
+          for ((i=0; i<count_wf; i++)); do
+            wf_id="$(echo "${workflows_json}" | jq -r ".workflows[${i}].id")"
+            wf_name="$(echo "${workflows_json}" | jq -r ".workflows[${i}].name")"
+            wf_path="$(echo "${workflows_json}" | jq -r ".workflows[${i}].path")"
+            wf_state="$(echo "${workflows_json}" | jq -r ".workflows[${i}].state")"
+            echoe "[WF] id=${wf_id} name='${wf_name}' path='${wf_path}' state=${wf_state}"
+
+            # 실행 목록
+            runs_all="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
+            runs_len="$(echo "${runs_all}" | jq '.workflow_runs | length')"
+            [ "${runs_len}" -eq 0 ] && echoe "[WF] No completed runs."
+
+            # 실패 run 강제 삭제
+            for ((j=0; j<runs_len; j++)); do
+              concl="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].conclusion // empty")"
+              run_id="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].id")"
+              created_at="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].created_at // empty")"
+              [ -z "${concl}" ] && continue
+              [ "${concl}" != "failure" ] && continue
+              [ -z "${created_at}" ] && continue
+              run_epoch="$(date -u -d "${created_at}" +%s || echo 0)"
+              (( run_epoch < cutoff_epoch )) && continue
+
+              echoe "[DEL-RUN] run_id=${run_id} conclusion=${concl} created_at=${created_at}"
+              if [ "${DRY_RUN}" = "true" ]; then
+                echoe "[DRY] DELETE /actions/runs/${run_id}"
               else
-                echoe "[WARN] SHA256 불일치(미러 편차?) 재시도"
+                api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}" >/dev/null
+              fi
+              deleted_runs=$((deleted_runs+1))
+              (( deleted_runs >= DELETE_LIMIT )) && echoe "[WARN] DELETE_LIMIT reached. stop." && break 2
+            done
+
+            latest_conclusion="$(echo "${runs_all}" | jq -r '.workflow_runs[0].conclusion // "none"')"
+            latest_created_at="$(echo "${runs_all}" | jq -r '.workflow_runs[0].created_at // empty')"
+            echoe "[WF] latest_conclusion=${latest_conclusion} latest_created_at=${latest_created_at}"
+
+            # 실패 → 비활성화 (보호 제외)
+            if [ "${latest_conclusion}" = "failure" ] && [ "${DISABLE_ON_FAIL}" = "true" ]; then
+              if is_protected_workflow "${wf_name}" "${wf_path}"; then
+                echoe "[SKIP] Protected. Skip disable: ${wf_name}"
+              else
+                echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}'"
+                if [ "${DRY_RUN}" = "true" ]; then
+                  echoe "[DRY] PUT /actions/workflows/${wf_id}/disable"
+                else
+                  curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" >/dev/null
+                fi
+                disabled_wf=$((disabled_wf+1))
+              fi
+            fi
+
+            # 성공 연속 → disabled_* 상태이면 Enable
+            if [ "${ENABLE_ON_SUCCESS}" = "true" ]; then
+              streak=0
+              for ((k=0; k<runs_len; k++)); do
+                concl2="$(echo "${runs_all}" | jq -r ".workflow_runs[${k}].conclusion // empty")"
+                [ -z "${concl2}" ] && break
+                if [ "${concl2}" = "success" ]; then streak=$((streak+1)); else break; fi
+              done
+              echoe "[WF] success_streak_detected=${streak} (target=${SUCCESS_STREAK})"
+              if [[ "${wf_state}" == disabled_* ]] && (( streak >= SUCCESS_STREAK )); then
+                echoe "[ENABLE] workflow_id=${wf_id} name='${wf_name}'"
+                if [ "${DRY_RUN}" = "true" ]; then
+                  echoe "[DRY] PUT /actions/workflows/${wf_id}/enable"
+                else
+                  curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" >/dev/null
+                fi
+                enabled_wf=$((enabled_wf+1))
+              else
+                echoe "[ENABLE-SKIP] state=${wf_state}, streak=${streak}"
+              fi
+            fi
+
+            # === 초강력: 워크플로우 파일 강제 삭제 ===
+            if [ "${HARD_DELETE}" = "true" ] && [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ]; then
+              if is_protected_workflow "${wf_name}" "${wf_path}"; then
+                echoe "[SKIP] Protected. Skip file delete: ${wf_path}"
+              else
+                # 백업 분기
+                if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then
+                  echoe "[BACKUP] ${wf_path} -> branch ${BACKUP_BRANCH}"
+                  copy_file_between_branches "${wf_path}" "${default_branch}" "${BACKUP_BRANCH}" "${COMMIT_PREFIX} backup ${wf_path}"
+                  backed_up_files=$((backed_up_files+1))
+                fi
+
+                # 삭제 대상 브랜치 결정
+                target_branch="${default_branch}"
+                if [ "${PR_MODE}" = "true" ]; then
+                  target_branch="${DELETE_BRANCH}"
+                fi
+
+                echoe "[PURGE] Deleting workflow file on ${target_branch}: ${wf_path}"
+                delete_file_on_branch "${wf_path}" "${target_branch}" "${COMMIT_PREFIX} purge ${wf_path}"
+                delete_paths+=("${wf_path}")
+                deleted_files=$((deleted_files+1))
               fi
             fi
           done
-          [ "$ok" -eq 1 ] || { echoe "[FAIL] 모든 미러에서 SHA256 불일치/실패"; exit 1; }
 
-          # 7) 부가 파일(선택)
-          for ext in zsync list manifest; do
-            curl -fsI "${RELEASES_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${RELEASES_URL}${CAND}.${ext}" || true
-            if [ -n "${CDIMAGE_URL}" ]; then
-              curl -fsI "${CDIMAGE_URL}${CAND}.${ext}" >/dev/null 2>&1 && curl -fsSL -o "${ECHO_ROOT}/out/${CAND}.${ext}" "${CDIMAGE_URL}${CAND}.${ext}" || true
+          # PR 모드면 PR 생성
+          if [ "${PR_MODE}" = "true" ] && [ "${#delete_paths[@]}" -gt 0 ]; then
+            title="${COMMIT_PREFIX} purge ${#delete_paths[@]} workflow files"
+            body="Auto purge of failed workflows.\nDeleted files:\n$(printf '%s\n' "${delete_paths[@]}")"
+            echoe "[PR] Creating PR: ${DELETE_BRANCH} -> ${default_branch}"
+            if [ "${DRY_RUN}" = "true" ]; then
+              echoe "[DRY] POST /pulls title='${title}'"
+            else
+              api_post "${API}/repos/${OWNER}/${REPO}/pulls" "$(jq -n --arg title "${title}" --arg head "${DELETE_BRANCH}" --arg base "${default_branch}" --arg body "${body}" '{title:$title, head:$head, base:$base, body:$body}')" >/dev/null
             fi
-          done
-          cp -a "${ECHO_ROOT}/out/SHA256SUMS.parsed" "${ECHO_ROOT}/logs/" || true
+          fi
 
-      - name: "합본 ISO (xorriso graft, /seed + /ks.cfg + /preseed.cfg)"
-        if: env.COMBINE == 'true'
+          echoe "[RESULT] deleted_runs=${deleted_runs} disabled_workflows=${disabled_wf} enabled_workflows=${enabled_wf} deleted_files=${deleted_files} backed_up_files=${backed_up_files}"
+          BASH
+          chmod +x scripts/failed_cleaner.sh
+          echo "[OK] Program generated: scripts/failed_cleaner.sh"
+
+      - name: ▶️ Run cleaner (Echo on)
+        env:
+          GH_ADMIN_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours }}
+          DISABLE_ON_FAILURE: ${{ github.event.inputs.disable_on_failure }}
+          ENABLE_ON_SUCCESS: ${{ github.event.inputs.enable_on_success }}
+          SUCCESS_STREAK: ${{ github.event.inputs.success_streak }}
+          DELETE_LIMIT: ${{ github.event.inputs.delete_limit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          PROTECT_PATTERNS: ${{ github.event.inputs.protect_patterns }}
+          HARD_DELETE_WORKFLOW_FILES: ${{ github.event.inputs.hard_delete_workflow_files }}
+          CREATE_PR_INSTEAD_OF_DIRECT_COMMIT: ${{ github.event.inputs.create_pr_instead_of_direct_commit }}
+          BACKUP_BEFORE_DELETE: ${{ github.event.inputs.backup_before_delete }}
+          BACKUP_BRANCH: ${{ github.event.inputs.backup_branch }}
+          DELETE_BRANCH_NAME: ${{ github.event.inputs.delete_branch_name }}
+          COMMIT_MESSAGE_PREFIX: ${{ github.event.inputs.commit_message_prefix }}
         run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          OUT="${ECHO_ROOT}/out"
-          [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
-          xorriso \
-            -indev  "${OUT}/base.iso" \
-            -outdev "${OUT}/base-with-seed.iso" \
-            -map "${ECHO_ROOT}/iso_src/seed" /seed \
-            -map "${ECHO_ROOT}/iso_src/ks_preseed/ks.cfg" /ks.cfg \
-            -map "${ECHO_ROOT}/iso_src/ks_preseed/preseed.cfg" /preseed.cfg \
-            -boot_image any keep
-          isoinfo -d -i "${OUT}/base-with-seed.iso" >/dev/null 2>&1 || { echo "combined iso invalid"; exit 1; }
-          [ $(stat -c%s "${OUT}/base-with-seed.iso") -ge 10485760 ] || { echo "combined iso too small"; exit 1; }
-
-      - name: "Ubuntu: 부트 엔트리 주입(완전 자동 ISO)"
-        if: env.DISTRO == 'ubuntu'
-        run: |
-          set -euo pipefail
-          OUT="${ECHO_ROOT}/out"
-          [ -s "${OUT}/base.iso" ] || { echo "[SKIP] base.iso 없음"; exit 0; }
-          rm -rf "${ECHO_ROOT}/tmp/grub" && mkdir -p "${ECHO_ROOT}/tmp/grub/boot/grub" "${ECHO_ROOT}/tmp/grub/EFI/BOOT"
-          7z x -o"${ECHO_ROOT}/tmp/grub" "${OUT}/base.iso" boot/grub/grub.cfg EFI/BOOT/grub.cfg -y || true
-          [ -f "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" ] || touch "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg"
-          [ -f "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg" ]  || touch "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"
-          mv "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg" "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig"
-          mv "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg"  "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"
-          mkdir -p "${ECHO_ROOT}/iso_src/autoinstall"
-          cat > "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg" <<'GRUB'
-          set timeout=5
-          set default=0
-          menuentry "Ubuntu Server Autoinstall (NoCloud /cdrom/seed)" {
-              set gfxpayload=keep
-              linux   /casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/seed/ ---
-              initrd  /casper/initrd
-          }
-          menuentry "Original installer menu" {
-              if [ -f (cd0)/boot/grub/grub.cfg.orig ]; then
-                configfile (cd0)/boot/grub/grub.cfg.orig
-              elif [ -f (cd0)/EFI/BOOT/grub.cfg.orig ]; then
-                configfile (cd0)/EFI/BOOT/grub.cfg.orig
-              fi
-          }
-          GRUB
-          xorriso \
-            -indev  "${OUT}/base.iso" \
-            -outdev "${OUT}/base-with-seed-autoinstall.iso" \
-            -map "${ECHO_ROOT}/iso_src/seed" /seed \
-            -map "${ECHO_ROOT}/tmp/grub/boot/grub/grub.cfg.orig" /boot/grub/grub.cfg.orig \
-            -map "${ECHO_ROOT}/tmp/grub/EFI/BOOT/grub.cfg.orig"  /EFI/BOOT/grub.cfg.orig \
-            -map "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg"     /boot/grub/grub.cfg \
-            -map "${ECHO_ROOT}/iso_src/autoinstall/grub.cfg"     /EFI/BOOT/grub.cfg \
-            -boot_image any keep
-          isoinfo -d -i "${OUT}/base-with-seed-autoinstall.iso" >/dev/null 2>&1 || { echo "autoinstall iso invalid"; exit 1; }
-          [ $(stat -c%s "${OUT}/base-with-seed-autoinstall.iso") -ge 10485760 ] || { echo "autoinstall iso too small"; exit 1; }
-
-      - name: "검증(요약) & 힌트"
-        run: |
-          set -euo pipefail
-          . ${ECHO_ROOT}/echo.sh
-          for f in ${ECHO_ROOT}/out/*.iso; do
-            [ -e "$f" ] || continue
-            sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
-            isoinfo -d -i "$f" >/dev/null 2>&1 && iso=OK || iso=FAIL
-            echoe "[ISO] $(basename "$f") size=${sz} iso=${iso}"
-          done
-          echo "[HINT] Ubuntu: autoinstall ds=nocloud;s=/cdrom/seed/"
-          echo "[HINT] Fedora/RHEL: inst.ks=cdrom:/ks.cfg"
-          echo "[HINT] Debian: auto=true priority=critical preseed/file=/cdrom/preseed.cfg"
-          echo "[HINT] Storage/Backup: /root/seed/scripts/env.storage 파일을 실제 값으로 설정 후 DRY_RUN=false 로 변경"
-
-      - name: "아티팩트 업로드(유효 파일만)"
-        if: env.UPLOAD == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-seed-iso-and-echo
-          path: |
-            .github/echo_linux/out/seed.iso
-            .github/echo_linux/out/base.iso
-            .github/echo_linux/out/base-with-seed.iso
-            .github/echo_linux/out/base-with-seed-autoinstall.iso
-            .github/echo_linux/seed/**
-            .github/echo_linux/snippets/**
-            .github/echo_linux/scripts/**
-            .github/echo_linux/logs/**
-            .github/echo_linux/iso_src/**
-            .github/echo_linux/templates/**
-            .github/echo_linux/records/**
-          retention-days: 14
+          set -Eeuo pipefail
+          [ -z "${GH_ADMIN_TOKEN:-}" ] && { echo "[ERROR] No GH_ADMIN_TOKEN in env after Acquire step." >&2; exit 9; }
+          echo "[RUN] Executing scripts/failed_cleaner.sh ..."
+          ./scripts/failed_cleaner.sh
+          echo "[DONE] Cleaner finished."
