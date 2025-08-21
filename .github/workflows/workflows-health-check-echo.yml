@@ -1,4 +1,4 @@
-name: "🧹 Actions Failed Cleaner (davidkims/springboot) + Auto-Enable + Echo"
+name: "🧹 Actions Failed Cleaner (Auto Token + Auto-Enable + Echo)"
 
 on:
   workflow_dispatch:
@@ -8,27 +8,27 @@ on:
         default: "720"
         required: true
       disable_on_failure:
-        description: "최근 실행이 실패한 워크플로우를 비활성화(Disable)할지 (true/false)"
+        description: "최근 실행이 실패한 워크플로우를 비활성화(Disable)할지"
         default: "true"
         required: true
       enable_on_success:
-        description: "최근 실행이 성공한 워크플로우를 자동 재활성화(Enable)할지 (true/false)"
+        description: "최근 실행이 성공한 워크플로우를 자동 재활성화(Enable)할지"
         default: "true"
         required: true
       success_streak:
-        description: "재활성화 조건: 최근 연속 성공 횟수 (기본 1)"
+        description: "재활성화 조건: 최근 연속 성공 횟수"
         default: "1"
         required: true
       delete_limit:
-        description: "최대 삭제 run 개수 상한 (안전장치)"
+        description: "최대 삭제 run 개수 상한"
         default: "1000"
         required: true
       dry_run:
-        description: "실제 삭제/비활성화/재활성화 대신 출력만 (true/false)"
+        description: "실제 수행 대신 출력만"
         default: "false"
         required: true
       protect_patterns:
-        description: "비활성화 제외 패턴(,로 구분, 예: 'health,deploy')"
+        description: "비활성화 제외 패턴(,로 구분)"
         default: ""
         required: false
 
@@ -47,17 +47,95 @@ jobs:
       - name: ⬇️ Checkout
         uses: actions/checkout@v4
 
-      - name: 🔧 Prepare tools (jq, coreutils) + Echo
+      - name: 🔧 Install openssl & jq + Echo
         run: |
           set -Eeuo pipefail
-          echo "[INIT] Installing jq ..."
+          echo "[INIT] Installing openssl & jq ..."
           sudo apt-get update -y >/dev/null 2>&1 || true
-          sudo apt-get install -y jq >/dev/null 2>&1
-          echo "[OK] jq installed."
+          sudo apt-get install -y openssl jq >/dev/null 2>&1
+          echo "[OK] Tools ready."
 
-      - name: 🛡️ Preflight & Secrets check (no secret value echo)
+      - name: 🔑 Acquire Admin Token (Auto) — PAT → App → GITHUB_TOKEN
+        id: tok
         env:
+          # Optional 1) Fine-grained PAT (already stored)
           GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+
+          # Optional 2) GitHub App creds (if provided)
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_INSTALLATION_ID: ${{ secrets.APP_INSTALLATION_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
+          # Always available
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          echo "[TOK] Start acquiring token ..."
+          MASK(){ echo "::add-mask::$1"; }
+
+          USE_TOKEN=""
+
+          if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
+            echo "[TOK] Using provided GH_ADMIN_TOKEN (PAT)."
+            USE_TOKEN="${GH_ADMIN_TOKEN}"
+          else
+            if [ -n "${APP_ID:-}" ] && [ -n "${APP_INSTALLATION_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+              echo "[TOK] No PAT. Trying GitHub App installation token ..."
+              NOW=$(date -u +%s)
+              IAT=$((NOW - 60))
+              EXP=$((NOW + 540)) # 9 minutes
+
+              HEADER_BASE64=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+              PAYLOAD=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$IAT" "$EXP" "$APP_ID")
+              PAYLOAD_BASE64=$(printf '%s' "$PAYLOAD" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+              UNSIGNED="${HEADER_BASE64}.${PAYLOAD_BASE64}"
+
+              # Write key to file with safe perms
+              KEYFILE="app_private_key.pem"
+              printf "%s" "$APP_PRIVATE_KEY" > "$KEYFILE"
+              chmod 600 "$KEYFILE"
+
+              SIGNATURE=$(printf '%s' "$UNSIGNED" | \
+                openssl dgst -sha256 -sign "$KEYFILE" | \
+                openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+              JWT="${UNSIGNED}.${SIGNATURE}"
+              MASK "$JWT"
+
+              echo "[TOK] Exchanging JWT for installation access token..."
+              INSTALL_TOKEN_JSON=$(curl -fsSL \
+                -H "Authorization: Bearer ${JWT}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -X POST "https://api.github.com/app/installations/${APP_INSTALLATION_ID}/access_tokens")
+
+              USE_TOKEN=$(echo "$INSTALL_TOKEN_JSON" | jq -r '.token')
+              if [ "$USE_TOKEN" = "null" ] || [ -z "$USE_TOKEN" ]; then
+                echo "[ERR] Failed to mint installation token." >&2
+                exit 1
+              fi
+              MASK "$USE_TOKEN"
+              echo "[TOK] GitHub App installation token acquired."
+            else
+              echo "[TOK] No PAT or App creds. Checking if this job runs on the target repo ..."
+              if [ "${{ github.repository_owner }}" = "${TARGET_OWNER}" ] && [ "${{ github.event.repository.name }}" = "${TARGET_REPO}" ]; then
+                echo "[TOK] This is the target repo. Using GITHUB_TOKEN."
+                USE_TOKEN="${GITHUB_TOKEN}"
+              else
+                echo "[ERR] No token source available. Provide GH_ADMIN_TOKEN or App creds, or run on target repo." >&2
+                exit 2
+              fi
+            fi
+          fi
+
+          # Export to outputs/environment (masked)
+          MASK "$USE_TOKEN"
+          echo "token_ready=true" >> "$GITHUB_OUTPUT"
+          echo "GH_ADMIN_TOKEN=$USE_TOKEN" >> "$GITHUB_ENV"
+          echo "[TOK] Token is ready and masked."
+
+      - name: 🛡️ Preflight & Config Echo
         run: |
           set -Eeuo pipefail
           echo "[CHECK] TARGET_OWNER=${TARGET_OWNER}"
@@ -69,10 +147,6 @@ jobs:
           echo "[CHECK] delete_limit=${{ github.event.inputs.delete_limit }}"
           echo "[CHECK] dry_run=${{ github.event.inputs.dry_run }}"
           echo "[CHECK] protect_patterns='${{ github.event.inputs.protect_patterns }}'"
-          if [ -z "${GH_ADMIN_TOKEN:-}" ]; then
-            echo "[ERROR] GH_ADMIN_TOKEN is missing (repo/workflow 권한의 PAT 필요)" >&2
-            exit 2
-          fi
 
       - name: 📄 Generate cleaner program (scripts/failed_cleaner.sh)
         run: |
@@ -111,16 +185,8 @@ jobs:
           echoe "[CFG] PROTECT_PATTERNS=${PROTECT_PATTERNS}"
 
           api_get(){ curl -fsSL -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
-          api_delete(){
-            local url="$1"
-            if [ "${DRY_RUN}" = "true" ]; then echoe "[DRY] DELETE ${url}"; return 0; fi
-            curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${url}" -o /dev/null
-          }
-          api_put(){
-            local url="$1"
-            if [ "${DRY_RUN}" = "true" ]; then echoe "[DRY] PUT ${url}"; return 0; fi
-            curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${url}" -o /dev/null
-          }
+          api_delete(){ local u="$1"; [ "${DRY_RUN}" = "true" ] && echoe "[DRY] DELETE ${u}" && return 0; curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${u}" -o /dev/null; }
+          api_put(){ local u="$1"; [ "${DRY_RUN}" = "true" ] && echoe "[DRY] PUT ${u}" && return 0; curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${u}" -o /dev/null; }
 
           is_protected_workflow(){
             local name="$1" path="$2"
@@ -135,32 +201,26 @@ jobs:
             return 1
           }
 
-          # 1) 워크플로우 목록 조회 (state 포함)
           echoe "[STEP] Fetch workflows ..."
           workflows_json="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows?per_page=100")"
           count_wf="$(echo "${workflows_json}" | jq '.workflows | length')"
           echoe "[INFO] workflows=${count_wf}"
 
-          deleted=0
-          disabled=0
-          enabled=0
+          deleted=0; disabled=0; enabled=0
 
           for ((i=0; i<count_wf; i++)); do
             wf_id="$(echo "${workflows_json}" | jq -r ".workflows[${i}].id")"
             wf_name="$(echo "${workflows_json}" | jq -r ".workflows[${i}].name")"
             wf_path="$(echo "${workflows_json}" | jq -r ".workflows[${i}].path")"
-            wf_state="$(echo "${workflows_json}" | jq -r ".workflows[${i}].state")" # active|deleted|disabled_inactivity|disabled_manually etc.
+            wf_state="$(echo "${workflows_json}" | jq -r ".workflows[${i}].state")"
 
             echoe "[WF] id=${wf_id} name='${wf_name}' path='${wf_path}' state=${wf_state}"
 
-            # 최신 completed 실행들 가져오기 (여러 건으로 성공/실패 추세 확인)
             runs_all="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
             runs_len="$(echo "${runs_all}" | jq '.workflow_runs | length')"
-            if [ "${runs_len}" -eq 0 ]; then
-              echoe "[WF] No completed runs."
-            fi
+            if [ "${runs_len}" -eq 0 ]; then echoe "[WF] No completed runs."; fi
 
-            # === 실패 run 정리 (lookback 이내) ===
+            # 실패 run 삭제
             for ((j=0; j<runs_len; j++)); do
               conclusion="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].conclusion // empty")"
               run_id="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].id")"
@@ -168,59 +228,45 @@ jobs:
               [ -z "${conclusion}" ] && continue
               [ "${conclusion}" != "failure" ] && continue
               [ -z "${created_at}" ] && continue
-
               run_epoch="$(date -u -d "${created_at}" +%s || echo 0)"
-              if (( run_epoch < cutoff_epoch )); then
-                continue
-              fi
+              (( run_epoch < cutoff_epoch )) && continue
 
               echoe "[DEL] run_id=${run_id} conclusion=${conclusion} created_at=${created_at}"
               api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}"
               deleted=$((deleted+1))
-              if (( deleted >= DELETE_LIMIT )); then
-                echoe "[WARN] DELETE_LIMIT(${DELETE_LIMIT}) 도달. 중단."
-                break 2
-              fi
+              (( deleted >= DELETE_LIMIT )) && echoe "[WARN] DELETE_LIMIT reached. Stop." && break 2
             done
 
-            # 최신 실행 1건의 결론
             latest_conclusion="$(echo "${runs_all}" | jq -r '.workflow_runs[0].conclusion // "none"')"
             latest_created_at="$(echo "${runs_all}" | jq -r '.workflow_runs[0].created_at // empty')"
             echoe "[WF] latest_conclusion=${latest_conclusion} latest_created_at=${latest_created_at}"
 
-            # === 실패 시 비활성화 ===
+            # 실패 → 비활성화
             if [ "${latest_conclusion}" = "failure" ] && [ "${DISABLE_ON_FAIL}" = "true" ]; then
               if is_protected_workflow "${wf_name}" "${wf_path}"; then
-                echoe "[SKIP] Protected by pattern. Skip disable: ${wf_name} (${wf_path})"
+                echoe "[SKIP] Protected. Skip disable: ${wf_name}"
               else
-                echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}' path='${wf_path}'"
+                echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}'"
                 api_put "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable"
                 disabled=$((disabled+1))
               fi
             fi
 
-            # === 성공 시 재활성화 ===
+            # 성공 연속 여부 체크 → disabled_* 상태면 enable
             if [ "${ENABLE_ON_SUCCESS}" = "true" ]; then
-              # 최근 연속 SUCCESS 횟수 계산
               streak=0
               for ((k=0; k<runs_len; k++)); do
                 concl="$(echo "${runs_all}" | jq -r ".workflow_runs[${k}].conclusion // empty")"
                 [ -z "${concl}" ] && break
-                if [ "${concl}" = "success" ]; then
-                  streak=$((streak+1))
-                else
-                  break
-                fi
+                if [ "${concl}" = "success" ]; then streak=$((streak+1)); else break; fi
               done
               echoe "[WF] success_streak_detected=${streak} (target=${SUCCESS_STREAK})"
-
-              # 현재 상태가 disabled_* 인 경우에만 enable 시도
               if [[ "${wf_state}" == disabled_* ]] && (( streak >= SUCCESS_STREAK )); then
-                echoe "[ENABLE] workflow_id=${wf_id} name='${wf_name}' path='${wf_path}' (state=${wf_state})"
+                echoe "[ENABLE] workflow_id=${wf_id} name='${wf_name}' (state=${wf_state})"
                 api_put "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable"
                 enabled=$((enabled+1))
               else
-                echoe "[ENABLE-SKIP] state=${wf_state}, streak=${streak} (< target or not disabled)"
+                echoe "[ENABLE-SKIP] state=${wf_state}, streak=${streak}"
               fi
             fi
           done
@@ -232,7 +278,7 @@ jobs:
 
       - name: ▶️ Run cleaner (Echo on)
         env:
-          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          GH_ADMIN_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours }}
           DISABLE_ON_FAILURE: ${{ github.event.inputs.disable_on_failure }}
           ENABLE_ON_SUCCESS: ${{ github.event.inputs.enable_on_success }}
@@ -242,6 +288,10 @@ jobs:
           PROTECT_PATTERNS: ${{ github.event.inputs.protect_patterns }}
         run: |
           set -Eeuo pipefail
+          if [ -z "${GH_ADMIN_TOKEN:-}" ]; then
+            echo "[ERROR] No GH_ADMIN_TOKEN in env after Acquire step." >&2
+            exit 9
+          fi
           echo "[RUN] Executing scripts/failed_cleaner.sh ..."
           ./scripts/failed_cleaner.sh
           echo "[DONE] Cleaner finished."
