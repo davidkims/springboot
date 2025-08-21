@@ -1,48 +1,7 @@
-name: "🐳 EchoOps: Docker + Release + Encrypt + Lock + DB Echo Tables (+ Auto-Create Secrets)"
+name: "🐳 EchoOps: Full Mandatory — Docker + GHCR + Encrypt + Lock + DB + Auto-Create Secrets + Release"
 
 on:
   workflow_dispatch:
-    inputs:
-      enable_docker_upgrade:
-        description: "Docker 설치/업그레이드 수행"
-        required: false
-        default: "true"
-      build_image:
-        description: "에코 Docker 이미지 빌드"
-        required: false
-        default: "true"
-      image_name:
-        description: "이미지 이름 (소문자 권장)"
-        required: false
-        default: "echo-app"
-      push_image:
-        description: "GHCR로 푸시"
-        required: false
-        default: "false"
-      do_release:
-        description: "릴리스 생성"
-        required: false
-        default: "false"
-      encrypt_outputs:
-        description: "산출물 암호화(AES-256/GPG)"
-        required: false
-        default: "true"
-      lock_protect:
-        description: "락/자기복구(외부 삭제 방지)"
-        required: false
-        default: "true"
-      db_engine:
-        description: "에코 테이블 생성 (none|mysql|postgres|both)"
-        required: false
-        default: "none"
-      echo_seed_rows:
-        description: "시드 행 개수"
-        required: false
-        default: "10"
-      auto_create_secrets:
-        description: "필요 시 ECHO_PASSWORD / GPG 키 자동 생성"
-        required: false
-        default: "true"
 
 permissions:
   contents: write
@@ -59,13 +18,17 @@ env:
   IMAGE_OWNER: ${{ github.repository_owner }}
   BRANCH_NAME: ${{ github.ref_name }}
   PROTECTED_PATHS: ".github/echo,site/"
+  IMAGE_NAME: "echo-app"
 
 jobs:
   echoops:
     runs-on: ubuntu-latest
-    # 🔑 secrets.* 대신 env.*로 참조할 수 있도록 Job env에 바인딩
+    # secrets.* 를 if에서 직접 쓰지 않도록 job env에 바인딩
     env:
       GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+      ECHO_PASSWORD: ${{ secrets.ECHO_PASSWORD }}
+      GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
+      GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
     steps:
       - name: ✅ Checkout
         uses: actions/checkout@v4
@@ -86,32 +49,34 @@ jobs:
           . "${ECHO_ROOT}/tools/echo.sh"
           echoe "Init echo helpers & dirs"
 
-      - name: ⬆️ Runner update (apt)
+      - name: ⬆️ Runner update (apt) + tool install
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          echoe "apt update/upgrade 시작"
+          echoe "apt update/upgrade"
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y install gnupg jq
-          echoe "apt upgrade 완료"
 
-      # ====== 🔐 Secrets 자동 생성(강제) 섹션 ======
-      # NOTE: if: 에서 secrets.* 직접 참조 금지 → env.GH_ADMIN_TOKEN 사용
-      - name: 🔐 (옵션) gh CLI 로그인 (GH_ADMIN_TOKEN)
-        if: ${{ inputs.auto_create_secrets == 'true' && env.GH_ADMIN_TOKEN != '' }}
+      # ====== 🔐 필수: GH_ADMIN_TOKEN 점검 및 gh 로그인 ======
+      - name: 🔒 Require GH_ADMIN_TOKEN
+        run: |
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/echo.sh"
+          [ -n "${GH_ADMIN_TOKEN:-}" ] || fail "GH_ADMIN_TOKEN secret이 필요합니다(필수). 저장소 Secrets에 추가하세요."
+
+      - name: 🔐 gh login
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          echoe "gh 인증 상태 확인"
           gh auth status || gh auth login --with-token <<< "${GH_TOKEN}"
           gh auth status
 
-      - name: 🧪 (옵션) Secrets 존재 여부 점검
+      # ====== 🔐 Secrets 강제 생성 ======
+      - name: 🧪 Secrets 존재 여부 점검
         id: chksec
-        if: ${{ inputs.auto_create_secrets == 'true' && env.GH_ADMIN_TOKEN != '' }}
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
@@ -120,13 +85,9 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           LIST_JSON=$(gh secret list --repo "$REPO" --json name || echo "[]")
           echo "LIST_JSON=$LIST_JSON" >> $GITHUB_OUTPUT
-          has(){ echo "$LIST_JSON" | jq -e --arg n "$1" '.[]|select(.name==$n)' >/dev/null 2>&1; }
-          for K in ECHO_PASSWORD GPG_PUBLIC_KEY GPG_KEY_ID; do
-            if has "$K"; then echoe "Secret 존재: $K"; else echoe "Secret 없음: $K"; fi
-          done
+          echoe "현재 secrets: $(echo "$LIST_JSON" | jq -r '.[].name' | tr '\n' ' ')"
 
-      - name: ⚙️ (옵션) ECHO_PASSWORD 자동 생성
-        if: ${{ inputs.auto_create_secrets == 'true' && env.GH_ADMIN_TOKEN != '' }}
+      - name: ⚙️ ECHO_PASSWORD 자동 생성(없으면 생성)
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
@@ -136,13 +97,12 @@ jobs:
           if ! gh secret list --repo "$REPO" --json name | jq -e '.[]|select(.name=="ECHO_PASSWORD")' >/dev/null; then
             PW="$(openssl rand -base64 48)"
             echoe "ECHO_PASSWORD 생성 및 저장"
-            echo -n "$PW" | gh secret set ECHO_PASSWORD --repo "$REPO" --body-file -
+            printf "%s" "$PW" | gh secret set ECHO_PASSWORD --repo "$REPO" --body-file -
           else
-            echoe "ECHO_PASSWORD 이미 존재, 건너뜀"
+            echoe "ECHO_PASSWORD 이미 존재"
           fi
 
-      - name: 🔑 (옵션) GPG 키 자동 생성 및 공개키/키ID 저장
-        if: ${{ inputs.auto_create_secrets == 'true' && env.GH_ADMIN_TOKEN != '' }}
+      - name: 🔑 GPG 키 생성 및 공개키/키ID 저장(없으면 생성)
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
@@ -152,7 +112,7 @@ jobs:
           NEED_PUB=$(gh secret list --repo "$REPO" --json name | jq -e '.[]|select(.name=="GPG_PUBLIC_KEY")' >/dev/null; echo $?)
           NEED_ID=$(gh secret list --repo "$REPO" --json name | jq -e '.[]|select(.name=="GPG_KEY_ID")' >/dev/null; echo $?)
           if [ "$NEED_PUB" -ne 0 ] || [ "$NEED_ID" -ne 0 ]; then
-            echoe "GPG 키 생성 (non-interactive)"
+            echoe "GPG 키 생성"
             GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
             cat > keybatch <<'EOF'
             %no-protection
@@ -168,43 +128,36 @@ jobs:
             gpg --batch --generate-key keybatch
             KEYID=$(gpg --list-keys --with-colons | awk -F: '/^pub/{getline; print $10; exit}')
             PUB=$(gpg --armor --export "$KEYID")
-            if [ "$NEED_PUB" -ne 0 ]; then
-              echoe "GPG_PUBLIC_KEY 저장"
-              printf "%s" "$PUB" | gh secret set GPG_PUBLIC_KEY --repo "$REPO" --body-file -
-            fi
-            if [ "$NEED_ID" -ne 0 ]; then
-              echoe "GPG_KEY_ID 저장"
-              printf "%s" "$KEYID" | gh secret set GPG_KEY_ID --repo "$REPO" --body-file -
-            fi
+            [ "$NEED_PUB" -ne 0 ] && printf "%s" "$PUB" | gh secret set GPG_PUBLIC_KEY --repo "$REPO" --body-file -
+            [ "$NEED_ID" -ne 0 ] && printf "%s" "$KEYID" | gh secret set GPG_KEY_ID --repo "$REPO" --body-file -
+            echoe "GPG_PUBLIC_KEY / GPG_KEY_ID 반영 완료"
           else
-            echoe "GPG_PUBLIC_KEY / GPG_KEY_ID 이미 존재, 건너뜀"
+            echoe "GPG_PUBLIC_KEY / GPG_KEY_ID 이미 존재"
           fi
 
-      # ====== Docker / 이미지 / 잠금 / 암호화 / DB 에코 ======
-      - name: 🐳 Docker install/upgrade (conditional)
-        if: ${{ inputs.enable_docker_upgrade == 'true' }}
+      # ====== Docker 항상 수행 ======
+      - name: 🐳 Docker install/upgrade
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
           if ! command -v docker >/dev/null 2>&1; then
-            echoe "Docker 미설치 → 설치 진행"
+            echoe "Docker 설치"
             sudo apt-get update -y
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
           else
-            echoe "Docker 설치됨 → 패키지 업데이트 시도"
+            echoe "Docker 업그레이드 시도"
             sudo apt-get update -y
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade docker.io || true
           fi
           docker --version || fail "docker 버전 확인 실패"
-          echoe "Docker 상태 점검"
           sudo usermod -aG docker $USER || true
 
+      # ====== 이미지 스캐폴드/빌드/푸시 항상 수행 ======
       - name: 🪵 Echo image scaffold (Dockerfile & app)
-        if: ${{ inputs.build_image == 'true' }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          APP_DIR="${ECHO_ROOT}/images/${{ inputs.image_name }}"
+          APP_DIR="${ECHO_ROOT}/images/${IMAGE_NAME}"
           mkdir -p "$APP_DIR"
           cat > "${APP_DIR}/app.sh" <<'APP'
           #!/usr/bin/env bash
@@ -225,52 +178,40 @@ jobs:
           DOCKER
           echoe "에코 Dockerfile & 앱 스캐폴드 생성"
 
-      - name: 🏗️ Build image
-        if: ${{ inputs.build_image == 'true' }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          APP_DIR="${ECHO_ROOT}/images/${{ inputs.image_name }}"
-          IMG="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${{ inputs.image_name }}"
-          TAG_SHA="${IMG}:${{ github.sha }}"
-          TAG_LATEST="${IMG}:latest"
-          echoe "이미지 빌드 → $TAG_SHA"
-          docker build -t "$TAG_SHA" "$APP_DIR"
-          docker tag "$TAG_SHA" "$TAG_LATEST"
-          echo "$TAG_SHA" > "${OUT_DIR}/image.txt"
-          echo "$TAG_LATEST" > "${OUT_DIR}/image_latest.txt"
-          echoe "빌드 완료"
-
-      - name: 🔐 GHCR login & push
-        if: ${{ inputs.build_image == 'true' && inputs.push_image == 'true' }}
+      - name: 🏗️ Build & Push image (GHCR)
         env:
           CR_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          IMG="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${{ inputs.image_name }}"
-          echoe "GHCR 로그인"
+          APP_DIR="${ECHO_ROOT}/images/${IMAGE_NAME}"
+          IMG="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}"
+          TAG_SHA="${IMG}:${GITHUB_SHA}"
+          TAG_LATEST="${IMG}:latest"
+          echoe "이미지 빌드 → $TAG_SHA"
+          docker build -t "$TAG_SHA" "$APP_DIR"
+          docker tag "$TAG_SHA" "$TAG_LATEST"
+          echo "${TAG_SHA}" > "${OUT_DIR}/image.txt"
+          echo "${TAG_LATEST}" > "${OUT_DIR}/image_latest.txt"
+          echoe "GHCR 로그인 & 푸시"
           echo "${CR_PAT}" | docker login "${IMAGE_REGISTRY}" -u "${GITHUB_ACTOR}" --password-stdin
-          echoe "이미지 푸시"
-          docker push "${IMG}:${{ github.sha }}"
-          docker push "${IMG}:latest"
+          docker push "${TAG_SHA}"
+          docker push "${TAG_LATEST}"
 
-      - name: 🧱 Lock/Protect & self-restore deleted protected paths
-        if: ${{ inputs.lock_protect == 'true' }}
+      # ====== 보호 경로 락/자기복구 항상 수행 ======
+      - name: 🧱 Lock/Protect & self-restore protected paths
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
           IFS=',' read -ra PATHS <<< "${PROTECTED_PATHS}"
-          echoe "보호 경로: ${PATHS[*]}"
           git config user.email "actions@users.noreply.github.com"
           git config user.name  "github-actions[bot]"
           git fetch --deepen=50 origin "${BRANCH_NAME}" || true
           RESTORED=0
           for p in "${PATHS[@]}"; do
-            p_trim=$(echo "$p" | xargs)
-            [ -z "$p_trim" ] && continue
+            p_trim=$(echo "$p" | xargs); [ -z "$p_trim" ] && continue
             if [ ! -e "$p_trim" ]; then
-              echoe "[LOCK] 누락 감지 → 복구 시도: $p_trim"
+              echoe "[LOCK] 누락 감지 → 복구: $p_trim"
               git checkout "origin/${BRANCH_NAME}" -- "$p_trim" 2>/dev/null || mkdir -p "$p_trim"
               touch "$p_trim/.restored.$(date +%Y%m%d%H%M%S)"
               git add "$p_trim" || true
@@ -280,11 +221,11 @@ jobs:
           if [ "$RESTORED" -eq 1 ]; then
             git commit -m "[LOCK] Auto-restore protected paths" || true
             git push origin "HEAD:${BRANCH_NAME}" || true
-            echo "[LOCK] 복구 커밋 완료"
           else
             echo "[LOCK] 복구 불필요"
           fi
 
+      # ====== DB 에코 테이블(둘 다) 항상 수행 ======
       - name: 📝 Generate SQL for echo tables
         run: |
           set -Eeuo pipefail
@@ -312,97 +253,84 @@ jobs:
           SQL
           echoe "SQL 생성 완료"
 
-      - name: 🐬 MySQL:create echo_logs & seed
-        if: ${{ inputs.db_engine == 'mysql' || inputs.db_engine == 'both' }}
+      - name: 🐬 MySQL — create echo_logs & seed
         env:
           MYSQL_ROOT_PW: rootpw123!
-          SEED: ${{ inputs.echo_seed_rows }}
+          SEED: "20"
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          echoe "MySQL 컨테이너 시작"
           docker run -d --name mysql-echo -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PW}" -p 3306:3306 mysql:8
-          echoe "가동 대기"
           for i in {1..60}; do
             if docker exec mysql-echo mysqladmin ping -h127.0.0.1 -uroot -p"${MYSQL_ROOT_PW}" --silent; then break; fi
             sleep 2
           done
-          echoe "스키마/테이블 생성"
           docker cp "${ECHO_ROOT}/db/sql/mysql/001_echo.sql" mysql-echo:/tmp/001_echo.sql
           docker exec -e MYSQL_PWD="${MYSQL_ROOT_PW}" mysql-echo mysql -uroot < /tmp/001_echo.sql
-          echoe "시드 적재 ${SEED}행"
           docker exec -e MYSQL_PWD="${MYSQL_ROOT_PW}" mysql-echo mysql -uroot -e "USE fin; \
-            SET @i:=0; \
-            INSERT INTO echo_logs(actor,action,notes) \
+            SET @i:=0; INSERT INTO echo_logs(actor,action,notes)
             SELECT 'actions-bot','seed', CONCAT('row #', @i:=@i+1) FROM information_schema.COLUMNS LIMIT ${SEED};"
-          echoe "MySQL 완료"
 
-      - name: 🐘 Postgres:create echo_logs & seed
-        if: ${{ inputs.db_engine == 'postgres' || inputs.db_engine == 'both' }}
+      - name: 🐘 Postgres — create echo_logs & seed
         env:
           PG_PW: pgpw123!
-          SEED: ${{ inputs.echo_seed_rows }}
+          SEED: "20"
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          echoe "Postgres 컨테이너 시작"
           docker run -d --name pg-echo -e POSTGRES_PASSWORD="${PG_PW}" -p 5432:5432 postgres:16
-          echoe "가동 대기"
           for i in {1..60}; do
             if docker exec pg-echo pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then break; fi
             sleep 2
           done
-          echoe "스키마/테이블 생성"
           docker cp "${ECHO_ROOT}/db/sql/postgres/001_echo.sql" pg-echo:/tmp/001_echo.sql
           docker exec -e PGPASSWORD="${PG_PW}" pg-echo psql -U postgres -f /tmp/001_echo.sql
-          echoe "시드 적재 ${SEED}행"
           docker exec -e PGPASSWORD="${PG_PW}" pg-echo psql -U postgres -c \
             "INSERT INTO fin.echo_logs(actor,action,notes)
-             SELECT 'actions-bot','seed','row #'||g
-             FROM generate_series(1, ${SEED}) g;"
-          echoe "Postgres 완료"
+             SELECT 'actions-bot','seed','row #'||g FROM generate_series(1, ${SEED}) g;"
 
-      - name: 🗄️ Prepare & hash artifacts
+      # ====== 산출물 패키징 + 강제 암호화(필수) ======
+      - name: 🗄️ Package & Hash artifacts
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
           mkdir -p "${OUT_DIR}"
-          echoe "산출물 패키징 시작"
           tar -czf "${OUT_DIR}/echo_artifacts.tar.gz" \
-            "${ECHO_ROOT}/tools" \
-            "${ECHO_ROOT}/images" \
-            "${ECHO_ROOT}/db" || true
+            "${ECHO_ROOT}/tools" "${ECHO_ROOT}/images" "${ECHO_ROOT}/db" || true
           sha256sum "${OUT_DIR}/echo_artifacts.tar.gz" > "${OUT_DIR}/echo_artifacts.sha256"
-          echoe "패키징 완료"
 
-      - name: 🔒 Encrypt artifacts (OpenSSL/GPG)
-        if: ${{ inputs.encrypt_outputs == 'true' }}
+      - name: 🔒 Encrypt artifacts (필수)
         env:
-          ECHO_PASSWORD: ${{ secrets.ECHO_PASSWORD }}
-          GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
-          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          # 갱신된 secrets 값 반영(직전 단계에서 생성했을 수 있음)
+          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
+
+          # 최신 secrets 값 읽어오기(암호화 강제 위해)
+          REPO="${GITHUB_REPOSITORY}"
+          # ECHO_PASSWORD 없으면 실패 대신 GPG 공개키로, 그것도 없으면 실패
+          EP="${ECHO_PASSWORD:-}"
+          GPK="${GPG_PUBLIC_KEY:-}"
+          GID="${GPG_KEY_ID:-}"
+
           f="${OUT_DIR}/echo_artifacts.tar.gz"
-          if [ -n "${ECHO_PASSWORD:-}" ]; then
-            echoe "OpenSSL AES-256-CBC 암호화"
-            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
-              -in "$f" -out "${f}.enc" -pass env:ECHO_PASSWORD
-            echoe "→ ${f}.enc 생성"
-          elif [ -n "${GPG_PUBLIC_KEY:-}" ]; then
-            echoe "GPG 공개키 임포트 및 암호화"
-            printf "%s" "$GPG_PUBLIC_KEY" | gpg --batch --import
+          if [ -n "$EP" ]; then
+            echoe "OpenSSL AES-256-CBC 암호화(필수)"
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$f" -out "${f}.enc" -pass env:ECHO_PASSWORD
+          else
+            if [ -z "$GPK" ]; then
+              fail "ECHO_PASSWORD와 GPG_PUBLIC_KEY 중 하나는 반드시 있어야 합니다. (auto-create 단계에서 생성되었는지 확인)"
+            fi
+            echoe "GPG 암호화(필수)"
+            printf "%s" "$GPK" | gpg --batch --import
             tgt="${f}.gpg"
-            if [ -n "${GPG_KEY_ID:-}" ]; then
-              gpg --batch --yes -r "${GPG_KEY_ID}" -o "$tgt" --encrypt "$f"
+            if [ -n "$GID" ]; then
+              gpg --batch --yes -r "$GID" -o "$tgt" --encrypt "$f"
             else
               rid=$(gpg --list-keys --with-colons | awk -F: '/^pub/{getline; print $10; exit}')
               gpg --batch --yes -r "$rid" -o "$tgt" --encrypt "$f"
             fi
-            echoe "→ ${tgt} 생성"
-          else
-            echoe "Secrets 미설정: 암호화 스킵"
           fi
 
       - name: 📦 Upload artifacts
@@ -419,17 +347,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: 🏷️ Create Release (optional)
-        if: ${{ inputs.do_release == 'true' }}
+      - name: 🏷️ Create Release (항상)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
           TAG="echoops-${{ github.run_number }}-$(date +%Y%m%d%H%M%S)"
-          echoe "릴리스 태그: $TAG"
           gh release create "$TAG" \
-            --notes "EchoOps automated release: image, SQL, encrypted artifacts" \
+            --notes "EchoOps FULL mandatory release: image, SQL, encrypted artifacts" \
             ${{ env.OUT_DIR }}/echo_artifacts.tar.gz \
             ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.enc \
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.gpg || echo "[WARN] gh release 실패(이미 존재 등)"
+            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.gpg || echo "[WARN] gh release 경고(이미 존재 등)"
