@@ -1,4 +1,4 @@
-name: "🐳 EchoOps: Full Mandatory — Docker + GHCR + Encrypt + Lock + DB + Auto-Create Secrets + Release"
+name: "🐳 EchoOps: FULL — Docker + GHCR + Encrypt + Lock + DB + Auto-Secrets + Service Upgrades + Release"
 
 on:
   workflow_dispatch:
@@ -23,8 +23,8 @@ env:
 jobs:
   echoops:
     runs-on: ubuntu-latest
-    # secrets.* 를 if에서 직접 쓰지 않도록 job env에 바인딩
     env:
+      # secrets.* 을 if에서 직접 쓰지 않도록 미리 바인딩
       GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
       ECHO_PASSWORD: ${{ secrets.ECHO_PASSWORD }}
       GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
@@ -38,7 +38,7 @@ jobs:
       - name: 🔧 Prepare echo helpers
         run: |
           set -Eeuo pipefail
-          mkdir -p "${ECHO_ROOT}"/{tools,out,db/sql/mysql,db/sql/postgres,images}
+          mkdir -p "${ECHO_ROOT}"/{tools,out,db/sql/mysql,db/sql/postgres,images,backup,logs}
           cat > "${ECHO_ROOT}/tools/echo.sh" <<'BASH'
           #!/usr/bin/env bash
           echoe(){ printf "[ECHO] %s\n" "$*"; }
@@ -49,7 +49,7 @@ jobs:
           . "${ECHO_ROOT}/tools/echo.sh"
           echoe "Init echo helpers & dirs"
 
-      - name: ⬆️ Runner update (apt) + tool install
+      - name: ⬆️ Runner update (apt) + base tools
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
@@ -58,7 +58,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y install gnupg jq
 
-      # ====== 🔐 필수: GH_ADMIN_TOKEN 점검 및 gh 로그인 ======
+      # ====== 🔐 필수: GH Admin 토큰 확인 + gh 로그인 ======
       - name: 🔒 Require GH_ADMIN_TOKEN
         run: |
           set -Eeuo pipefail
@@ -74,20 +74,16 @@ jobs:
           gh auth status || gh auth login --with-token <<< "${GH_TOKEN}"
           gh auth status
 
-      # ====== 🔐 Secrets 강제 생성 ======
-      - name: 🧪 Secrets 존재 여부 점검
-        id: chksec
+      # ====== 🔐 Secrets 강제 생성(동일 런타임 사용을 위해 RUNTIME 변수 세팅) ======
+      - name: 🧪 List existing secrets
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-          REPO="${GITHUB_REPOSITORY}"
-          LIST_JSON=$(gh secret list --repo "$REPO" --json name || echo "[]")
-          echo "LIST_JSON=$LIST_JSON" >> $GITHUB_OUTPUT
-          echoe "현재 secrets: $(echo "$LIST_JSON" | jq -r '.[].name' | tr '\n' ' ')"
+          gh secret list --repo "$GITHUB_REPOSITORY" --json name | jq -r '.[].name' | sed 's/^/[ECHO][SECRET] /' || true
 
-      - name: ⚙️ ECHO_PASSWORD 자동 생성(없으면 생성)
+      - name: ⚙️ Ensure ECHO_PASSWORD
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
@@ -98,11 +94,13 @@ jobs:
             PW="$(openssl rand -base64 48)"
             echoe "ECHO_PASSWORD 생성 및 저장"
             printf "%s" "$PW" | gh secret set ECHO_PASSWORD --repo "$REPO" --body-file -
+            echo "ECHO_PASSWORD_RUNTIME=$PW" >> "$GITHUB_ENV"
           else
-            echoe "ECHO_PASSWORD 이미 존재"
+            echoe "ECHO_PASSWORD 이미 존재 → 런타임 반영"
+            echo "ECHO_PASSWORD_RUNTIME=${ECHO_PASSWORD}" >> "$GITHUB_ENV"
           fi
 
-      - name: 🔑 GPG 키 생성 및 공개키/키ID 저장(없으면 생성)
+      - name: 🔑 Ensure GPG_PUBLIC_KEY / GPG_KEY_ID
         env:
           GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
         run: |
@@ -130,12 +128,15 @@ jobs:
             PUB=$(gpg --armor --export "$KEYID")
             [ "$NEED_PUB" -ne 0 ] && printf "%s" "$PUB" | gh secret set GPG_PUBLIC_KEY --repo "$REPO" --body-file -
             [ "$NEED_ID" -ne 0 ] && printf "%s" "$KEYID" | gh secret set GPG_KEY_ID --repo "$REPO" --body-file -
-            echoe "GPG_PUBLIC_KEY / GPG_KEY_ID 반영 완료"
+            echo "GPG_PUBLIC_KEY_RUNTIME=$(printf "%s" "$PUB" | tr -d '\n')" >> "$GITHUB_ENV"
+            echo "GPG_KEY_ID_RUNTIME=$KEYID" >> "$GITHUB_ENV"
           else
-            echoe "GPG_PUBLIC_KEY / GPG_KEY_ID 이미 존재"
+            echoe "GPG 키 이미 존재 → 런타임 반영"
+            echo "GPG_PUBLIC_KEY_RUNTIME=$(printf "%s" "${GPG_PUBLIC_KEY}" | tr -d '\n')" >> "$GITHUB_ENV"
+            echo "GPG_KEY_ID_RUNTIME=${GPG_KEY_ID}" >> "$GITHUB_ENV"
           fi
 
-      # ====== Docker 항상 수행 ======
+      # ====== Docker 엔진 설치/업그레이드 (항상) ======
       - name: 🐳 Docker install/upgrade
         run: |
           set -Eeuo pipefail
@@ -152,7 +153,7 @@ jobs:
           docker --version || fail "docker 버전 확인 실패"
           sudo usermod -aG docker $USER || true
 
-      # ====== 이미지 스캐폴드/빌드/푸시 항상 수행 ======
+      # ====== Echo 앱: 스캐폴드 → 빌드 → 푸시 (항상) ======
       - name: 🪵 Echo image scaffold (Dockerfile & app)
         run: |
           set -Eeuo pipefail
@@ -171,14 +172,16 @@ jobs:
           chmod +x "${APP_DIR}/app.sh"
           cat > "${APP_DIR}/Dockerfile" <<'DOCKER'
           FROM ubuntu:24.04
+          ARG REBUILD_TS
+          ENV REBUILD_TS=${REBUILD_TS}
           RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates bash && rm -rf /var/lib/apt/lists/*
           WORKDIR /app
           COPY app.sh /app/app.sh
           CMD ["/app/app.sh"]
           DOCKER
-          echoe "에코 Dockerfile & 앱 스캐폴드 생성"
+          echoe "에코 Dockerfile & 앱 스캐폴드 생성(캐시 무력화 ARG 포함)"
 
-      - name: 🏗️ Build & Push image (GHCR)
+      - name: 🏗️ Build & Push image (initial)
         env:
           CR_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -189,7 +192,7 @@ jobs:
           TAG_SHA="${IMG}:${GITHUB_SHA}"
           TAG_LATEST="${IMG}:latest"
           echoe "이미지 빌드 → $TAG_SHA"
-          docker build -t "$TAG_SHA" "$APP_DIR"
+          docker build --build-arg REBUILD_TS=$(date +%s) -t "$TAG_SHA" "$APP_DIR"
           docker tag "$TAG_SHA" "$TAG_LATEST"
           echo "${TAG_SHA}" > "${OUT_DIR}/image.txt"
           echo "${TAG_LATEST}" > "${OUT_DIR}/image_latest.txt"
@@ -198,7 +201,7 @@ jobs:
           docker push "${TAG_SHA}"
           docker push "${TAG_LATEST}"
 
-      # ====== 보호 경로 락/자기복구 항상 수행 ======
+      # ====== 보호 경로 락/자기복구 (항상) ======
       - name: 🧱 Lock/Protect & self-restore protected paths
         run: |
           set -Eeuo pipefail
@@ -225,7 +228,7 @@ jobs:
             echo "[LOCK] 복구 불필요"
           fi
 
-      # ====== DB 에코 테이블(둘 다) 항상 수행 ======
+      # ====== DB 에코 테이블(둘 다) 생성 + 시드 (항상) ======
       - name: 📝 Generate SQL for echo tables
         run: |
           set -Eeuo pipefail
@@ -289,44 +292,131 @@ jobs:
             "INSERT INTO fin.echo_logs(actor,action,notes)
              SELECT 'actions-bot','seed','row #'||g FROM generate_series(1, ${SEED}) g;"
 
+      # ====== 🔁 서비스 업그레이드(대량 확장) — 백업 → 최신 Pull → 교체 → 복구/검증 ======
+      - name: 🧰 Write upgrade orchestrator
+        run: |
+          set -Eeuo pipefail
+          cat > "${ECHO_ROOT}/tools/upgrade.sh" <<'UP'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          log(){ printf "[UPGRADE] %s\n" "$*"; }
+
+          pull_if_new() {
+            local img="$1"
+            log "Pull latest for ${img}"
+            docker pull "${img}" >/dev/null 2>&1 || true
+            docker inspect --format '{{index .RepoDigests 0}}' "${img}" 2>/dev/null || echo ""
+          }
+
+          upgrade_mysql(){
+            local c="mysql-echo" pw="$1"
+            log "MySQL backup (fin)"
+            docker exec -e MYSQL_PWD="${pw}" "${c}" sh -lc 'mysqldump -uroot --databases fin > /tmp/fin.sql'
+            docker cp "${c}:/tmp/fin.sql" ".github/echo/backup/mysql_fin.sql"
+            log "Pull newest mysql:8"
+            pull_if_new "mysql:8"
+            log "Replace container"
+            docker rm -f "${c}" || true
+            docker run -d --name "${c}" -e MYSQL_ROOT_PASSWORD="${pw}" -p 3306:3306 mysql:8
+            for i in $(seq 1 90); do docker exec "${c}" mysqladmin ping -h127.0.0.1 -uroot -p"${pw}" --silent && break || sleep 2; done
+            log "Restore DB"
+            docker cp ".github/echo/backup/mysql_fin.sql" "${c}:/tmp/fin.sql"
+            docker exec -e MYSQL_PWD="${pw}" "${c}" sh -lc 'mysql -uroot < /tmp/fin.sql'
+            log "Validate count"
+            docker exec -e MYSQL_PWD="${pw}" "${c}" sh -lc 'mysql -uroot -e "SELECT COUNT(*) AS cnt FROM fin.echo_logs;"' | tee ".github/echo/logs/mysql_after_count.txt"
+          }
+
+          upgrade_postgres(){
+            local c="pg-echo" pw="$1"
+            log "Postgres backup (schema fin)"
+            docker exec -e PGPASSWORD="${pw}" "${c}" bash -lc 'pg_dump -U postgres -n fin -d postgres > /tmp/fin.sql'
+            docker cp "${c}:/tmp/fin.sql" ".github/echo/backup/pg_fin.sql"
+            log "Pull newest postgres:16"
+            pull_if_new "postgres:16"
+            log "Replace container"
+            docker rm -f "${c}" || true
+            docker run -d --name "${c}" -e POSTGRES_PASSWORD="${pw}" -p 5432:5432 postgres:16
+            for i in $(seq 1 90); do docker exec "${c}" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break || sleep 2; done
+            log "Restore schema"
+            docker cp ".github/echo/backup/pg_fin.sql" "${c}:/tmp/fin.sql"
+            docker exec -e PGPASSWORD="${pw}" "${c}" bash -lc 'psql -U postgres -f /tmp/fin.sql'
+            log "Validate count"
+            docker exec -e PGPASSWORD="${pw}" "${c}" bash -lc 'psql -U postgres -tAc "SELECT COUNT(*) FROM fin.echo_logs;"' | tee ".github/echo/logs/pg_after_count.txt"
+          }
+
+          upgrade_echo_image(){
+            local img_base="$1"
+            local ts=$(date +%s)
+            local tag_u="${img_base}:upgrade-${ts}"
+            log "Rebuild echo image with cache-bust (REBUILD_TS=${ts})"
+            docker build --build-arg REBUILD_TS="${ts}" -t "${tag_u}" ".github/echo/images/${IMAGE_NAME}"
+            log "Tag latest"
+            docker tag "${tag_u}" "${img_base}:latest"
+            echo "${tag_u}" > ".github/echo/out/image_upgrade.txt"
+          }
+          UP
+          chmod +x "${ECHO_ROOT}/tools/upgrade.sh"
+
+      - name: 🔁 Upgrade — MySQL
+        env:
+          MYSQL_ROOT_PW: rootpw123!
+        run: |
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/upgrade.sh"
+          upgrade_mysql "${MYSQL_ROOT_PW}"
+
+      - name: 🔁 Upgrade — Postgres
+        env:
+          PG_PW: pgpw123!
+        run: |
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/upgrade.sh"
+          upgrade_postgres "${PG_PW}"
+
+      - name: 🔁 Upgrade — Echo image (rebuild & re-push)
+        env:
+          CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/echo.sh"
+          . "${ECHO_ROOT}/tools/upgrade.sh"
+          IMG="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}"
+          upgrade_echo_image "${IMG}"
+          echoe "GHCR 로그인 & 푸시(업그레이드 태그)"
+          echo "${CR_PAT}" | docker login "${IMAGE_REGISTRY}" -u "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMG}:latest"
+          docker push "$(cat "${OUT_DIR}/image_upgrade.txt")"
+
       # ====== 산출물 패키징 + 강제 암호화(필수) ======
-      - name: 🗄️ Package & Hash artifacts
+      - name: 🗄️ Package & Hash artifacts (after upgrades)
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
           mkdir -p "${OUT_DIR}"
           tar -czf "${OUT_DIR}/echo_artifacts.tar.gz" \
-            "${ECHO_ROOT}/tools" "${ECHO_ROOT}/images" "${ECHO_ROOT}/db" || true
+            "${ECHO_ROOT}/tools" "${ECHO_ROOT}/images" "${ECHO_ROOT}/db" "${ECHO_ROOT}/backup" "${ECHO_ROOT}/logs" || true
           sha256sum "${OUT_DIR}/echo_artifacts.tar.gz" > "${OUT_DIR}/echo_artifacts.sha256"
 
       - name: 🔒 Encrypt artifacts (필수)
         env:
-          # 갱신된 secrets 값 반영(직전 단계에서 생성했을 수 있음)
-          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
+          ECHO_PASSWORD_RUNTIME: ${{ env.ECHO_PASSWORD_RUNTIME }}
+          GPG_PUBLIC_KEY_RUNTIME: ${{ env.GPG_PUBLIC_KEY_RUNTIME }}
+          GPG_KEY_ID_RUNTIME: ${{ env.GPG_KEY_ID_RUNTIME }}
         run: |
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
-
-          # 최신 secrets 값 읽어오기(암호화 강제 위해)
-          REPO="${GITHUB_REPOSITORY}"
-          # ECHO_PASSWORD 없으면 실패 대신 GPG 공개키로, 그것도 없으면 실패
-          EP="${ECHO_PASSWORD:-}"
-          GPK="${GPG_PUBLIC_KEY:-}"
-          GID="${GPG_KEY_ID:-}"
-
           f="${OUT_DIR}/echo_artifacts.tar.gz"
-          if [ -n "$EP" ]; then
+          if [ -n "${ECHO_PASSWORD_RUNTIME:-}" ]; then
             echoe "OpenSSL AES-256-CBC 암호화(필수)"
-            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$f" -out "${f}.enc" -pass env:ECHO_PASSWORD
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+              -in "$f" -out "${f}.enc" -pass env:ECHO_PASSWORD_RUNTIME
           else
-            if [ -z "$GPK" ]; then
-              fail "ECHO_PASSWORD와 GPG_PUBLIC_KEY 중 하나는 반드시 있어야 합니다. (auto-create 단계에서 생성되었는지 확인)"
-            fi
+            [ -n "${GPG_PUBLIC_KEY_RUNTIME:-}" ] || fail "GPG 공개키가 필요합니다."
             echoe "GPG 암호화(필수)"
-            printf "%s" "$GPK" | gpg --batch --import
+            printf "%s" "$GPG_PUBLIC_KEY_RUNTIME" | gpg --batch --import
             tgt="${f}.gpg"
-            if [ -n "$GID" ]; then
-              gpg --batch --yes -r "$GID" -o "$tgt" --encrypt "$f"
+            if [ -n "${GPG_KEY_ID_RUNTIME:-}" ]; then
+              gpg --batch --yes -r "${GPG_KEY_ID_RUNTIME}" -o "$tgt" --encrypt "$f"
             else
               rid=$(gpg --list-keys --with-colons | awk -F: '/^pub/{getline; print $10; exit}')
               gpg --batch --yes -r "$rid" -o "$tgt" --encrypt "$f"
@@ -344,6 +434,9 @@ jobs:
             ${{ env.OUT_DIR }}/echo_artifacts.sha256
             ${{ env.OUT_DIR }}/image.txt
             ${{ env.OUT_DIR }}/image_latest.txt
+            ${{ env.OUT_DIR }}/image_upgrade.txt
+            ${{ env.ECHO_ROOT }}/logs/mysql_after_count.txt
+            ${{ env.ECHO_ROOT }}/logs/pg_after_count.txt
           if-no-files-found: ignore
           retention-days: 7
 
@@ -355,7 +448,7 @@ jobs:
           . "${ECHO_ROOT}/tools/echo.sh"
           TAG="echoops-${{ github.run_number }}-$(date +%Y%m%d%H%M%S)"
           gh release create "$TAG" \
-            --notes "EchoOps FULL mandatory release: image, SQL, encrypted artifacts" \
+            --notes "EchoOps FULL (+Upgrades): docker engine, echo image, MySQL/Postgres upgraded with backup/restore; encrypted artifacts included." \
             ${{ env.OUT_DIR }}/echo_artifacts.tar.gz \
             ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.enc \
             ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.gpg || echo "[WARN] gh release 경고(이미 존재 등)"
