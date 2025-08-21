@@ -4,20 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       lookback_hours:
-        description: "몇 시간 이내 실패 run만 삭제 (기본 720=30일)"
+        description: "몇 시간 이내 실패 run 정리(기본 720=30일)"
         default: "720"
-        required: true
-      disable_on_failure:
-        description: "최근 실행이 실패한 워크플로우를 비활성화(Disable)"
-        default: "true"
-        required: true
-      enable_on_success:
-        description: "최근 실행이 성공한 워크플로우를 자동 재활성화(Enable)"
-        default: "true"
-        required: true
-      success_streak:
-        description: "재활성화 조건: 최근 연속 성공 횟수"
-        default: "1"
         required: true
       delete_limit:
         description: "최대 삭제 run 개수 상한"
@@ -27,35 +15,34 @@ on:
         description: "실제 수행 대신 출력만 (true/false)"
         default: "false"
         required: true
-      protect_patterns:
-        description: "비활성화/삭제 제외 패턴(, 구분, 예: 'health,deploy')"
-        default: ""
-        required: false
-      # === 강제 파일 삭제 관련 옵션 ===
-      hard_delete_workflow_files:
-        description: "실패 워크플로우의 YAML 파일을 기본 브랜치에서 즉시 강제 삭제"
+      disable_on_failure:
+        description: "최근 실행 실패한 워크플로우 Disable"
         default: "true"
         required: true
-      create_pr_instead_of_direct_commit:
-        description: "직접 커밋 대신 PR 생성으로 삭제(보수 모드)"
-        default: "false"
+      enable_on_success:
+        description: "연속 성공 시 비활성 워크플로우 Enable"
+        default: "true"
         required: true
-      backup_before_delete:
-        description: "삭제 전 백업 브랜치에 워크플로우 파일 보관"
-        default: "false"
+      success_streak:
+        description: "재활성화 조건: 최근 연속 성공 횟수"
+        default: "1"
         required: true
-      backup_branch:
-        description: "백업 브랜치 이름 (backup_before_delete=true일 때 사용)"
-        default: "workflow-purge-backup"
-        required: true
-      delete_branch_name:
-        description: "PR 모드에서 사용할 작업 브랜치 이름"
-        default: "workflow-purge-branch"
+      protect_patterns:
+        description: "보호 패턴(,로 구분, 예: 'health,deploy')"
+        default: ""
+        required: false
+      policy_mode:
+        description: "force_delete | pr_delete | backup_then_delete | backup_then_pr | disable_only"
+        default: "force_delete"
         required: true
       commit_message_prefix:
         description: "커밋 메시지 접두사"
         default: "[FORCE-PURGE]"
         required: true
+      advanced_json:
+        description: "고급설정 JSON (예: {\"backup_branch\":\"workflow-purge-backup\",\"delete_branch_name\":\"workflow-purge-branch\"})"
+        default: "{}"
+        required: false
 
 permissions:
   actions: write
@@ -106,7 +93,9 @@ jobs:
             PAYLOAD_BASE64=$(printf '%s' "$PAYLOAD" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
             UNSIGNED="${HEADER_BASE64}.${PAYLOAD_BASE64}"
             KEYFILE="app_private_key.pem"; printf "%s" "$APP_PRIVATE_KEY" > "$KEYFILE"; chmod 600 "$KEYFILE"
-            SIGNATURE=$(printf '%s' "$UNSIGNED" | openssl dgst -sha256 -sign "$KEYFILE" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+            SIGNATURE=$(printf '%s' "$UNSIGNED" | \
+              openssl dgst -sha256 -sign "$KEYFILE" | \
+              openssl base64 -A | tr '+/' '-_' | tr -d '=')
             JWT="${UNSIGNED}.${SIGNATURE}"; MASK "$JWT"
             INSTALL_TOKEN_JSON=$(curl -fsSL \
               -H "Authorization: Bearer ${JWT}" \
@@ -131,24 +120,58 @@ jobs:
           echo "GH_ADMIN_TOKEN=$USE_TOKEN" >> "$GITHUB_ENV"
           echo "token_ready=true" >> "$GITHUB_OUTPUT"
 
+      - name: 🧠 Resolve policy_mode → flags & parse advanced_json
+        id: policy
+        run: |
+          set -Eeuo pipefail
+          MODE="${{ github.event.inputs.policy_mode }}"
+          ADV='${{ github.event.inputs.advanced_json }}'
+          echo "[POLICY] mode=${MODE}"
+          echo "[POLICY] advanced_json=${ADV}"
+
+          # defaults
+          HARD_DELETE="true"
+          PR_MODE="false"
+          BACKUP_BEFORE_DELETE="false"
+          BACKUP_BRANCH="$(echo "${ADV}" | jq -r '.backup_branch // "workflow-purge-backup"')"
+          DELETE_BRANCH_NAME="$(echo "${ADV}" | jq -r '.delete_branch_name // "workflow-purge-branch"')"
+
+          case "$MODE" in
+            force_delete)        HARD_DELETE="true";  PR_MODE="false"; BACKUP_BEFORE_DELETE="false" ;;
+            pr_delete)           HARD_DELETE="true";  PR_MODE="true";  BACKUP_BEFORE_DELETE="false" ;;
+            backup_then_delete)  HARD_DELETE="true";  PR_MODE="false"; BACKUP_BEFORE_DELETE="true"  ;;
+            backup_then_pr)      HARD_DELETE="true";  PR_MODE="true";  BACKUP_BEFORE_DELETE="true"  ;;
+            disable_only)        HARD_DELETE="false"; PR_MODE="false"; BACKUP_BEFORE_DELETE="false" ;;
+            *) echo "[WARN] Unknown policy_mode. Fallback=force_delete";;
+          esac
+
+          {
+            echo "HARD_DELETE=${HARD_DELETE}"
+            echo "PR_MODE=${PR_MODE}"
+            echo "BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
+            echo "BACKUP_BRANCH=${BACKUP_BRANCH}"
+            echo "DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME}"
+          } >> "$GITHUB_ENV"
+
+          echo "[POLICY] HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
+          echo "[POLICY] BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME}"
+
       - name: 🛡️ Preflight & Config Echo
         run: |
           set -Eeuo pipefail
           echo "[CHECK] TARGET_OWNER=${TARGET_OWNER}"
           echo "[CHECK] TARGET_REPO=${TARGET_REPO}"
           echo "[CHECK] lookback_hours=${{ github.event.inputs.lookback_hours }}"
+          echo "[CHECK] delete_limit=${{ github.event.inputs.delete_limit }}"
+          echo "[CHECK] dry_run=${{ github.event.inputs.dry_run }}"
           echo "[CHECK] disable_on_failure=${{ github.event.inputs.disable_on_failure }}"
           echo "[CHECK] enable_on_success=${{ github.event.inputs.enable_on_success }}"
           echo "[CHECK] success_streak=${{ github.event.inputs.success_streak }}"
-          echo "[CHECK] delete_limit=${{ github.event.inputs.delete_limit }}"
-          echo "[CHECK] dry_run=${{ github.event.inputs.dry_run }}"
           echo "[CHECK] protect_patterns='${{ github.event.inputs.protect_patterns }}'"
-          echo "[CHECK] hard_delete_workflow_files=${{ github.event.inputs.hard_delete_workflow_files }}"
-          echo "[CHECK] create_pr_instead_of_direct_commit=${{ github.event.inputs.create_pr_instead_of_direct_commit }}"
-          echo "[CHECK] backup_before_delete=${{ github.event.inputs.backup_before_delete }}"
-          echo "[CHECK] backup_branch=${{ github.event.inputs.backup_branch }}"
-          echo "[CHECK] delete_branch_name=${{ github.event.inputs.delete_branch_name }}"
+          echo "[CHECK] policy_mode=${{ github.event.inputs.policy_mode }}"
           echo "[CHECK] commit_message_prefix='${{ github.event.inputs.commit_message_prefix }}'"
+          echo "[CHECK] (derived) HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
+          echo "[CHECK] (derived) BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME}"
 
       - name: 📄 Generate cleaner+purger program (scripts/failed_cleaner.sh)
         run: |
@@ -165,19 +188,19 @@ jobs:
           TOKEN="${GH_ADMIN_TOKEN}"
 
           LOOKBACK_HOURS="${LOOKBACK_HOURS:-720}"
-          DISABLE_ON_FAIL="${DISABLE_ON_FAILURE:-true}"
-          ENABLE_ON_SUCCESS="${ENABLE_ON_SUCCESS:-true}"
-          SUCCESS_STREAK="${SUCCESS_STREAK:-1}"
           DELETE_LIMIT="${DELETE_LIMIT:-1000}"
           DRY_RUN="${DRY_RUN:-false}"
+          DISABLE_ON_FAILURE="${DISABLE_ON_FAILURE:-true}"
+          ENABLE_ON_SUCCESS="${ENABLE_ON_SUCCESS:-true}"
+          SUCCESS_STREAK="${SUCCESS_STREAK:-1}"
           PROTECT_PATTERNS="${PROTECT_PATTERNS:-}"
 
-          HARD_DELETE="${HARD_DELETE_WORKFLOW_FILES:-true}"
-          PR_MODE="${CREATE_PR_INSTEAD_OF_DIRECT_COMMIT:-false}"
+          HARD_DELETE="${HARD_DELETE:-true}"
+          PR_MODE="${PR_MODE:-false}"
           BACKUP_BEFORE_DELETE="${BACKUP_BEFORE_DELETE:-false}"
           BACKUP_BRANCH="${BACKUP_BRANCH:-workflow-purge-backup}"
-          DELETE_BRANCH="${DELETE_BRANCH_NAME:-workflow-purge-branch}"
-          COMMIT_PREFIX="${COMMIT_MESSAGE_PREFIX:-[FORCE-PURGE]}"
+          DELETE_BRANCH_NAME="${DELETE_BRANCH_NAME:-workflow-purge-branch}"
+          COMMIT_MESSAGE_PREFIX="${COMMIT_MESSAGE_PREFIX:-[FORCE-PURGE]}"
 
           API="https://api.github.com"
           HDR_AUTH="Authorization: Bearer ${TOKEN}"
@@ -193,51 +216,46 @@ jobs:
           cutoff_epoch=$(( now_epoch - LOOKBACK_HOURS*3600 ))
 
           echoe "[CFG] OWNER=${OWNER} REPO=${REPO}"
-          echoe "[CFG] DISABLE_ON_FAIL=${DISABLE_ON_FAIL} ENABLE_ON_SUCCESS=${ENABLE_ON_SUCCESS} SUCCESS_STREAK=${SUCCESS_STREAK}"
+          echoe "[CFG] LOOKBACK_HOURS=${LOOKBACK_HOURS} DELETE_LIMIT=${DELETE_LIMIT} DRY_RUN=${DRY_RUN}"
+          echoe "[CFG] DISABLE_ON_FAILURE=${DISABLE_ON_FAILURE} ENABLE_ON_SUCCESS=${ENABLE_ON_SUCCESS} SUCCESS_STREAK=${SUCCESS_STREAK}"
           echoe "[CFG] HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
-          echoe "[CFG] BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH=${DELETE_BRANCH} COMMIT_PREFIX=${COMMIT_PREFIX}"
-          echoe "[CFG] DELETE_LIMIT=${DELETE_LIMIT} DRY_RUN=${DRY_RUN} LOOKBACK_HOURS=${LOOKBACK_HOURS} cutoff_epoch=${cutoff_epoch}"
+          echoe "[CFG] BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME} COMMIT_MESSAGE_PREFIX=${COMMIT_MESSAGE_PREFIX}"
           echoe "[CFG] PROTECT_PATTERNS=${PROTECT_PATTERNS}"
 
-          # === Repo 정보 및 기본 브랜치 획득 ===
+          # 기본 브랜치
           repo_json="$(api_get "${API}/repos/${OWNER}/${REPO}")"
           default_branch="$(echo "${repo_json}" | jq -r '.default_branch')"
-          echoe "[INFO] default_branch=${default_branch}"
-
-          # === 브랜치(ref) 준비 (PR 모드 또는 백업 필요 시) ===
           base_ref_json="$(api_get "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${default_branch}")"
           base_sha="$(echo "${base_ref_json}" | jq -r '.object.sha')"
-          echoe "[INFO] base_sha=${base_sha}"
+          echoe "[INFO] default_branch=${default_branch} base_sha=${base_sha}"
 
           create_branch_if_missing(){
             local branch="$1"
-            # 존재 여부 확인
-            if curl -fsS -o /dev/null -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${branch}"; then
+            if curl -fsS -o /dev/null -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" \
+                 "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${branch}"; then
               echoe "[BRANCH] ${branch} already exists."
               return 0
             fi
             echoe "[BRANCH] creating ${branch} from ${default_branch} (${base_sha})"
             [ "${DRY_RUN}" = "true" ] && { echoe "[DRY] create ref ${branch}"; return 0; }
-            api_post "${API}/repos/${OWNER}/${REPO}/git/refs" "$(jq -n --arg ref "refs/heads/${branch}" --arg sha "${base_sha}" '{ref:$ref, sha:$sha}')" >/dev/null
+            api_post "${API}/repos/${OWNER}/${REPO}/git/refs" \
+              "$(jq -n --arg ref "refs/heads/${branch}" --arg sha "${base_sha}" '{ref:$ref, sha:$sha}')" >/dev/null
           }
 
-          # === 파일 삭제/백업 보조 ===
           get_file_sha(){
             local path="$1" branch="$2"
             api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${branch}" | jq -r '.sha'
           }
           delete_file_on_branch(){
             local path="$1" branch="$2" msg="$3"
-            local sha
-            sha="$(get_file_sha "${path}" "${branch}")"
+            local sha; sha="$(get_file_sha "${path}" "${branch}")"
             if [ -z "${sha}" ] || [ "${sha}" = "null" ]; then
               echoe "[DEL-FILE] Not found: ${path} on ${branch}"
               return 0
             fi
             echoe "[DEL-FILE] ${path} (sha=${sha}) on ${branch}"
             if [ "${DRY_RUN}" = "true" ]; then
-              echoe "[DRY] DELETE ${path} on ${branch} msg='${msg}'"
-              return 0
+              echoe "[DRY] DELETE ${path} on ${branch} msg='${msg}'"; return 0
             fi
             curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" \
               -d "$(jq -n --arg message "${msg}" --arg sha "${sha}" --arg branch "${branch}" '{message:$message, sha:$sha, branch:$branch}')" \
@@ -245,20 +263,17 @@ jobs:
           }
           copy_file_between_branches(){
             local path="$1" from_branch="$2" to_branch="$3" msg="$4"
-            local blob_json file_sha file_content encoding
+            local blob_json file_sha content_b64
             blob_json="$(api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${from_branch}")"
             file_sha="$(echo "${blob_json}" | jq -r '.sha')"
-            encoding="$(echo "${blob_json}" | jq -r '.encoding')"
             if [ "${file_sha}" = "null" ] || [ -z "${file_sha}" ]; then
               echoe "[BACKUP] Skip copy (missing): ${path}"
               return 0
             fi
             content_b64="$(echo "${blob_json}" | jq -r '.content' | tr -d '\n')"
             if [ "${DRY_RUN}" = "true" ]; then
-              echoe "[DRY] COPY ${path} ${from_branch} -> ${to_branch} msg='${msg}'"
-              return 0
+              echoe "[DRY] COPY ${path} ${from_branch} -> ${to_branch} msg='${msg}'"; return 0
             fi
-            # put to target branch (create/update)
             curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" \
               -d "$(jq -n --arg message "${msg}" --arg content "${content_b64}" --arg branch "${to_branch}" '{message:$message, content:$content, branch:$branch}')" \
               "${API}/repos/${OWNER}/${REPO}/contents/${path}" >/dev/null
@@ -277,8 +292,10 @@ jobs:
             return 1
           }
 
-          # === 워크플로우 목록 ===
-          echoe "[STEP] Fetch workflows ..."
+          # 필요 브랜치 생성
+          if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then create_branch_if_missing "${BACKUP_BRANCH}"; fi
+          if [ "${PR_MODE}" = "true" ]; then create_branch_if_missing "${DELETE_BRANCH_NAME}"; fi
+
           workflows_json="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows?per_page=100")"
           count_wf="$(echo "${workflows_json}" | jq '.workflows | length')"
           echoe "[INFO] workflows=${count_wf}"
@@ -286,11 +303,6 @@ jobs:
           deleted_runs=0; disabled_wf=0; enabled_wf=0; deleted_files=0; backed_up_files=0
           declare -a delete_paths
 
-          # 백업/PR 모드 준비
-          if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then create_branch_if_missing "${BACKUP_BRANCH}"; fi
-          if [ "${PR_MODE}" = "true" ]; then create_branch_if_missing "${DELETE_BRANCH}"; fi
-
-          # === 각 워크플로우 처리 ===
           for ((i=0; i<count_wf; i++)); do
             wf_id="$(echo "${workflows_json}" | jq -r ".workflows[${i}].id")"
             wf_name="$(echo "${workflows_json}" | jq -r ".workflows[${i}].name")"
@@ -298,12 +310,11 @@ jobs:
             wf_state="$(echo "${workflows_json}" | jq -r ".workflows[${i}].state")"
             echoe "[WF] id=${wf_id} name='${wf_name}' path='${wf_path}' state=${wf_state}"
 
-            # 실행 목록
             runs_all="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
             runs_len="$(echo "${runs_all}" | jq '.workflow_runs | length')"
             [ "${runs_len}" -eq 0 ] && echoe "[WF] No completed runs."
 
-            # 실패 run 강제 삭제
+            # 실패 run 삭제
             for ((j=0; j<runs_len; j++)); do
               concl="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].conclusion // empty")"
               run_id="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].id")"
@@ -315,11 +326,7 @@ jobs:
               (( run_epoch < cutoff_epoch )) && continue
 
               echoe "[DEL-RUN] run_id=${run_id} conclusion=${concl} created_at=${created_at}"
-              if [ "${DRY_RUN}" = "true" ]; then
-                echoe "[DRY] DELETE /actions/runs/${run_id}"
-              else
-                api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}" >/dev/null
-              fi
+              [ "${DRY_RUN}" = "true" ] && { echoe "[DRY] DELETE /actions/runs/${run_id}"; } || api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}" >/dev/null
               deleted_runs=$((deleted_runs+1))
               (( deleted_runs >= DELETE_LIMIT )) && echoe "[WARN] DELETE_LIMIT reached. stop." && break 2
             done
@@ -328,78 +335,67 @@ jobs:
             latest_created_at="$(echo "${runs_all}" | jq -r '.workflow_runs[0].created_at // empty')"
             echoe "[WF] latest_conclusion=${latest_conclusion} latest_created_at=${latest_created_at}"
 
-            # 실패 → 비활성화 (보호 제외)
-            if [ "${latest_conclusion}" = "failure" ] && [ "${DISABLE_ON_FAIL}" = "true" ]; then
+            # 실패 → Disable
+            if [ "${latest_conclusion}" = "failure" ] && [ "${DISABLE_ON_FAILURE}" = "true" ]; then
               if is_protected_workflow "${wf_name}" "${wf_path}"; then
                 echoe "[SKIP] Protected. Skip disable: ${wf_name}"
               else
                 echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}'"
-                if [ "${DRY_RUN}" = "true" ]; then
-                  echoe "[DRY] PUT /actions/workflows/${wf_id}/disable"
-                else
-                  curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" >/dev/null
-                fi
+                [ "${DRY_RUN}" = "true" ] && echoe "[DRY] PUT /actions/workflows/${wf_id}/disable" \
+                  || curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" >/dev/null
                 disabled_wf=$((disabled_wf+1))
               fi
             fi
 
-            # 성공 연속 → disabled_* 상태이면 Enable
+            # 연속 성공 → disabled_* 이면 Enable
             if [ "${ENABLE_ON_SUCCESS}" = "true" ]; then
               streak=0
               for ((k=0; k<runs_len; k++)); do
-                concl2="$(echo "${runs_all}" | jq -r ".workflow_runs[${k}].conclusion // empty")"
-                [ -z "${concl2}" ] && break
-                if [ "${concl2}" = "success" ]; then streak=$((streak+1)); else break; fi
+                c="$(echo "${runs_all}" | jq -r ".workflow_runs[${k}].conclusion // empty")"
+                [ -z "${c}" ] && break
+                if [ "${c}" = "success" ]; then streak=$((streak+1)); else break; fi
               done
               echoe "[WF] success_streak_detected=${streak} (target=${SUCCESS_STREAK})"
               if [[ "${wf_state}" == disabled_* ]] && (( streak >= SUCCESS_STREAK )); then
                 echoe "[ENABLE] workflow_id=${wf_id} name='${wf_name}'"
-                if [ "${DRY_RUN}" = "true" ]; then
-                  echoe "[DRY] PUT /actions/workflows/${wf_id}/enable"
-                else
-                  curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" >/dev/null
-                fi
+                [ "${DRY_RUN}" = "true" ] && echoe "[DRY] PUT /actions/workflows/${wf_id}/enable" \
+                  || curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" >/dev/null
                 enabled_wf=$((enabled_wf+1))
               else
                 echoe "[ENABLE-SKIP] state=${wf_state}, streak=${streak}"
               fi
             fi
 
-            # === 초강력: 워크플로우 파일 강제 삭제 ===
+            # 정책에 따른 파일 삭제 흐름
             if [ "${HARD_DELETE}" = "true" ] && [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ]; then
               if is_protected_workflow "${wf_name}" "${wf_path}"; then
                 echoe "[SKIP] Protected. Skip file delete: ${wf_path}"
               else
-                # 백업 분기
-                if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then
+                [ "${BACKUP_BEFORE_DELETE}" = "true" ] && {
                   echoe "[BACKUP] ${wf_path} -> branch ${BACKUP_BRANCH}"
-                  copy_file_between_branches "${wf_path}" "${default_branch}" "${BACKUP_BRANCH}" "${COMMIT_PREFIX} backup ${wf_path}"
+                  copy_file_between_branches "${wf_path}" "${default_branch}" "${BACKUP_BRANCH}" "${COMMIT_MESSAGE_PREFIX} backup ${wf_path}"
                   backed_up_files=$((backed_up_files+1))
-                fi
-
-                # 삭제 대상 브랜치 결정
+                }
                 target_branch="${default_branch}"
-                if [ "${PR_MODE}" = "true" ]; then
-                  target_branch="${DELETE_BRANCH}"
-                fi
-
+                [ "${PR_MODE}" = "true" ] && target_branch="${DELETE_BRANCH_NAME}"
                 echoe "[PURGE] Deleting workflow file on ${target_branch}: ${wf_path}"
-                delete_file_on_branch "${wf_path}" "${target_branch}" "${COMMIT_PREFIX} purge ${wf_path}"
+                delete_file_on_branch "${wf_path}" "${target_branch}" "${COMMIT_MESSAGE_PREFIX} purge ${wf_path}"
                 delete_paths+=("${wf_path}")
                 deleted_files=$((deleted_files+1))
               fi
             fi
           done
 
-          # PR 모드면 PR 생성
+          # PR 생성
           if [ "${PR_MODE}" = "true" ] && [ "${#delete_paths[@]}" -gt 0 ]; then
-            title="${COMMIT_PREFIX} purge ${#delete_paths[@]} workflow files"
+            title="${COMMIT_MESSAGE_PREFIX} purge ${#delete_paths[@]} workflow files"
             body="Auto purge of failed workflows.\nDeleted files:\n$(printf '%s\n' "${delete_paths[@]}")"
-            echoe "[PR] Creating PR: ${DELETE_BRANCH} -> ${default_branch}"
+            echoe "[PR] Creating PR: ${DELETE_BRANCH_NAME} -> ${default_branch}"
             if [ "${DRY_RUN}" = "true" ]; then
               echoe "[DRY] POST /pulls title='${title}'"
             else
-              api_post "${API}/repos/${OWNER}/${REPO}/pulls" "$(jq -n --arg title "${title}" --arg head "${DELETE_BRANCH}" --arg base "${default_branch}" --arg body "${body}" '{title:$title, head:$head, base:$base, body:$body}')" >/dev/null
+              api_post "${API}/repos/${OWNER}/${REPO}/pulls" \
+                "$(jq -n --arg title "${title}" --arg head "${DELETE_BRANCH_NAME}" --arg base "${default_branch}" --arg body "${body}" '{title:$title, head:$head, base:$base, body:$body}')" >/dev/null
             fi
           fi
 
@@ -412,17 +408,12 @@ jobs:
         env:
           GH_ADMIN_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours }}
+          DELETE_LIMIT: ${{ github.event.inputs.delete_limit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
           DISABLE_ON_FAILURE: ${{ github.event.inputs.disable_on_failure }}
           ENABLE_ON_SUCCESS: ${{ github.event.inputs.enable_on_success }}
           SUCCESS_STREAK: ${{ github.event.inputs.success_streak }}
-          DELETE_LIMIT: ${{ github.event.inputs.delete_limit }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
           PROTECT_PATTERNS: ${{ github.event.inputs.protect_patterns }}
-          HARD_DELETE_WORKFLOW_FILES: ${{ github.event.inputs.hard_delete_workflow_files }}
-          CREATE_PR_INSTEAD_OF_DIRECT_COMMIT: ${{ github.event.inputs.create_pr_instead_of_direct_commit }}
-          BACKUP_BEFORE_DELETE: ${{ github.event.inputs.backup_before_delete }}
-          BACKUP_BRANCH: ${{ github.event.inputs.backup_branch }}
-          DELETE_BRANCH_NAME: ${{ github.event.inputs.delete_branch_name }}
           COMMIT_MESSAGE_PREFIX: ${{ github.event.inputs.commit_message_prefix }}
         run: |
           set -Eeuo pipefail
