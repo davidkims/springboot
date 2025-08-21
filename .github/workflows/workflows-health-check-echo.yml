@@ -1,476 +1,247 @@
-name: "🩺 Workflows Health Check (24x7 + Echo Everywhere)"
+name: "🧹 Actions Failed Cleaner (davidkims/springboot) + Auto-Enable + Echo"
 
 on:
   workflow_dispatch:
     inputs:
-      lookback:
-        description: "최근 조회 실행 수 (기본 24)"
-        required: false
-        default: "24"
-      max_reruns:
-        description: "자동 재실행 최대 횟수/회 (기본 3)"
-        required: false
-        default: "3"
-      fail_rate_threshold:
-        description: "실패율 임계값 (0~1, 기본 0.5)"
-        required: false
-        default: "0.5"
-      fail_abs_threshold:
-        description: "절대 실패 횟수 임계값 (기본 3)"
-        required: false
-        default: "3"
-      replica_count:
-        description: "랩 복제본 개수 (기본 5)"
-        required: false
-        default: "5"
-      commit_changes:
-        description: "변경 커밋/푸시 여부 (true/false, 기본 true)"
-        required: false
+      lookback_hours:
+        description: "몇 시간 이내 실패 run만 정리/비활성화 (기본 720=30일)"
+        default: "720"
+        required: true
+      disable_on_failure:
+        description: "최근 실행이 실패한 워크플로우를 비활성화(Disable)할지 (true/false)"
         default: "true"
-      rerun_forever:
-        description: "실패 존재 시 무한 재실행 루프(24x7) 가동 (true/false, 기본 true)"
-        required: false
+        required: true
+      enable_on_success:
+        description: "최근 실행이 성공한 워크플로우를 자동 재활성화(Enable)할지 (true/false)"
         default: "true"
-      check_interval_minutes:
-        description: "자기 호출 간격(분) — self-dispatch 대기 (기본 5)"
+        required: true
+      success_streak:
+        description: "재활성화 조건: 최근 연속 성공 횟수 (기본 1)"
+        default: "1"
+        required: true
+      delete_limit:
+        description: "최대 삭제 run 개수 상한 (안전장치)"
+        default: "1000"
+        required: true
+      dry_run:
+        description: "실제 삭제/비활성화/재활성화 대신 출력만 (true/false)"
+        default: "false"
+        required: true
+      protect_patterns:
+        description: "비활성화 제외 패턴(,로 구분, 예: 'health,deploy')"
+        default: ""
         required: false
-        default: "5"
-  schedule:
-    - cron: "*/10 * * * *" # 10분마다 (UTC) — 24x7 주기 감시
 
 permissions:
   actions: write
   contents: write
-  pull-requests: read
+
+env:
+  TARGET_OWNER: "davidkims"
+  TARGET_REPO: "springboot"
 
 jobs:
-  health-check:
-    name: "Health Check (EchoOps+RCA+∞Rerun)"
+  clean-and-toggle:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      LOG_DIR: .github/logs
-      LAB_DIR: ci-labs/replicas
-      QUAR_DIR: ci-labs/quarantine
-      FAIL_DIR: ci-labs/failures
-      ANALYZE_DIR: ci-labs/analysis
-      LOOKBACK_DEFAULT: "24"
-      MAX_RERUNS_DEFAULT: "3"
-      FAIL_RATE_THRESHOLD_DEFAULT: "0.5"
-      FAIL_ABS_THRESHOLD_DEFAULT: "3"
-      REPLICA_COUNT_DEFAULT: "5"
-      COMMIT_CHANGES_DEFAULT: "true"
-      RERUN_FOREVER_DEFAULT: "true"
-      CHECK_INTERVAL_MINUTES_DEFAULT: "5"
-
     steps:
-      - name: 🛠️ Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
 
-      - name: 🧰 Install gh & jq
-        shell: bash
-        run: |
-          set -e
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-          ECHO INFO "apt update"
-          sudo apt-get update -y -qq
-          ECHO INFO "install gh jq"
-          sudo apt-get install -y -qq gh jq
-          ECHO OK   "tools ready"
-
-      - name: 📂 Prepare dirs (echo)
-        shell: bash
-        run: |
-          set -e
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-          ECHO INFO "mkdir -p $LOG_DIR $LAB_DIR $QUAR_DIR $FAIL_DIR $ANALYZE_DIR"
-          mkdir -p "$LOG_DIR" "$LAB_DIR" "$QUAR_DIR" "$FAIL_DIR" "$ANALYZE_DIR"
-          echo "# Workflows Health Logs ($(ts))" > "$LOG_DIR/health_report.md"
-          ECHO OK   "dirs prepared"
-
-      - name: 🔍 Health check + auto-rerun + labs/quarantine (echo)
-        id: scan
-        shell: bash
+      - name: 🔧 Prepare tools (jq, coreutils) + Echo
         run: |
           set -Eeuo pipefail
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          echo "[INIT] Installing jq ..."
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y jq >/dev/null 2>&1
+          echo "[OK] jq installed."
 
-          LOOKBACK="${{ github.event.inputs.lookback || env.LOOKBACK_DEFAULT }}"
-          MAX_RERUNS="${{ github.event.inputs.max_reruns || env.MAX_RERUNS_DEFAULT }}"
-          FAIL_RATE_THRESHOLD="${{ github.event.inputs.fail_rate_threshold || env.FAIL_RATE_THRESHOLD_DEFAULT }}"
-          FAIL_ABS_THRESHOLD="${{ github.event.inputs.fail_abs_threshold || env.FAIL_ABS_THRESHOLD_DEFAULT }}"
-          REPLICA_COUNT="${{ github.event.inputs.replica_count || env.REPLICA_COUNT_DEFAULT }}"
-          COMMIT_CHANGES="${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}"
-
-          REPORT_MD="$LOG_DIR/health_report.md"
-          {
-            echo ""
-            echo "# 🩺 Workflows Health Check Report ($(ts))"
-            echo ""
-            echo "| Workflow | Runs | OK | Fail | Cancel | FailRate | Last | ReRuns | Action |"
-            echo "|---|---:|---:|---:|---:|---:|---|---:|---|"
-          } >> "$REPORT_MD"
-
-          ECHO INFO "params LOOKBACK=$LOOKBACK MAX_RERUNS=$MAX_RERUNS RATE_TH=$FAIL_RATE_THRESHOLD ABS_TH=$FAIL_ABS_THRESHOLD REPLICA=$REPLICA_COUNT COMMIT=$COMMIT_CHANGES"
-
-          TOTAL_RERUNS=0
-          FAILED_WORKFLOWS=()
-          FAILED_RUN_IDS=()
-
-          shopt -s nullglob
-          for file in .github/workflows/*.{yml,yaml}; do
-            WF_FILE="$(basename "$file")"
-            ECHO INFO "check $WF_FILE"
-
-            RUNS_JSON="$(gh run list --workflow "$WF_FILE" --limit "$LOOKBACK" --json databaseId,conclusion,status,createdAt,headBranch 2>/dev/null || true)"
-            RUNS_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
-
-            if [[ -z "$RUNS_JSON" || "$RUNS_COUNT" -eq 0 ]]; then
-              ECHO WARN "no runs for $WF_FILE"
-              echo "| \`$WF_FILE\` | 0 | 0 | 0 | 0 | 0.00 | N/A | 0 | no-runs |" >> "$REPORT_MD"
-              continue
-            fi
-
-            SUC="$(jq '[.[] | select(.conclusion=="success")] | length' <<< "$RUNS_JSON")"
-            FAI="$(jq '[.[] | select(.conclusion=="failure")] | length' <<< "$RUNS_JSON")"
-            CAN="$(jq '[.[] | select(.conclusion=="cancelled")] | length' <<< "$RUNS_JSON")"
-            LAST_CONC="$(jq -r '.[0].conclusion // "unknown"' <<< "$RUNS_JSON")"
-
-            FAIL_RATE="$(awk -v t="$RUNS_COUNT" -v f="$FAI" 'BEGIN{ if(t>0) printf "%.2f", f/t; else printf "0.00"; }')"
-            ECHO INFO "$WF_FILE runs=$RUNS_COUNT ok=$SUC fail=$FAI cancel=$CAN rate=$FAIL_RATE last=$LAST_CONC"
-
-            # 최근 실패/취소 자동 재실행
-            RERUNS=0
-            if [[ "$MAX_RERUNS" -gt 0 ]]; then
-              while read -r run_id; do
-                [[ -z "$run_id" ]] && continue
-                ECHO INFO "rerun $run_id for $WF_FILE"
-                if gh run rerun "$run_id"; then
-                  RERUNS=$((RERUNS+1))
-                  TOTAL_RERUNS=$((TOTAL_RERUNS+1))
-                else
-                  ECHO WARN "rerun failed id=$run_id"
-                fi
-                [[ "$RERUNS" -ge "$MAX_RERUNS" ]] && break
-              done < <(jq -r '[.[] | select((.conclusion=="failure") or (.conclusion=="cancelled")) | .databaseId] | .[]?' <<< "$RUNS_JSON")
-            fi
-
-            # 임계 판단
-            OVER_RATE="$(awk -v r="$FAIL_RATE" -v th="$FAIL_RATE_THRESHOLD" 'BEGIN{ print (r+0 >= th+0) ? "1" : "0" }')"
-            if [[ "$FAI" =~ ^[0-9]+$ ]] && [[ "$FAIL_ABS_THRESHOLD" =~ ^[0-9]+$ ]]; then
-              if [ "$FAI" -ge "$FAIL_ABS_THRESHOLD" ]; then
-                OVER_ABS="1"
-              else
-                OVER_ABS="0"
-              fi
-            else
-              OVER_ABS="0"
-            fi
-
-            ACTION="ok"
-            if [[ "$OVER_RATE" == "1" || "$OVER_ABS" == "1" ]]; then
-              ACTION="labs/quarantine"
-              FAILED_WORKFLOWS+=("$WF_FILE")
-              WF_BASE="${WF_FILE%.*}"
-              TS_ID="$(ts | tr ':T' '__' | tr -d 'Z')"
-
-              # 랩 복제본 생성 (workflow_dispatch만 허용)
-              LAB_ROOT="$LAB_DIR/${WF_BASE}/${TS_ID}"
-              mkdir -p "$LAB_ROOT"
-              for i in $(seq 1 "${{ github.event.inputs.replica_count || env.REPLICA_COUNT_DEFAULT }}"); do
-                LAB_COPY="$LAB_ROOT/${WF_BASE}-lab-${i}.yml"
-                ECHO INFO "create lab replica $LAB_COPY"
-                awk '
-                  BEGIN {in_on=0}
-                  /^[[:space:]]*on:[[:space:]]*$/ {print "on:\n  workflow_dispatch:"; in_on=1; next}
-                  {if(in_on && $0 ~ /^[[:space:]]*[^[:space:]]/){in_on=0} if(!in_on) print}
-                ' "$file" > "$LAB_COPY"
-                # 이름 수정
-                if grep -q '^name:' "$LAB_COPY"; then
-                  sed -i "1s|^name:.*|name: ${WF_BASE} (LAB ${i})|" "$LAB_COPY"
-                else
-                  sed -i "1i name: ${WF_BASE} (LAB ${i})" "$LAB_COPY"
-                fi
-              done
-
-              # 격리 백업(원본 그대로)
-              QUAR_ROOT="$QUAR_DIR/${WF_BASE}/${TS_ID}"
-              mkdir -p "$QUAR_ROOT"
-              QUAR_COPY="$QUAR_ROOT/$WF_FILE"
-              ECHO INFO "backup quarantine $QUAR_COPY"
-              cp -f "$file" "$QUAR_COPY"
-            fi
-
-            # 실패 run id를 수집하여 후속 단계에서 로그 다운로드/분석
-            while read -r rid; do
-              [[ -z "$rid" ]] && continue
-              FAILED_RUN_IDS+=("$rid")
-              ECHO INFO "collect failed run id=$rid for RCA"
-            done < <(jq -r '[.[] | select(.conclusion=="failure") | .databaseId] | .[]?' <<< "$RUNS_JSON")
-
-            echo "| \`$WF_FILE\` | $RUNS_COUNT | $SUC | $FAI | $CAN | $FAIL_RATE | $LAST_CONC | $RERUNS | $ACTION |" >> "$REPORT_MD"
-          done
-
-          {
-            echo ""
-            echo "## Summary ($(ts))"
-            echo "- Total auto reruns attempted: **$TOTAL_RERUNS**"
-            if [[ ${#FAILED_WORKFLOWS[@]} -gt 0 ]]; then
-              echo "- Labs/Quarantine 대상: \`${FAILED_WORKFLOWS[*]}\`"
-            else
-              echo "- 모든 워크플로우 임계 미만"
-            fi
-          } >> "$REPORT_MD"
-
-          # 결과를 다음 단계에 넘김
-          echo "failed_count=${#FAILED_RUN_IDS[@]}" >> "$GITHUB_OUTPUT"
-          # 배열을 줄로 직렬화
-          (IFS=,; echo "failed_ids=${FAILED_RUN_IDS[*]}") >> "$GITHUB_OUTPUT"
-
-          # 콘솔/요약에도 복사
-          sed 's/^/[ECHO] /' "$REPORT_MD" || true
-          cat "$LOG_DIR/health_report.md" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 📥 Download failed run logs & store (echo)
-        if: steps.scan.outputs.failed_count != '0'
-        id: fetchlogs
-        shell: bash
+      - name: 🛡️ Preflight & Secrets check (no secret value echo)
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
         run: |
           set -Eeuo pipefail
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          echo "[CHECK] TARGET_OWNER=${TARGET_OWNER}"
+          echo "[CHECK] TARGET_REPO=${TARGET_REPO}"
+          echo "[CHECK] lookback_hours=${{ github.event.inputs.lookback_hours }}"
+          echo "[CHECK] disable_on_failure=${{ github.event.inputs.disable_on_failure }}"
+          echo "[CHECK] enable_on_success=${{ github.event.inputs.enable_on_success }}"
+          echo "[CHECK] success_streak=${{ github.event.inputs.success_streak }}"
+          echo "[CHECK] delete_limit=${{ github.event.inputs.delete_limit }}"
+          echo "[CHECK] dry_run=${{ github.event.inputs.dry_run }}"
+          echo "[CHECK] protect_patterns='${{ github.event.inputs.protect_patterns }}'"
+          if [ -z "${GH_ADMIN_TOKEN:-}" ]; then
+            echo "[ERROR] GH_ADMIN_TOKEN is missing (repo/workflow 권한의 PAT 필요)" >&2
+            exit 2
+          fi
 
-          FAILED_IDS="${{ steps.scan.outputs.failed_ids }}"
-          ECHO INFO "failed run ids = $FAILED_IDS"
-
-          TS_ROOT="$(ts | tr ':T' '__' | tr -d 'Z')"
-          ROOT_DIR="$FAIL_DIR/$TS_ROOT"
-          mkdir -p "$ROOT_DIR"
-
-          IFS=',' read -r -a arr <<< "$FAILED_IDS"
-          for rid in "${arr[@]}"; do
-            [[ -z "$rid" ]] && continue
-            DEST="$ROOT_DIR/run_$rid"
-            mkdir -p "$DEST"
-            ECHO INFO "download logs run_id=$rid -> $DEST"
-            # 로그 다운로드 (압축 포함)
-            if gh run download "$rid" --dir "$DEST"; then
-              ECHO OK "downloaded run_id=$rid"
-            else
-              ECHO WARN "download failed run_id=$rid"
-            fi
-          done
-
-          echo "fail_root=$ROOT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: 🧠 Auto Root Cause Analysis (RCA) (echo)
-        if: steps.scan.outputs.failed_count != '0'
-        shell: bash
+      - name: 📄 Generate cleaner program (scripts/failed_cleaner.sh)
         run: |
           set -Eeuo pipefail
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
+          mkdir -p scripts
+          cat > scripts/failed_cleaner.sh <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          trap 'rc=$?; echo "[CLEANER][ERR] ${BASH_COMMAND} (rc=${rc})" >&2; exit $rc' ERR
 
-          FAIL_ROOT="${{ steps.fetchlogs.outputs.fail_root }}"
-          TS_ROOT="$(basename "$FAIL_ROOT")"
-          OUT_DIR="$ANALYZE_DIR/$TS_ROOT"
-          mkdir -p "$OUT_DIR"
+          echoe(){ printf "%s\n" "$*"; }
 
-          # 단순 패턴 매칭 기반 다중 카테고리 진단
-          diagnose() {
-            local file="$1"
-            local verdicts=()
+          OWNER="${TARGET_OWNER}"
+          REPO="${TARGET_REPO}"
+          TOKEN="${GH_ADMIN_TOKEN}"
+          LOOKBACK_HOURS="${LOOKBACK_HOURS:-720}"
+          DISABLE_ON_FAIL="${DISABLE_ON_FAILURE:-true}"
+          ENABLE_ON_SUCCESS="${ENABLE_ON_SUCCESS:-true}"
+          SUCCESS_STREAK="${SUCCESS_STREAK:-1}"
+          DELETE_LIMIT="${DELETE_LIMIT:-1000}"
+          DRY_RUN="${DRY_RUN:-false}"
+          PROTECT_PATTERNS="${PROTECT_PATTERNS:-}"
 
-            grep -Ei "rate limit|api rate|secondary rate" "$file" && verdicts+=("rate-limit")
-            grep -Ei "network is unreachable|temporary failure|could not resolve host|connection timed out|TLS handshake timeout|EOF" "$file" && verdicts+=("network")
-            grep -Ei "permission denied|not permitted|operation not permitted|EACCES" "$file" && verdicts+=("permission")
-            grep -Ei "No space left on device|disk quota exceeded|ENOSPC" "$file" && verdicts+=("disk-space")
-            grep -Ei "Secrets? .* not found|Missing required secret|Undefined secret" "$file" && verdicts+=("secret-missing")
-            grep -Ei "Docker pull.*denied|toomanyrequests|image not found|no basic auth credentials" "$file" && verdicts+=("docker/pull")
-            grep -Ei "ModuleNotFoundError|No module named|cannot find module|package .* not found|apt-get.*not found|command not found" "$file" && verdicts+=("dependency/missing")
-            grep -Ei "YAMLException|mapping values are not allowed|did not find expected key|Invalid workflow file" "$file" && verdicts+=("yaml/syntax")
-            grep -Ei "java.lang.OutOfMemoryError|Killed process .* out of memory|OOM|MemoryError" "$file" && verdicts+=("memory/OOM")
-            grep -Ei "database .* connection.* failed|ECONNREFUSED|connection refused" "$file" && verdicts+=("db/connection")
-            grep -Ei "timeout|Timed out after|Read timed out" "$file" && verdicts+=("timeout")
+          API="https://api.github.com"
+          HDR_AUTH="Authorization: Bearer ${TOKEN}"
+          HDR_ACC="Accept: application/vnd.github+json"
+          HDR_VER="X-GitHub-Api-Version: 2022-11-28"
 
-            if [[ ${#verdicts[@]} -eq 0 ]]; then
-              echo "unknown"
-            else
-              IFS='|' ; echo "${verdicts[*]}"
-            fi
+          now_epoch="$(date -u +%s)"
+          cutoff_epoch=$(( now_epoch - LOOKBACK_HOURS*3600 ))
+
+          echoe "[CFG] OWNER=${OWNER} REPO=${REPO}"
+          echoe "[CFG] LOOKBACK_HOURS=${LOOKBACK_HOURS} cutoff_epoch=${cutoff_epoch}"
+          echoe "[CFG] DISABLE_ON_FAIL=${DISABLE_ON_FAIL} ENABLE_ON_SUCCESS=${ENABLE_ON_SUCCESS} SUCCESS_STREAK=${SUCCESS_STREAK}"
+          echoe "[CFG] DELETE_LIMIT=${DELETE_LIMIT} DRY_RUN=${DRY_RUN}"
+          echoe "[CFG] PROTECT_PATTERNS=${PROTECT_PATTERNS}"
+
+          api_get(){ curl -fsSL -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
+          api_delete(){
+            local url="$1"
+            if [ "${DRY_RUN}" = "true" ]; then echoe "[DRY] DELETE ${url}"; return 0; fi
+            curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${url}" -o /dev/null
+          }
+          api_put(){
+            local url="$1"
+            if [ "${DRY_RUN}" = "true" ]; then echoe "[DRY] PUT ${url}"; return 0; fi
+            curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${url}" -o /dev/null
           }
 
-          # 각 run 로그에서 텍스트 추출 및 요약/분류
-          for run_dir in "$FAIL_ROOT"/run_*; do
-            [[ -d "$run_dir" ]] || continue
-            rid="${run_dir##*/run_}"
-            SUMMARY="$OUT_DIR/run_${rid}_summary.md"
-            JSON="$OUT_DIR/run_${rid}_analysis.json"
+          is_protected_workflow(){
+            local name="$1" path="$2"
+            if [ -z "${PROTECT_PATTERNS}" ]; then return 1; fi
+            IFS=',' read -r -a pats <<< "${PROTECT_PATTERNS}"
+            for p in "${pats[@]}"; do
+              p_trim="$(echo "$p" | xargs)"; [ -z "${p_trim}" ] && continue
+              if [[ "${name,,}" == *"${p_trim,,}"* ]] || [[ "${path,,}" == *"${p_trim,,}"* ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
 
-            # 가능한 로그 파일을 펼쳐서 텍스트로 합침
-            find "$run_dir" -type f -name "*.txt" -o -name "*.log" -o -name "*.md" > "$run_dir/.loglist" || true
-            if [[ ! -s "$run_dir/.loglist" ]]; then
-              # 아티팩트 zip이 있을 수 있음
-              find "$run_dir" -type f -name "*.zip" > "$run_dir/.zips" || true
-              while read -r z; do
-                [[ -z "$z" ]] && continue
-                ECHO INFO "unzip $z"
-                unzip -qq -o "$z" -d "$run_dir/unzipped" || true
-              done < "$run_dir/.zips"
-              find "$run_dir/unzipped" -type f -name "*.txt" -o -name "*.log" -o -name "*.md" >> "$run_dir/.loglist" || true
+          # 1) 워크플로우 목록 조회 (state 포함)
+          echoe "[STEP] Fetch workflows ..."
+          workflows_json="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows?per_page=100")"
+          count_wf="$(echo "${workflows_json}" | jq '.workflows | length')"
+          echoe "[INFO] workflows=${count_wf}"
+
+          deleted=0
+          disabled=0
+          enabled=0
+
+          for ((i=0; i<count_wf; i++)); do
+            wf_id="$(echo "${workflows_json}" | jq -r ".workflows[${i}].id")"
+            wf_name="$(echo "${workflows_json}" | jq -r ".workflows[${i}].name")"
+            wf_path="$(echo "${workflows_json}" | jq -r ".workflows[${i}].path")"
+            wf_state="$(echo "${workflows_json}" | jq -r ".workflows[${i}].state")" # active|deleted|disabled_inactivity|disabled_manually etc.
+
+            echoe "[WF] id=${wf_id} name='${wf_name}' path='${wf_path}' state=${wf_state}"
+
+            # 최신 completed 실행들 가져오기 (여러 건으로 성공/실패 추세 확인)
+            runs_all="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
+            runs_len="$(echo "${runs_all}" | jq '.workflow_runs | length')"
+            if [ "${runs_len}" -eq 0 ]; then
+              echoe "[WF] No completed runs."
             fi
 
-            # 합쳐진 로그 파일 생성
-            cat /dev/null > "$run_dir/_ALL.txt"
-            while read -r f; do
-              [[ -z "$f" ]] && continue
-              echo -e "\n===== FILE: $f =====\n" >> "$run_dir/_ALL.txt"
-              # 큰 파일은 끝부분만
-              tail -n 400 "$f" >> "$run_dir/_ALL.txt" || true
-            done < "$run_dir/.loglist"
+            # === 실패 run 정리 (lookback 이내) ===
+            for ((j=0; j<runs_len; j++)); do
+              conclusion="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].conclusion // empty")"
+              run_id="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].id")"
+              created_at="$(echo "${runs_all}" | jq -r ".workflow_runs[${j}].created_at // empty")"
+              [ -z "${conclusion}" ] && continue
+              [ "${conclusion}" != "failure" ] && continue
+              [ -z "${created_at}" ] && continue
 
-            CATEGORY="$(diagnose "$run_dir/_ALL.txt")"
-            ECHO INFO "RCA run_id=$rid -> $CATEGORY"
+              run_epoch="$(date -u -d "${created_at}" +%s || echo 0)"
+              if (( run_epoch < cutoff_epoch )); then
+                continue
+              fi
 
-            # 간단 요약/가이드
-            {
-              echo "### RCA for Run $rid ($(ts))"
-              echo "- Category: **$CATEGORY**"
-              echo "- Hints:"
-              case "$CATEGORY" in
-                *rate-limit*) echo "  - gh/api 호출 빈도 조절, 재시도 딜레이, 캐시/병렬축소 권장" ;;
-              esac
-              case "$CATEGORY" in
-                *network*) echo "  - 네트워크/미러 불안정. 재시도/백오프/미러 고정 필요" ;;
-              esac
-              case "$CATEGORY" in
-                *permission*) echo "  - 권한/파일모드/퍼미션 확인 (chmod/chown, GITHUB_TOKEN scope)" ;;
-              esac
-              case "$CATEGORY" in
-                *disk-space*) echo "  - 디스크 정리: rm -rf /opt/hostedtoolcache/*, actions/cache 관리" ;;
-              esac
-              case "$CATEGORY" in
-                *secret-missing*) echo "  - 저장소/환경 시크릿 누락. 이름 정확도/권한 확인" ;;
-              esac
-              case "$CATEGORY" in
-                *docker/pull*) echo "  - 레지스트리 토큰/이미지명/레이트리밋 점검, pull 정책 수정" ;;
-              esac
-              case "$CATEGORY" in
-                *dependency/missing*) echo "  - 패키지/모듈 설치 단계 보강 (apt/pip/npm 등)" ;;
-              esac
-              case "$CATEGORY" in
-                *yaml/syntax*) echo "  - workflow yaml 문법검사 및 key 들여쓰기 점검" ;;
-              esac
-              case "$CATEGORY" in
-                *memory/OOM*) echo "  - 자원절약/메모리옵션 조정, 매트릭 축소, 스왑/병렬도↓" ;;
-              esac
-              case "$CATEGORY" in
-                *db/connection*) echo "  - DB 주소/포트/보안그룹/가용성 점검. 재시도 로직 추가" ;;
-              esac
-              case "$CATEGORY" in
-                *timeout*) echo "  - 타임아웃 상향, 네트워크 재시도, 외부서비스 안정화" ;;
-              esac
-              echo ""
-              echo "#### Tail(최근 로그 200줄)"
-              echo '```text'
-              tail -n 200 "$run_dir/_ALL.txt" || true
-              echo '```'
-            } > "$SUMMARY"
+              echoe "[DEL] run_id=${run_id} conclusion=${conclusion} created_at=${created_at}"
+              api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}"
+              deleted=$((deleted+1))
+              if (( deleted >= DELETE_LIMIT )); then
+                echoe "[WARN] DELETE_LIMIT(${DELETE_LIMIT}) 도달. 중단."
+                break 2
+              fi
+            done
 
-            jq -n --arg rid "$rid" --arg cat "$CATEGORY" --arg ts "$(ts)" \
-              '{run_id:$rid, category:$cat, timestamp:$ts}' > "$JSON"
+            # 최신 실행 1건의 결론
+            latest_conclusion="$(echo "${runs_all}" | jq -r '.workflow_runs[0].conclusion // "none"')"
+            latest_created_at="$(echo "${runs_all}" | jq -r '.workflow_runs[0].created_at // empty')"
+            echoe "[WF] latest_conclusion=${latest_conclusion} latest_created_at=${latest_created_at}"
+
+            # === 실패 시 비활성화 ===
+            if [ "${latest_conclusion}" = "failure" ] && [ "${DISABLE_ON_FAIL}" = "true" ]; then
+              if is_protected_workflow "${wf_name}" "${wf_path}"; then
+                echoe "[SKIP] Protected by pattern. Skip disable: ${wf_name} (${wf_path})"
+              else
+                echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}' path='${wf_path}'"
+                api_put "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable"
+                disabled=$((disabled+1))
+              fi
+            fi
+
+            # === 성공 시 재활성화 ===
+            if [ "${ENABLE_ON_SUCCESS}" = "true" ]; then
+              # 최근 연속 SUCCESS 횟수 계산
+              streak=0
+              for ((k=0; k<runs_len; k++)); do
+                concl="$(echo "${runs_all}" | jq -r ".workflow_runs[${k}].conclusion // empty")"
+                [ -z "${concl}" ] && break
+                if [ "${concl}" = "success" ]; then
+                  streak=$((streak+1))
+                else
+                  break
+                fi
+              done
+              echoe "[WF] success_streak_detected=${streak} (target=${SUCCESS_STREAK})"
+
+              # 현재 상태가 disabled_* 인 경우에만 enable 시도
+              if [[ "${wf_state}" == disabled_* ]] && (( streak >= SUCCESS_STREAK )); then
+                echoe "[ENABLE] workflow_id=${wf_id} name='${wf_name}' path='${wf_path}' (state=${wf_state})"
+                api_put "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable"
+                enabled=$((enabled+1))
+              else
+                echoe "[ENABLE-SKIP] state=${wf_state}, streak=${streak} (< target or not disabled)"
+              fi
+            fi
           done
 
-          # 전체 인덱스
-          INDEX="$OUT_DIR/INDEX.md"
-          {
-            echo "# RCA Index ($(ts))"
-            for f in "$OUT_DIR"/run_*_summary.md; do
-              bn="$(basename "$f")"
-              echo "- $bn"
-            done
-          } > "$INDEX"
+          echoe "[RESULT] deleted_runs=${deleted} disabled_workflows=${disabled} enabled_workflows=${enabled}"
+          BASH
+          chmod +x scripts/failed_cleaner.sh
+          echo "[OK] Program generated: scripts/failed_cleaner.sh"
 
-          # 요약도 스텝 요약에 첨부
-          cat "$INDEX" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 💾 Commit & Push generated labs/quarantine & report (echo)
-        shell: bash
+      - name: ▶️ Run cleaner (Echo on)
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours }}
+          DISABLE_ON_FAILURE: ${{ github.event.inputs.disable_on_failure }}
+          ENABLE_ON_SUCCESS: ${{ github.event.inputs.enable_on_success }}
+          SUCCESS_STREAK: ${{ github.event.inputs.success_streak }}
+          DELETE_LIMIT: ${{ github.event.inputs.delete_limit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          PROTECT_PATTERNS: ${{ github.event.inputs.protect_patterns }}
         run: |
           set -Eeuo pipefail
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-          COMMIT_CHANGES="${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}"
-          if [[ "$COMMIT_CHANGES" != "true" ]]; then
-            ECHO INFO "commit_changes=false → 커밋/푸시 생략"
-            exit 0
-          fi
-          if git diff --quiet; then
-            ECHO INFO "no changes to commit"
-            exit 0
-          fi
-          ECHO INFO "git commit"
-          git config user.name  "workflow-bot"
-          git config user.email "workflow-bot@users.noreply.github.com"
-          git add -A
-          git commit -m "chore(health): labs/quarantine, failures, RCA & report ($(ts))"
-          ECHO INFO "git push"
-          git push origin "HEAD:${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}" || true
-          ECHO OK   "pushed"
-
-      - name: 📎 Upload artifacts (report/logs/rca)
-        uses: actions/upload-artifact@v4
-        with:
-          name: workflows-health-${{ github.run_id }}
-          path: |
-            .github/logs
-            ci-labs/replicas
-            ci-labs/quarantine
-            ci-labs/failures
-            ci-labs/analysis
-          if-no-files-found: warn
-
-      - name: ♻️ Self-dispatch for 24x7 infinite rerun (echo)
-        if: always()
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          ts(){ date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-          ECHO(){ printf '%s [%s] %s\n' "$(ts)" "$1" "$2"; }
-
-          RERUN_FOREVER="${{ github.event.inputs.rerun_forever || env.RERUN_FOREVER_DEFAULT }}"
-          CHECK_INTERVAL="${{ github.event.inputs.check_interval_minutes || env.CHECK_INTERVAL_MINUTES_DEFAULT }}"
-          FAILED_COUNT="${{ steps.scan.outputs.failed_count }}"
-
-          ECHO INFO "RERUN_FOREVER=$RERUN_FOREVER FAILED_COUNT=$FAILED_COUNT CHECK_INTERVAL=$CHECK_INTERVAL"
-
-          if [[ "$RERUN_FOREVER" != "true" ]]; then
-            ECHO INFO "rerun_forever=false → self-dispatch skip"
-            exit 0
-          fi
-
-          if [[ "$FAILED_COUNT" -gt 0 ]]; then
-            ECHO INFO "failures remain -> schedule self-dispatch after ${CHECK_INTERVAL}m"
-            # 대기 후 자기 자신 호출
-            sleep "$(( CHECK_INTERVAL * 60 ))"
-            # 현재 워크플로 이름을 이용해 동일 인자 재호출
-            WF_NAME="${GITHUB_WORKFLOW}"
-            ECHO INFO "gh workflow run \"$WF_NAME\""
-            gh workflow run "$WF_NAME" \
-              --field lookback='${{ github.event.inputs.lookback || env.LOOKBACK_DEFAULT }}' \
-              --field max_reruns='${{ github.event.inputs.max_reruns || env.MAX_RERUNS_DEFAULT }}' \
-              --field fail_rate_threshold='${{ github.event.inputs.fail_rate_threshold || env.FAIL_RATE_THRESHOLD_DEFAULT }}' \
-              --field fail_abs_threshold='${{ github.event.inputs.fail_abs_threshold || env.FAIL_ABS_THRESHOLD_DEFAULT }}' \
-              --field replica_count='${{ github.event.inputs.replica_count || env.REPLICA_COUNT_DEFAULT }}' \
-              --field commit_changes='${{ github.event.inputs.commit_changes || env.COMMIT_CHANGES_DEFAULT }}' \
-              --field rerun_forever='true' \
-              --field check_interval_minutes='${{ github.event.inputs.check_interval_minutes || env.CHECK_INTERVAL_MINUTES_DEFAULT }}'
-            ECHO OK "self-dispatch triggered"
-          else
-            ECHO OK "no failures remain -> no self-dispatch"
-          fi
+          echo "[RUN] Executing scripts/failed_cleaner.sh ..."
+          ./scripts/failed_cleaner.sh
+          echo "[DONE] Cleaner finished."
