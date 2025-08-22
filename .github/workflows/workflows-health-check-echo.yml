@@ -41,7 +41,9 @@ on:
         required: true
       advanced_json:
         description: >-
-          {"backup_branch":"workflow-purge-backup","delete_branch_name":"workflow-purge-branch","results_dir":"site/reports","commit_results":true,"protect_recent_hours":72}
+          {"results_dir":"site/reports","commit_results":true,"protect_recent_hours":72,
+           "backup_branch":"workflow-purge-backup","delete_branch_name":"workflow-purge-branch",
+           "upgrade":{"apt":true,"apt_full_upgrade":false,"cleanup":true,"docker":true,"gh":true,"pip":true,"npm":true,"node":"20","java":"17"}}
         default: "{}"
         required: false
 
@@ -123,8 +125,6 @@ jobs:
           set -Eeuo pipefail
           MODE="${{ github.event.inputs.policy_mode }}"
           ADV='${{ github.event.inputs.advanced_json }}'
-          echo "[POLICY] mode=${MODE}"
-          echo "[POLICY] advanced_json=${ADV}"
 
           HARD_DELETE="true"; PR_MODE="false"; BACKUP_BEFORE_DELETE="false"
           BACKUP_BRANCH="$(echo "${ADV}" | jq -r '.backup_branch // "workflow-purge-backup"')"
@@ -132,6 +132,18 @@ jobs:
           RESULTS_DIR="$(echo "${ADV}" | jq -r '.results_dir // "site/reports"')"
           COMMIT_RESULTS="$(echo "${ADV}" | jq -r '.commit_results // false')"
           PROTECT_RECENT_HOURS="$(echo "${ADV}" | jq -r '.protect_recent_hours // 72')"
+
+          # 업그레이드 설정 파싱 (존재하지 않으면 안전 기본값)
+          UPGRADE_JSON="$(echo "${ADV}" | jq -c '.upgrade // {}')"
+          UPGRADE_APT="$(echo "${UPGRADE_JSON}" | jq -r '.apt // false')"
+          UPGRADE_APT_FULL="$(echo "${UPGRADE_JSON}" | jq -r '.apt_full_upgrade // false')"
+          UPGRADE_CLEANUP="$(echo "${UPGRADE_JSON}" | jq -r '.cleanup // true')"
+          UPGRADE_DOCKER="$(echo "${UPGRADE_JSON}" | jq -r '.docker // false')"
+          UPGRADE_GH="$(echo "${UPGRADE_JSON}" | jq -r '.gh // false')"
+          UPGRADE_PIP="$(echo "${UPGRADE_JSON}" | jq -r '.pip // false')"
+          UPGRADE_NPM="$(echo "${UPGRADE_JSON}" | jq -r '.npm // false')"
+          NODE_VERSION="$(echo "${UPGRADE_JSON}" | jq -r '.node // "none"')"
+          JAVA_VERSION="$(echo "${UPGRADE_JSON}" | jq -r '.java // "none"')"
 
           case "$MODE" in
             force_delete)        HARD_DELETE="true";  PR_MODE="false"; BACKUP_BEFORE_DELETE="false" ;;
@@ -151,6 +163,15 @@ jobs:
             echo "RESULTS_DIR=${RESULTS_DIR}"
             echo "COMMIT_RESULTS=${COMMIT_RESULTS}"
             echo "PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
+            echo "UPGRADE_APT=${UPGRADE_APT}"
+            echo "UPGRADE_APT_FULL=${UPGRADE_APT_FULL}"
+            echo "UPGRADE_CLEANUP=${UPGRADE_CLEANUP}"
+            echo "UPGRADE_DOCKER=${UPGRADE_DOCKER}"
+            echo "UPGRADE_GH=${UPGRADE_GH}"
+            echo "UPGRADE_PIP=${UPGRADE_PIP}"
+            echo "UPGRADE_NPM=${UPGRADE_NPM}"
+            echo "NODE_VERSION=${NODE_VERSION}"
+            echo "JAVA_VERSION=${JAVA_VERSION}"
           } >> "$GITHUB_ENV"
 
       - name: 🛡️ Preflight & Config Echo
@@ -167,9 +188,103 @@ jobs:
           echo "[CHECK] protect_patterns='${{ github.event.inputs.protect_patterns }}'"
           echo "[CHECK] policy_mode=${{ github.event.inputs.policy_mode }}"
           echo "[CHECK] commit_message_prefix='${{ github.event.inputs.commit_message_prefix }}'"
-          echo "[CHECK] (derived) HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
-          echo "[CHECK] (derived) BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME}"
-          echo "[CHECK] (derived) RESULTS_DIR=${RESULTS_DIR} COMMIT_RESULTS=${COMMIT_RESULTS} PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
+          echo "[CHECK] (derived) RESULTS_DIR=${RESULTS_DIR} PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
+          echo "[CHECK] (upgrade) apt=${UPGRADE_APT} full=${UPGRADE_APT_FULL} cleanup=${UPGRADE_CLEANUP} docker=${UPGRADE_DOCKER} gh=${UPGRADE_GH} pip=${UPGRADE_PIP} npm=${UPGRADE_NPM} node=${NODE_VERSION} java=${JAVA_VERSION}"
+
+      - name: 🔼 Upgrades (optional, best-effort + Echo)
+        id: upgrades
+        env:
+          RESULTS_DIR: ${{ env.RESULTS_DIR }}
+          UPGRADE_APT: ${{ env.UPGRADE_APT }}
+          UPGRADE_APT_FULL: ${{ env.UPGRADE_APT_FULL }}
+          UPGRADE_CLEANUP: ${{ env.UPGRADE_CLEANUP }}
+          UPGRADE_DOCKER: ${{ env.UPGRADE_DOCKER }}
+          UPGRADE_GH: ${{ env.UPGRADE_GH }}
+          UPGRADE_PIP: ${{ env.UPGRADE_PIP }}
+          UPGRADE_NPM: ${{ env.UPGRADE_NPM }}
+          NODE_VERSION: ${{ env.NODE_VERSION }}
+          JAVA_VERSION: ${{ env.JAVA_VERSION }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${RESULTS_DIR}/upgrade"
+          LOG="${RESULTS_DIR}/upgrade/upgrade_$(date -u +%Y%m%d%H%M%S).log"
+          exec > >(tee -a "$LOG") 2>&1
+          echo "[UPGRADE] start"
+
+          vers(){
+            echo "[VERS] $(date -u +%FT%TZ)"
+            docker --version || true
+            gh --version || true
+            node --version || true
+            npm --version || true
+            python3 --version || true
+            pip3 --version || true
+            java -version || true
+            go version || true
+          }
+
+          echo "[UPGRADE] versions before:"
+          vers
+
+          if [ "${UPGRADE_APT}" = "true" ]; then
+            echo "[APT] update"
+            sudo apt-get update -y || true
+            if [ "${UPGRADE_APT_FULL}" = "true" ]; then
+              echo "[APT] full-upgrade"
+              sudo apt-get -y dist-upgrade || true
+            else
+              echo "[APT] upgrade"
+              sudo apt-get -y upgrade || true
+            fi
+          fi
+
+          if [ "${UPGRADE_GH}" = "true" ]; then
+            echo "[GH] ensure latest gh"
+            sudo apt-get install -y gh || true
+          fi
+
+          if [ "${UPGRADE_PIP}" = "true" ]; then
+            echo "[PIP] upgrade pip/setuptools/wheel"
+            python3 -m pip install --upgrade --user pip setuptools wheel || true
+          fi
+
+          if [ "${UPGRADE_NPM}" = "true" ]; then
+            echo "[NPM] corepack enable & npm@latest"
+            corepack enable || true
+            sudo npm -g install npm@latest || true
+          fi
+
+          if [ -n "${NODE_VERSION}" ] && [ "${NODE_VERSION}" != "none" ]; then
+            echo "[NODE] setup ${NODE_VERSION} (nvm if available)"
+            if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
+            if command -v nvm >/dev/null 2>&1; then
+              nvm install "${NODE_VERSION}" || true
+              nvm use "${NODE_VERSION}" || true
+            else
+              echo "[NODE] nvm not available; skip"
+            fi
+          fi
+
+          if [ -n "${JAVA_VERSION}" ] && [ "${JAVA_VERSION}" != "none" ]; then
+            echo "[JAVA] install Temurin ${JAVA_VERSION} if available"
+            sudo apt-get install -y "temurin-${JAVA_VERSION}-jdk" >/dev/null 2>&1 || true
+          fi
+
+          if [ "${UPGRADE_DOCKER}" = "true" ]; then
+            echo "[DOCKER] restart docker"
+            sudo systemctl restart docker || true
+            docker info >/dev/null 2>&1 && echo "[DOCKER] ok" || echo "[DOCKER] info failed"
+          fi
+
+          if [ "${UPGRADE_CLEANUP}" = "true" ]; then
+            echo "[CLEANUP] apt autoremove/autoclean"
+            sudo apt-get -y autoremove || true
+            sudo apt-get -y autoclean || true
+          fi
+
+          echo "[UPGRADE] versions after:"
+          vers
+          echo "UPGRADE_LOG=${LOG}" >> "$GITHUB_OUTPUT"
 
       - name: 📄 Generate cleaner+purger program (scripts/failed_cleaner.sh)
         run: |
@@ -203,36 +318,50 @@ jobs:
             done
           }
           uri_enc(){ jq -sRr @uri <<< "$1"; }
-          safe_api_get(){ # url -> stdout(body or empty), return 0 always
-            local URL="$1" TMP; TMP="$(mktemp)"
-            local code
-            code=$(retry curl -sS -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -o "$TMP" -w "%{http_code}" "$URL" || true)
-            if [ "$codex$code" = "x" ]; then code=000; fi
-            if [[ "$code" =~ ^2..$ ]]; then cat "$TMP"
-            else echo "[API][GET][$code] $URL" >&2; : # empty
+          safe_api_get(){ # url -> stdout(body or empty), always returns 0
+            local URL="$1"
+            local TMP; TMP="$(mktemp)"
+            local code=""
+            code="$(retry curl -sS -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -o "$TMP" -w "%{http_code}" "$URL" || true)"
+            if [ -z "${code}" ]; then code="000"; fi
+            if [[ "${code}" =~ ^2..$ ]]; then
+              cat "$TMP"
+            else
+              echo "[API][GET][${code}] ${URL}" >&2
+              :
             fi
             rm -f "$TMP"
+            return 0
           }
           safe_api_put(){ # url data -> 0 on 2xx else 1
-            local URL="$1" DATA="$2" TMP; TMP="$(mktemp)"
-            local code
-            code=$(retry curl -sS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$DATA" -o "$TMP" -w "%{http_code}" "$URL" || true)
+            local URL="$1" DATA="$2"
+            local TMP; TMP="$(mktemp)"
+            local code=""
+            code="$(retry curl -sS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$DATA" -o "$TMP" -w "%{http_code}" "$URL" || true)"
             rm -f "$TMP"
-            [[ "$code" =~ ^2..$ ]]
+            [[ "${code}" =~ ^2..$ ]]
           }
-          safe_api_post(){ # url data -> body on 2xx else empty
-            local URL="$1" DATA="$2" TMP; TMP="$(mktemp)"
-            local code
-            code=$(retry curl -sS -X POST -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$DATA" -o "$TMP" -w "%{http_code}" "$URL" || true)
-            if [[ "$code" =~ ^2..$ ]]; then cat "$TMP"; else echo "[API][POST][$code] $URL" >&2; :; fi
+          safe_api_post(){ # url data -> body on 2xx else empty; always returns 0
+            local URL="$1" DATA="$2"
+            local TMP; TMP="$(mktemp)"
+            local code=""
+            code="$(retry curl -sS -X POST -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$DATA" -o "$TMP" -w "%{http_code}" "$URL" || true)"
+            if [[ "${code}" =~ ^2..$ ]]; then
+              cat "$TMP"
+            else
+              echo "[API][POST][${code}] ${URL}" >&2
+              :
+            fi
             rm -f "$TMP"
+            return 0
           }
           safe_api_delete(){ # url -> 0 on 2xx else 1 (skip)
-            local URL="$1" TMP; TMP="$(mktemp)"
-            local code
-            code=$(retry curl -sS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -o "$TMP" -w "%{http_code}" "$URL" || true)
+            local URL="$1"
+            local TMP; TMP="$(mktemp)"
+            local code=""
+            code="$(retry curl -sS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -o "$TMP" -w "%{http_code}" "$URL" || true)"
             rm -f "$TMP"
-            [[ "$code" =~ ^2..$ ]]
+            [[ "${code}" =~ ^2..$ ]]
           }
 
           ts="$(date -u +%Y%m%d%H%M%S)"
@@ -276,7 +405,6 @@ jobs:
 
           create_branch_if_missing(){
             local branch="$1"
-            # 존재 확인
             if safe_api_get "${API}/repos/${OWNER}/${REPO}/git/ref/heads/$(uri_enc "${branch}")" >/dev/null; then
               echoe "[BRANCH] ${branch} exists"; return 0
             fi
@@ -294,7 +422,6 @@ jobs:
             echo "$js" | jq -r '.sha // empty'
           }
 
-          # 최근 커밋 시간 기반 보호
           now_epoch="$(date -u +%s)"
           protect_recent_cutoff=$(( now_epoch - PROTECT_RECENT_HOURS*3600 ))
           is_recent_workflow_file(){
@@ -379,7 +506,6 @@ jobs:
             return 1
           }
 
-          # 브랜치 준비
           [ "${BACKUP_BEFORE_DELETE}" = "true" ] && create_branch_if_missing "${BACKUP_BRANCH}"
           [ "${PR_MODE}" = "true" ] && create_branch_if_missing "${DELETE_BRANCH_NAME}"
 
@@ -516,7 +642,7 @@ jobs:
               fi
             fi
 
-            # 정책에 따른 파일 삭제 흐름(최근/패턴 보호 + 안전 API)
+            # 정책에 따른 파일 삭제 흐름
             if [ "${HARD_DELETE}" = "true" ] && [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ]; then
               if is_protected_workflow "${wf_name}" "${wf_path}"; then
                 echoe "[SKIP] Pattern protected file delete: ${wf_path}"
@@ -542,7 +668,6 @@ jobs:
             fi
           done
 
-          # PR 생성
           if [ "${PR_MODE}" = "true" ] && [ "${#delete_paths[@]}" -gt 0 ]; then
             title="${COMMIT_MESSAGE_PREFIX} purge ${#delete_paths[@]} workflow files"
             body="Auto purge of workflows.\nDeleted files:\n$(printf '%s\n' "${delete_paths[@]}")"
@@ -632,7 +757,7 @@ jobs:
           echo "[DB] Row count:"
           sqlite3 "${DB}" "SELECT COUNT(*) FROM purge_events;" | awk '{print "[DB] rows=" $0}'
 
-      - name: 📦 Upload reports as artifacts (CSV/JSONL/MD/DB)
+      - name: 📦 Upload reports as artifacts (CSV/JSONL/MD/DB + UPGRADE LOG)
         uses: actions/upload-artifact@v4
         with:
           name: actions-purge-reports
@@ -641,6 +766,7 @@ jobs:
             ${{ steps.run_cleaner.outputs.JSONL_PATH }}
             ${{ steps.run_cleaner.outputs.MD_PATH }}
             ${{ env.RESULTS_DIR }}/actions_purge.db
+            ${{ steps.upgrades.outputs.UPGRADE_LOG }}
 
       - name: 💾 (Optional) Commit reports to repo
         if: env.COMMIT_RESULTS == 'true'
@@ -653,5 +779,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "${RESULTS_DIR}"
-          git commit -m "${COMMIT_MESSAGE_PREFIX} store reports (CSV/JSONL/MD/DB)" || { echo "[GIT] Nothing to commit."; exit 0; }
+          git commit -m "${COMMIT_MESSAGE_PREFIX} store reports (CSV/JSONL/MD/DB + upgrade logs)" || { echo "[GIT] Nothing to commit."; exit 0; }
           git push
