@@ -1,454 +1,385 @@
-name: "🐳 EchoOps: FULL — Docker + GHCR + Encrypt + Lock + DB + Auto-Secrets + Service Upgrades + Release"
+name: "🧰 SAP Logon Enterprise Deploy (Echo Scaffold + Silent Install + Artifact)"
 
 on:
   workflow_dispatch:
+    inputs:
+      sap_gui_installer_url:
+        description: "SAP GUI 설치파일 URL (사내 N/W 또는 SAP SMP URL). 비우면 설치 스킵"
+        required: false
+        default: ""
+      sap_gui_sha256:
+        description: "설치파일 SHA256(선택). 지정 시 무결성 검증"
+        required: false
+        default: ""
+      landscape_name:
+        description: "Landscape 표시명 (템플릿 주석용)"
+        required: false
+        default: "Company Landscape"
+      deploy_scope:
+        description: "배포 범위 (PerMachine|PerUser)"
+        required: false
+        default: "PerMachine"
+      create_shortcuts:
+        description: "바탕화면/시작메뉴 바로가기 생성 (true/false)"
+        required: false
+        default: "true"
+      dry_run:
+        description: "드라이런(설치 미수행, 파일만 생성) (true/false)"
+        required: false
+        default: "false"
+      create_release:
+        description: "배포 ZIP로 GitHub Release 생성 (true/false)"
+        required: false
+        default: "false"
+      commit_branch:
+        description: "생성물 커밋 대상 브랜치"
+        required: false
+        default: "main"
 
 permissions:
   contents: write
-  packages: write
-
-concurrency:
-  group: echoops-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  ECHO_ROOT: .github/echo
-  OUT_DIR: .github/echo/out
-  IMAGE_REGISTRY: ghcr.io
-  IMAGE_OWNER: ${{ github.repository_owner }}
-  BRANCH_NAME: ${{ github.ref_name }}
-  PROTECTED_PATHS: ".github/echo,site/"
-  IMAGE_NAME: "echo-app"
 
 jobs:
-  echoops:
-    runs-on: ubuntu-latest
+  sap-logon-deploy:
+    runs-on: windows-latest
     env:
-      # secrets.* 을 if에서 직접 쓰지 않도록 미리 바인딩
-      GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
-      ECHO_PASSWORD: ${{ secrets.ECHO_PASSWORD }}
-      GPG_PUBLIC_KEY: ${{ secrets.GPG_PUBLIC_KEY }}
-      GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+      ECHO_ROOT: .github/echo_sap
+      OUT_DIR: .github/echo_sap/out
+      SCRIPTS_DIR: .github/echo_sap/scripts
+      TPL_DIR: .github/echo_sap/templates
+      DOC_DIR: .github/echo_sap/docs
+      LOG_DIR: .github/echo_sap/logs
+
     steps:
-      - name: ✅ Checkout
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: 🔧 Prepare echo helpers
+      - name: Prepare echo folders
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          mkdir -p "${ECHO_ROOT}"/{tools,out,db/sql/mysql,db/sql/postgres,images,backup,logs}
-          cat > "${ECHO_ROOT}/tools/echo.sh" <<'BASH'
-          #!/usr/bin/env bash
-          echoe(){ printf "[ECHO] %s\n" "$*"; }
-          warn(){ printf "[ECHO][WARN] %s\n" "$*" >&2; }
-          fail(){ echo "[ECHO][FAIL] $*" >&2; exit 1; }
-          BASH
-          chmod +x "${ECHO_ROOT}/tools/echo.sh"
-          . "${ECHO_ROOT}/tools/echo.sh"
-          echoe "Init echo helpers & dirs"
+          $ErrorActionPreference = "Stop"
+          foreach($p in @("$env:ECHO_ROOT",$env:OUT_DIR,$env:SCRIPTS_DIR,$env:TPL_DIR,$env:DOC_DIR,$env:LOG_DIR")){
+            New-Item -ItemType Directory -Force -Path $p | Out-Null
+          }
+          Write-Host "[ECHO][OK] Directories prepared"
 
-      - name: ⬆️ Runner update (apt) + base tools
+      - name: Generate PowerShell deploy script (echo)
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          echoe "apt update/upgrade"
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y install gnupg jq
+          $deploy = @'
+          [CmdletBinding()]
+          param(
+            [string]$InstallerPath = "",
+            [string]$LandscapeXml = "",
+            [string]$SapLogonIni = "",
+            [ValidateSet("PerMachine","PerUser")]
+            [string]$Scope = "PerMachine",
+            [switch]$CreateShortcuts,
+            [switch]$DryRun
+          )
 
-      # ====== 🔐 필수: GH Admin 토큰 확인 + gh 로그인 ======
-      - name: 🔒 Require GH_ADMIN_TOKEN
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          [ -n "${GH_ADMIN_TOKEN:-}" ] || fail "GH_ADMIN_TOKEN secret이 필요합니다(필수). 저장소 Secrets에 추가하세요."
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+          $Script:LogDir = "$PSScriptRoot\..\logs"
+          $Script:LogFile = Join-Path $Script:LogDir ("deploy-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+          if(!(Test-Path $Script:LogDir)){ New-Item -ItemType Directory -Force -Path $Script:LogDir | Out-Null }
 
-      - name: 🔐 gh login
-        env:
-          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          gh auth status || gh auth login --with-token <<< "${GH_TOKEN}"
-          gh auth status
-
-      # ====== 🔐 Secrets 강제 생성(동일 런타임 사용을 위해 RUNTIME 변수 세팅) ======
-      - name: 🧪 List existing secrets
-        env:
-          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          gh secret list --repo "$GITHUB_REPOSITORY" --json name | jq -r '.[].name' | sed 's/^/[ECHO][SECRET] /' || true
-
-      - name: ⚙️ Ensure ECHO_PASSWORD
-        env:
-          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          REPO="${GITHUB_REPOSITORY}"
-          if ! gh secret list --repo "$REPO" --json name | jq -e '.[]|select(.name=="ECHO_PASSWORD")' >/dev/null; then
-            PW="$(openssl rand -base64 48)"
-            echoe "ECHO_PASSWORD 생성 및 저장"
-            printf "%s" "$PW" | gh secret set ECHO_PASSWORD --repo "$REPO" --body-file -
-            echo "ECHO_PASSWORD_RUNTIME=$PW" >> "$GITHUB_ENV"
-          else
-            echoe "ECHO_PASSWORD 이미 존재 → 런타임 반영"
-            echo "ECHO_PASSWORD_RUNTIME=${ECHO_PASSWORD}" >> "$GITHUB_ENV"
-          fi
-
-      - name: 🔑 Ensure GPG_PUBLIC_KEY / GPG_KEY_ID
-        env:
-          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          REPO="${GITHUB_REPOSITORY}"
-          NEED_PUB=$(gh secret list --repo "$REPO" --json name | jq -e '.[]|select(.name=="GPG_PUBLIC_KEY")' >/dev/null; echo $?)
-          NEED_ID=$(gh secret list --repo "$REPO" --json name | jq -e '.[]|select(.name=="GPG_KEY_ID")' >/dev/null; echo $?)
-          if [ "$NEED_PUB" -ne 0 ] || [ "$NEED_ID" -ne 0 ]; then
-            echoe "GPG 키 생성"
-            GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
-            cat > keybatch <<'EOF'
-            %no-protection
-            Key-Type: RSA
-            Key-Length: 3072
-            Subkey-Type: RSA
-            Subkey-Length: 3072
-            Name-Real: EchoOps Auto Key
-            Name-Email: actions@users.noreply.github.com
-            Expire-Date: 2y
-            %commit
-            EOF
-            gpg --batch --generate-key keybatch
-            KEYID=$(gpg --list-keys --with-colons | awk -F: '/^pub/{getline; print $10; exit}')
-            PUB=$(gpg --armor --export "$KEYID")
-            [ "$NEED_PUB" -ne 0 ] && printf "%s" "$PUB" | gh secret set GPG_PUBLIC_KEY --repo "$REPO" --body-file -
-            [ "$NEED_ID" -ne 0 ] && printf "%s" "$KEYID" | gh secret set GPG_KEY_ID --repo "$REPO" --body-file -
-            echo "GPG_PUBLIC_KEY_RUNTIME=$(printf "%s" "$PUB" | tr -d '\n')" >> "$GITHUB_ENV"
-            echo "GPG_KEY_ID_RUNTIME=$KEYID" >> "$GITHUB_ENV"
-          else
-            echoe "GPG 키 이미 존재 → 런타임 반영"
-            echo "GPG_PUBLIC_KEY_RUNTIME=$(printf "%s" "${GPG_PUBLIC_KEY}" | tr -d '\n')" >> "$GITHUB_ENV"
-            echo "GPG_KEY_ID_RUNTIME=${GPG_KEY_ID}" >> "$GITHUB_ENV"
-          fi
-
-      # ====== Docker 엔진 설치/업그레이드 (항상) ======
-      - name: 🐳 Docker install/upgrade
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          if ! command -v docker >/dev/null 2>&1; then
-            echoe "Docker 설치"
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
-          else
-            echoe "Docker 업그레이드 시도"
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade docker.io || true
-          fi
-          docker --version || fail "docker 버전 확인 실패"
-          sudo usermod -aG docker $USER || true
-
-      # ====== Echo 앱: 스캐폴드 → 빌드 → 푸시 (항상) ======
-      - name: 🪵 Echo image scaffold (Dockerfile & app)
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          APP_DIR="${ECHO_ROOT}/images/${IMAGE_NAME}"
-          mkdir -p "$APP_DIR"
-          cat > "${APP_DIR}/app.sh" <<'APP'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "[ECHO-IMAGE] started at $ts"
-          echo "repo=${GITHUB_REPOSITORY:-unknown} sha=${GITHUB_SHA:-unknown}"
-          echo "hello from echo image!"
-          while true; do sleep 60; done
-          APP
-          chmod +x "${APP_DIR}/app.sh"
-          cat > "${APP_DIR}/Dockerfile" <<'DOCKER'
-          FROM ubuntu:24.04
-          ARG REBUILD_TS
-          ENV REBUILD_TS=${REBUILD_TS}
-          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates bash && rm -rf /var/lib/apt/lists/*
-          WORKDIR /app
-          COPY app.sh /app/app.sh
-          CMD ["/app/app.sh"]
-          DOCKER
-          echoe "에코 Dockerfile & 앱 스캐폴드 생성(캐시 무력화 ARG 포함)"
-
-      - name: 🏗️ Build & Push image (initial)
-        env:
-          CR_PAT: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          APP_DIR="${ECHO_ROOT}/images/${IMAGE_NAME}"
-          IMG="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}"
-          TAG_SHA="${IMG}:${GITHUB_SHA}"
-          TAG_LATEST="${IMG}:latest"
-          echoe "이미지 빌드 → $TAG_SHA"
-          docker build --build-arg REBUILD_TS=$(date +%s) -t "$TAG_SHA" "$APP_DIR"
-          docker tag "$TAG_SHA" "$TAG_LATEST"
-          echo "${TAG_SHA}" > "${OUT_DIR}/image.txt"
-          echo "${TAG_LATEST}" > "${OUT_DIR}/image_latest.txt"
-          echoe "GHCR 로그인 & 푸시"
-          echo "${CR_PAT}" | docker login "${IMAGE_REGISTRY}" -u "${GITHUB_ACTOR}" --password-stdin
-          docker push "${TAG_SHA}"
-          docker push "${TAG_LATEST}"
-
-      # ====== 보호 경로 락/자기복구 (항상) ======
-      - name: 🧱 Lock/Protect & self-restore protected paths
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          IFS=',' read -ra PATHS <<< "${PROTECTED_PATHS}"
-          git config user.email "actions@users.noreply.github.com"
-          git config user.name  "github-actions[bot]"
-          git fetch --deepen=50 origin "${BRANCH_NAME}" || true
-          RESTORED=0
-          for p in "${PATHS[@]}"; do
-            p_trim=$(echo "$p" | xargs); [ -z "$p_trim" ] && continue
-            if [ ! -e "$p_trim" ]; then
-              echoe "[LOCK] 누락 감지 → 복구: $p_trim"
-              git checkout "origin/${BRANCH_NAME}" -- "$p_trim" 2>/dev/null || mkdir -p "$p_trim"
-              touch "$p_trim/.restored.$(date +%Y%m%d%H%M%S)"
-              git add "$p_trim" || true
-              RESTORED=1
-            fi
-          done
-          if [ "$RESTORED" -eq 1 ]; then
-            git commit -m "[LOCK] Auto-restore protected paths" || true
-            git push origin "HEAD:${BRANCH_NAME}" || true
-          else
-            echo "[LOCK] 복구 불필요"
-          fi
-
-      # ====== DB 에코 테이블(둘 다) 생성 + 시드 (항상) ======
-      - name: 📝 Generate SQL for echo tables
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          cat > "${ECHO_ROOT}/db/sql/mysql/001_echo.sql" <<'SQL'
-          CREATE DATABASE IF NOT EXISTS fin;
-          USE fin;
-          CREATE TABLE IF NOT EXISTS echo_logs (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            actor VARCHAR(128) NOT NULL,
-            action VARCHAR(128) NOT NULL,
-            notes TEXT
-          );
-          SQL
-          cat > "${ECHO_ROOT}/db/sql/postgres/001_echo.sql" <<'SQL'
-          CREATE SCHEMA IF NOT EXISTS fin;
-          CREATE TABLE IF NOT EXISTS fin.echo_logs (
-            id BIGSERIAL PRIMARY KEY,
-            ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            actor VARCHAR(128) NOT NULL,
-            action VARCHAR(128) NOT NULL,
-            notes TEXT
-          );
-          SQL
-          echoe "SQL 생성 완료"
-
-      - name: 🐬 MySQL — create echo_logs & seed
-        env:
-          MYSQL_ROOT_PW: rootpw123!
-          SEED: "20"
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          docker run -d --name mysql-echo -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PW}" -p 3306:3306 mysql:8
-          for i in {1..60}; do
-            if docker exec mysql-echo mysqladmin ping -h127.0.0.1 -uroot -p"${MYSQL_ROOT_PW}" --silent; then break; fi
-            sleep 2
-          done
-          docker cp "${ECHO_ROOT}/db/sql/mysql/001_echo.sql" mysql-echo:/tmp/001_echo.sql
-          docker exec -e MYSQL_PWD="${MYSQL_ROOT_PW}" mysql-echo mysql -uroot < /tmp/001_echo.sql
-          docker exec -e MYSQL_PWD="${MYSQL_ROOT_PW}" mysql-echo mysql -uroot -e "USE fin; \
-            SET @i:=0; INSERT INTO echo_logs(actor,action,notes)
-            SELECT 'actions-bot','seed', CONCAT('row #', @i:=@i+1) FROM information_schema.COLUMNS LIMIT ${SEED};"
-
-      - name: 🐘 Postgres — create echo_logs & seed
-        env:
-          PG_PW: pgpw123!
-          SEED: "20"
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          docker run -d --name pg-echo -e POSTGRES_PASSWORD="${PG_PW}" -p 5432:5432 postgres:16
-          for i in {1..60}; do
-            if docker exec pg-echo pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1; then break; fi
-            sleep 2
-          done
-          docker cp "${ECHO_ROOT}/db/sql/postgres/001_echo.sql" pg-echo:/tmp/001_echo.sql
-          docker exec -e PGPASSWORD="${PG_PW}" pg-echo psql -U postgres -f /tmp/001_echo.sql
-          docker exec -e PGPASSWORD="${PG_PW}" pg-echo psql -U postgres -c \
-            "INSERT INTO fin.echo_logs(actor,action,notes)
-             SELECT 'actions-bot','seed','row #'||g FROM generate_series(1, ${SEED}) g;"
-
-      # ====== 🔁 서비스 업그레이드(대량 확장) — 백업 → 최신 Pull → 교체 → 복구/검증 ======
-      - name: 🧰 Write upgrade orchestrator
-        run: |
-          set -Eeuo pipefail
-          cat > "${ECHO_ROOT}/tools/upgrade.sh" <<'UP'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          log(){ printf "[UPGRADE] %s\n" "$*"; }
-
-          pull_if_new() {
-            local img="$1"
-            log "Pull latest for ${img}"
-            docker pull "${img}" >/dev/null 2>&1 || true
-            docker inspect --format '{{index .RepoDigests 0}}' "${img}" 2>/dev/null || echo ""
+          function Write-Log {
+            param([string]$Message,[string]$Level="INFO")
+            $ts = (Get-Date).ToString("u")
+            $line = "[{0}][{1}] {2}" -f $ts,$Level,$Message
+            Write-Host $line
+            Add-Content -LiteralPath $Script:LogFile -Value $line
           }
 
-          upgrade_mysql(){
-            local c="mysql-echo" pw="$1"
-            log "MySQL backup (fin)"
-            docker exec -e MYSQL_PWD="${pw}" "${c}" sh -lc 'mysqldump -uroot --databases fin > /tmp/fin.sql'
-            docker cp "${c}:/tmp/fin.sql" ".github/echo/backup/mysql_fin.sql"
-            log "Pull newest mysql:8"
-            pull_if_new "mysql:8"
-            log "Replace container"
-            docker rm -f "${c}" || true
-            docker run -d --name "${c}" -e MYSQL_ROOT_PASSWORD="${pw}" -p 3306:3306 mysql:8
-            for i in $(seq 1 90); do docker exec "${c}" mysqladmin ping -h127.0.0.1 -uroot -p"${pw}" --silent && break || sleep 2; done
-            log "Restore DB"
-            docker cp ".github/echo/backup/mysql_fin.sql" "${c}:/tmp/fin.sql"
-            docker exec -e MYSQL_PWD="${pw}" "${c}" sh -lc 'mysql -uroot < /tmp/fin.sql'
-            log "Validate count"
-            docker exec -e MYSQL_PWD="${pw}" "${c}" sh -lc 'mysql -uroot -e "SELECT COUNT(*) AS cnt FROM fin.echo_logs;"' | tee ".github/echo/logs/mysql_after_count.txt"
+          function Ensure-Dir { param([string]$Path) if(!(Test-Path $Path)){ New-Item -ItemType Directory -Force -Path $Path | Out-Null } }
+
+          function Install-SapGui {
+            param([string]$Path)
+            if([string]::IsNullOrWhiteSpace($Path) -or !(Test-Path $Path)){
+              Write-Log "Installer not provided or not found. Skip install." "WARN"; return
+            }
+            if($DryRun){ Write-Log "DryRun: would install $Path" "INFO"; return }
+
+            $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
+            if($ext -eq ".msi"){
+              Write-Log "Installing MSI: $Path" "INFO"
+              $p = Start-Process msiexec.exe -ArgumentList "/i `"$Path`" /qn /norestart" -Wait -PassThru
+              if($p.ExitCode -ne 0){ throw "MSI install failed (rc=$($p.ExitCode))" }
+              Write-Log "MSI install OK" "INFO"
+              return
+            }
+
+            if($ext -eq ".exe"){
+              Write-Log "Installing EXE (try silent flags): $Path" "INFO"
+              $candidates = @(
+                "/silent",
+                "/verysilent",
+                "/s",
+                "/qn",
+                "/quiet",
+                "/passive /norestart"
+              )
+              foreach($arg in $candidates){
+                Write-Log "Try args: $arg" "INFO"
+                try{
+                  $p = Start-Process -FilePath $Path -ArgumentList $arg -Wait -PassThru
+                  if($p.ExitCode -eq 0){
+                    Write-Log "EXE install OK with args: $arg" "INFO"; return
+                  } else {
+                    Write-Log "ExitCode=$($p.ExitCode) with args: $arg" "WARN"
+                  }
+                } catch {
+                  Write-Log "Install attempt failed: $($_.Exception.Message)" "WARN"
+                }
+              }
+              Write-Log "EXE silent install did not succeed; trying SAP specific setup binary discovery" "WARN"
+            }
+
+            # SAP GUI 배포 폴더 내 SAP*Setup 검색
+            $dir = (Get-Item $Path).Directory.FullName
+            $setup = Get-ChildItem -Path $dir -Recurse -Include *SAP*Setup*.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if($setup){
+              Write-Log "Found SAP setup candidate: $($setup.FullName)" "INFO"
+              if($DryRun){ Write-Log "DryRun: would run $($setup.FullName) /Silent" "INFO"; return }
+              $p = Start-Process -FilePath $setup.FullName -ArgumentList "/Silent" -Wait -PassThru
+              if($p.ExitCode -ne 0){ throw "SAP setup failed (rc=$($p.ExitCode))" }
+              Write-Log "SAP setup OK" "INFO"
+            } else {
+              Write-Log "No SAP*Setup*.exe found; installation skipped" "WARN"
+            }
           }
 
-          upgrade_postgres(){
-            local c="pg-echo" pw="$1"
-            log "Postgres backup (schema fin)"
-            docker exec -e PGPASSWORD="${pw}" "${c}" bash -lc 'pg_dump -U postgres -n fin -d postgres > /tmp/fin.sql'
-            docker cp "${c}:/tmp/fin.sql" ".github/echo/backup/pg_fin.sql"
-            log "Pull newest postgres:16"
-            pull_if_new "postgres:16"
-            log "Replace container"
-            docker rm -f "${c}" || true
-            docker run -d --name "${c}" -e POSTGRES_PASSWORD="${pw}" -p 5432:5432 postgres:16
-            for i in $(seq 1 90); do docker exec "${c}" pg_isready -U postgres -h 127.0.0.1 >/dev/null 2>&1 && break || sleep 2; done
-            log "Restore schema"
-            docker cp ".github/echo/backup/pg_fin.sql" "${c}:/tmp/fin.sql"
-            docker exec -e PGPASSWORD="${pw}" "${c}" bash -lc 'psql -U postgres -f /tmp/fin.sql'
-            log "Validate count"
-            docker exec -e PGPASSWORD="${pw}" "${c}" bash -lc 'psql -U postgres -tAc "SELECT COUNT(*) FROM fin.echo_logs;"' | tee ".github/echo/logs/pg_after_count.txt"
+          function Deploy-Landscape {
+            param([string]$Xml,[string]$Ini,[string]$Scope)
+            $ProgramDataSAP = Join-Path $env:ProgramData "SAP"
+            $AppDataSAP = Join-Path $env:AppData "SAP"
+
+            if($Scope -eq "PerMachine"){
+              Ensure-Dir $ProgramDataSAP
+              if($Xml -and (Test-Path $Xml)){
+                Copy-Item -Force -LiteralPath $Xml -Destination (Join-Path $ProgramDataSAP "SAPUILandscape.xml")
+                Write-Log "SAPUILandscape.xml -> $ProgramDataSAP" "INFO"
+              } else { Write-Log "Landscape XML not provided; skipped" "WARN" }
+
+              if($Ini -and (Test-Path $Ini)){
+                Ensure-Dir $AppDataSAP
+                Copy-Item -Force -LiteralPath $Ini -Destination (Join-Path $AppDataSAP "saplogon.ini")
+                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)" "INFO"
+              }
+            } else {
+              Ensure-Dir $AppDataSAP
+              if($Xml -and (Test-Path $Xml)){
+                Copy-Item -Force -LiteralPath $Xml -Destination (Join-Path $AppDataSAP "SAPUILandscape.xml")
+                Write-Log "SAPUILandscape.xml -> $AppDataSAP" "INFO"
+              }
+              if($Ini -and (Test-Path $Ini)){
+                Copy-Item -Force -LiteralPath $Ini -Destination (Join-Path $AppDataSAP "saplogon.ini")
+                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)" "INFO"
+              }
+            }
           }
 
-          upgrade_echo_image(){
-            local img_base="$1"
-            local ts=$(date +%s)
-            local tag_u="${img_base}:upgrade-${ts}"
-            log "Rebuild echo image with cache-bust (REBUILD_TS=${ts})"
-            docker build --build-arg REBUILD_TS="${ts}" -t "${tag_u}" ".github/echo/images/${IMAGE_NAME}"
-            log "Tag latest"
-            docker tag "${tag_u}" "${img_base}:latest"
-            echo "${tag_u}" > ".github/echo/out/image_upgrade.txt"
+          function Create-Shortcuts {
+            # 대표 경로들 확인
+            $candidates = @(
+              "C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe",
+              "C:\Program Files\SAP\FrontEnd\SAPgui\saplogon.exe"
+            )
+            $exe = $null
+            foreach($c in $candidates){ if(Test-Path $c){ $exe = $c; break } }
+            if(-not $exe){ Write-Log "saplogon.exe not found; skip shortcuts" "WARN"; return }
+
+            $w = New-Object -ComObject WScript.Shell
+            $publicDesktop = "$env:Public\Desktop"
+            $startMenu = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
+            Ensure-Dir $publicDesktop
+            Ensure-Dir $startMenu
+
+            $link1 = Join-Path $publicDesktop "SAP Logon.lnk"
+            $s1 = $w.CreateShortcut($link1)
+            $s1.TargetPath = $exe
+            $s1.WorkingDirectory = (Split-Path $exe)
+            $s1.Description = "SAP Logon"
+            $s1.Save()
+            Write-Log "Shortcut created: $link1" "INFO"
+
+            $link2 = Join-Path $startMenu "SAP Logon.lnk"
+            $s2 = $w.CreateShortcut($link2)
+            $s2.TargetPath = $exe
+            $s2.WorkingDirectory = (Split-Path $exe)
+            $s2.Description = "SAP Logon"
+            $s2.Save()
+            Write-Log "Shortcut created: $link2" "INFO"
           }
-          UP
-          chmod +x "${ECHO_ROOT}/tools/upgrade.sh"
 
-      - name: 🔁 Upgrade — MySQL
-        env:
-          MYSQL_ROOT_PW: rootpw123!
+          Write-Log "==== SAP Logon Deploy start ====" "INFO"
+          Write-Log "Scope=$Scope, DryRun=$DryRun, CreateShortcuts=$CreateShortcuts" "INFO"
+
+          Install-SapGui -Path $InstallerPath
+          Deploy-Landscape -Xml $LandscapeXml -Ini $SapLogonIni -Scope $Scope
+          if($CreateShortcuts){ Create-Shortcuts }
+
+          Write-Log "==== Done ====" "INFO"
+          Write-Host ("[ECHO][LOG] " + $Script:LogFile)
+          '@
+
+          $path = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
+          $deploy | Set-Content -Encoding UTF8 -LiteralPath $path
+          Write-Host "[ECHO][OK] Generated: $path"
+
+      - name: Generate templates and docs (echo)
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/upgrade.sh"
-          upgrade_mysql "${MYSQL_ROOT_PW}"
+          # README
+          @"
+          # SAP Logon Enterprise Deploy Scaffold
 
-      - name: 🔁 Upgrade — Postgres
-        env:
-          PG_PW: pgpw123!
+          이 폴더는 GitHub Actions가 **에코** 방식으로 자동 생성했습니다.
+
+          - `scripts/deploy_sap_logon.ps1` : 무인 설치 + Landscape 배포 + 바로가기 생성
+          - `templates/SAPUILandscape.xml` : 샘플(빈 골격). 실제 환경에선 SAP Logon에서 Export한 파일 사용 권장
+          - `templates/saplogon.ini`       : 레거시 클라이언트용 샘플
+          - `logs/`                        : 실행 로그
+          - `out/`                         : 산출물(압축/다운로드)
+
+          **주의**  
+          - SAP GUI 설치 파일은 SAP의 라이선스 및 배포 정책을 준수해야 합니다. 저장소에 업로드하지 말고, 내부 배포 URL 또는 사내 공유 경로를 입력하여 사용하세요.
+          - 최신 SAP GUI는 `SAPUILandscape.xml` 기반 구성이 표준입니다. `saplogon.ini`는 구형 호환용입니다.
+          "@ | Set-Content -Encoding UTF8 $env:DOC_DIR\README_DEPLOY.md
+
+          # Landscape 템플릿 (빈 골격 + 주석)
+          @"
+          <!--
+            TEMPLATE ONLY — 실제로는 SAP Logon에서 내보낸 SAPUILandscape.xml을 사용하세요.
+            Landscape: ${{ github.event.inputs.landscape_name }}
+          -->
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Landscape>
+            <Services>
+              <!-- 예시: SAPGUI 항목들 배치 -->
+              <!--
+              <Service name="SAPGUI">
+                <Item name="PRD" description="ECC Production" type="SAPGUI">
+                  <Server>prd.example.internal</Server>
+                  <SystemID>PRD</SystemID>
+                  <SystemNumber>00</SystemNumber>
+                  <RouterString/>
+                </Item>
+              </Service>
+              -->
+            </Services>
+          </Landscape>
+          "@ | Set-Content -Encoding UTF8 $env:TPL_DIR\SAPUILandscape.xml
+
+          # saplogon.ini 샘플(선택)
+          @";
+          ; TEMPLATE ONLY — 구형/레거시 호환용 샘플
+          ; 실제 환경에 맞게 수정하거나 XML을 표준으로 사용하세요.
+          [Description]
+          ENTRIES=1
+          [Entry1]
+          Name=PRD
+          ApplicationServer=prd.example.internal
+          SystemNumber=00
+          SAPRouter=
+          "@ | Set-Content -Encoding UTF8 $env:TPL_DIR\saplogon.ini
+
+          Write-Host "[ECHO][OK] Generated templates and docs"
+
+      - name: Optionally download SAP GUI installer & verify (if URL provided)
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/upgrade.sh"
-          upgrade_postgres "${PG_PW}"
+          $url = "${{ github.event.inputs.sap_gui_installer_url }}"
+          if([string]::IsNullOrWhiteSpace($url)){
+            Write-Host "[ECHO][SKIP] No installer URL provided"
+            exit 0
+          }
+          $dl = Join-Path $env:OUT_DIR "SAP_GUI_Setup.exe"
+          Write-Host "[ECHO][GET] $url -> $dl"
+          try{
+            Invoke-WebRequest -Uri $url -OutFile $dl -UseBasicParsing -TimeoutSec 600
+          } catch {
+            Write-Error "Download failed: $($_.Exception.Message)"
+          }
+          if(!(Test-Path $dl)){ throw "Installer not downloaded." }
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $dl).Hash.ToLower()
+          $exp = "${{ github.event.inputs.sap_gui_sha256 }}".ToLower()
+          if($exp){
+            if($sha -ne $exp){ throw "SHA256 mismatch. got=$sha expected=$exp" }
+            Write-Host "[ECHO][OK] SHA256 verified"
+          } else {
+            Write-Host "[ECHO][WARN] SHA256 not provided. got=$sha"
+          }
+          "SAP_GUI_INSTALLER=$dl" | Out-File -FilePath $env:OUT_DIR\env.properties -Encoding ascii
 
-      - name: 🔁 Upgrade — Echo image (rebuild & re-push)
-        env:
-          CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run deploy script (install/landscape/shortcuts)
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          . "${ECHO_ROOT}/tools/upgrade.sh"
-          IMG="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${IMAGE_NAME}"
-          upgrade_echo_image "${IMG}"
-          echoe "GHCR 로그인 & 푸시(업그레이드 태그)"
-          echo "${CR_PAT}" | docker login "${IMAGE_REGISTRY}" -u "${GITHUB_ACTOR}" --password-stdin
-          docker push "${IMG}:latest"
-          docker push "$(cat "${OUT_DIR}/image_upgrade.txt")"
+          $installer = ""
+          $envFile = "$env:OUT_DIR\env.properties"
+          if(Test-Path $envFile){
+            $kv = Get-Content $envFile | Where-Object { $_ -match "=" } | ForEach-Object {
+              $p=$_.Split("=",2); [PSCustomObject]@{ K=$p[0]; V=$p[1] }
+            } | Group-Object -AsHashTable -AsString K,V
+            if($kv.ContainsKey("SAP_GUI_INSTALLER")){ $installer = $kv["SAP_GUI_INSTALLER"]["V"] }
+          }
 
-      # ====== 산출물 패키징 + 강제 암호화(필수) ======
-      - name: 🗄️ Package & Hash artifacts (after upgrades)
+          $script = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
+          $xml = Join-Path $env:TPL_DIR "SAPUILandscape.xml"
+          $ini = Join-Path $env:TPL_DIR "saplogon.ini"
+
+          $scope = "${{ github.event.inputs.deploy_scope }}"
+          $mkShort = [bool]::Parse("${{ github.event.inputs.create_shortcuts }}")
+          $dry = [bool]::Parse("${{ github.event.inputs.dry_run }}")
+
+          Write-Host "[ECHO][RUN] $script"
+          & $script `
+            -InstallerPath $installer `
+            -LandscapeXml $xml `
+            -SapLogonIni $ini `
+            -Scope $scope `
+            -CreateShortcuts:($mkShort) `
+            -DryRun:($dry)
+
+      - name: Package artifact (zip)
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          mkdir -p "${OUT_DIR}"
-          tar -czf "${OUT_DIR}/echo_artifacts.tar.gz" \
-            "${ECHO_ROOT}/tools" "${ECHO_ROOT}/images" "${ECHO_ROOT}/db" "${ECHO_ROOT}/backup" "${ECHO_ROOT}/logs" || true
-          sha256sum "${OUT_DIR}/echo_artifacts.tar.gz" > "${OUT_DIR}/echo_artifacts.sha256"
+          $zip = "$env:OUT_DIR\sap-logon-deploy.zip"
+          if(Test-Path $zip){ Remove-Item -Force $zip }
+          Compress-Archive -Path "$env:ECHO_ROOT\*" -DestinationPath $zip
+          Write-Host "[ECHO][OK] Packed -> $zip"
 
-      - name: 🔒 Encrypt artifacts (필수)
-        env:
-          ECHO_PASSWORD_RUNTIME: ${{ env.ECHO_PASSWORD_RUNTIME }}
-          GPG_PUBLIC_KEY_RUNTIME: ${{ env.GPG_PUBLIC_KEY_RUNTIME }}
-          GPG_KEY_ID_RUNTIME: ${{ env.GPG_KEY_ID_RUNTIME }}
-        run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          f="${OUT_DIR}/echo_artifacts.tar.gz"
-          if [ -n "${ECHO_PASSWORD_RUNTIME:-}" ]; then
-            echoe "OpenSSL AES-256-CBC 암호화(필수)"
-            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
-              -in "$f" -out "${f}.enc" -pass env:ECHO_PASSWORD_RUNTIME
-          else
-            [ -n "${GPG_PUBLIC_KEY_RUNTIME:-}" ] || fail "GPG 공개키가 필요합니다."
-            echoe "GPG 암호화(필수)"
-            printf "%s" "$GPG_PUBLIC_KEY_RUNTIME" | gpg --batch --import
-            tgt="${f}.gpg"
-            if [ -n "${GPG_KEY_ID_RUNTIME:-}" ]; then
-              gpg --batch --yes -r "${GPG_KEY_ID_RUNTIME}" -o "$tgt" --encrypt "$f"
-            else
-              rid=$(gpg --list-keys --with-colons | awk -F: '/^pub/{getline; print $10; exit}')
-              gpg --batch --yes -r "$rid" -o "$tgt" --encrypt "$f"
-            fi
-          fi
-
-      - name: 📦 Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: echoops-artifacts
-          path: |
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.enc
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.gpg
-            ${{ env.OUT_DIR }}/echo_artifacts.sha256
-            ${{ env.OUT_DIR }}/image.txt
-            ${{ env.OUT_DIR }}/image_latest.txt
-            ${{ env.OUT_DIR }}/image_upgrade.txt
-            ${{ env.ECHO_ROOT }}/logs/mysql_after_count.txt
-            ${{ env.ECHO_ROOT }}/logs/pg_after_count.txt
-          if-no-files-found: ignore
-          retention-days: 7
+          name: sap-logon-deploy
+          path: .github/echo_sap/out/sap-logon-deploy.zip
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: 🏷️ Create Release (항상)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit generated scaffold to repo
+        if: ${{ github.event.inputs.commit_branch != '' }}
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-          . "${ECHO_ROOT}/tools/echo.sh"
-          TAG="echoops-${{ github.run_number }}-$(date +%Y%m%d%H%M%S)"
-          gh release create "$TAG" \
-            --notes "EchoOps FULL (+Upgrades): docker engine, echo image, MySQL/Postgres upgraded with backup/restore; encrypted artifacts included." \
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz \
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.enc \
-            ${{ env.OUT_DIR }}/echo_artifacts.tar.gz.gpg || echo "[WARN] gh release 경고(이미 존재 등)"
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git checkout "${{ github.event.inputs.commit_branch }}"
+          git add $env:ECHO_ROOT
+          if((git status --porcelain) -ne $null){
+            git commit -m "chore(sap): echo scaffold + deploy script [auto]"
+            git push
+            Write-Host "[ECHO][OK] committed/pushed"
+          } else {
+            Write-Host "[ECHO][SKIP] nothing to commit"
+          }
+
+      - name: Create GitHub Release (optional)
+        if: ${{ github.event.inputs.create_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "sap-deploy-${{ github.run_number }}"
+          name: "SAP Logon Deploy Scaffold #${{ github.run_number }}"
+          body: "Auto-generated SAP Logon deployment scaffold and package."
+          files: |
+            .github/echo_sap/out/sap-logon-deploy.zip
