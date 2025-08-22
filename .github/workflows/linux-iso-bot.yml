@@ -1,18 +1,18 @@
-name: "🧰 SAP Logon Enterprise Deploy (Echo Scaffold + Silent Install + Artifact)"
+name: "🧰 SAP Logon Enterprise Deploy (Echo+Fix v2)"
 
 on:
   workflow_dispatch:
     inputs:
       sap_gui_installer_url:
-        description: "SAP GUI 설치파일 URL (사내 N/W 또는 SAP SMP URL). 비우면 설치 스킵"
+        description: "SAP GUI 설치파일 URL (선택)"
         required: false
         default: ""
       sap_gui_sha256:
-        description: "설치파일 SHA256(선택). 지정 시 무결성 검증"
+        description: "설치파일 SHA256(선택)"
         required: false
         default: ""
       landscape_name:
-        description: "Landscape 표시명 (템플릿 주석용)"
+        description: "Landscape 표시명"
         required: false
         default: "Company Landscape"
       deploy_scope:
@@ -24,15 +24,15 @@ on:
         required: false
         default: "true"
       dry_run:
-        description: "드라이런(설치 미수행, 파일만 생성) (true/false)"
+        description: "드라이런 (true/false)"
         required: false
         default: "false"
       create_release:
-        description: "배포 ZIP로 GitHub Release 생성 (true/false)"
+        description: "GitHub Release 생성 (true/false)"
         required: false
         default: "false"
       commit_branch:
-        description: "생성물 커밋 대상 브랜치"
+        description: "생성물 커밋 브랜치"
         required: false
         default: "main"
 
@@ -54,19 +54,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare echo folders
+      - name: Prepare echo folders (robust)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          foreach($p in @("$env:ECHO_ROOT",$env:OUT_DIR,$env:SCRIPTS_DIR,$env:TPL_DIR,$env:DOC_DIR,$env:LOG_DIR")){
-            New-Item -ItemType Directory -Force -Path $p | Out-Null
-          }
-          Write-Host "[ECHO][OK] Directories prepared"
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          trap { Write-Error "[FATAL] $($_.Exception.Message)"; exit 1 }
 
-      - name: Generate PowerShell deploy script (echo)
+          $paths = @(
+            $env:ECHO_ROOT,
+            $env:OUT_DIR,
+            $env:SCRIPTS_DIR,
+            $env:TPL_DIR,
+            $env:DOC_DIR,
+            $env:LOG_DIR
+          ) | Where-Object { $_ -and $_.Trim() -ne "" }
+
+          foreach ($p in $paths) {
+            if (-not (Test-Path -LiteralPath $p)) {
+              New-Item -ItemType Directory -Force -Path $p | Out-Null
+            }
+          }
+          Write-Host "[ECHO][OK] Directories prepared: $($paths -join ', ')"
+
+      - name: Generate deploy script (echo)
         shell: pwsh
         run: |
-          $deploy = @'
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $content = @'
           [CmdletBinding()]
           param(
             [string]$InstallerPath = "",
@@ -80,16 +97,16 @@ jobs:
 
           Set-StrictMode -Version Latest
           $ErrorActionPreference = "Stop"
-          $Script:LogDir = "$PSScriptRoot\..\logs"
-          $Script:LogFile = Join-Path $Script:LogDir ("deploy-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
-          if(!(Test-Path $Script:LogDir)){ New-Item -ItemType Directory -Force -Path $Script:LogDir | Out-Null }
+          $LogDir = Join-Path $PSScriptRoot "..\logs"
+          if (!(Test-Path $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+          $LogFile = Join-Path $LogDir ("deploy-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
 
           function Write-Log {
-            param([string]$Message,[string]$Level="INFO")
+            param([string]$Message,[ValidateSet("INFO","WARN","ERROR")] [string]$Level="INFO")
             $ts = (Get-Date).ToString("u")
             $line = "[{0}][{1}] {2}" -f $ts,$Level,$Message
             Write-Host $line
-            Add-Content -LiteralPath $Script:LogFile -Value $line
+            Add-Content -LiteralPath $LogFile -Value $line
           }
 
           function Ensure-Dir { param([string]$Path) if(!(Test-Path $Path)){ New-Item -ItemType Directory -Force -Path $Path | Out-Null } }
@@ -99,52 +116,39 @@ jobs:
             if([string]::IsNullOrWhiteSpace($Path) -or !(Test-Path $Path)){
               Write-Log "Installer not provided or not found. Skip install." "WARN"; return
             }
-            if($DryRun){ Write-Log "DryRun: would install $Path" "INFO"; return }
+            if($DryRun){ Write-Log "DryRun: would install $Path"; return }
 
             $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
             if($ext -eq ".msi"){
-              Write-Log "Installing MSI: $Path" "INFO"
+              Write-Log "Installing MSI: $Path"
               $p = Start-Process msiexec.exe -ArgumentList "/i `"$Path`" /qn /norestart" -Wait -PassThru
               if($p.ExitCode -ne 0){ throw "MSI install failed (rc=$($p.ExitCode))" }
-              Write-Log "MSI install OK" "INFO"
+              Write-Log "MSI install OK"
               return
             }
 
             if($ext -eq ".exe"){
-              Write-Log "Installing EXE (try silent flags): $Path" "INFO"
-              $candidates = @(
-                "/silent",
-                "/verysilent",
-                "/s",
-                "/qn",
-                "/quiet",
-                "/passive /norestart"
-              )
+              Write-Log "Installing EXE (try silent flags): $Path"
+              $candidates = @("/silent","/verysilent","/s","/qn","/quiet","/passive /norestart")
               foreach($arg in $candidates){
-                Write-Log "Try args: $arg" "INFO"
+                Write-Log "Try args: $arg"
                 try{
                   $p = Start-Process -FilePath $Path -ArgumentList $arg -Wait -PassThru
-                  if($p.ExitCode -eq 0){
-                    Write-Log "EXE install OK with args: $arg" "INFO"; return
-                  } else {
-                    Write-Log "ExitCode=$($p.ExitCode) with args: $arg" "WARN"
-                  }
-                } catch {
-                  Write-Log "Install attempt failed: $($_.Exception.Message)" "WARN"
-                }
+                  if($p.ExitCode -eq 0){ Write-Log "EXE install OK with args: $arg"; return }
+                  else { Write-Log "ExitCode=$($p.ExitCode) with args: $arg" "WARN" }
+                } catch { Write-Log "Install attempt failed: $($_.Exception.Message)" "WARN" }
               }
-              Write-Log "EXE silent install did not succeed; trying SAP specific setup binary discovery" "WARN"
+              Write-Log "EXE silent install not succeeded; trying SAP*Setup discovery" "WARN"
             }
 
-            # SAP GUI 배포 폴더 내 SAP*Setup 검색
             $dir = (Get-Item $Path).Directory.FullName
             $setup = Get-ChildItem -Path $dir -Recurse -Include *SAP*Setup*.exe -ErrorAction SilentlyContinue | Select-Object -First 1
             if($setup){
-              Write-Log "Found SAP setup candidate: $($setup.FullName)" "INFO"
-              if($DryRun){ Write-Log "DryRun: would run $($setup.FullName) /Silent" "INFO"; return }
+              Write-Log "Found SAP setup candidate: $($setup.FullName)"
+              if($DryRun){ Write-Log "DryRun: would run $($setup.FullName) /Silent"; return }
               $p = Start-Process -FilePath $setup.FullName -ArgumentList "/Silent" -Wait -PassThru
               if($p.ExitCode -ne 0){ throw "SAP setup failed (rc=$($p.ExitCode))" }
-              Write-Log "SAP setup OK" "INFO"
+              Write-Log "SAP setup OK"
             } else {
               Write-Log "No SAP*Setup*.exe found; installation skipped" "WARN"
             }
@@ -159,137 +163,102 @@ jobs:
               Ensure-Dir $ProgramDataSAP
               if($Xml -and (Test-Path $Xml)){
                 Copy-Item -Force -LiteralPath $Xml -Destination (Join-Path $ProgramDataSAP "SAPUILandscape.xml")
-                Write-Log "SAPUILandscape.xml -> $ProgramDataSAP" "INFO"
+                Write-Log "SAPUILandscape.xml -> $ProgramDataSAP"
               } else { Write-Log "Landscape XML not provided; skipped" "WARN" }
 
               if($Ini -and (Test-Path $Ini)){
                 Ensure-Dir $AppDataSAP
                 Copy-Item -Force -LiteralPath $Ini -Destination (Join-Path $AppDataSAP "saplogon.ini")
-                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)" "INFO"
+                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)"
               }
             } else {
               Ensure-Dir $AppDataSAP
               if($Xml -and (Test-Path $Xml)){
                 Copy-Item -Force -LiteralPath $Xml -Destination (Join-Path $AppDataSAP "SAPUILandscape.xml")
-                Write-Log "SAPUILandscape.xml -> $AppDataSAP" "INFO"
+                Write-Log "SAPUILandscape.xml -> $AppDataSAP"
               }
               if($Ini -and (Test-Path $Ini)){
                 Copy-Item -Force -LiteralPath $Ini -Destination (Join-Path $AppDataSAP "saplogon.ini")
-                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)" "INFO"
+                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)"
               }
             }
           }
 
           function Create-Shortcuts {
-            # 대표 경로들 확인
             $candidates = @(
               "C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe",
               "C:\Program Files\SAP\FrontEnd\SAPgui\saplogon.exe"
             )
-            $exe = $null
-            foreach($c in $candidates){ if(Test-Path $c){ $exe = $c; break } }
+            $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
             if(-not $exe){ Write-Log "saplogon.exe not found; skip shortcuts" "WARN"; return }
 
             $w = New-Object -ComObject WScript.Shell
             $publicDesktop = "$env:Public\Desktop"
             $startMenu = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
-            Ensure-Dir $publicDesktop
-            Ensure-Dir $startMenu
+            Ensure-Dir $publicDesktop; Ensure-Dir $startMenu
 
-            $link1 = Join-Path $publicDesktop "SAP Logon.lnk"
-            $s1 = $w.CreateShortcut($link1)
-            $s1.TargetPath = $exe
-            $s1.WorkingDirectory = (Split-Path $exe)
-            $s1.Description = "SAP Logon"
-            $s1.Save()
-            Write-Log "Shortcut created: $link1" "INFO"
+            $lnk1 = Join-Path $publicDesktop "SAP Logon.lnk"
+            $s1 = $w.CreateShortcut($lnk1); $s1.TargetPath = $exe; $s1.WorkingDirectory = (Split-Path $exe); $s1.Description = "SAP Logon"; $s1.Save()
+            Write-Log "Shortcut created: $lnk1"
 
-            $link2 = Join-Path $startMenu "SAP Logon.lnk"
-            $s2 = $w.CreateShortcut($link2)
-            $s2.TargetPath = $exe
-            $s2.WorkingDirectory = (Split-Path $exe)
-            $s2.Description = "SAP Logon"
-            $s2.Save()
-            Write-Log "Shortcut created: $link2" "INFO"
+            $lnk2 = Join-Path $startMenu "SAP Logon.lnk"
+            $s2 = $w.CreateShortcut($lnk2); $s2.TargetPath = $exe; $s2.WorkingDirectory = (Split-Path $exe); $s2.Description = "SAP Logon"; $s2.Save()
+            Write-Log "Shortcut created: $lnk2"
           }
 
-          Write-Log "==== SAP Logon Deploy start ====" "INFO"
-          Write-Log "Scope=$Scope, DryRun=$DryRun, CreateShortcuts=$CreateShortcuts" "INFO"
+          Write-Log "==== SAP Logon Deploy start ===="
+          Write-Log ("Scope="+$Scope+", DryRun="+$DryRun+", CreateShortcuts="+$CreateShortcuts)
 
           Install-SapGui -Path $InstallerPath
           Deploy-Landscape -Xml $LandscapeXml -Ini $SapLogonIni -Scope $Scope
           if($CreateShortcuts){ Create-Shortcuts }
 
-          Write-Log "==== Done ====" "INFO"
-          Write-Host ("[ECHO][LOG] " + $Script:LogFile)
+          Write-Log "==== Done ===="
+          Write-Host ("[ECHO][LOG] " + $LogFile)
           '@
 
-          $path = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
-          $deploy | Set-Content -Encoding UTF8 -LiteralPath $path
-          Write-Host "[ECHO][OK] Generated: $path"
+          $scriptPath = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
+          $content | Set-Content -Encoding UTF8 -LiteralPath $scriptPath
+          Write-Host "[ECHO][OK] Generated: $scriptPath"
 
-      - name: Generate templates and docs (echo)
+      - name: Generate templates & docs (echo)
         shell: pwsh
         run: |
-          # README
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
           @"
-          # SAP Logon Enterprise Deploy Scaffold
+          # SAP Logon Deploy Scaffold (v2)
 
-          이 폴더는 GitHub Actions가 **에코** 방식으로 자동 생성했습니다.
-
-          - `scripts/deploy_sap_logon.ps1` : 무인 설치 + Landscape 배포 + 바로가기 생성
-          - `templates/SAPUILandscape.xml` : 샘플(빈 골격). 실제 환경에선 SAP Logon에서 Export한 파일 사용 권장
-          - `templates/saplogon.ini`       : 레거시 클라이언트용 샘플
-          - `logs/`                        : 실행 로그
-          - `out/`                         : 산출물(압축/다운로드)
-
-          **주의**  
-          - SAP GUI 설치 파일은 SAP의 라이선스 및 배포 정책을 준수해야 합니다. 저장소에 업로드하지 말고, 내부 배포 URL 또는 사내 공유 경로를 입력하여 사용하세요.
-          - 최신 SAP GUI는 `SAPUILandscape.xml` 기반 구성이 표준입니다. `saplogon.ini`는 구형 호환용입니다.
+          - scripts/deploy_sap_logon.ps1 : 무인 설치 + Landscape 배포 + 바로가기
+          - templates/SAPUILandscape.xml : 샘플 골격
+          - templates/saplogon.ini       : 레거시 호환 샘플
+          - logs/                        : 실행 로그
+          - out/                         : 산출물
           "@ | Set-Content -Encoding UTF8 $env:DOC_DIR\README_DEPLOY.md
 
-          # Landscape 템플릿 (빈 골격 + 주석)
           @"
-          <!--
-            TEMPLATE ONLY — 실제로는 SAP Logon에서 내보낸 SAPUILandscape.xml을 사용하세요.
-            Landscape: ${{ github.event.inputs.landscape_name }}
-          -->
+          <!-- TEMPLATE ONLY — 실제 운영 파일 사용 권장 -->
           <?xml version="1.0" encoding="UTF-8"?>
-          <Landscape>
+          <Landscape note="${{ github.event.inputs.landscape_name }}">
             <Services>
-              <!-- 예시: SAPGUI 항목들 배치 -->
-              <!--
-              <Service name="SAPGUI">
-                <Item name="PRD" description="ECC Production" type="SAPGUI">
-                  <Server>prd.example.internal</Server>
-                  <SystemID>PRD</SystemID>
-                  <SystemNumber>00</SystemNumber>
-                  <RouterString/>
-                </Item>
-              </Service>
-              -->
             </Services>
           </Landscape>
           "@ | Set-Content -Encoding UTF8 $env:TPL_DIR\SAPUILandscape.xml
 
-          # saplogon.ini 샘플(선택)
           @";
-          ; TEMPLATE ONLY — 구형/레거시 호환용 샘플
-          ; 실제 환경에 맞게 수정하거나 XML을 표준으로 사용하세요.
+          ; TEMPLATE ONLY — 구형/레거시 클라이언트용
           [Description]
-          ENTRIES=1
-          [Entry1]
-          Name=PRD
-          ApplicationServer=prd.example.internal
-          SystemNumber=00
-          SAPRouter=
+          ENTRIES=0
           "@ | Set-Content -Encoding UTF8 $env:TPL_DIR\saplogon.ini
 
-          Write-Host "[ECHO][OK] Generated templates and docs"
+          Write-Host "[ECHO][OK] Templates/docs generated"
 
-      - name: Optionally download SAP GUI installer & verify (if URL provided)
+      - name: (Optional) Download installer & verify
         shell: pwsh
         run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
           $url = "${{ github.event.inputs.sap_gui_installer_url }}"
           if([string]::IsNullOrWhiteSpace($url)){
             Write-Host "[ECHO][SKIP] No installer URL provided"
@@ -297,11 +266,7 @@ jobs:
           }
           $dl = Join-Path $env:OUT_DIR "SAP_GUI_Setup.exe"
           Write-Host "[ECHO][GET] $url -> $dl"
-          try{
-            Invoke-WebRequest -Uri $url -OutFile $dl -UseBasicParsing -TimeoutSec 600
-          } catch {
-            Write-Error "Download failed: $($_.Exception.Message)"
-          }
+          Invoke-WebRequest -Uri $url -OutFile $dl -UseBasicParsing -TimeoutSec 900
           if(!(Test-Path $dl)){ throw "Installer not downloaded." }
           $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $dl).Hash.ToLower()
           $exp = "${{ github.event.inputs.sap_gui_sha256 }}".ToLower()
@@ -313,16 +278,19 @@ jobs:
           }
           "SAP_GUI_INSTALLER=$dl" | Out-File -FilePath $env:OUT_DIR\env.properties -Encoding ascii
 
-      - name: Run deploy script (install/landscape/shortcuts)
+      - name: Run deploy script
         shell: pwsh
         run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
           $installer = ""
           $envFile = "$env:OUT_DIR\env.properties"
           if(Test-Path $envFile){
-            $kv = Get-Content $envFile | Where-Object { $_ -match "=" } | ForEach-Object {
-              $p=$_.Split("=",2); [PSCustomObject]@{ K=$p[0]; V=$p[1] }
-            } | Group-Object -AsHashTable -AsString K,V
-            if($kv.ContainsKey("SAP_GUI_INSTALLER")){ $installer = $kv["SAP_GUI_INSTALLER"]["V"] }
+            $m = Get-Content $envFile | Where-Object { $_ -match "=" } | ForEach-Object {
+              $kv = $_.Split("=",2); [PSCustomObject]@{ K=$kv[0]; V=$kv[1] }
+            }
+            $installer = ($m | Where-Object { $_.K -eq "SAP_GUI_INSTALLER" } | Select-Object -First 1).V
           }
 
           $script = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
@@ -342,9 +310,11 @@ jobs:
             -CreateShortcuts:($mkShort) `
             -DryRun:($dry)
 
-      - name: Package artifact (zip)
+      - name: Zip artifact
         shell: pwsh
         run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
           $zip = "$env:OUT_DIR\sap-logon-deploy.zip"
           if(Test-Path $zip){ Remove-Item -Force $zip }
           Compress-Archive -Path "$env:ECHO_ROOT\*" -DestinationPath $zip
@@ -358,7 +328,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Commit generated scaffold to repo
+      - name: Commit scaffold
         if: ${{ github.event.inputs.commit_branch != '' }}
         shell: pwsh
         run: |
@@ -366,7 +336,8 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git checkout "${{ github.event.inputs.commit_branch }}"
           git add $env:ECHO_ROOT
-          if((git status --porcelain) -ne $null){
+          $status = git status --porcelain
+          if($status){
             git commit -m "chore(sap): echo scaffold + deploy script [auto]"
             git push
             Write-Host "[ECHO][OK] committed/pushed"
@@ -374,7 +345,7 @@ jobs:
             Write-Host "[ECHO][SKIP] nothing to commit"
           }
 
-      - name: Create GitHub Release (optional)
+      - name: Create Release (optional)
         if: ${{ github.event.inputs.create_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
