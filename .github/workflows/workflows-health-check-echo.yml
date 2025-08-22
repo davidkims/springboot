@@ -40,7 +40,8 @@ on:
         default: "[FORCE-PURGE]"
         required: true
       advanced_json:
-        description: "고급설정 JSON (예: {\"backup_branch\":\"workflow-purge-backup\",\"delete_branch_name\":\"workflow-purge-branch\",\"results_dir\":\"site/reports\",\"commit_results\":true})"
+        description: >-
+          고급설정 JSON (예: {"backup_branch":"workflow-purge-backup","delete_branch_name":"workflow-purge-branch","results_dir":"site/reports","commit_results":true,"protect_recent_hours":72})
         default: "{}"
         required: false
 
@@ -124,12 +125,14 @@ jobs:
           ADV='${{ github.event.inputs.advanced_json }}'
           echo "[POLICY] mode=${MODE}"
           echo "[POLICY] advanced_json=${ADV}"
-          # policy → flags
+
           HARD_DELETE="true"; PR_MODE="false"; BACKUP_BEFORE_DELETE="false"
           BACKUP_BRANCH="$(echo "${ADV}" | jq -r '.backup_branch // "workflow-purge-backup"')"
           DELETE_BRANCH_NAME="$(echo "${ADV}" | jq -r '.delete_branch_name // "workflow-purge-branch"')"
           RESULTS_DIR="$(echo "${ADV}" | jq -r '.results_dir // "site/reports"')"
           COMMIT_RESULTS="$(echo "${ADV}" | jq -r '.commit_results // false')"
+          PROTECT_RECENT_HOURS="$(echo "${ADV}" | jq -r '.protect_recent_hours // 72')"
+
           case "$MODE" in
             force_delete)        HARD_DELETE="true";  PR_MODE="false"; BACKUP_BEFORE_DELETE="false" ;;
             pr_delete)           HARD_DELETE="true";  PR_MODE="true";  BACKUP_BEFORE_DELETE="false" ;;
@@ -138,6 +141,7 @@ jobs:
             disable_only)        HARD_DELETE="false"; PR_MODE="false"; BACKUP_BEFORE_DELETE="false" ;;
             *) echo "[WARN] Unknown policy_mode. Fallback=force_delete";;
           esac
+
           {
             echo "HARD_DELETE=${HARD_DELETE}"
             echo "PR_MODE=${PR_MODE}"
@@ -146,9 +150,11 @@ jobs:
             echo "DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME}"
             echo "RESULTS_DIR=${RESULTS_DIR}"
             echo "COMMIT_RESULTS=${COMMIT_RESULTS}"
+            echo "PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
           } >> "$GITHUB_ENV"
+
           echo "[POLICY] HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
-          echo "[POLICY] RESULTS_DIR=${RESULTS_DIR} COMMIT_RESULTS=${COMMIT_RESULTS}"
+          echo "[POLICY] RESULTS_DIR=${RESULTS_DIR} COMMIT_RESULTS=${COMMIT_RESULTS} PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
 
       - name: 🛡️ Preflight & Config Echo
         run: |
@@ -166,7 +172,7 @@ jobs:
           echo "[CHECK] commit_message_prefix='${{ github.event.inputs.commit_message_prefix }}'"
           echo "[CHECK] (derived) HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
           echo "[CHECK] (derived) BACKUP_BRANCH=${BACKUP_BRANCH} DELETE_BRANCH_NAME=${DELETE_BRANCH_NAME}"
-          echo "[CHECK] (derived) RESULTS_DIR=${RESULTS_DIR} COMMIT_RESULTS=${COMMIT_RESULTS}"
+          echo "[CHECK] (derived) RESULTS_DIR=${RESULTS_DIR} COMMIT_RESULTS=${COMMIT_RESULTS} PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
 
       - name: 📄 Generate cleaner+purger program (scripts/failed_cleaner.sh)
         run: |
@@ -182,11 +188,11 @@ jobs:
           LOOKBACK_HOURS="${LOOKBACK_HOURS:-720}"; DELETE_LIMIT="${DELETE_LIMIT:-1000}"; DRY_RUN="${DRY_RUN:-false}"
           DISABLE_ON_FAILURE="${DISABLE_ON_FAILURE:-true}"; ENABLE_ON_SUCCESS="${ENABLE_ON_SUCCESS:-true}"; SUCCESS_STREAK="${SUCCESS_STREAK:-1}"
           PROTECT_PATTERNS="${PROTECT_PATTERNS:-}"
-
           HARD_DELETE="${HARD_DELETE:-true}"; PR_MODE="${PR_MODE:-false}"; BACKUP_BEFORE_DELETE="${BACKUP_BEFORE_DELETE:-false}"
           BACKUP_BRANCH="${BACKUP_BRANCH:-workflow-purge-backup}"; DELETE_BRANCH_NAME="${DELETE_BRANCH_NAME:-workflow-purge-branch}"
           COMMIT_MESSAGE_PREFIX="${COMMIT_MESSAGE_PREFIX:-[FORCE-PURGE]}"
           RESULTS_DIR="${RESULTS_DIR:-site/reports}"
+          PROTECT_RECENT_HOURS="${PROTECT_RECENT_HOURS:-72}"
 
           API="https://api.github.com"
           HDR_AUTH="Authorization: Bearer ${TOKEN}"; HDR_ACC="Accept: application/vnd.github+json"; HDR_VER="X-GitHub-Api-Version: 2022-11-28"
@@ -197,9 +203,7 @@ jobs:
           JSONL="${RESULTS_DIR}/actions_purge_${ts}.jsonl"
           MD="${RESULTS_DIR}/actions_purge_${ts}.md"
 
-          # CSV header
           echo "timestamp,repo,workflow_id,workflow_name,workflow_path,action,target_id,created_at,run_created_at,note" > "${CSV}"
-
           log_row(){ # action,target_id,note,workflow info present in env
             printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -218,15 +222,14 @@ jobs:
           api_delete(){ curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
 
           now_epoch="$(date -u +%s)"; cutoff_epoch=$(( now_epoch - LOOKBACK_HOURS*3600 ))
+          protect_recent_cutoff=$(( now_epoch - PROTECT_RECENT_HOURS*3600 ))
 
-          # Markdown table init
           {
             echo "# Actions Purge Report (${ts} UTC)"
             echo ""
             echo "| timestamp | repo | workflow_id | workflow_name | workflow_path | action | target_id | created_at | run_created_at | note |"
             echo "|---|---|---:|---|---|---|---|---|---|---|"
           } > "${MD}"
-
           add_md_row(){ # same fields as CSV
             printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -254,6 +257,24 @@ jobs:
 
           get_file_sha(){ api_get "${API}/repos/${OWNER}/${REPO}/contents/$1?ref=$2" | jq -r '.sha'; }
 
+          # 최근 커밋 시간을 가져와서 보호 여부 판단
+          # (워크플로우 객체의 created_at/updated_at도 보조적으로 사용)
+          is_recent_workflow_file(){
+            local path="$1"
+            # 파일 커밋 시간 조회
+            local commit_json commit_date commit_epoch
+            commit_json="$(api_get "${API}/repos/${OWNER}/${REPO}/commits?path=${path}&per_page=1")" || return 1
+            commit_date="$(echo "${commit_json}" | jq -r '.[0].commit.author.date // empty')"
+            if [ -n "${commit_date}" ]; then
+              commit_epoch="$(date -u -d "${commit_date}" +%s || echo 0)"
+              if (( commit_epoch >= protect_recent_cutoff )); then
+                echoe "[PROTECT] Recent file commit (${commit_date}) within ${PROTECT_RECENT_HOURS}h: ${path}"
+                return 0
+              fi
+            fi
+            return 1
+          }
+
           delete_file_on_branch(){
             local path="$1" branch="$2" msg="$3"
             local sha; sha="$(get_file_sha "${path}" "${branch}")"
@@ -280,9 +301,9 @@ jobs:
           copy_file_between_branches(){
             local path="$1" from_branch="$2" to_branch="$3" msg="$4"
             local blob_json file_sha content_b64
-            blob_json="$(api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${from_branch}")"
+            blob_json="$(api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${from_branch}")" || blob_json=""
             file_sha="$(echo "${blob_json}" | jq -r '.sha')"
-            if [ "${file_sha}" = "null" ] || [ -z "${file_sha}" ]; then
+            if [ -z "${file_sha}" ] || [ "${file_sha}" = "null" ]; then
               echoe "[BACKUP] Skip copy (missing): ${path}"
               log_row "backup_skip" "${path}" "missing_on_${from_branch}"
               add_md_row "backup_skip" "${path}" "missing_on_${from_branch}"
@@ -315,7 +336,7 @@ jobs:
             return 1
           }
 
-          # 필요 브랜치
+          # 필요한 브랜치 준비
           if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then create_branch_if_missing "${BACKUP_BRANCH}"; fi
           if [ "${PR_MODE}" = "true" ]; then create_branch_if_missing "${DELETE_BRANCH_NAME}"; fi
 
@@ -333,6 +354,7 @@ jobs:
             wf_name="$(echo "${workflows_json}" | jq -r ".workflows[${i}].name")"
             wf_path="$(echo "${workflows_json}" | jq -r ".workflows[${i}].path")"
             wf_state="$(echo "${workflows_json}" | jq -r ".workflows[${i}].state")"
+            wf_created_at="$(echo "${workflows_json}" | jq -r ".workflows[${i}].created_at // empty")"
             echoe "[WF] id=${wf_id} name='${wf_name}' path='${wf_path}' state=${wf_state}"
 
             runs_all="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
@@ -349,6 +371,7 @@ jobs:
               [ -z "${run_created_at}" ] && continue
               run_epoch="$(date -u -d "${run_created_at}" +%s || echo 0)"
               (( run_epoch < cutoff_epoch )) && continue
+
               echoe "[DEL-RUN] run_id=${run_id} conclusion=${concl} created_at=${run_created_at}"
               if [ "${DRY_RUN}" = "true" ]; then
                 echoe "[DRY] DELETE /actions/runs/${run_id}"
@@ -367,12 +390,32 @@ jobs:
             latest_created_at="$(echo "${runs_all}" | jq -r '.workflow_runs[0].created_at // empty')"
             echoe "[WF] latest_conclusion=${latest_conclusion} latest_created_at=${latest_created_at}"
 
-            # 실패 → Disable
+            # 최근 생성/커밋 보호 판단
+            recent_protected="false"
+            if [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ] && is_recent_workflow_file "${wf_path}"; then
+              recent_protected="true"
+            elif [ -n "${wf_created_at}" ]; then
+              wf_created_epoch="$(date -u -d "${wf_created_at}" +%s || echo 0)"
+              if (( wf_created_epoch >= protect_recent_cutoff )); then
+                echoe "[PROTECT] Recent workflow object (${wf_created_at}) within ${PROTECT_RECENT_HOURS}h: ${wf_name}"
+                recent_protected="true"
+              fi
+            fi
+
+            # 실패 → Disable (422 방지: active 상태에서만)
             if [ "${latest_conclusion}" = "failure" ] && [ "${DISABLE_ON_FAILURE}" = "true" ]; then
-              if is_protected_workflow "${wf_name}" "${wf_path}"; then
-                echoe "[SKIP] Protected. Skip disable: ${wf_name}"
+              if [ "${wf_state}" != "active" ]; then
+                echoe "[SKIP] Not active(state=${wf_state}). Skip disable."
+                log_row "disable_skip_state" "${wf_id}" "state=${wf_state}"
+                add_md_row "disable_skip_state" "${wf_id}" "state=${wf_state}"
+              elif is_protected_workflow "${wf_name}" "${wf_path}"; then
+                echoe "[SKIP] Protected by pattern. Skip disable: ${wf_name}"
                 log_row "disable_skip_protected" "${wf_id}" "${wf_path}"
                 add_md_row "disable_skip_protected" "${wf_id}" "${wf_path}"
+              elif [ "${recent_protected}" = "true" ]; then
+                echoe "[SKIP] Recent workflow. Skip disable: ${wf_name}"
+                log_row "disable_skip_recent" "${wf_id}" "${wf_path}"
+                add_md_row "disable_skip_recent" "${wf_id}" "${wf_path}"
               else
                 echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}'"
                 if [ "${DRY_RUN}" = "true" ]; then
@@ -380,11 +423,17 @@ jobs:
                   log_row "disable_dry" "${wf_id}" ""
                   add_md_row "disable_dry" "${wf_id}" ""
                 else
-                  curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" >/dev/null
-                  log_row "disable" "${wf_id}" ""
-                  add_md_row "disable" "${wf_id}" ""
+                  # 422 방지: active일 때만 호출, 호출 실패 시 메시지 기록
+                  if ! curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" >/dev/null; then
+                    echoe "[WARN] disable API returned non-2xx. Skipped to avoid hard failure."
+                    log_row "disable_skip_api" "${wf_id}" "api_non_2xx"
+                    add_md_row "disable_skip_api" "${wf_id}" "api_non_2xx"
+                  else
+                    log_row "disable" "${wf_id}" ""
+                    add_md_row "disable" "${wf_id}" ""
+                    disabled_wf=$((disabled_wf+1))
+                  fi
                 fi
-                disabled_wf=$((disabled_wf+1))
               fi
             fi
 
@@ -404,23 +453,32 @@ jobs:
                   log_row "enable_dry" "${wf_id}" ""
                   add_md_row "enable_dry" "${wf_id}" ""
                 else
-                  curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" >/dev/null
-                  log_row "enable" "${wf_id}" ""
-                  add_md_row "enable" "${wf_id}" ""
+                  if ! curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" >/dev/null; then
+                    echoe "[WARN] enable API returned non-2xx. Skip."
+                    log_row "enable_skip_api" "${wf_id}" "api_non_2xx"
+                    add_md_row "enable_skip_api" "${wf_id}" "api_non_2xx"
+                  else
+                    log_row "enable" "${wf_id}" ""
+                    add_md_row "enable" "${wf_id}" ""
+                    enabled_wf=$((enabled_wf+1))
+                  fi
                 fi
-                enabled_wf=$((enabled_wf+1))
               else
                 log_row "enable_skip" "${wf_id}" "state=${wf_state} streak=${streak}"
                 add_md_row "enable_skip" "${wf_id}" "state=${wf_state} streak=${streak}"
               fi
             fi
 
-            # 정책에 따른 파일 삭제 흐름
+            # 정책에 따른 파일 삭제 흐름(최근/패턴 보호 적용)
             if [ "${HARD_DELETE}" = "true" ] && [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ]; then
               if is_protected_workflow "${wf_name}" "${wf_path}"; then
-                echoe "[SKIP] Protected. Skip file delete: ${wf_path}"
+                echoe "[SKIP] Protected by pattern. Skip file delete: ${wf_path}"
                 log_row "delete_file_skip_protected" "${wf_path}" ""
                 add_md_row "delete_file_skip_protected" "${wf_path}" ""
+              elif [ "${recent_protected}" = "true" ]; then
+                echoe "[SKIP] Recent workflow. Skip file delete: ${wf_path}"
+                log_row "delete_file_skip_recent" "${wf_path}" ""
+                add_md_row "delete_file_skip_recent" "${wf_path}" ""
               else
                 [ "${BACKUP_BEFORE_DELETE}" = "true" ] && {
                   echoe "[BACKUP] ${wf_path} -> branch ${BACKUP_BRANCH}"
@@ -437,10 +495,10 @@ jobs:
             fi
           done
 
-          # PR 생성
+          # PR 생성(삭제 후보가 있을 때만)
           if [ "${PR_MODE}" = "true" ] && [ "${#delete_paths[@]}" -gt 0 ]; then
             title="${COMMIT_MESSAGE_PREFIX} purge ${#delete_paths[@]} workflow files"
-            body="Auto purge of failed workflows.\nDeleted files:\n$(printf '%s\n' "${delete_paths[@]}")"
+            body="Auto purge of workflows.\nDeleted files:\n$(printf '%s\n' "${delete_paths[@]}")"
             echoe "[PR] Creating PR: ${DELETE_BRANCH_NAME} -> ${default_branch}"
             if [ "${DRY_RUN}" = "true" ]; then
               echoe "[DRY] POST /pulls title='${title}'"
@@ -455,8 +513,6 @@ jobs:
           fi
 
           echoe "[RESULT] deleted_runs=${deleted_runs} disabled_workflows=${disabled_wf} enabled_workflows=${enabled_wf} deleted_files=${deleted_files} backed_up_files=${backed_up_files}"
-
-          # Markdown tail
           {
             echo ""
             echo "- deleted_runs: ${deleted_runs}"
@@ -466,7 +522,6 @@ jobs:
             echo "- backed_up_files: ${backed_up_files}"
           } >> "${MD}"
 
-          # 최종 경로 출력
           echo "CSV_PATH=${CSV}" >> "$GITHUB_OUTPUT"
           echo "JSONL_PATH=${JSONL}" >> "$GITHUB_OUTPUT"
           echo "MD_PATH=${MD}" >> "$GITHUB_OUTPUT"
@@ -492,6 +547,7 @@ jobs:
           BACKUP_BRANCH: ${{ env.BACKUP_BRANCH }}
           DELETE_BRANCH_NAME: ${{ env.DELETE_BRANCH_NAME }}
           RESULTS_DIR: ${{ env.RESULTS_DIR }}
+          PROTECT_RECENT_HOURS: ${{ env.PROTECT_RECENT_HOURS }}
         run: |
           set -Eeuo pipefail
           [ -z "${GH_ADMIN_TOKEN:-}" ] && { echo "[ERROR] No GH_ADMIN_TOKEN in env after Acquire step." >&2; exit 9; }
@@ -508,7 +564,6 @@ jobs:
           DB="${RESULTS_DIR}/actions_purge.db"
           echo "[DB] Creating DB at ${DB}"
           mkdir -p "${RESULTS_DIR}"
-          # 테이블 생성
           sqlite3 "${DB}" <<'SQL'
           PRAGMA journal_mode=WAL;
           CREATE TABLE IF NOT EXISTS purge_events (
@@ -525,7 +580,6 @@ jobs:
             note TEXT
           );
           SQL
-          # CSV 적재 (header 스킵)
           echo "[DB] Import CSV -> purge_events"
           tail -n +2 "${CSV}" | sqlite3 -csv "${DB}" ".import /dev/stdin purge_events"
           echo "[DB] Row count:"
