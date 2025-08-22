@@ -41,7 +41,7 @@ on:
         required: true
       advanced_json:
         description: >-
-          고급설정 JSON (예: {"backup_branch":"workflow-purge-backup","delete_branch_name":"workflow-purge-branch","results_dir":"site/reports","commit_results":true,"protect_recent_hours":72})
+          {"backup_branch":"workflow-purge-backup","delete_branch_name":"workflow-purge-branch","results_dir":"site/reports","commit_results":true,"protect_recent_hours":72}
         default: "{}"
         required: false
 
@@ -153,9 +153,6 @@ jobs:
             echo "PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
           } >> "$GITHUB_ENV"
 
-          echo "[POLICY] HARD_DELETE=${HARD_DELETE} PR_MODE=${PR_MODE} BACKUP_BEFORE_DELETE=${BACKUP_BEFORE_DELETE}"
-          echo "[POLICY] RESULTS_DIR=${RESULTS_DIR} COMMIT_RESULTS=${COMMIT_RESULTS} PROTECT_RECENT_HOURS=${PROTECT_RECENT_HOURS}"
-
       - name: 🛡️ Preflight & Config Echo
         run: |
           set -Eeuo pipefail
@@ -197,6 +194,47 @@ jobs:
           API="https://api.github.com"
           HDR_AUTH="Authorization: Bearer ${TOKEN}"; HDR_ACC="Accept: application/vnd.github+json"; HDR_VER="X-GitHub-Api-Version: 2022-11-28"
 
+          # ----- 안전 API 유틸 (404/422 방지 + 재시도 + URL 인코딩) -----
+          retry(){ # cmd...
+            local n=0; local max=3; local delay=1
+            until "$@"; do
+              n=$((n+1)); [ $n -ge $max ] && return 1
+              sleep $delay; delay=$((delay*2))
+            done
+          }
+          uri_enc(){ jq -sRr @uri <<< "$1"; }
+          safe_api_get(){ # url -> stdout(body or empty), return 0 always
+            local URL="$1" TMP; TMP="$(mktemp)"
+            local code
+            code=$(retry curl -sS -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -o "$TMP" -w "%{http_code}" "$URL" || true)
+            if [ "$codex$code" = "x" ]; then code=000; fi
+            if [[ "$code" =~ ^2..$ ]]; then cat "$TMP"
+            else echo "[API][GET][$code] $URL" >&2; : # empty
+            fi
+            rm -f "$TMP"
+          }
+          safe_api_put(){ # url data -> 0 on 2xx else 1
+            local URL="$1" DATA="$2" TMP; TMP="$(mktemp)"
+            local code
+            code=$(retry curl -sS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$DATA" -o "$TMP" -w "%{http_code}" "$URL" || true)
+            rm -f "$TMP"
+            [[ "$code" =~ ^2..$ ]]
+          }
+          safe_api_post(){ # url data -> body on 2xx else empty
+            local URL="$1" DATA="$2" TMP; TMP="$(mktemp)"
+            local code
+            code=$(retry curl -sS -X POST -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$DATA" -o "$TMP" -w "%{http_code}" "$URL" || true)
+            if [[ "$code" =~ ^2..$ ]]; then cat "$TMP"; else echo "[API][POST][$code] $URL" >&2; :; fi
+            rm -f "$TMP"
+          }
+          safe_api_delete(){ # url -> 0 on 2xx else 1 (skip)
+            local URL="$1" TMP; TMP="$(mktemp)"
+            local code
+            code=$(retry curl -sS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -o "$TMP" -w "%{http_code}" "$URL" || true)
+            rm -f "$TMP"
+            [[ "$code" =~ ^2..$ ]]
+          }
+
           ts="$(date -u +%Y%m%d%H%M%S)"
           mkdir -p "${RESULTS_DIR}"
           CSV="${RESULTS_DIR}/actions_purge_${ts}.csv"
@@ -204,7 +242,7 @@ jobs:
           MD="${RESULTS_DIR}/actions_purge_${ts}.md"
 
           echo "timestamp,repo,workflow_id,workflow_name,workflow_path,action,target_id,created_at,run_created_at,note" > "${CSV}"
-          log_row(){ # action,target_id,note,workflow info present in env
+          log_row(){
             printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               "${OWNER}/${REPO}" \
@@ -215,22 +253,13 @@ jobs:
               "${wf_id:-}" "${wf_name//\"/\\\"}" "${wf_path:-}" \
               "$1" "$2" "${latest_created_at:-}" "${run_created_at:-}" "${3//\"/\\\"}" >> "${JSONL}"
           }
-
-          api_get(){ curl -fsSL -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
-          api_post(){ curl -fsS -X POST -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$2" "$1"; }
-          api_put(){ curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" -d "$2" "$1"; }
-          api_delete(){ curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "$1"; }
-
-          now_epoch="$(date -u +%s)"; cutoff_epoch=$(( now_epoch - LOOKBACK_HOURS*3600 ))
-          protect_recent_cutoff=$(( now_epoch - PROTECT_RECENT_HOURS*3600 ))
-
           {
             echo "# Actions Purge Report (${ts} UTC)"
             echo ""
             echo "| timestamp | repo | workflow_id | workflow_name | workflow_path | action | target_id | created_at | run_created_at | note |"
             echo "|---|---|---:|---|---|---|---|---|---|---|"
           } > "${MD}"
-          add_md_row(){ # same fields as CSV
+          add_md_row(){
             printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               "${OWNER}/${REPO}" \
@@ -239,36 +268,45 @@ jobs:
           }
 
           echoe "[STEP] Fetch repo & default branch ..."
-          repo_json="$(api_get "${API}/repos/${OWNER}/${REPO}")"
-          default_branch="$(echo "${repo_json}" | jq -r '.default_branch')"
-          base_ref_json="$(api_get "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${default_branch}")"
-          base_sha="$(echo "${base_ref_json}" | jq -r '.object.sha')"
-          echoe "[INFO] default_branch=${default_branch} base_sha=${base_sha}"
+          repo_json="$(safe_api_get "${API}/repos/${OWNER}/${REPO}")"
+          default_branch="$(echo "${repo_json}" | jq -r '.default_branch // "main"')"
+          base_ref_json="$(safe_api_get "${API}/repos/${OWNER}/${REPO}/git/ref/heads/$(uri_enc "${default_branch}")")"
+          base_sha="$(echo "${base_ref_json}" | jq -r '.object.sha // empty')"
+          [ -z "${base_sha}" -o "${base_sha}" = "null" ] && echoe "[WARN] base_sha missing; operations that need branch will be skipped where relevant."
 
           create_branch_if_missing(){
             local branch="$1"
-            if curl -fsS -o /dev/null -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/git/ref/heads/${branch}"; then
-              echoe "[BRANCH] ${branch} already exists."; return 0
+            # 존재 확인
+            if safe_api_get "${API}/repos/${OWNER}/${REPO}/git/ref/heads/$(uri_enc "${branch}")" >/dev/null; then
+              echoe "[BRANCH] ${branch} exists"; return 0
             fi
+            [ -z "${base_sha}" ] && { echoe "[BRANCH] skip create ${branch} (no base_sha)"; return 0; }
             echoe "[BRANCH] creating ${branch} from ${default_branch} (${base_sha})"
             [ "${DRY_RUN}" = "true" ] && { echoe "[DRY] create ref ${branch}"; return 0; }
-            api_post "${API}/repos/${OWNER}/${REPO}/git/refs" "$(jq -n --arg ref "refs/heads/${branch}" --arg sha "${base_sha}" '{ref:$ref, sha:$sha}')" >/dev/null
+            safe_api_post "${API}/repos/${OWNER}/${REPO}/git/refs" "$(jq -n --arg ref "refs/heads/${branch}" --arg sha "${base_sha}" '{ref:$ref, sha:$sha}')" >/dev/null
           }
 
-          get_file_sha(){ api_get "${API}/repos/${OWNER}/${REPO}/contents/$1?ref=$2" | jq -r '.sha'; }
+          get_file_sha(){
+            local path="$1" branch="$2"
+            local path_enc; path_enc="$(uri_enc "${path}")"
+            local js; js="$(safe_api_get "${API}/repos/${OWNER}/${REPO}/contents/${path_enc}?ref=$(uri_enc "${branch}")")"
+            [ -z "${js}" ] && { echo ""; return 0; }
+            echo "$js" | jq -r '.sha // empty'
+          }
 
-          # 최근 커밋 시간을 가져와서 보호 여부 판단
-          # (워크플로우 객체의 created_at/updated_at도 보조적으로 사용)
+          # 최근 커밋 시간 기반 보호
+          now_epoch="$(date -u +%s)"
+          protect_recent_cutoff=$(( now_epoch - PROTECT_RECENT_HOURS*3600 ))
           is_recent_workflow_file(){
             local path="$1"
-            # 파일 커밋 시간 조회
+            local path_enc; path_enc="$(uri_enc "${path}")"
             local commit_json commit_date commit_epoch
-            commit_json="$(api_get "${API}/repos/${OWNER}/${REPO}/commits?path=${path}&per_page=1")" || return 1
+            commit_json="$(safe_api_get "${API}/repos/${OWNER}/${REPO}/commits?path=${path_enc}&per_page=1")"
             commit_date="$(echo "${commit_json}" | jq -r '.[0].commit.author.date // empty')"
             if [ -n "${commit_date}" ]; then
               commit_epoch="$(date -u -d "${commit_date}" +%s || echo 0)"
               if (( commit_epoch >= protect_recent_cutoff )); then
-                echoe "[PROTECT] Recent file commit (${commit_date}) within ${PROTECT_RECENT_HOURS}h: ${path}"
+                echoe "[PROTECT] Recent commit ${commit_date} (<= ${PROTECT_RECENT_HOURS}h): ${path}"
                 return 0
               fi
             fi
@@ -278,8 +316,8 @@ jobs:
           delete_file_on_branch(){
             local path="$1" branch="$2" msg="$3"
             local sha; sha="$(get_file_sha "${path}" "${branch}")"
-            if [ -z "${sha}" ] || [ "${sha}" = "null" ]; then
-              echoe "[DEL-FILE] Not found: ${path} on ${branch}"
+            if [ -z "${sha}" -o "${sha}" = "null" ]; then
+              echoe "[DEL-FILE] Not found on ${branch}: ${path}"
               log_row "delete_file_skip" "${path}" "not_found_on_${branch}"
               add_md_row "delete_file_skip" "${path}" "not_found_on_${branch}"
               return 0
@@ -291,36 +329,41 @@ jobs:
               add_md_row "delete_file_dry" "${path}" "${branch}"
               return 0
             fi
-            curl -fsS -X DELETE -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" \
-              -d "$(jq -n --arg message "${msg}" --arg sha "${sha}" --arg branch "${branch}" '{message:$message, sha:$sha, branch:$branch}')" \
-              "${API}/repos/${OWNER}/${REPO}/contents/${path}" >/dev/null
-            log_row "delete_file" "${path}" "${branch}"
-            add_md_row "delete_file" "${path}" "${branch}"
+            local path_enc; path_enc="$(uri_enc "${path}")"
+            if safe_api_delete "${API}/repos/${OWNER}/${REPO}/contents/${path_enc}?message=$(uri_enc "${msg}")&sha=$(uri_enc "${sha}")&branch=$(uri_enc "${branch}")"; then
+              log_row "delete_file" "${path}" "${branch}"
+              add_md_row "delete_file" "${path}" "${branch}"
+            else
+              echoe "[WARN] DELETE non-2xx (skip): ${path}"
+              log_row "delete_file_skip_api" "${path}" "${branch}"
+              add_md_row "delete_file_skip_api" "${path}" "${branch}"
+            fi
           }
 
           copy_file_between_branches(){
             local path="$1" from_branch="$2" to_branch="$3" msg="$4"
+            [ -z "${base_sha}" ] && { echoe "[BACKUP] skip (no base_sha)"; return 0; }
             local blob_json file_sha content_b64
-            blob_json="$(api_get "${API}/repos/${OWNER}/${REPO}/contents/${path}?ref=${from_branch}")" || blob_json=""
-            file_sha="$(echo "${blob_json}" | jq -r '.sha')"
-            if [ -z "${file_sha}" ] || [ "${file_sha}" = "null" ]; then
-              echoe "[BACKUP] Skip copy (missing): ${path}"
-              log_row "backup_skip" "${path}" "missing_on_${from_branch}"
-              add_md_row "backup_skip" "${path}" "missing_on_${from_branch}"
-              return 0
-            fi
-            content_b64="$(echo "${blob_json}" | jq -r '.content' | tr -d '\n')"
+            local path_enc; path_enc="$(uri_enc "${path}")"
+            blob_json="$(safe_api_get "${API}/repos/${OWNER}/${REPO}/contents/${path_enc}?ref=$(uri_enc "${from_branch}")")"
+            file_sha="$(echo "${blob_json}" | jq -r '.sha // empty')"
+            [ -z "${file_sha}" ] && { echoe "[BACKUP] missing: ${path}"; log_row "backup_skip" "${path}" "missing_on_${from_branch}"; add_md_row "backup_skip" "${path}" "missing_on_${from_branch}"; return 0; }
+            content_b64="$(echo "${blob_json}" | jq -r '.content // empty' | tr -d '\n')"
             if [ "${DRY_RUN}" = "true" ]; then
               echoe "[DRY] COPY ${path} ${from_branch} -> ${to_branch} msg='${msg}'"
               log_row "backup_dry" "${path}" "${to_branch}"
               add_md_row "backup_dry" "${path}" "${to_branch}"
               return 0
             fi
-            curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" -H "Content-Type: application/json" \
-              -d "$(jq -n --arg message "${msg}" --arg content "${content_b64}" --arg branch "${to_branch}" '{message:$message, content:$content, branch:$branch}')" \
-              "${API}/repos/${OWNER}/${REPO}/contents/${path}" >/dev/null
-            log_row "backup" "${path}" "${to_branch}"
-            add_md_row "backup" "${path}" "${to_branch}"
+            local url="${API}/repos/${OWNER}/${REPO}/contents/${path_enc}"
+            if safe_api_put "${url}" "$(jq -n --arg message "${msg}" --arg content "${content_b64}" --arg branch "${to_branch}" '{message:$message, content:$content, branch:$branch}')"; then
+              log_row "backup" "${path}" "${to_branch}"
+              add_md_row "backup" "${path}" "${to_branch}"
+            else
+              echoe "[WARN] BACKUP non-2xx: ${path}"
+              log_row "backup_skip_api" "${path}" "${to_branch}"
+              add_md_row "backup_skip_api" "${path}" "${to_branch}"
+            fi
           }
 
           is_protected_workflow(){
@@ -336,11 +379,11 @@ jobs:
             return 1
           }
 
-          # 필요한 브랜치 준비
-          if [ "${BACKUP_BEFORE_DELETE}" = "true" ]; then create_branch_if_missing "${BACKUP_BRANCH}"; fi
-          if [ "${PR_MODE}" = "true" ]; then create_branch_if_missing "${DELETE_BRANCH_NAME}"; fi
+          # 브랜치 준비
+          [ "${BACKUP_BEFORE_DELETE}" = "true" ] && create_branch_if_missing "${BACKUP_BRANCH}"
+          [ "${PR_MODE}" = "true" ] && create_branch_if_missing "${DELETE_BRANCH_NAME}"
 
-          workflows_json="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows?per_page=100")"
+          workflows_json="$(safe_api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows?per_page=100")"
           count_wf="$(echo "${workflows_json}" | jq '.workflows | length')"
           echoe "[INFO] workflows=${count_wf}"
 
@@ -357,7 +400,7 @@ jobs:
             wf_created_at="$(echo "${workflows_json}" | jq -r ".workflows[${i}].created_at // empty")"
             echoe "[WF] id=${wf_id} name='${wf_name}' path='${wf_path}' state=${wf_state}"
 
-            runs_all="$(api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
+            runs_all="$(safe_api_get "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/runs?per_page=100&status=completed")"
             runs_len="$(echo "${runs_all}" | jq '.workflow_runs | length')"
             [ "${runs_len}" -eq 0 ] && echoe "[WF] No completed runs."
 
@@ -378,9 +421,14 @@ jobs:
                 log_row "delete_run_dry" "${run_id}" ""
                 add_md_row "delete_run_dry" "${run_id}" ""
               else
-                api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}" >/dev/null
-                log_row "delete_run" "${run_id}" ""
-                add_md_row "delete_run" "${run_id}" ""
+                if safe_api_delete "${API}/repos/${OWNER}/${REPO}/actions/runs/${run_id}"; then
+                  log_row "delete_run" "${run_id}" ""
+                  add_md_row "delete_run" "${run_id}" ""
+                else
+                  echoe "[WARN] DELETE run non-2xx: ${run_id}"
+                  log_row "delete_run_skip_api" "${run_id}" ""
+                  add_md_row "delete_run_skip_api" "${run_id}" ""
+                fi
               fi
               deleted_runs=$((deleted_runs+1))
               (( deleted_runs >= DELETE_LIMIT )) && echoe "[WARN] DELETE_LIMIT reached. stop." && break 2
@@ -390,7 +438,7 @@ jobs:
             latest_created_at="$(echo "${runs_all}" | jq -r '.workflow_runs[0].created_at // empty')"
             echoe "[WF] latest_conclusion=${latest_conclusion} latest_created_at=${latest_created_at}"
 
-            # 최근 생성/커밋 보호 판단
+            # 최근 보호
             recent_protected="false"
             if [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ] && is_recent_workflow_file "${wf_path}"; then
               recent_protected="true"
@@ -409,29 +457,28 @@ jobs:
                 log_row "disable_skip_state" "${wf_id}" "state=${wf_state}"
                 add_md_row "disable_skip_state" "${wf_id}" "state=${wf_state}"
               elif is_protected_workflow "${wf_name}" "${wf_path}"; then
-                echoe "[SKIP] Protected by pattern. Skip disable: ${wf_name}"
+                echoe "[SKIP] Pattern protected. Skip disable."
                 log_row "disable_skip_protected" "${wf_id}" "${wf_path}"
                 add_md_row "disable_skip_protected" "${wf_id}" "${wf_path}"
               elif [ "${recent_protected}" = "true" ]; then
-                echoe "[SKIP] Recent workflow. Skip disable: ${wf_name}"
+                echoe "[SKIP] Recent workflow. Skip disable."
                 log_row "disable_skip_recent" "${wf_id}" "${wf_path}"
                 add_md_row "disable_skip_recent" "${wf_id}" "${wf_path}"
               else
-                echoe "[DISABLE] workflow_id=${wf_id} name='${wf_name}'"
+                echoe "[DISABLE] workflow_id=${wf_id}"
                 if [ "${DRY_RUN}" = "true" ]; then
                   echoe "[DRY] PUT /actions/workflows/${wf_id}/disable"
                   log_row "disable_dry" "${wf_id}" ""
                   add_md_row "disable_dry" "${wf_id}" ""
                 else
-                  # 422 방지: active일 때만 호출, 호출 실패 시 메시지 기록
-                  if ! curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" >/dev/null; then
-                    echoe "[WARN] disable API returned non-2xx. Skipped to avoid hard failure."
-                    log_row "disable_skip_api" "${wf_id}" "api_non_2xx"
-                    add_md_row "disable_skip_api" "${wf_id}" "api_non_2xx"
-                  else
+                  if safe_api_put "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/disable" "{}"; then
                     log_row "disable" "${wf_id}" ""
                     add_md_row "disable" "${wf_id}" ""
                     disabled_wf=$((disabled_wf+1))
+                  else
+                    echoe "[WARN] disable non-2xx; skip"
+                    log_row "disable_skip_api" "${wf_id}" ""
+                    add_md_row "disable_skip_api" "${wf_id}" ""
                   fi
                 fi
               fi
@@ -447,20 +494,20 @@ jobs:
               done
               echoe "[WF] success_streak_detected=${streak} (target=${SUCCESS_STREAK})"
               if [[ "${wf_state}" == disabled_* ]] && (( streak >= SUCCESS_STREAK )); then
-                echoe "[ENABLE] workflow_id=${wf_id} name='${wf_name}'"
+                echoe "[ENABLE] workflow_id=${wf_id}"
                 if [ "${DRY_RUN}" = "true" ]; then
                   echoe "[DRY] PUT /actions/workflows/${wf_id}/enable"
                   log_row "enable_dry" "${wf_id}" ""
                   add_md_row "enable_dry" "${wf_id}" ""
                 else
-                  if ! curl -fsS -X PUT -H "${HDR_AUTH}" -H "${HDR_ACC}" -H "${HDR_VER}" "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" >/dev/null; then
-                    echoe "[WARN] enable API returned non-2xx. Skip."
-                    log_row "enable_skip_api" "${wf_id}" "api_non_2xx"
-                    add_md_row "enable_skip_api" "${wf_id}" "api_non_2xx"
-                  else
+                  if safe_api_put "${API}/repos/${OWNER}/${REPO}/actions/workflows/${wf_id}/enable" "{}"; then
                     log_row "enable" "${wf_id}" ""
                     add_md_row "enable" "${wf_id}" ""
                     enabled_wf=$((enabled_wf+1))
+                  else
+                    echoe "[WARN] enable non-2xx; skip"
+                    log_row "enable_skip_api" "${wf_id}" ""
+                    add_md_row "enable_skip_api" "${wf_id}" ""
                   fi
                 fi
               else
@@ -469,25 +516,25 @@ jobs:
               fi
             fi
 
-            # 정책에 따른 파일 삭제 흐름(최근/패턴 보호 적용)
+            # 정책에 따른 파일 삭제 흐름(최근/패턴 보호 + 안전 API)
             if [ "${HARD_DELETE}" = "true" ] && [ -n "${wf_path}" ] && [ "${wf_path}" != "null" ]; then
               if is_protected_workflow "${wf_name}" "${wf_path}"; then
-                echoe "[SKIP] Protected by pattern. Skip file delete: ${wf_path}"
+                echoe "[SKIP] Pattern protected file delete: ${wf_path}"
                 log_row "delete_file_skip_protected" "${wf_path}" ""
                 add_md_row "delete_file_skip_protected" "${wf_path}" ""
               elif [ "${recent_protected}" = "true" ]; then
-                echoe "[SKIP] Recent workflow. Skip file delete: ${wf_path}"
+                echoe "[SKIP] Recent file delete: ${wf_path}"
                 log_row "delete_file_skip_recent" "${wf_path}" ""
                 add_md_row "delete_file_skip_recent" "${wf_path}" ""
               else
                 [ "${BACKUP_BEFORE_DELETE}" = "true" ] && {
-                  echoe "[BACKUP] ${wf_path} -> branch ${BACKUP_BRANCH}"
+                  echoe "[BACKUP] ${wf_path} -> ${BACKUP_BRANCH}"
                   copy_file_between_branches "${wf_path}" "${default_branch}" "${BACKUP_BRANCH}" "${COMMIT_MESSAGE_PREFIX} backup ${wf_path}"
                   backed_up_files=$((backed_up_files+1))
                 }
                 target_branch="${default_branch}"
                 [ "${PR_MODE}" = "true" ] && target_branch="${DELETE_BRANCH_NAME}"
-                echoe "[PURGE] Deleting workflow file on ${target_branch}: ${wf_path}"
+                echoe "[PURGE] Deleting ${wf_path} on ${target_branch}"
                 delete_file_on_branch "${wf_path}" "${target_branch}" "${COMMIT_MESSAGE_PREFIX} purge ${wf_path}"
                 delete_paths+=("${wf_path}")
                 deleted_files=$((deleted_files+1))
@@ -495,17 +542,17 @@ jobs:
             fi
           done
 
-          # PR 생성(삭제 후보가 있을 때만)
+          # PR 생성
           if [ "${PR_MODE}" = "true" ] && [ "${#delete_paths[@]}" -gt 0 ]; then
             title="${COMMIT_MESSAGE_PREFIX} purge ${#delete_paths[@]} workflow files"
             body="Auto purge of workflows.\nDeleted files:\n$(printf '%s\n' "${delete_paths[@]}")"
-            echoe "[PR] Creating PR: ${DELETE_BRANCH_NAME} -> ${default_branch}"
+            echoe "[PR] Create PR: ${DELETE_BRANCH_NAME} -> ${default_branch}"
             if [ "${DRY_RUN}" = "true" ]; then
-              echoe "[DRY] POST /pulls title='${title}'"
+              echoe "[DRY] POST /pulls"
               log_row "pr_create_dry" "${DELETE_BRANCH_NAME}" "${title}"
               add_md_row "pr_create_dry" "${DELETE_BRANCH_NAME}" "${title}"
             else
-              api_post "${API}/repos/${OWNER}/${REPO}/pulls" \
+              safe_api_post "${API}/repos/${OWNER}/${REPO}/pulls" \
                 "$(jq -n --arg title "${title}" --arg head "${DELETE_BRANCH_NAME}" --arg base "${default_branch}" --arg body "${body}" '{title:$title, head:$head, base:$base, body:$body}')" >/dev/null
               log_row "pr_create" "${DELETE_BRANCH_NAME}" "${title}"
               add_md_row "pr_create" "${DELETE_BRANCH_NAME}" "${title}"
