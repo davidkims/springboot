@@ -1,78 +1,518 @@
-name: Netstat Status Reporter
+name: "🏦 MEGA Echo DB v3 (Oracle + MariaDB + Teradata DDL/DML + Echo Image + Upgrade)"
+
+permissions:
+  contents: write
+  actions: write
+  packages: write
 
 on:
-  schedule:
-    - cron: '0 0 * * *' # 매일 UTC 00:00에 실행
   workflow_dispatch:
+    inputs:
+      services:
+        description: "대상 서비스 콤마구분 (oracle,mariadb,teradata)"
+        required: true
+        default: "oracle,mariadb,teradata"
+      do_upgrade:
+        description: "호스트 APT 업그레이드 수행 (true/false)"
+        required: true
+        default: "false"
+      run_ssh_bastion:
+        description: "SSH Bastion 컨테이너 실행 (true/false)"
+        required: true
+        default: "false"
+      build_echo_image:
+        description: "에코 파일을 포함한 Docker 이미지 빌드 (true/false)"
+        required: true
+        default: "true"
+      push_image:
+        description: "빌드한 이미지를 레지스트리에 푸시 (true/false)"
+        required: true
+        default: "false"
+      image_registry:
+        description: "이미지 레지스트리 (예: ghcr.io)"
+        required: true
+        default: "ghcr.io"
+      image_owner:
+        description: "이미지 소유자/조직 (예: davidkims)"
+        required: true
+        default: "${{ github.repository_owner }}"
+      image_name:
+        description: "이미지 이름"
+        required: true
+        default: "echo-mega-db"
+      ddl_rows:
+        description: "DDL 샘플 테이블/행 생성 기준(행 수 힌트)"
+        required: true
+        default: "30"
+      dml_rows:
+        description: "DML 샘플 INSERT 개수"
+        required: true
+        default: "60"
+
+env:
+  ECHO_ROOT: .github/echo_db
+  LOG_DIR: .github/echo_db/logs
+  OUT_DIR: .github/echo_db/out
+  SQL_DIR: .github/echo_db/sql
+  IMG_DIR: .github/echo_db/images
+  TOOLS_DIR: .github/echo_db/tools
+  SCRIPTS_DIR: .github/echo_db/scripts
+  SITE_DIR: site
+  ORACLE_PDB: XEPDB1
+  ORACLE_IMAGE: gvenzl/oracle-xe:21-slim
+  MARIADB_IMAGE: mariadb:11
+  SSH_IMAGE: lscr.io/linuxserver/openssh-server:latest
+  # 선택: TERADATA 이미지 (라이선스 필요). 설정되지 않으면 관련 Job은 Skip
+  TERADATA_IMAGE: "${{ secrets.TERADATA_IMAGE }}"
 
 jobs:
-  check_and_report:
+  prepare:
+    name: "0) Prepare & Echo Library"
     runs-on: ubuntu-latest
-    
-    # 환경 변수 설정
-    env:
-      SSH_HOST: ${{ secrets.SSH_HOST }}
-      SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: "Checkout"
+        uses: actions/checkout@v4
 
-      # SSH 키가 설정되어 있는지 확인
-      - name: Validate SSH key secret
+      - name: "Optionally upgrade host packages"
+        if: ${{ inputs.do_upgrade == 'true' }}
         run: |
-          if [ -z "${{ env.SSH_PRIVATE_KEY }}" ]; then
-            echo "❌ ERROR: SSH_PRIVATE_KEY secret is empty or not set."
-            echo "Please configure it in repository settings."
-            exit 1
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get -y dist-upgrade
+          sudo apt-get -y autoremove --purge
+          sudo apt-get -y clean
+
+      - name: "Create directories"
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$ECHO_ROOT" "$LOG_DIR" "$OUT_DIR" "$SQL_DIR/oracle/ddl" "$SQL_DIR/oracle/dml" "$SQL_DIR/oracle/grant" \
+                   "$SQL_DIR/mariadb/ddl" "$SQL_DIR/mariadb/dml" "$SQL_DIR/mariadb/grant" \
+                   "$SQL_DIR/teradata/ddl" "$SQL_DIR/teradata/dml" "$SQL_DIR/teradata/grant" \
+                   "$IMG_DIR" "$TOOLS_DIR" "$SCRIPTS_DIR" "$SITE_DIR"
+          echo "[ECHO][OK] Directories prepared"
+
+      - name: "Write echo.sh (logger/functions)"
+        run: |
+          set -Eeuo pipefail
+          cat >"$TOOLS_DIR/echo.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Euo pipefail
+          echoe(){ printf "[ECHO][%s] %s\n" "OK" "$*"; }
+          warn(){ printf "[ECHO][%s] %s\n" "WARN" "$*" 1>&2; }
+          fail(){ local rc=$?; printf "[ECHO][%s] %s (rc=%s)\n" "FAIL" "$*" "$rc" 1>&2; exit 1; }
+          randpw(){ tr -dc 'A-Za-z0-9!@#%^_' </dev/urandom | head -c 16; echo; }
+          seal(){ mkdir -p "${OUT_DIR:-.}"; local f="$1"; [ -f "$f" ] || return 0; sha256sum "$f" | tee -a "${OUT_DIR}/sha256sum.txt"; }
+          SH
+          chmod +x "$TOOLS_DIR/echo.sh"
+          echo "[ECHO][OK] echo.sh ready"
+
+      - name: "Write helper: ensure_docker_login (for GHCR)"
+        run: |
+          set -Eeuo pipefail
+          cat >"$SCRIPTS_DIR/ensure_docker_login.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          REG="${1:-ghcr.io}"
+          OWNER="${2:-$GITHUB_REPOSITORY_OWNER}"
+          TOK="${3:-$GITHUB_TOKEN}"
+          if [ -n "$TOK" ]; then
+            echo "$TOK" | docker login "$REG" -u "$OWNER" --password-stdin >/dev/null 2>&1 || true
+            echo "[ECHO][OK] docker login attempted for $REG/$OWNER"
+          else
+            echo "[ECHO][WARN] No token provided for docker login"
+          fi
+          SH
+          chmod +x "$SCRIPTS_DIR/ensure_docker_login.sh"
+
+  echo_gen:
+    name: "1) Generate Echo SQL/Script Files"
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Load library"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"
+          echoe "Generate Oracle/MariaDB/Teradata DDL/DML/GRANT & connectors"
+
+      - name: "Generate Oracle SQL"
+        run: |
+          set -Eeuo pipefail
+          # 사용자/권한
+          cat >"$SQL_DIR/oracle/grant/001_user.sql" <<'SQL'
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          ALTER SESSION SET CONTAINER = XEPDB1;
+          CREATE USER fin IDENTIFIED BY "Fin_pw1!";
+          GRANT CREATE SESSION TO fin;
+          GRANT CONNECT, RESOURCE TO fin;
+          ALTER USER fin QUOTA UNLIMITED ON USERS;
+          SQL
+          # DDL
+          cat >"$SQL_DIR/oracle/ddl/002_schema.sql" <<'SQL'
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          ALTER SESSION SET CURRENT_SCHEMA = fin;
+          CREATE TABLE customers (
+            id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            name VARCHAR2(128) NOT NULL,
+            email VARCHAR2(256) UNIQUE,
+            created_at TIMESTAMP DEFAULT SYSTIMESTAMP
+          );
+          CREATE TABLE accounts (
+            id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            customer_id NUMBER NOT NULL REFERENCES customers(id),
+            balance NUMBER(18,2) DEFAULT 0,
+            currency VARCHAR2(8) DEFAULT 'KRW',
+            opened_at TIMESTAMP DEFAULT SYSTIMESTAMP
+          );
+          SQL
+          # DML
+          cat >"$SQL_DIR/oracle/dml/003_seed.sql" <<SQL
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          ALTER SESSION SET CURRENT_SCHEMA = fin;
+          BEGIN
+            FOR i IN 1..${{ inputs.dml_rows }} LOOP
+              INSERT INTO customers(name, email) VALUES ('cust_'||i, 'cust_'||i||'@example.com');
+            END LOOP;
+            INSERT INTO accounts(customer_id, balance, currency)
+            SELECT id, (ABS(DBMS_RANDOM.RANDOM)/1000), CASE MOD(id,3) WHEN 0 THEN 'KRW' WHEN 1 THEN 'USD' ELSE 'JPY' END FROM customers;
+            COMMIT;
+          END;
+          /
+          SQL
+
+      - name: "Generate MariaDB SQL"
+        run: |
+          set -Eeuo pipefail
+          # 사용자/권한/스키마
+          cat >"$SQL_DIR/mariadb/grant/001_user.sql" <<'SQL'
+          CREATE DATABASE IF NOT EXISTS fin CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+          CREATE USER IF NOT EXISTS 'fin'@'%' IDENTIFIED BY 'Fin_pw1!';
+          GRANT ALL PRIVILEGES ON fin.* TO 'fin'@'%';
+          FLUSH PRIVILEGES;
+          SQL
+          # DDL
+          cat >"$SQL_DIR/mariadb/ddl/002_schema.sql" <<'SQL'
+          USE fin;
+          CREATE TABLE IF NOT EXISTS customers (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            name VARCHAR(128) NOT NULL,
+            email VARCHAR(256) UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE IF NOT EXISTS accounts (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            customer_id BIGINT NOT NULL,
+            balance DECIMAL(18,2) DEFAULT 0,
+            currency VARCHAR(8) DEFAULT 'KRW',
+            opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+          );
+          SQL
+          # DML
+          cat >"$SQL_DIR/mariadb/dml/003_seed.sql" <<SQL
+          USE fin;
+          SET SESSION sql_log_bin = 0;
+          INSERT INTO customers(name, email)
+          SELECT CONCAT('cust_', n), CONCAT('cust_', n, '@example.com')
+          FROM (
+            SELECT @row := @row + 1 AS n FROM
+            (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) t1,
+            (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) t2,
+            (SELECT @row:=-1) r
+          ) x WHERE n < ${{ inputs.dml_rows }};
+          INSERT INTO accounts(customer_id, balance, currency)
+          SELECT id, RAND()*100000, CASE id % 3 WHEN 0 THEN 'KRW' WHEN 1 THEN 'USD' ELSE 'JPY' END FROM customers;
+          SQL
+
+      - name: "Generate Teradata SQL (Echo Only)"
+        run: |
+          set -Eeuo pipefail
+          # 참고: 실제 실행은 라이선스/이미지 필요. 여기서는 Echo 생성만.
+          cat >"$SQL_DIR/teradata/grant/001_user.tdsql" <<'SQL'
+          /* Teradata Echo - requires BTEQ/DBC access */
+          /* CREATE USER fin FROM DBC AS PERM = 10000000, SPOOL = 5000000, PASSWORD = "Fin_pw1!"; */
+          /* GRANT CONNECT ON DBC TO fin; */
+          SQL
+          cat >"$SQL_DIR/teradata/ddl/002_schema.tdsql" <<'SQL'
+          /* DATABASE fin; */
+          /* CREATE TABLE fin.customers (
+              id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+              name VARCHAR(128) NOT NULL,
+              email VARCHAR(256),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE fin.accounts (
+              id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+              customer_id BIGINT NOT NULL,
+              balance DECIMAL(18,2),
+              currency VARCHAR(8),
+              opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ); */
+          SQL
+          cat >"$SQL_DIR/teradata/dml/003_seed.tdsql" <<SQL
+          /* INSERT INTO fin.customers(name,email)
+             SELECT 'cust_'||CAST(n as VARCHAR(20)), 'cust_'||CAST(n as VARCHAR(20))||'@example.com'
+             FROM sys_calendar.CALENDAR
+             QUALIFY ROW_NUMBER() OVER (ORDER BY calendar_date) <= ${{ inputs.dml_rows }}; */
+          SQL
+
+      - name: "Connect scripts"
+        run: |
+          set -Eeuo pipefail
+          cat >"$SCRIPTS_DIR/oracle_connect.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          ORA_CONN="${1:-system/oracle@//localhost:1521/XEPDB1}"
+          FILE="${2:-/sql/run.sql}"
+          docker exec -i oracle-xe bash -lc "sqlplus -s $ORA_CONN @${FILE}" || true
+          SH
+          chmod +x "$SCRIPTS_DIR/oracle_connect.sh"
+
+          cat >"$SCRIPTS_DIR/mariadb_connect.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          HOST="${1:-127.0.0.1}"; PORT="${2:-3306}"; USER="${3:-root}"; PASS="${4:-rootpw}"; FILE="${5:-/sql/run.sql}"
+          mysql -h"$HOST" -P"$PORT" -u"$USER" -p"$PASS" < "$FILE" || true
+          SH
+          chmod +x "$SCRIPTS_DIR/mariadb_connect.sh"
+
+          cat >"$SCRIPTS_DIR/teradata_connect.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo "[ECHO][WARN] Teradata 실행은 BTEQ/라이선스 이미지 필요. 현재는 Echo 전용입니다." 1>&2
+          SH
+          chmod +x "$SCRIPTS_DIR/teradata_connect.sh"
+
+      - name: "Seal & list"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"
+          find "$SQL_DIR" -type f -maxdepth 3 | sort | tee "$OUT_DIR/files.txt"
+          seal "$OUT_DIR/files.txt"
+
+  db_oracle:
+    name: "2) Oracle XE: Container + Apply SQL"
+    runs-on: ubuntu-latest
+    needs: [echo_gen]
+    if: ${{ contains(inputs.services, 'oracle') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Start Oracle XE container"
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name oracle-xe -p 1521:1521 -e ORACLE_PASSWORD=oracle "$ORACLE_IMAGE"
+          echo "[ECHO] Waiting Oracle to be ready..."
+          for i in $(seq 1 60); do
+            sleep 5
+            if docker logs oracle-xe 2>&1 | grep -Eq "DATABASE IS READY|DATABASE IS READY TO USE"; then
+              echo "[ECHO][OK] Oracle ready"; break
+            fi
+            if [ "$i" -eq 60 ]; then echo "[ECHO][FAIL] Oracle not ready"; docker logs oracle-xe; exit 1; fi
+          done
+
+      - name: "Copy SQL into container"
+        run: |
+          set -Eeuo pipefail
+          docker exec oracle-xe bash -lc 'mkdir -p /sql/{grant,ddl,dml}'
+          docker cp "$SQL_DIR/oracle/grant/001_user.sql" oracle-xe:/sql/grant/
+          docker cp "$SQL_DIR/oracle/ddl/002_schema.sql" oracle-xe:/sql/ddl/
+          docker cp "$SQL_DIR/oracle/dml/003_seed.sql" oracle-xe:/sql/dml/
+
+      - name: "Execute Oracle SQL"
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "-- run grant"; docker exec -i oracle-xe bash -lc "sqlplus -s system/oracle@//localhost:1521/$ORACLE_PDB @/sql/grant/001_user.sql";
+            echo "-- run ddl";  docker exec -i oracle-xe bash -lc "sqlplus -s system/oracle@//localhost:1521/$ORACLE_PDB @/sql/ddl/002_schema.sql";
+            echo "-- run dml";  docker exec -i oracle-xe bash -lc "sqlplus -s system/oracle@//localhost:1521/$ORACLE_PDB @/sql/dml/003_seed.sql";
+          } | tee "$LOG_DIR/oracle.log"
+
+      - name: "Seal logs"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"; seal "$LOG_DIR/oracle.log"
+
+  db_mariadb:
+    name: "3) MariaDB: Container + Apply SQL"
+    runs-on: ubuntu-latest
+    needs: [echo_gen]
+    if: ${{ contains(inputs.services, 'mariadb') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Start MariaDB"
+        env:
+          MARIADB_ROOT_PASSWORD: rootpw
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD="$MARIADB_ROOT_PASSWORD" -p 3306:3306 "$MARIADB_IMAGE"
+          echo "[ECHO] Waiting MariaDB to be ready..."
+          for i in $(seq 1 60); do
+            sleep 3
+            if docker exec mariadb sh -lc 'mariadb-admin ping -prootpw --silent' 2>/dev/null; then echo "[ECHO][OK] MariaDB ready"; break; fi
+            if [ "$i" -eq 60 ]; then echo "[ECHO][FAIL] MariaDB not ready"; docker logs mariadb; exit 1; fi
+          done
+
+      - name: "Apply SQL"
+        env:
+          MARIADB_ROOT_PASSWORD: rootpw
+        run: |
+          set -Eeuo pipefail
+          tmp="$(mktemp)"; {
+            cat "$SQL_DIR/mariadb/grant/001_user.sql";
+            cat "$SQL_DIR/mariadb/ddl/002_schema.sql";
+            cat "$SQL_DIR/mariadb/dml/003_seed.sql";
+          } > "$tmp"
+          docker cp "$tmp" mariadb:/tmp/run.sql
+          docker exec -i mariadb sh -lc "mariadb -uroot -p$MARIADB_ROOT_PASSWORD < /tmp/run.sql" | tee "$LOG_DIR/mariadb.log" || true
+
+      - name: "Seal logs"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"; seal "$LOG_DIR/mariadb.log"
+
+  db_teradata:
+    name: "4) Teradata: (Echo Only / Optional Licensed Image)"
+    runs-on: ubuntu-latest
+    needs: [echo_gen]
+    if: ${{ contains(inputs.services, 'teradata') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check image availability"
+        id: td
+        run: |
+          set -Eeuo pipefail
+          if [ -n "${TERADATA_IMAGE}" ]; then
+            echo "img=$TERADATA_IMAGE" >> "$GITHUB_OUTPUT"
+          else
+            echo "img=" >> "$GITHUB_OUTPUT"
           fi
 
-      # SSH 키를 사용하여 원격 서버에 접속하고 netstat 실행
-      - name: Get netstat data from server
-        id: netstat_data_step
-        uses: appleboy/ssh-action@v0.1.7
+      - name: "Pull & start (if image provided)"
+        if: ${{ steps.td.outputs.img != '' }}
+        run: |
+          set -Eeuo pipefail
+          docker pull "$TERADATA_IMAGE"
+          # 아래 run 옵션은 이미지에 따라 상이. 사용자 환경에 맞게 secrets.TERADATA_RUN_ARGS 로 전달 권장.
+          docker run -d --name teradata "$TERADATA_IMAGE" || true
+          echo "[ECHO][WARN] Teradata 컨테이너는 라이선스/초기화 절차 필요. SQL 실행은 스킵할 수 있습니다."
+
+      - name: "Echo-only: list generated TD files"
+        run: |
+          set -Eeuo pipefail
+          find "$SQL_DIR/teradata" -type f | sort | tee "$LOG_DIR/teradata_echo.txt"
+
+      - name: "Seal logs"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"; seal "$LOG_DIR/teradata_echo.txt"
+
+  bastion:
+    name: "5) SSH Bastion (optional)"
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    if: ${{ inputs.run_ssh_bastion == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Run SSH Bastion"
+        run: |
+          set -Eeuo pipefail
+          PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)"
+          docker run -d --name bastion -e PASSWORD_ACCESS=true -e USER_NAME=echo -e USER_PASSWORD="$PASS" -p 2222:2222 "$SSH_IMAGE"
+          echo "user=echo" > "$OUT_DIR/bastion.txt"
+          echo "pass=$PASS" >> "$OUT_DIR/bastion.txt"
+          echo "port=2222" >> "$OUT_DIR/bastion.txt"
+          echo "[ECHO][OK] SSH bastion on localhost:2222 (local only)"
+
+      - name: "Seal bastion info"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"; seal "$OUT_DIR/bastion.txt"
+
+  echo_image:
+    name: "6) Build Echo Image (copy all echo SQL/scripts)"
+    runs-on: ubuntu-latest
+    needs: [echo_gen]
+    if: ${{ inputs.build_echo_image == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Docker login (GHCR)"
+        if: ${{ inputs.push_image == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          "$SCRIPTS_DIR/ensure_docker_login.sh" "${{ inputs.image_registry }}" "${{ inputs.image_owner }}" "$GH_TOKEN"
+
+      - name: "Write Dockerfile"
+        run: |
+          set -Eeuo pipefail
+          cat >"$IMG_DIR/Dockerfile" <<'DOCK'
+          FROM alpine:3.20
+          WORKDIR /echo
+          COPY .github/echo_db /echo
+          CMD ["/bin/sh", "-lc", "find /echo -maxdepth 3 -type f | sort"]
+          DOCK
+
+      - name: "Build image"
+        env:
+          TAG: ${{ inputs.image_registry }}/${{ inputs.image_owner }}/${{ inputs.image_name }}:latest
+        run: |
+          set -Eeuo pipefail
+          docker build -f "$IMG_DIR/Dockerfile" -t "$TAG" .
+          echo "$TAG" | tee "$OUT_DIR/echo_image_tag.txt"
+
+      - name: "Push image (optional)"
+        if: ${{ inputs.push_image == 'true' }}
+        env:
+          TAG: ${{ inputs.image_registry }}/${{ inputs.image_owner }}/${{ inputs.image_name }}:latest
+        run: |
+          set -Eeuo pipefail
+          docker push "$TAG"
+          echo "[ECHO][OK] pushed $TAG"
+
+      - name: "Seal image tag"
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"; seal "$OUT_DIR/echo_image_tag.txt"
+
+  report:
+    name: "7) Commit Reports to Repo (MANDATORY)"
+    runs-on: ubuntu-latest
+    needs: [prepare, echo_gen]
+    steps:
+      - uses: actions/checkout@v4
         with:
-          host: ${{ env.SSH_HOST }}
-          username: ${{ env.SSH_USERNAME }}
-          key: ${{ env.SSH_PRIVATE_KEY }}
-          script: |
-            echo "# 서버 네트워크 상태 보고서"
-            echo ""
-            echo "## $(hostname) 서버"
-            echo ""
-            echo "### 1. LISTEN 상태 포트"
-            echo "```bash"
-            netstat -lntp
-            echo "```"
-            echo ""
-            echo "### 2. TCP 연결 상태별 통계"
-            echo "```bash"
-            netstat -ant | awk '{print $6}' | sort | uniq -c | sort -nr
-            echo "```"
-            echo ""
-            echo "### 3. 주요 포트 점검 (80, 443)"
-            echo "---"
-            
-            PORT_TO_CHECK="80 443"
-            for PORT in $PORT_TO_CHECK; do
-              if netstat -lnt | grep -q ":$PORT\s*LISTEN"; then
-                echo "✅ Port $PORT is listening."
-              else
-                echo "❌ Port $PORT is NOT listening."
-              fi
-            done
-            
-            echo ""
-            echo "---"
-            echo "점검 시간: $(date '+%Y-%m-%d %H:%M:%S')"
-      
-      # Netstat 결과를 GitHub Issue에 등록
-      - name: Create GitHub Issue report
-        if: always()
-        uses: peter-evans/create-issue-from-file@v4
-        with:
-          title: 'Netstat Report - Server Status (${{ github.ref_name }})'
-          content: ${{ steps.netstat_data_step.outputs.stdout }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          assignees: your-github-username
+          fetch-depth: 0
+
+      - name: "Collect artifacts to site/"
+        run: |
+          set -Eeuo pipefail
+          TS="$(date -u +%Y%m%d%H%M%S)"
+          DEST="$SITE_DIR/db-report-$TS"
+          mkdir -p "$DEST"
+          cp -R "$SQL_DIR" "$DEST/"
+          cp -R "$LOG_DIR" "$DEST/" || true
+          cp -R "$OUT_DIR" "$DEST/" || true
+          find "$DEST" -type f | sed "s|^|[SITE] |" | sort
+
+      - name: "Commit & Push"
+        env:
+          GIT_AUTHOR_NAME: EchoBot
+          GIT_AUTHOR_EMAIL: actions@github.com
+          GIT_COMMITTER_NAME: EchoBot
+          GIT_COMMITTER_EMAIL: actions@github.com
+        run: |
+          set -Eeuo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "[ECHO][WARN] No changes to commit"
+          else
+            git commit -m "[site] DB report + echo files (auto)"
+            git push
+            echo "[ECHO][OK] Reports committed"
+          fi
