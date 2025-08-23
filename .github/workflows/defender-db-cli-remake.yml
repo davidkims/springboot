@@ -48,22 +48,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare tools (Mermaid CLI, fonts)
+      # ---- PATCHED: Chromium sandbox-free rendering toolchain ----
+      - name: Prepare tools (Mermaid CLI, fonts)  # patched
         if: env.GEN_DIAG == 'true'
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Install prerequisites"
           sudo apt-get update -y
-          sudo apt-get install -y libnss3 fonts-noto fonts-noto-cjk jq
-          echo "[ECHO] Install Mermaid CLI"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            libnss3 libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 \
+            libxi6 libxtst6 libcups2 libxrandr2 libasound2 libpangocairo-1.0-0 \
+            libgtk-3-0 fonts-noto fonts-noto-cjk jq
           corepack enable || true
-          npm -v || true
           npm i -g @mermaid-js/mermaid-cli@10
+          mkdir -p "${OUT_DIR}/assets"
+          cat > "${OUT_DIR}/assets/puppeteer.config.cjs" <<'CJS'
+          module.exports = {
+            headless: 'new',
+            args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']
+          };
+          CJS
 
       - name: Generate structure
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Make output directories"
           mkdir -p "${OUT_DIR}/assets" "${OUT_DIR}/samples" "${OUT_DIR}/scripts"
 
       - name: Create Mermaid diagram (.mmd)
@@ -71,7 +78,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           cat > "${OUT_DIR}/assets/dns_cache_flow.mmd" <<'MMD'
-          %% DNS Cache Resolution & Caching Flow
           flowchart LR
               A[Client Request] --> B{Browser Cache}
               B -- hit --> Z[Return IP (cached)]
@@ -80,73 +86,41 @@ jobs:
               C -- miss/expired --> D{Recursive Resolver Cache}
               D -- hit --> Z
               D -- miss/expired --> E[Authoritative DNS (Root→TLD→Auth)]
-              E --> D
-              D --> C
-              C --> B
-              Z --> F[Connection to Target IP]
+              E --> D --> C --> B --> Z
+              Z --> F[Connect to Target IP]
               subgraph CacheEntry[Cache Entry Fields]
-                N[Name (FQDN)]
-                T[Type (A/AAAA/MX/CNAME/NS/TXT)]
-                CL[Class=IN]
-                R[RDATA (IP/alias...)]
-                TTL[TTL (seconds)]
-                CACHED[CachedTime]
-                EXP[ExpireTime=CACHED+TTL]
+                N[Name(FQDN)]:::f T[Type]:::f CL[Class=IN]:::f
+                R[RDATA]:::f TTL[TTL]:::f CACHED[CachedTime]:::f EXP[ExpireTime]:::f
               end
-              classDef cache fill:#eefaff,stroke:#48a,stroke-width:1px
-              class B,C,D cache
+              classDef f fill:#eefaff,stroke:#48a,stroke-width:1px
+              class B,C,D f
           MMD
 
-      - name: Render SVG/PNG from Mermaid
+      # ---- PATCHED: render with --no-sandbox ----
+      - name: Render SVG/PNG from Mermaid (no-sandbox)  # patched
         if: env.GEN_DIAG == 'true'
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Render diagrams"
-          mmdc -i "${OUT_DIR}/assets/dns_cache_flow.mmd" -o "${OUT_DIR}/assets/dns_cache_flow.svg"
-          mmdc -i "${OUT_DIR}/assets/dns_cache_flow.mmd" -o "${OUT_DIR}/assets/dns_cache_flow.png" -b transparent
+          CFG="${OUT_DIR}/assets/puppeteer.config.cjs"
+          IN="${OUT_DIR}/assets/dns_cache_flow.mmd"
+          mmdc -p "$CFG" -i "$IN" -o "${OUT_DIR}/assets/dns_cache_flow.svg"
+          mmdc -p "$CFG" -i "$IN" -o "${OUT_DIR}/assets/dns_cache_flow.png" -b transparent
+          test -s "${OUT_DIR}/assets/dns_cache_flow.svg"
+          test -s "${OUT_DIR}/assets/dns_cache_flow.png"
 
       - name: Create sample cache table (JSON/CSV)
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Create sample cache entries"
           cat > "${OUT_DIR}/samples/cache_table.json" <<'JSON'
           [
-            {
-              "name": "www.example.com.",
-              "type": "A",
-              "class": "IN",
-              "rdata": "93.184.216.34",
-              "ttl": 3600,
-              "cached_time": "2025-08-23T12:00:00Z",
-              "expire_time": "2025-08-23T13:00:00Z"
-            },
-            {
-              "name": "api.example.com.",
-              "type": "AAAA",
-              "class": "IN",
-              "rdata": "2606:2800:220:1:248:1893:25c8:1946",
-              "ttl": 600,
-              "cached_time": "2025-08-23T12:05:00Z",
-              "expire_time": "2025-08-23T12:15:00Z"
-            },
-            {
-              "name": "no-such.example.com.",
-              "type": "A",
-              "class": "IN",
-              "rdata": "NXDOMAIN",
-              "ttl": 300,
-              "cached_time": "2025-08-23T12:10:00Z",
-              "expire_time": "2025-08-23T12:15:00Z",
-              "note": "Negative Caching (RFC 2308)"
-            }
+            {"name":"www.example.com.","type":"A","class":"IN","rdata":"93.184.216.34","ttl":3600,"cached_time":"2025-08-23T12:00:00Z","expire_time":"2025-08-23T13:00:00Z"},
+            {"name":"api.example.com.","type":"AAAA","class":"IN","rdata":"2606:2800:220:1:248:1893:25c8:1946","ttl":600,"cached_time":"2025-08-23T12:05:00Z","expire_time":"2025-08-23T12:15:00Z"},
+            {"name":"no-such.example.com.","type":"A","class":"IN","rdata":"NXDOMAIN","ttl":300,"cached_time":"2025-08-23T12:10:00Z","expire_time":"2025-08-23T12:15:00Z","note":"Negative Caching (RFC 2308)"}
           ]
           JSON
-
-          jq -r '
-            ["name","type","class","rdata","ttl","cached_time","expire_time","note"],
-            (.[] | [.name,.type,.class,.rdata,.ttl,.cached_time,.expire_time, (.note // "")])
-            | @csv
-          ' "${OUT_DIR}/samples/cache_table.json" > "${OUT_DIR}/samples/cache_table.csv"
+          jq -r '["name","type","class","rdata","ttl","cached_time","expire_time","note"],
+                 (.[]|[.name,.type,.class,.rdata,.ttl,.cached_time,.expire_time, (.note//"")])|@csv' \
+                 "${OUT_DIR}/samples/cache_table.json" > "${OUT_DIR}/samples/cache_table.csv"
 
       - name: Create flush examples (Windows/Linux/macOS)
         if: env.GEN_FLUSH == 'true'
@@ -157,7 +131,6 @@ jobs:
           ipconfig /flushdns
           Write-Host "[OK] Flushed Windows DNS client cache."
           PS1
-
           cat > "${OUT_DIR}/scripts/flush_linux.sh" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -166,7 +139,6 @@ jobs:
           echo "[OK] Flushed systemd-resolved cache."
           SH
           chmod +x "${OUT_DIR}/scripts/flush_linux.sh"
-
           cat > "${OUT_DIR}/scripts/flush_macos.sh" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -182,72 +154,18 @@ jobs:
           if [ "${LANG_SEL}" = "en" ]; then
             cat > "${OUT_DIR}/README.md" <<'MD'
             # DNS Cache Table (Expert Guide)
-
-            ## What it is
-            An in-memory table storing recent DNS query results (name ⇄ address), used by browsers, OS resolvers, and recursive resolvers to reduce latency and load.
-
-            ## Layers
-            - Application/Browser cache
-            - OS DNS cache (Windows DNS Client, systemd-resolved, mDNSResponder, etc.)
-            - Recursive resolver cache (ISP, 8.8.8.8, 1.1.1.1)
-            - Authoritative servers (no typical caching)
-
-            ## Table fields
-            Name, Type, Class(IN), RDATA, TTL, CachedTime, ExpireTime.
-
-            ## Negative caching
-            NXDOMAIN responses are cached per RFC 2308 (TTL taken from SOA/minimum).
-
-            ## Security
-            - DNSSEC (RFC 4033–4035)
-            - 0x20 randomization
-            - Sensible TTLs; periodic flush
-
-            ## Diagrams
-            See `assets/dns_cache_flow.svg` and `.png`.
-
-            ## OS Commands
-            - Windows: `ipconfig /displaydns`, `ipconfig /flushdns`
-            - Linux: `systemd-resolve --status`, `--flush-caches`
-            - macOS: `killall -INFO mDNSResponder`, `-HUP`
-
-            ## Samples
-            - `samples/cache_table.json`, `samples/cache_table.csv`
+            Layers: Browser → OS → Recursive Resolver → Authoritative.
+            Fields: Name, Type, Class(IN), RDATA, TTL, CachedTime, ExpireTime.
+            Security: DNSSEC, 0x20, periodic flush.
+            See `assets/dns_cache_flow.svg` and samples/*.md.
             MD
           else
             cat > "${OUT_DIR}/README.md" <<'MD'
             # DNS 캐시 테이블 (전문가 가이드)
-
-            ## 개요
-            브라우저/OS/재귀 리졸버가 **도메인⇄주소 해석 결과**를 보관하는 **메모리 캐시 테이블**입니다. 재조회 시 지연을 줄이고(µs~ms), 상위 DNS 부하를 완화합니다.
-
-            ## 캐시 계층
-            - 애플리케이션/브라우저 캐시
-            - 운영체제 캐시(Windows DNS Client, systemd-resolved, mDNSResponder 등)
-            - 재귀 리졸버 캐시(ISP, 8.8.8.8, 1.1.1.1)
-            - 권한 DNS 서버(일반적으로 캐시하지 않음)
-
-            ## 테이블 필드
-            Name, Type, Class(IN), RDATA, TTL, CachedTime, ExpireTime
-
-            ## Negative Caching
-            NXDOMAIN 응답도 RFC 2308에 따라 TTL 범위로 캐시됩니다(SOA Minimum 기반).
-
-            ## 보안
-            - DNSSEC(RFC 4033~4035)
-            - 0x20 대소문자 난수화
-            - 적정 TTL과 주기적 플러시
-
-            ## 다이어그램
-            `assets/dns_cache_flow.svg`, `.png` 참고
-
-            ## OS 명령
-            - Windows: `ipconfig /displaydns`, `ipconfig /flushdns`
-            - Linux: `systemd-resolve --status`, `--flush-caches`
-            - macOS: `killall -INFO mDNSResponder`, `-HUP`
-
-            ## 샘플
-            - `samples/cache_table.json`, `samples/cache_table.csv`
+            계층: 브라우저 → OS → 재귀 리졸버 → 권한 서버.
+            필드: Name, Type, Class(IN), RDATA, TTL, CachedTime, ExpireTime.
+            보안: DNSSEC, 0x20 난수화, 주기적 플러시.
+            다이어그램: `assets/dns_cache_flow.svg` 참고.
             MD
           fi
 
@@ -261,6 +179,7 @@ jobs:
             - dns_cache_flow.mmd
             - dns_cache_flow.svg
             - dns_cache_flow.png
+            - puppeteer.config.cjs
           - samples/
             - cache_table.json
             - cache_table.csv
@@ -273,27 +192,21 @@ jobs:
       - name: Commit & Push
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Configure Git"
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # ensure branch exists
           if [ "$(git rev-parse --abbrev-ref HEAD)" != "${BRANCH}" ]; then
             git checkout -B "${BRANCH}"
           fi
-
-          echo "[ECHO] Add & commit"
           git add -A "${OUT_DIR}"
           if git diff --cached --quiet; then
-            echo "[ECHO] No changes to commit."
+            echo "[ECHO] No changes"
           else
             git commit -m "${COMMIT_MSG}"
             git push origin "${BRANCH}"
-            echo "[ECHO] Pushed changes to ${BRANCH}"
           fi
 
       - name: Upload artifact (optional)
         uses: actions/upload-artifact@v4
         with:
           name: dns-cache-docs
-          path: ${{ github.event.inputs.out_dir }}
+          path: ${{ env.OUT_DIR }}
