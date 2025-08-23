@@ -1,732 +1,299 @@
-name: "🏦 MEGA Echo DB v3 (Oracle + MariaDB + Teradata DDL/DML + Echo Image + Upgrade + Perm Deploy)"
+name: "📚 DNS Cache Table Docs & Diagram (Echo+Commit)"
 
 permissions:
   contents: write
-  actions: write
-  packages: write
 
 on:
   workflow_dispatch:
     inputs:
-      services:
-        description: "대상 서비스 콤마구분 (oracle,mariadb,teradata)"
+      doc_lang:
+        description: "문서 언어 (ko|en)"
         required: true
-        default: "oracle,mariadb,teradata"
-      do_upgrade:
-        description: "호스트 APT 업그레이드 수행 (true/false)"
+        default: "ko"
+      out_dir:
+        description: "출력 디렉토리"
         required: true
-        default: "false"
-      run_ssh_bastion:
-        description: "SSH Bastion 컨테이너 실행 (true/false)"
-        required: true
-        default: "false"
-      build_echo_image:
-        description: "에코 파일을 포함한 Docker 이미지 빌드 (true/false)"
+        default: "docs/dns-cache"
+      generate_diagram:
+        description: "Mermaid 다이어그램 생성(SVG/PNG)"
         required: true
         default: "true"
-      push_image:
-        description: "빌드한 이미지를 레지스트리에 푸시 (true/false)"
-        required: true
-        default: "false"
-      image_registry:
-        description: "이미지 레지스트리 (예: ghcr.io)"
-        required: true
-        default: "ghcr.io"
-      image_owner:
-        description: "이미지 소유자/조직 (예: davidkims, 비우면 레포 소유자 자동 적용)"
-        required: false
-        default: ""
-      image_name:
-        description: "이미지 이름"
-        required: true
-        default: "echo-mega-db"
-      ddl_rows:
-        description: "DDL 샘플 테이블/행 생성 기준(행 수 힌트)"
-        required: true
-        default: "30"
-      dml_rows:
-        description: "DML 샘플 INSERT 개수"
-        required: true
-        default: "60"
-      cleanup:
-        description: "작업 후 컨테이너/이미지 정리 (true/false)"
+      flush_examples:
+        description: "OS별 Flush 예시 스크립트 생성"
         required: true
         default: "true"
-
-env:
-  ECHO_ROOT: .github/echo_db
-  LOG_DIR: .github/echo_db/logs
-  OUT_DIR: .github/echo_db/out
-  SQL_DIR: .github/echo_db/sql
-  IMG_DIR: .github/echo_db/images
-  TOOLS_DIR: .github/echo_db/tools
-  SCRIPTS_DIR: .github/echo_db/scripts
-  SITE_DIR: site
-  ORACLE_PDB: XEPDB1
-  ORACLE_IMAGE: gvenzl/oracle-xe:21-slim
-  MARIADB_IMAGE: mariadb:11
-  SSH_IMAGE: lscr.io/linuxserver/openssh-server:latest
-  TERADATA_IMAGE: "${{ secrets.TERADATA_IMAGE }}"
-  TERADATA_RUN_ARGS: "${{ secrets.TERADATA_RUN_ARGS }}"
-  IMAGE_OWNER: ${{ inputs.image_owner != '' && inputs.image_owner || github.repository_owner }}
+      commit_branch:
+        description: "커밋/푸시 대상 브랜치"
+        required: true
+        default: "main"
+      commit_message:
+        description: "커밋 메시지"
+        required: true
+        default: "docs(dns): generate DNS cache table docs & diagrams"
 
 jobs:
-  prepare:
-    name: "0) Prepare & Echo Library + Perm Deploy"
+  build:
     runs-on: ubuntu-latest
+    env:
+      OUT_DIR: ${{ github.event.inputs.out_dir }}
+      LANG_SEL: ${{ github.event.inputs.doc_lang }}
+      GEN_DIAG: ${{ github.event.inputs.generate_diagram }}
+      GEN_FLUSH: ${{ github.event.inputs.flush_examples }}
+      BRANCH: ${{ github.event.inputs.commit_branch }}
+      COMMIT_MSG: ${{ github.event.inputs.commit_message }}
+
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: "Optionally upgrade host packages"
-        if: ${{ inputs.do_upgrade == 'true' }}
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][UPGRADE] Starting host upgrade"
-          sudo apt-get update -y
-          sudo apt-get -y dist-upgrade
-          sudo apt-get -y autoremove --purge
-          sudo apt-get -y clean
-          echo "[ECHO][UPGRADE] Completed host upgrade"
-
-      - name: "Create base directories"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][DIR] Creating base directories"
-          mkdir -p "$ECHO_ROOT" "$LOG_DIR" "$OUT_DIR" \
-                   "$SQL_DIR/oracle/ddl" "$SQL_DIR/oracle/dml" "$SQL_DIR/oracle/grant" \
-                   "$SQL_DIR/mariadb/ddl" "$SQL_DIR/mariadb/dml" "$SQL_DIR/mariadb/grant" \
-                   "$SQL_DIR/teradata/ddl" "$SQL_DIR/teradata/dml" "$SQL_DIR/teradata/grant" \
-                   "$IMG_DIR" "$TOOLS_DIR" "$SCRIPTS_DIR" "$SITE_DIR"
-          echo "[ECHO][DIR] Directories prepared"
-
-      - name: "Write echo.sh (logger/functions)"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][INIT] Writing echo.sh"
-          cat >"$TOOLS_DIR/echo.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Euo pipefail
-          echoe(){ printf "[ECHO][%s] %s\n" "OK" "$*"; }
-          warn(){  printf "[ECHO][%s] %s\n" "WARN" "$*" 1>&2; }
-          fail(){  local rc=$?; printf "[ECHO][%s] %s (rc=%s)\n" "FAIL" "$*" "$rc" 1>&2; exit 1; }
-          randpw(){ tr -dc 'A-Za-z0-9!@#%^_' </dev/urandom | head -c 16; echo; }
-          seal(){ mkdir -p "${OUT_DIR:-.}"; local f="$1"; [ -f "$f" ] || return 0; sha256sum "$f" | tee -a "${OUT_DIR}/sha256sum.txt"; }
-          SH
-          chmod +x "$TOOLS_DIR/echo.sh"
-          echo "[ECHO][INIT] echo.sh ready"
-
-      - name: "Write permission deploy script"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][PERM] Writing permission deploy script"
-          cat >"$SCRIPTS_DIR/echo_permissions.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          ROOT="${ECHO_ROOT:-.github/echo_db}"
-          LOG_DIR="${LOG_DIR:-.github/echo_db/logs}"
-          OUT_DIR="${OUT_DIR:-.github/echo_db/out}"
-          mkdir -p "$LOG_DIR" "$OUT_DIR"
-          # 파일 권한 정책
-          find "$ROOT" -type f -name "*.sh"    -exec chmod 0755 {} +
-          find "$ROOT" -type f -name "*.sql"   -exec chmod 0644 {} +
-          find "$ROOT" -type f -name "*.tdsql" -exec chmod 0644 {} +
-          find "$ROOT" -type f \( ! -name "*.sh" ! -name "*.sql" ! -name "*.tdsql" \) -exec chmod 0644 {} +
-          # 디렉토리 권한
-          find "$ROOT" -type d -exec chmod 0755 {} +
-          # 오너 정보(러너 사용자)
-          chown -R "$USER":"$USER" "$ROOT" || true
-          # 매니페스트 출력
-          printf "# ECHO PERMISSION MANIFEST\n" | tee "$OUT_DIR/perm_manifest.txt"
-          find "$ROOT" -type f -printf "%M %u:%g %p\n" | sort | tee -a "$OUT_DIR/perm_manifest.txt"
-          SH
-          chmod +x "$SCRIPTS_DIR/echo_permissions.sh"
-          echo "[ECHO][PERM] Permission deploy script ready"
-
-      - name: "Run permission deploy"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][PERM] Running permission deploy"
-          "$SCRIPTS_DIR/echo_permissions.sh"
-          . "$TOOLS_DIR/echo.sh"; seal "$OUT_DIR/perm_manifest.txt"
-          echo "[ECHO][PERM] Permission deploy completed"
-
-      - name: "Write helper: ensure_docker_login (for GHCR)"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][DOCKER] Writing docker login helper"
-          cat >"$SCRIPTS_DIR/ensure_docker_login.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          REG="${1:-ghcr.io}"
-          OWNER="${2:-$GITHUB_REPOSITORY_OWNER}"
-          TOK="${3:-$GITHUB_TOKEN}"
-          if [ -n "$TOK" ]; then
-            echo "$TOK" | docker login "$REG" -u "$OWNER" --password-stdin >/dev/null 2>&1 || true
-            echo "[ECHO][DOCKER] docker login attempted for $REG/$OWNER"
-          else
-            echo "[ECHO][DOCKER][WARN] No token provided for docker login"
-          fi
-          SH
-          chmod +x "$SCRIPTS_DIR/ensure_docker_login.sh"
-          echo "[ECHO][DOCKER] ensure_docker_login ready"
-
-  echo_gen:
-    name: "1) Generate Echo SQL/Script Files"
-    runs-on: ubuntu-latest
-    needs: prepare
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: "Ensure structure & echo.sh on fresh runner"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][GEN] Ensuring structure & echo.sh"
-          mkdir -p "$ECHO_ROOT" "$LOG_DIR" "$OUT_DIR" \
-                   "$SQL_DIR/oracle/ddl" "$SQL_DIR/oracle/dml" "$SQL_DIR/oracle/grant" \
-                   "$SQL_DIR/mariadb/ddl" "$SQL_DIR/mariadb/dml" "$SQL_DIR/mariadb/grant" \
-                   "$SQL_DIR/teradata/ddl" "$SQL_DIR/teradata/dml" "$SQL_DIR/teradata/grant" \
-                   "$IMG_DIR" "$TOOLS_DIR" "$SCRIPTS_DIR" "$SITE_DIR"
-          if [ ! -f "$TOOLS_DIR/echo.sh" ]; then
-            cat >"$TOOLS_DIR/echo.sh" <<'SH'
-            #!/usr/bin/env bash
-            set -Euo pipefail
-            echoe(){ printf "[ECHO][%s] %s\n" "OK" "$*"; }
-            warn(){ printf "[ECHO][%s] %s\n" "WARN" "$*" 1>&2; }
-            fail(){ local rc=$?; printf "[ECHO][%s] %s (rc=%s)\n" "FAIL" "$*" "$rc" 1>&2; exit 1; }
-            randpw(){ tr -dc 'A-Za-z0-9!@#%^_' </dev/urandom | head -c 16; echo; }
-            seal(){ mkdir -p "${OUT_DIR:-.}"; local f="$1"; [ -f "$f" ] || return 0; sha256sum "$f" | tee -a "${OUT_DIR}/sha256sum.txt"; }
-            SH
-            chmod +x "$TOOLS_DIR/echo.sh"
-            echo "[ECHO][GEN] echo.sh created"
-          fi
-
-      - name: "Load library"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"
-          echoe "Generate Oracle/MariaDB/Teradata DDL/DML/GRANT & connectors"
-
-      - name: "Generate Oracle SQL"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][GEN][ORACLE] Writing grant/ddl/dml"
-          cat >"$SQL_DIR/oracle/grant/001_user.sql" <<'SQL'
-          WHENEVER SQLERROR EXIT SQL.SQLCODE
-          ALTER SESSION SET CONTAINER = XEPDB1;
-          CREATE USER fin IDENTIFIED BY "Fin_pw1!";
-          GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE SEQUENCE TO fin;
-          GRANT CONNECT, RESOURCE TO fin;
-          ALTER USER fin QUOTA UNLIMITED ON USERS;
-          SQL
-          cat >"$SQL_DIR/oracle/ddl/002_schema.sql" <<'SQL'
-          WHENEVER SQLERROR EXIT SQL.SQLCODE
-          ALTER SESSION SET CURRENT_SCHEMA = fin;
-          CREATE TABLE customers (
-            id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            name VARCHAR2(128) NOT NULL,
-            email VARCHAR2(256) UNIQUE,
-            created_at TIMESTAMP DEFAULT SYSTIMESTAMP
-          );
-          CREATE INDEX idx_customers_email ON customers(email);
-          CREATE TABLE accounts (
-            id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            customer_id NUMBER NOT NULL REFERENCES customers(id),
-            balance NUMBER(18,2) DEFAULT 0,
-            currency VARCHAR2(8) DEFAULT 'KRW',
-            opened_at TIMESTAMP DEFAULT SYSTIMESTAMP
-          );
-          CREATE INDEX idx_accounts_customer ON accounts(customer_id);
-          SQL
-          cat >"$SQL_DIR/oracle/dml/003_seed.sql" <<SQL
-          WHENEVER SQLERROR EXIT SQL.SQLCODE
-          ALTER SESSION SET CURRENT_SCHEMA = fin;
-          BEGIN
-            FOR i IN 1..${{ inputs.dml_rows }} LOOP
-              INSERT INTO customers(name, email) VALUES ('cust_'||i, 'cust_'||i||'@example.com');
-            END LOOP;
-            INSERT INTO accounts(customer_id, balance, currency)
-            SELECT id, (ABS(DBMS_RANDOM.RANDOM)/1000), CASE MOD(id,3) WHEN 0 THEN 'KRW' WHEN 1 THEN 'USD' ELSE 'JPY' END FROM customers;
-            COMMIT;
-          END;
-          /
-          SQL
-          echo "[ECHO][GEN][ORACLE] Done"
-
-      - name: "Generate MariaDB SQL"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][GEN][MARIADB] Writing grant/ddl/dml"
-          cat >"$SQL_DIR/mariadb/grant/001_user.sql" <<'SQL'
-          CREATE DATABASE IF NOT EXISTS fin CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-          CREATE ROLE IF NOT EXISTS fin_reader;
-          CREATE ROLE IF NOT EXISTS fin_writer;
-          CREATE USER IF NOT EXISTS 'fin'@'%' IDENTIFIED BY 'Fin_pw1!';
-          GRANT SELECT ON fin.* TO fin_reader;
-          GRANT SELECT, INSERT, UPDATE, DELETE ON fin.* TO fin_writer;
-          GRANT fin_reader, fin_writer TO 'fin'@'%';
-          FLUSH PRIVILEGES;
-          SQL
-          cat >"$SQL_DIR/mariadb/ddl/002_schema.sql" <<'SQL'
-          USE fin;
-          CREATE TABLE IF NOT EXISTS customers (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            name VARCHAR(128) NOT NULL,
-            email VARCHAR(256) UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-          CREATE INDEX idx_customers_email ON customers(email);
-          CREATE TABLE IF NOT EXISTS accounts (
-            id BIGINT PRIMARY KEY AUTO_INCREMENT,
-            customer_id BIGINT NOT NULL,
-            balance DECIMAL(18,2) DEFAULT 0,
-            currency VARCHAR(8) DEFAULT 'KRW',
-            opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-          );
-          CREATE INDEX idx_accounts_customer ON accounts(customer_id);
-          SQL
-          cat >"$SQL_DIR/mariadb/dml/003_seed.sql" <<SQL
-          USE fin;
-          SET SESSION sql_log_bin = 0;
-          INSERT INTO customers(name, email)
-          SELECT CONCAT('cust_', n), CONCAT('cust_', n, '@example.com')
-          FROM (
-            SELECT @row := @row + 1 AS n FROM
-            (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) t1,
-            (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) t2,
-            (SELECT @row:=-1) r
-          ) x WHERE n < ${{ inputs.dml_rows }};
-          INSERT INTO accounts(customer_id, balance, currency)
-          SELECT id, RAND()*100000, CASE id % 3 WHEN 0 THEN 'KRW' WHEN 1 THEN 'USD' ELSE 'JPY' END FROM customers;
-          SQL
-          echo "[ECHO][GEN][MARIADB] Done"
-
-      - name: "Generate Teradata SQL (Echo Only)"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][GEN][TERADATA] Writing echo sql files"
-          cat >"$SQL_DIR/teradata/grant/001_user.tdsql" <<'SQL'
-          /* Teradata Echo - requires BTEQ/DBC access */
-          /* CREATE USER fin FROM DBC AS PERM = 10000000, SPOOL = 5000000, PASSWORD = "Fin_pw1!"; */
-          /* GRANT CONNECT ON DBC TO fin; */
-          SQL
-          cat >"$SQL_DIR/teradata/ddl/002_schema.tdsql" <<'SQL'
-          /* DATABASE fin; */
-          /* CREATE TABLE fin.customers (
-              id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-              name VARCHAR(128) NOT NULL,
-              email VARCHAR(256),
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE fin.accounts (
-              id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-              customer_id BIGINT NOT NULL,
-              balance DECIMAL(18,2),
-              currency VARCHAR(8),
-              opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ); */
-          SQL
-          cat >"$SQL_DIR/teradata/dml/003_seed.tdsql" <<SQL
-          /* INSERT INTO fin.customers(name,email)
-             SELECT 'cust_'||CAST(n as VARCHAR(20)), 'cust_'||CAST(n as VARCHAR(20))||'@example.com'
-             FROM sys_calendar.CALENDAR
-             QUALIFY ROW_NUMBER() OVER (ORDER BY calendar_date) <= ${{ inputs.dml_rows }}; */
-          SQL
-          echo "[ECHO][GEN][TERADATA] Done"
-
-      - name: "Connect scripts"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][GEN] Writing connect scripts"
-          cat >"$SCRIPTS_DIR/oracle_connect.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          ORA_CONN="${1:-system/oracle@//localhost:1521/XEPDB1}"
-          FILE="${2:-/sql/run.sql}"
-          docker exec -i oracle-xe bash -lc "sqlplus -s $ORA_CONN @${FILE}" || true
-          SH
-          chmod +x "$SCRIPTS_DIR/oracle_connect.sh"
-
-          cat >"$SCRIPTS_DIR/mariadb_connect.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          HOST="${1:-127.0.0.1}"; PORT="${2:-3306}"; USER="${3:-root}"; PASS="${4:-rootpw}"; FILE="${5:-/sql/run.sql}"
-          mysql -h"$HOST" -P"$PORT" -u"$USER" -p"$PASS" < "$FILE" || true
-          SH
-          chmod +x "$SCRIPTS_DIR/mariadb_connect.sh"
-
-          cat >"$SCRIPTS_DIR/teradata_connect.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo "[ECHO][TERADATA] Execution requires BTEQ/licensed image; echo-only mode." 1>&2
-          SH
-          chmod +x "$SCRIPTS_DIR/teradata_connect.sh"
-          echo "[ECHO][GEN] Connect scripts ready"
-
-      - name: "Seal & list"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"
-          echoe "Sealing file list"
-          find "$SQL_DIR" -type f -maxdepth 3 | sort | tee "$OUT_DIR/files.txt"
-          seal "$OUT_DIR/files.txt"
-          echo "[ECHO][GEN] Seal completed"
-
-      - name: "Upload Echo SQL/scripts as artifact"
-        uses: actions/upload-artifact@v4
-        with:
-          name: sql_echo
-          path: |
-            ${{ env.SQL_DIR }}
-            ${{ env.SCRIPTS_DIR }}
-            ${{ env.TOOLS_DIR }}
-          if-no-files-found: ignore
-
-  db_oracle:
-    name: "2) Oracle XE: Container + Apply SQL + Upgrade"
-    runs-on: ubuntu-latest
-    needs: [echo_gen]
-    if: ${{ contains(inputs.services, 'oracle') }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: "Prepare dirs on fresh runner"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][ORACLE] Prepare dirs"
-          mkdir -p "$LOG_DIR" "$OUT_DIR" "$TOOLS_DIR"
-          if [ ! -f "$TOOLS_DIR/echo.sh" ]; then
-            cat >"$TOOLS_DIR/echo.sh" <<'SH'
-            #!/usr/bin/env bash
-            set -Euo pipefail
-            echoe(){ printf "[ECHO][%s] %s\n" "OK" "$*"; }
-            seal(){ mkdir -p "${OUT_DIR:-.}"; local f="$1"; [ -f "$f" ] || return 0; sha256sum "$f" | tee -a "${OUT_DIR}/sha256sum.txt"; }
-            SH
-            chmod +x "$TOOLS_DIR/echo.sh"
-          fi
-
-      - name: "Pull latest image (upgrade semantic)"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][ORACLE] docker pull $ORACLE_IMAGE"
-          docker pull "$ORACLE_IMAGE" || true
-
-      - name: "Start Oracle XE container"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][ORACLE] Starting container"
-          docker run -d --name oracle-xe -p 1521:1521 -e ORACLE_PASSWORD=oracle "$ORACLE_IMAGE"
-          echo "[ECHO][ORACLE] Waiting for readiness"
-          for i in $(seq 1 60); do
-            sleep 5
-            if docker logs oracle-xe 2>&1 | grep -Eq "DATABASE IS READY|DATABASE IS READY TO USE"; then
-              echo "[ECHO][ORACLE] Ready"; break
-            fi
-            if [ "$i" -eq 60 ]; then echo "[ECHO][ORACLE][FAIL] Not ready"; docker logs oracle-xe; exit 1; fi
-          done
-
-      - name: "Copy SQL into container"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][ORACLE] Copy SQL"
-          docker exec oracle-xe bash -lc 'mkdir -p /sql/{grant,ddl,dml}'
-          docker cp "$SQL_DIR/oracle/grant/001_user.sql" oracle-xe:/sql/grant/
-          docker cp "$SQL_DIR/oracle/ddl/002_schema.sql" oracle-xe:/sql/ddl/
-          docker cp "$SQL_DIR/oracle/dml/003_seed.sql" oracle-xe:/sql/dml/
-
-      - name: "Execute Oracle SQL"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][ORACLE] Running SQL"
-          {
-            echo "-- run grant"; docker exec -i oracle-xe bash -lc "sqlplus -s system/oracle@//localhost:1521/$ORACLE_PDB @/sql/grant/001_user.sql";
-            echo "-- run ddl";  docker exec -i oracle-xe bash -lc "sqlplus -s system/oracle@//localhost:1521/$ORACLE_PDB @/sql/ddl/002_schema.sql";
-            echo "-- run dml";  docker exec -i oracle-xe bash -lc "sqlplus -s system/oracle@//localhost:1521/$ORACLE_PDB @/sql/dml/003_seed.sql";
-          } | tee "$LOG_DIR/oracle.log"
-
-      - name: "Seal logs"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"; seal "$LOG_DIR/oracle.log"
-          echo "[ECHO][ORACLE] Logs sealed"
-
-      - name: "Upload Oracle logs"
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs_oracle
-          path: ${{ env.LOG_DIR }}/oracle.log
-          if-no-files-found: ignore
-
-  db_mariadb:
-    name: "3) MariaDB: Container + Apply SQL + Upgrade"
-    runs-on: ubuntu-latest
-    needs: [echo_gen]
-    if: ${{ contains(inputs.services, 'mariadb') }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: "Prepare dirs on fresh runner"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][MARIADB] Prepare dirs"
-          mkdir -p "$LOG_DIR" "$OUT_DIR" "$TOOLS_DIR"
-          if [ ! -f "$TOOLS_DIR/echo.sh" ]; then
-            cat >"$TOOLS_DIR/echo.sh" <<'SH'
-            #!/usr/bin/env bash
-            set -Euo pipefail
-            echoe(){ printf "[ECHO][%s] %s\n" "OK" "$*"; }
-            seal(){ mkdir -p "${OUT_DIR:-.}"; local f="$1"; [ -f "$f" ] || return 0; sha256sum "$f" | tee -a "${OUT_DIR}/sha256sum.txt"; }
-            SH
-            chmod +x "$TOOLS_DIR/echo.sh"
-          fi
-
-      - name: "Pull latest image (upgrade semantic)"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][MARIADB] docker pull $MARIADB_IMAGE"
-          docker pull "$MARIADB_IMAGE" || true
-
-      - name: "Start MariaDB"
-        env:
-          MARIADB_ROOT_PASSWORD: rootpw
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][MARIADB] Starting container"
-          docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD="$MARIADB_ROOT_PASSWORD" -p 3306:3306 "$MARIADB_IMAGE"
-          echo "[ECHO][MARIADB] Waiting for readiness"
-          for i in $(seq 1 60); do
-            sleep 3
-            if docker exec mariadb sh -lc 'mariadb-admin ping -prootpw --silent' 2>/dev/null; then echo "[ECHO][MARIADB] Ready"; break; fi
-            if [ "$i" -eq 60 ]; then echo "[ECHO][MARIADB][FAIL] Not ready"; docker logs mariadb; exit 1; fi
-          done
-
-      - name: "Apply SQL"
-        env:
-          MARIADB_ROOT_PASSWORD: rootpw
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][MARIADB] Applying SQL"
-          tmp="$(mktemp)"; {
-            cat "$SQL_DIR/mariadb/grant/001_user.sql";
-            cat "$SQL_DIR/mariadb/ddl/002_schema.sql";
-            cat "$SQL_DIR/mariadb/dml/003_seed.sql";
-          } > "$tmp"
-          docker cp "$tmp" mariadb:/tmp/run.sql
-          docker exec -i mariadb sh -lc "mariadb -uroot -p$MARIADB_ROOT_PASSWORD < /tmp/run.sql" | tee "$LOG_DIR/mariadb.log" || true
-
-      - name: "Seal logs"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"; seal "$LOG_DIR/mariadb.log"
-          echo "[ECHO][MARIADB] Logs sealed"
-
-      - name: "Upload MariaDB logs"
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs_mariadb
-          path: ${{ env.LOG_DIR }}/mariadb.log
-          if-no-files-found: ignore
-
-  db_teradata:
-    name: "4) Teradata: (Echo Only / Optional Licensed Image + Upgrade)"
-    runs-on: ubuntu-latest
-    needs: [echo_gen]
-    if: ${{ contains(inputs.services, 'teradata') }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: "Prepare dirs on fresh runner"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][TD] Prepare dirs"
-          mkdir -p "$LOG_DIR" "$OUT_DIR" "$TOOLS_DIR"
-          if [ ! -f "$TOOLS_DIR/echo.sh" ]; then
-            cat >"$TOOLS_DIR/echo.sh" <<'SH'
-            #!/usr/bin/env bash
-            set -Euo pipefail
-            echoe(){ printf "[ECHO][%s] %s\n" "OK" "$*"; }
-            seal(){ mkdir -p "${OUT_DIR:-.}"; local f="$1"; [ -f "$f" ] || return 0; sha256sum "$f" | tee -a "${OUT_DIR}/sha256sum.txt"; }
-            SH
-            chmod +x "$TOOLS_DIR/echo.sh"
-          fi
-
-      - name: "Pull & start (if image provided)"
-        if: ${{ env.TERADATA_IMAGE != '' }}
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][TD] docker pull $TERADATA_IMAGE"
-          docker pull "$TERADATA_IMAGE" || true
-          echo "[ECHO][TD] starting container (may require license/init)"
-          docker run -d --name teradata $TERADATA_RUN_ARGS "$TERADATA_IMAGE" || true
-          echo "[ECHO][TD] Container started (echo-only mode)"
-
-      - name: "Echo-only: list generated TD files"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][TD] Listing generated files"
-          find "$SQL_DIR/teradata" -type f | sort | tee "$LOG_DIR/teradata_echo.txt"
-
-      - name: "Seal logs"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"; seal "$LOG_DIR/teradata_echo.txt"
-          echo "[ECHO][TD] Logs sealed"
-
-      - name: "Upload Teradata echo logs"
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs_teradata
-          path: ${{ env.LOG_DIR }}/teradata_echo.txt
-          if-no-files-found: ignore
-
-  bastion:
-    name: "5) SSH Bastion (optional)"
-    runs-on: ubuntu-latest
-    needs: [prepare]
-    if: ${{ inputs.run_ssh_bastion == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: "Run SSH Bastion"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][BASTION] Starting"
-          PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)"
-          docker run -d --name bastion -e PASSWORD_ACCESS=true -e USER_NAME=echo -e USER_PASSWORD="$PASS" -p 2222:2222 "$SSH_IMAGE"
-          echo "user=echo" > "$OUT_DIR/bastion.txt"
-          echo "pass=$PASS" >> "$OUT_DIR/bastion.txt"
-          echo "port=2222" >> "$OUT_DIR/bastion.txt"
-          echo "[ECHO][BASTION] SSH bastion on localhost:2222 (local only)"
-      - name: "Seal bastion info"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"; seal "$OUT_DIR/bastion.txt"
-          echo "[ECHO][BASTION] Info sealed"
-
-  echo_image:
-    name: "6) Build Echo Image (copy all echo SQL/scripts)"
-    runs-on: ubuntu-latest
-    needs: [echo_gen]
-    if: ${{ inputs.build_echo_image == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: "Docker login (GHCR)"
-        if: ${{ inputs.push_image == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][IMG] docker login"
-          "$SCRIPTS_DIR/ensure_docker_login.sh" "${{ inputs.image_registry }}" "${{ env.IMAGE_OWNER }}" "$GH_TOKEN"
-
-      - name: "Write Dockerfile"
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][IMG] Writing Dockerfile"
-          cat >"$IMG_DIR/Dockerfile" <<'DOCK'
-          FROM alpine:3.20
-          WORKDIR /echo
-          COPY .github/echo_db /echo
-          CMD ["/bin/sh", "-lc", "find /echo -maxdepth 3 -type f | sort"]
-          DOCK
-
-      - name: "Build image (multi tags)"
-        env:
-          TAG_LATEST: ${{ inputs.image_registry }}/${{ env.IMAGE_OWNER }}/${{ inputs.image_name }}:latest
-          TAG_SHA:    ${{ inputs.image_registry }}/${{ env.IMAGE_OWNER }}/${{ inputs.image_name }}:${{ github.sha }}
-          TAG_TS:     ${{ inputs.image_registry }}/${{ env.IMAGE_OWNER }}/${{ inputs.image_name }}:${{ github.run_id }}-${{ github.run_number }}
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][IMG] docker build -> $TAG_LATEST, $TAG_SHA, $TAG_TS"
-          docker build -f "$IMG_DIR/Dockerfile" -t "$TAG_LATEST" -t "$TAG_SHA" -t "$TAG_TS" .
-          printf "%s\n%s\n%s\n" "$TAG_LATEST" "$TAG_SHA" "$TAG_TS" | tee "$OUT_DIR/echo_image_tags.txt"
-          echo "[ECHO][IMG] Build complete"
-
-      - name: "Push image (optional)"
-        if: ${{ inputs.push_image == 'true' }}
-        env:
-          TAG_LATEST: ${{ inputs.image_registry }}/${{ env.IMAGE_OWNER }}/${{ inputs.image_name }}:latest
-          TAG_SHA:    ${{ inputs.image_registry }}/${{ env.IMAGE_OWNER }}/${{ inputs.image_name }}:${{ github.sha }}
-          TAG_TS:     ${{ inputs.image_registry }}/${{ env.IMAGE_OWNER }}/${{ inputs.image_name }}:${{ github.run_id }}-${{ github.run_number }}
-        run: |
-          set -Eeuo pipefail
-          echo "[ECHO][IMG] docker push (latest/sha/ts)"
-          docker push "$TAG_LATEST"
-          docker push "$TAG_SHA"
-          docker push "$TAG_TS"
-          echo "[ECHO][IMG] Push complete"
-
-      - name: "Seal image tags"
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"; seal "$OUT_DIR/echo_image_tags.txt"
-          echo "[ECHO][IMG] Tags sealed"
-
-  report:
-    name: "7) Commit Reports to Repo (MANDATORY)"
-    runs-on: ubuntu-lest
-    needs: [prepare, echo_gen]
-    steps:
-      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: "Download artifacts"
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: "Rehydrate echo payload & logs"
+      - name: Prepare tools (Mermaid CLI, fonts)
+        if: env.GEN_DIAG == 'true'
         run: |
           set -Eeuo pipefail
-          echo "[ECHO][SITE] Rehydrate artifacts"
-          mkdir -p "$ECHO_ROOT" "$SQL_DIR" "$SCRIPTS_DIR" "$TOOLS_DIR" "$LOG_DIR" "$OUT_DIR"
-          [ -d artifacts/sql_echo ] && cp -R artifacts/sql_echo/* "$ECHO_ROOT"/ || true
-          [ -f artifacts/logs_oracle/oracle.log ] && cp artifacts/logs_oracle/oracle.log "$LOG_DIR/" || true
-          [ -f artifacts/logs_mariadb/mariadb.log ] && cp artifacts/logs_mariadb/mariadb.log "$LOG_DIR/" || true
-          [ -f artifacts/logs_teradata/teradata_echo.txt ] && cp artifacts/logs_teradata/teradata_echo.txt "$LOG_DIR/" || true
+          echo "[ECHO] Install prerequisites"
+          sudo apt-get update -y
+          sudo apt-get install -y libnss3 fonts-noto fonts-noto-cjk jq
+          echo "[ECHO] Install Mermaid CLI"
+          corepack enable || true
+          npm -v || true
+          npm i -g @mermaid-js/mermaid-cli@10
 
-      - name: "Collect artifacts to site/"
+      - name: Generate structure
         run: |
           set -Eeuo pipefail
-          TS="$(date -u +%Y%m%d%H%M%S)"
-          DEST="$SITE_DIR/db-report-$TS"
-          echo "[ECHO][SITE] Collect to $DEST"
-          mkdir -p "$DEST"
-          cp -R "$SQL_DIR" "$DEST/" || true
-          cp -R "$LOG_DIR" "$DEST/" || true
-          cp -R "$OUT_DIR" "$DEST/" || true
-          find "$DEST" -type f | sed "s|^|[SITE] |" | sort
+          echo "[ECHO] Make output directories"
+          mkdir -p "${OUT_DIR}/assets" "${OUT_DIR}/samples" "${OUT_DIR}/scripts"
 
-      - name: "Commit & Push"
-        env:
-          GIT_AUTHOR_NAME: EchoBot
-          GIT_AUTHOR_EMAIL: actions@github.com
-          GIT_COMMITTER_NAME: EchoBot
-          GIT_COMMITTER_EMAIL: actions@github.com
+      - name: Create Mermaid diagram (.mmd)
+        if: env.GEN_DIAG == 'true'
         run: |
           set -Eeuo pipefail
-          echo "[ECHO][SITE] Commit & push"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "[ECHO][SITE][WARN] No changes to commit"
+          cat > "${OUT_DIR}/assets/dns_cache_flow.mmd" <<'MMD'
+          %% DNS Cache Resolution & Caching Flow
+          flowchart LR
+              A[Client Request] --> B{Browser Cache}
+              B -- hit --> Z[Return IP (cached)]
+              B -- miss/expired --> C{OS DNS Cache}
+              C -- hit --> Z
+              C -- miss/expired --> D{Recursive Resolver Cache}
+              D -- hit --> Z
+              D -- miss/expired --> E[Authoritative DNS (Root→TLD→Auth)]
+              E --> D
+              D --> C
+              C --> B
+              Z --> F[Connection to Target IP]
+              subgraph CacheEntry[Cache Entry Fields]
+                N[Name (FQDN)]
+                T[Type (A/AAAA/MX/CNAME/NS/TXT)]
+                CL[Class=IN]
+                R[RDATA (IP/alias...)]
+                TTL[TTL (seconds)]
+                CACHED[CachedTime]
+                EXP[ExpireTime=CACHED+TTL]
+              end
+              classDef cache fill:#eefaff,stroke:#48a,stroke-width:1px
+              class B,C,D cache
+          MMD
+
+      - name: Render SVG/PNG from Mermaid
+        if: env.GEN_DIAG == 'true'
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] Render diagrams"
+          mmdc -i "${OUT_DIR}/assets/dns_cache_flow.mmd" -o "${OUT_DIR}/assets/dns_cache_flow.svg"
+          mmdc -i "${OUT_DIR}/assets/dns_cache_flow.mmd" -o "${OUT_DIR}/assets/dns_cache_flow.png" -b transparent
+
+      - name: Create sample cache table (JSON/CSV)
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] Create sample cache entries"
+          cat > "${OUT_DIR}/samples/cache_table.json" <<'JSON'
+          [
+            {
+              "name": "www.example.com.",
+              "type": "A",
+              "class": "IN",
+              "rdata": "93.184.216.34",
+              "ttl": 3600,
+              "cached_time": "2025-08-23T12:00:00Z",
+              "expire_time": "2025-08-23T13:00:00Z"
+            },
+            {
+              "name": "api.example.com.",
+              "type": "AAAA",
+              "class": "IN",
+              "rdata": "2606:2800:220:1:248:1893:25c8:1946",
+              "ttl": 600,
+              "cached_time": "2025-08-23T12:05:00Z",
+              "expire_time": "2025-08-23T12:15:00Z"
+            },
+            {
+              "name": "no-such.example.com.",
+              "type": "A",
+              "class": "IN",
+              "rdata": "NXDOMAIN",
+              "ttl": 300,
+              "cached_time": "2025-08-23T12:10:00Z",
+              "expire_time": "2025-08-23T12:15:00Z",
+              "note": "Negative Caching (RFC 2308)"
+            }
+          ]
+          JSON
+
+          jq -r '
+            ["name","type","class","rdata","ttl","cached_time","expire_time","note"],
+            (.[] | [.name,.type,.class,.rdata,.ttl,.cached_time,.expire_time, (.note // "")])
+            | @csv
+          ' "${OUT_DIR}/samples/cache_table.json" > "${OUT_DIR}/samples/cache_table.csv"
+
+      - name: Create flush examples (Windows/Linux/macOS)
+        if: env.GEN_FLUSH == 'true'
+        run: |
+          set -Eeuo pipefail
+          cat > "${OUT_DIR}/scripts/flush_windows.ps1" <<'PS1'
+          ipconfig /displaydns
+          ipconfig /flushdns
+          Write-Host "[OK] Flushed Windows DNS client cache."
+          PS1
+
+          cat > "${OUT_DIR}/scripts/flush_linux.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          sudo systemd-resolve --statistics || true
+          sudo systemd-resolve --flush-caches
+          echo "[OK] Flushed systemd-resolved cache."
+          SH
+          chmod +x "${OUT_DIR}/scripts/flush_linux.sh"
+
+          cat > "${OUT_DIR}/scripts/flush_macos.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          sudo killall -INFO mDNSResponder || true
+          sudo killall -HUP mDNSResponder
+          echo "[OK] Flushed macOS mDNSResponder cache."
+          SH
+          chmod +x "${OUT_DIR}/scripts/flush_macos.sh"
+
+      - name: Create README (ko/en)
+        run: |
+          set -Eeuo pipefail
+          if [ "${LANG_SEL}" = "en" ]; then
+            cat > "${OUT_DIR}/README.md" <<'MD'
+            # DNS Cache Table (Expert Guide)
+
+            ## What it is
+            An in-memory table storing recent DNS query results (name ⇄ address), used by browsers, OS resolvers, and recursive resolvers to reduce latency and load.
+
+            ## Layers
+            - Application/Browser cache
+            - OS DNS cache (Windows DNS Client, systemd-resolved, mDNSResponder, etc.)
+            - Recursive resolver cache (ISP, 8.8.8.8, 1.1.1.1)
+            - Authoritative servers (no typical caching)
+
+            ## Table fields
+            Name, Type, Class(IN), RDATA, TTL, CachedTime, ExpireTime.
+
+            ## Negative caching
+            NXDOMAIN responses are cached per RFC 2308 (TTL taken from SOA/minimum).
+
+            ## Security
+            - DNSSEC (RFC 4033–4035)
+            - 0x20 randomization
+            - Sensible TTLs; periodic flush
+
+            ## Diagrams
+            See `assets/dns_cache_flow.svg` and `.png`.
+
+            ## OS Commands
+            - Windows: `ipconfig /displaydns`, `ipconfig /flushdns`
+            - Linux: `systemd-resolve --status`, `--flush-caches`
+            - macOS: `killall -INFO mDNSResponder`, `-HUP`
+
+            ## Samples
+            - `samples/cache_table.json`, `samples/cache_table.csv`
+            MD
           else
-            git commit -m "[site] DB report + echo files (auto)"
-            git push
-            echo "[ECHO][SITE] Reports committed"
+            cat > "${OUT_DIR}/README.md" <<'MD'
+            # DNS 캐시 테이블 (전문가 가이드)
+
+            ## 개요
+            브라우저/OS/재귀 리졸버가 **도메인⇄주소 해석 결과**를 보관하는 **메모리 캐시 테이블**입니다. 재조회 시 지연을 줄이고(µs~ms), 상위 DNS 부하를 완화합니다.
+
+            ## 캐시 계층
+            - 애플리케이션/브라우저 캐시
+            - 운영체제 캐시(Windows DNS Client, systemd-resolved, mDNSResponder 등)
+            - 재귀 리졸버 캐시(ISP, 8.8.8.8, 1.1.1.1)
+            - 권한 DNS 서버(일반적으로 캐시하지 않음)
+
+            ## 테이블 필드
+            Name, Type, Class(IN), RDATA, TTL, CachedTime, ExpireTime
+
+            ## Negative Caching
+            NXDOMAIN 응답도 RFC 2308에 따라 TTL 범위로 캐시됩니다(SOA Minimum 기반).
+
+            ## 보안
+            - DNSSEC(RFC 4033~4035)
+            - 0x20 대소문자 난수화
+            - 적정 TTL과 주기적 플러시
+
+            ## 다이어그램
+            `assets/dns_cache_flow.svg`, `.png` 참고
+
+            ## OS 명령
+            - Windows: `ipconfig /displaydns`, `ipconfig /flushdns`
+            - Linux: `systemd-resolve --status`, `--flush-caches`
+            - macOS: `killall -INFO mDNSResponder`, `-HUP`
+
+            ## 샘플
+            - `samples/cache_table.json`, `samples/cache_table.csv`
+            MD
           fi
 
-  cleanup:
-    name: "8) Cleanup Containers/Images (optional)"
-    runs-on: ubuntu-latest
-    needs: [db_oracle, db_mariadb, db_teradata, echo_image, report]
-    if: ${{ inputs.cleanup == 'true' }}
-    steps:
-      - name: "Docker cleanup"
+      - name: Summarize outputs (index)
         run: |
           set -Eeuo pipefail
-          echo "[ECHO][CLEANUP] Removing containers & pruning"
-          docker rm -f oracle-xe mariadb teradata bastion 2>/dev/null || true
-          docker system prune -af || true
-          echo "[ECHO][CLEANUP] Done"
+          cat > "${OUT_DIR}/INDEX.md" <<'MD'
+          # Index
+          - README.md
+          - assets/
+            - dns_cache_flow.mmd
+            - dns_cache_flow.svg
+            - dns_cache_flow.png
+          - samples/
+            - cache_table.json
+            - cache_table.csv
+          - scripts/
+            - flush_windows.ps1
+            - flush_linux.sh
+            - flush_macos.sh
+          MD
+
+      - name: Commit & Push
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] Configure Git"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # ensure branch exists
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "${BRANCH}" ]; then
+            git checkout -B "${BRANCH}"
+          fi
+
+          echo "[ECHO] Add & commit"
+          git add -A "${OUT_DIR}"
+          if git diff --cached --quiet; then
+            echo "[ECHO] No changes to commit."
+          else
+            git commit -m "${COMMIT_MSG}"
+            git push origin "${BRANCH}"
+            echo "[ECHO] Pushed changes to ${BRANCH}"
+          fi
+
+      - name: Upload artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dns-cache-docs
+          path: ${{ github.event.inputs.out_dir }}
