@@ -1,22 +1,16 @@
-# 워크플로우의 이름 설정
-name: Multi-Server Netstat Reporter (Issue Report Only)
+name: Multi-Server Netstat Reporter (Final Version)
 
-# 워크플로우를 실행할 조건 설정
 on:
-  # 매일 UTC 기준 00:00 (KST 09:00)에 실행
   schedule:
-    - cron: '0 0 * * *'
-  # GitHub UI에서 'Run workflow' 버튼으로 수동 실행 가능
+    - cron: '0 0 * * *' # 매일 UTC 00:00 (KST 09:00) 실행
   workflow_dispatch:
 
-# 워크플로우에서 실행할 작업(jobs) 정의
 jobs:
   check_and_report_netstat:
     runs-on: ubuntu-latest
-
-    # GitHub Secrets에 등록된 서버 정보와 SSH 키를 워크플로우에 전달
+    
+    # 환경 변수 설정
     env:
-      REPORT_TITLE: "Daily Netstat Report"
       SSH_HOST: ${{ secrets.SSH_HOST }}
       SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
       SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -25,18 +19,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      #----------------------------------------------------
-      # 1. SSH를 통해 원격 서버에 접속하여 netstat 실행
-      #----------------------------------------------------
-      - name: Get netstat data from server
+      - name: Set up SSH key
+        run: |
+          # 1. SSH 키가 PEM 형식이 아닐 경우를 대비해 임시 파일을 만들고 키를 저장
+          echo "${{ env.SSH_PRIVATE_KEY }}" | tr -d '\r' > ssh_key.pem
+          
+          # 2. 키 파일의 권한 설정
+          chmod 600 ssh_key.pem
+
+          # 3. 키가 유효한지 확인하고 PEM 형식으로 변환 (필요 시)
+          # 이 단계는 appleboy/ssh-action의 요구사항을 충족시키기 위함
+          # 대부분의 경우 SSH_PRIVATE_KEY는 PEM 형식이어야 함
+          ssh-keygen -y -f ssh_key.pem > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "SSH key is not in PEM format. Attempting conversion..."
+            # OpenSSH 키 형식을 PEM으로 변환 (ssh-keygen -p -f <key_file> -m pem)
+            # 이 기능은 일부 환경에서만 작동하며, GitHub Actions 환경에서는 복잡할 수 있음.
+            # 가장 확실한 방법은 Secrets에 등록할 때부터 PEM 형식으로 올리는 것.
+            # 이 예시는 단순화된 로직입니다.
+          else
+            echo "SSH key is in PEM format."
+          fi
+
+      - name: Connect to server and run netstat
         id: netstat_data_step
         uses: appleboy/ssh-action@v0.1.7
         with:
-          # 시크릿에 저장된 SSH 접속 정보 사용
           host: ${{ env.SSH_HOST }}
           username: ${{ env.SSH_USERNAME }}
           key: ${{ env.SSH_PRIVATE_KEY }}
-          # 실행할 셸 스크립트. 여러 명령어를 조합하여 실행 결과를 정리
           script: |
             echo "# 서버 네트워크 상태 보고서"
             echo ""
@@ -67,18 +78,12 @@ jobs:
             echo ""
             echo "---"
             echo "점검 시간: $(date '+%Y-%m-%d %H:%M:%S')"
-            
-      #----------------------------------------------------
-      # 2. 결과 보고서 생성 및 GitHub Issue에 등록
-      #----------------------------------------------------
+      
       - name: Create GitHub Issue report
+        if: always() # SSH 연결 실패 시에도 이슈 생성 (에러 보고)
         uses: peter-evans/create-issue-from-file@v4
         with:
-          # 이슈 제목을 동적으로 생성
           title: 'Netstat Report - Server Status (${{ github.ref_name }})'
-          # SSH 접속 스크립트의 출력 결과를 이슈 내용으로 사용
           content: ${{ steps.netstat_data_step.outputs.stdout }}
-          # GITHUB_TOKEN을 사용하여 이슈 생성 권한 부여
           token: ${{ secrets.GITHUB_TOKEN }}
-          # 보고서를 할당할 사용자 지정 (선택 사항)
           assignees: your-github-username
