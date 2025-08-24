@@ -1,4 +1,4 @@
-name: "🛡️ IDS Misuse-Detection Suite — ALL-IN (Suricata PPA + Snort3 Docker + Huge Rules + Pages + Release)"
+name: "🛡️ IDS Misuse-Detection Suite — ULTRA ALL-IN (Suricata PPA + Snort3 Docker + Huge Rules + ECHO Pack + Pages + Release)"
 
 on:
   workflow_dispatch:
@@ -9,11 +9,11 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: "pages-ultra"
   cancel-in-progress: false
 
 jobs:
-  ids-suite:
+  ids-ultra:
     runs-on: ubuntu-latest
     env:
       PYTHONWARNINGS: "ignore::SyntaxWarning"
@@ -23,6 +23,7 @@ jobs:
       PCAP_DIR: .github/echo_ids/pcap
       LOG_DIR: .github/echo_ids/logs
       SITE_DIR: .github/echo_ids/out/site
+      PACK_DIR: .github/echo_ids/echo-pack
       SNORT3_IMG: "ciscotalos/snort3:latest"
 
     steps:
@@ -33,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$RULE_DIR" "$PCAP_DIR" "$LOG_DIR" "$OUT_DIR/conf" "$SITE_DIR" "$ECHO_ROOT/tools"
+          mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$RULE_DIR" "$PCAP_DIR" "$LOG_DIR" "$OUT_DIR/conf" "$SITE_DIR" "$ECHO_ROOT/tools" "$PACK_DIR"
           cat > "$ECHO_ROOT/tools/echo.sh" <<'EOSH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -52,7 +53,7 @@ jobs:
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
           step "APT update + base packages"
           sudo apt-get update -y
-          sudo apt-get install -y software-properties-common curl jq ca-certificates gnupg lsb-release python3 python3-pip wireshark-common
+          sudo apt-get install -y software-properties-common curl jq ca-certificates gnupg lsb-release python3 python3-pip wireshark-common zip
           step "Add OISF Suricata PPA"
           sudo add-apt-repository -y ppa:oisf/suricata-stable
           sudo apt-get update -y
@@ -84,15 +85,15 @@ jobs:
           docker run --rm "$SNORT3_IMG" snort -V || true
           docker run --rm "$SNORT3_IMG" snort --daq-list || true
 
-      - name: "📝 Generate LARGE ruleset (split files, sticky buffers fixed)"
+      - name: "📝 Generate HUGE ruleset (multi-category, sticky buffers fixed)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
           step "Write category rules"
 
-          # WEB
+          # WEB (HTTP)
           cat > "$RULE_DIR/web.rules" <<'R1'
-          # SQLi (단순, URI) — content 먼저, 즉시 http_uri 한정자
+          # SQLi (단순, URI)
           alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
             msg:"WEB SQLi simple";
             flow:to_server,established;
@@ -171,15 +172,21 @@ jobs:
           )
           R4
 
-          # POLICY/MISC
-          cat > "$RULE_DIR/policy.rules" <<'R5'
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"POLICY HTTP method override suspicious";
-            flow:to_server,established;
-            content:"X-HTTP-Method-Override|3a|"; nocase; http_header;
-            sid:1004001; rev:1;
+          # TLS (지표성 룰 - 테스트용, PCAP 어설션 대상 아님)
+          cat > "$RULE_DIR/tls.rules" <<'R6'
+          alert tls $EXTERNAL_NET any -> $HOME_NET any (
+            msg:"TLS SNI suspicious (.onion)";
+            content:".onion"; nocase; tls.sni;
+            classtype:policy-violation; sid:1005001; rev:1;
           )
-          R5
+          R6
+
+          # FTP/SMTP/SMB (지표성 룰 - 테스트용, PCAP 어설션 대상 아님)
+          cat > "$RULE_DIR/misc.rules" <<'R7'
+          alert tcp any any -> $HOME_NET 21 (msg:"FTP control usage"; flow:to_server,established; content:"220 "; depth:4; sid:1006001; rev:1;)
+          alert tcp any any -> $HOME_NET 25 (msg:"SMTP HELO/MAIL"; flow:to_server,established; content:"HELO "; sid:1006002; rev:1;)
+          alert tcp any any -> $HOME_NET 445 (msg:"SMB attempt"; flags:S; flow:stateless; sid:1006003; rev:1;)
+          R7
 
           step "Combine rules → combined.local.rules"
           cat "$RULE_DIR/"*.rules > "$RULE_DIR/combined.local.rules"
@@ -217,30 +224,53 @@ jobs:
           LUA
           ok "snort.lua ready"
 
-      - name: "🧪 Build PCAP suite (SQLi/XSS/DNS)"
+      - name: "🧪 Build PCAP suite (SQLi/XSS/DNS + RECON + SSH BF)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Create Scapy PCAP builder"
           cat > "$PCAP_DIR/build_pcap.py" <<'PY'
-          import logging; logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-          from scapy.all import Ether, IP, TCP, UDP, Raw, wrpcap, conf
+          import logging, sys, random
+          logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+          from scapy.all import Ether, IP, TCP, UDP, ICMP, Raw, wrpcap, conf
           conf.verb = 0
+          out_path = sys.argv[1] if len(sys.argv) > 1 else "suite.pcap"
           pkts=[]
+
           # SQLi GET
-          pkts.append(Ether()/IP(src="192.0.2.10",dst="192.0.2.20")/TCP(sport=12345,dport=80,seq=1)/Raw(load=b"GET /search?q=' OR 1=1 -- HTTP/1.1\r\nHost: x\r\n\r\n"))
+          pkts.append(Ether()/IP(src="192.0.2.10",dst="192.0.2.20")/
+                      TCP(sport=12345,dport=80,flags="S",seq=1)/
+                      Raw(load=b"GET /search?q=' OR 1=1 -- HTTP/1.1\r\nHost: x\r\n\r\n"))
+
           # XSS POST
           body=b"<script>alert(1)</script>"
           post=(b"POST /comment HTTP/1.1\r\nHost: x\r\nContent-Length: "+str(len(body)).encode()+b"\r\n\r\n")+body
-          pkts.append(Ether()/IP(src="192.0.2.11",dst="192.0.2.20")/TCP(sport=23456,dport=80,seq=1)/Raw(load=post))
+          pkts.append(Ether()/IP(src="192.0.2.11",dst="192.0.2.20")/
+                      TCP(sport=23456,dport=80,flags="S",seq=1)/
+                      Raw(load=post))
+
           # DNS exfil (long query)
           q=b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"+(b"a"*90)+b"\x00\x00\x01\x00\x01"
-          pkts.append(Ether()/IP(src="198.51.100.10",dst="198.51.100.53")/UDP(sport=53000,dport=53)/Raw(load=q))
-          wrpcap("suite.pcap", pkts)
+          pkts.append(Ether()/IP(src="198.51.100.10",dst="198.51.100.53")/
+                      UDP(sport=53000,dport=53)/
+                      Raw(load=q))
+
+          # RECON SYN scan (25 ports)
+          for dport in list(range(10000,10025)):
+              pkts.append(Ether()/IP(src="203.0.113.50",dst="192.0.2.20")/TCP(sport=40000,dport=dport,flags="S",seq=random.randint(1,1<<32)))
+
+          # SSH brute force (12 SYNs)
+          for i in range(12):
+              pkts.append(Ether()/IP(src="203.0.113.60",dst="192.0.2.20")/TCP(sport=41000+i,dport=22,flags="S",seq=random.randint(1,1<<32)))
+
+          wrpcap(out_path, pkts)
+          print(f"[OK] wrote {out_path} ({len(pkts)} packets)")
           PY
-          python3 "$PCAP_DIR/build_pcap.py"
-          mv "$PCAP_DIR/suite.pcap" "$PCAP_DIR/suite.pcap"
+          step "Build PCAP to fixed path"
+          python3 "$PCAP_DIR/build_pcap.py" "$PCAP_DIR/suite.pcap"
+          step "List PCAP dir"
           ls -l "$PCAP_DIR"
-          ok "PCAP ready"
+          ok "PCAP ready at $PCAP_DIR/suite.pcap"
 
       - name: "🧷 Optional stage: default-rule-path copy"
         shell: bash
@@ -281,30 +311,27 @@ jobs:
           echo "[SNORT3] alert_fast.log ↓"; test -f "$OUT_DIR/snort3/alert_fast.log" && tail -n +1 "$OUT_DIR/snort3/alert_fast.log" || warn "No alert_fast.log"
           ok "Offline runs done"
 
-      - name: "🔎 Assertions (SQLi/XSS/DNS all fire on both engines)"
+      - name: "🔎 Assertions (WEB/DNS/RECON/SSH on both engines)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
           PASS=1
-
           # Suricata assertions
-          for pat in "WEB SQLi simple" "WEB XSS body" "DNS exfil large query"; do
+          for pat in "WEB SQLi simple" "WEB XSS body" "DNS exfil large query" "RECON TCP SYN scan" "AUTH SSH brute force"; do
             if ! grep -q "$pat" "$OUT_DIR/suricata/fast.log"; then
               warn "[ASSERT][SURICATA] Missing: $pat"; PASS=0
             else
               ok "[ASSERT][SURICATA] Fired: $pat"
             fi
           done
-
           # Snort3 assertions
-          for pat in "WEB SQLi simple" "WEB XSS body" "DNS exfil large query"; do
+          for pat in "WEB SQLi simple" "WEB XSS body" "DNS exfil large query" "RECON TCP SYN scan" "AUTH SSH brute force"; do
             if ! grep -q "$pat" "$OUT_DIR/snort3/alert_fast.log"; then
               warn "[ASSERT][SNORT3] Missing: $pat"; PASS=0
             else
               ok "[ASSERT][SNORT3] Fired: $pat"
             fi
           done
-
           [ "$PASS" -eq 1 ] || fail "One or more detections did not trigger on both engines"
           ok "All assertions passed"
 
@@ -353,24 +380,97 @@ jobs:
           PY
           ok "Pages site generated"
 
-      - name: "📦 Bundle artifacts (tar.gz)"
+      - name: "📦 Build ECHO PACK (dirs/files + installers + manifest)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
-          BUNDLE="ids-suite-bundle-${GITHUB_RUN_NUMBER}.tar.gz"
-          tar -czf "$BUNDLE" -C .github/echo_ids rules pcap out
-          mv "$BUNDLE" "$OUT_DIR/$BUNDLE"
-          ls -l "$OUT_DIR/$BUNDLE"
-          ok "Bundle created"
+          step "Create ECHO PACK tree"
+          mkdir -p "$PACK_DIR"/{rules,pcap,logs,conf,site,tools}
+          cp -a "$RULE_DIR/combined.rules" "$PACK_DIR/rules/"
+          cp -a "$RULE_DIR/"*.rules "$PACK_DIR/rules/" || true
+          cp -a "$PCAP_DIR/suite.pcap" "$PACK_DIR/pcap/" || true
+          cp -a "$OUT_DIR/suricata/fast.log" "$PACK_DIR/logs/" || true
+          cp -a "$OUT_DIR/snort3/alert_fast.log" "$PACK_DIR/logs/" || true
+          cp -a "$OUT_DIR/conf/"* "$PACK_DIR/conf/" || true
+          cp -a "$SITE_DIR/"* "$PACK_DIR/site/" || true
+          cp -a "$ECHO_ROOT/tools/echo.sh" "$PACK_DIR/tools/" || true
 
-      - name: "⬆️ Upload run artifacts"
+          step "Write install scripts (Suricata system, Snort3 docker)"
+          cat > "$PACK_DIR/tools/install_suricata.sh" <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          echo "[ECHO] Installing combined.rules into Suricata default-rule-path..."
+          SYS_YAML="/etc/suricata/suricata.yaml"
+          [ -f "$SYS_YAML" ] || { echo "[FAIL] suricata.yaml not found"; exit 1; }
+          DEFAULT_RULE_PATH=$(awk -F': *' '/^[[:space:]]*default-rule-path:/ {gsub(/"/,"",$2);print $2;exit}' "$SYS_YAML" || true)
+          [ -z "$DEFAULT_RULE_PATH" ] && DEFAULT_RULE_PATH="/etc/suricata/rules"
+          sudo mkdir -p "$DEFAULT_RULE_PATH"
+          sudo cp "$(dirname "$0")/../rules/combined.rules" "$DEFAULT_RULE_PATH/combined.rules"
+          echo "[OK] Copied to $DEFAULT_RULE_PATH/combined.rules"
+          echo "[ECHO] Test: sudo suricata -T -c $SYS_YAML -S $DEFAULT_RULE_PATH/combined.rules -v"
+          BASH
+          chmod +x "$PACK_DIR/tools/install_suricata.sh"
+
+          cat > "$PACK_DIR/tools/run_snort3_docker.sh" <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          here="$(cd "$(dirname "$0")"/.. && pwd)"
+          docker run --rm -v "$here":/work -w /work ciscotalos/snort3:latest \
+            snort -c /work/conf/snort.lua -S /work/rules/combined.rules -A alert_fast -q -l /work/logs -r /work/pcap/suite.pcap -k none
+          echo "[OK] Snort3 finished. See logs/alert_fast.log"
+          BASH
+          chmod +x "$PACK_DIR/tools/run_snort3_docker.sh"
+
+          step "Write ECHO README"
+          cat > "$PACK_DIR/README_ECHO.md" <<'MD'
+          # ECHO PACK
+          - `rules/combined.rules` : 로컬+ET 병합 룰
+          - `pcap/suite.pcap` : SQLi/XSS/DNS/RECON/SSH 샘플
+          - `tools/install_suricata.sh` : Suricata 시스템 적용
+          - `tools/run_snort3_docker.sh` : Snort3 Docker 구동
+          - `conf/` : snort.lua 등 구성 샘플
+          - `logs/` : 실행 로그 샘플
+          - `site/` : 정적 리포트
+          MD
+
+          step "Write manifest + checksums"
+          cat > "$PACK_DIR/manifest.json" <<JSON
+          {
+            "name": "ids-echo-pack",
+            "version": "${GITHUB_RUN_NUMBER}",
+            "generated_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "contents": ["rules","pcap","logs","conf","site","tools"]
+          }
+          JSON
+          (cd "$PACK_DIR" && find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          ok "ECHO PACK ready"
+
+      - name: "📦 Bundle artifacts (tar.gz & zip)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Create bundles"
+          TAR_BUNDLE="ids-ultra-bundle-${GITHUB_RUN_NUMBER}.tar.gz"
+          PACK_TAR="ids-echo-pack-${GITHUB_RUN_NUMBER}.tar.gz"
+          PACK_ZIP="ids-echo-pack-${GITHUB_RUN_NUMBER}.zip"
+          tar -czf "$TAR_BUNDLE" -C .github/echo_ids rules pcap out
+          tar -czf "$PACK_TAR" -C .github/echo_ids echo-pack
+          (cd .github/echo_ids && zip -qr "../../$PACK_ZIP" echo-pack)
+          mv "$TAR_BUNDLE" "$OUT_DIR/$TAR_BUNDLE"
+          mv "$PACK_TAR" "$OUT_DIR/$PACK_TAR"
+          mv "$PACK_ZIP" "$OUT_DIR/$PACK_ZIP"
+          ls -l "$OUT_DIR/" | sed -n '1,200p'
+          ok "Bundles created"
+
+      - name: "⬆️ Upload run artifacts (incl. ECHO PACK)"
         uses: actions/upload-artifact@v4
         with:
-          name: ids-misuse-artifacts
+          name: ids-ultra-artifacts
           path: |
             .github/echo_ids/out/**
             .github/echo_ids/rules/**
             .github/echo_ids/pcap/**
+            .github/echo_ids/echo-pack/**
           if-no-files-found: warn
 
       - name: "📤 Upload Pages artifact"
@@ -378,21 +478,22 @@ jobs:
         with:
           path: .github/echo_ids/out/site
 
-      - name: "🏷️ Create Release"
+      - name: "🏷️ Create Release (attach bundles)"
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ids-suite-${{ github.run_number }}
-          name: IDS Suite ${{ github.run_number }}
+          tag_name: ids-ultra-${{ github.run_number }}
+          name: IDS ULTRA ${{ github.run_number }}
           body: |
-            Automated release from workflow run ${{ github.run_number }}.
-            Includes combined.rules (local+ET if available), generated PCAPs, logs, and static report.
+            ULTRA run ${{ github.run_number }} — includes combined.rules (local+ET if available), multi-PCAPs, logs, static report, and full ECHO PACK with installers.
           files: |
-            .github/echo_ids/out/ids-suite-bundle-${{ github.run_number }}.tar.gz
+            .github/echo_ids/out/ids-ultra-bundle-${{ github.run_number }}.tar.gz
+            .github/echo_ids/out/ids-echo-pack-${{ github.run_number }}.tar.gz
+            .github/echo_ids/out/ids-echo-pack-${{ github.run_number }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   deploy-pages:
-    needs: ids-suite
+    needs: ids-ultra
     runs-on: ubuntu-latest
     environment:
       name: github-pages
