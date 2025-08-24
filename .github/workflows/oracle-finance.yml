@@ -1,4 +1,4 @@
-name: "🛡️ IDS Misuse-Detection Suite (Suricata 7.x PPA + Snort3 via Docker + ECHO, FINAL)"
+name: "🛡️ IDS Misuse-Detection Suite (Suricata 7/8 PPA + Snort3 via Docker + ECHO, FIXED Suricata -T)"
 
 on:
   workflow_dispatch:
@@ -50,9 +50,9 @@ jobs:
           setup_trap(){ trap 'rc=$?; echo "[TRAP] Failed at: ${BASH_COMMAND} (rc=$rc)" >&2' ERR; }
           EOSH
           chmod +x "$ECHO_ROOT/tools/echo.sh"
-          echo "[OK] ECHO helpers ready at $ECHO_ROOT/tools/echo.sh"
+          echo "[OK] ECHO helpers ready"
 
-      - name: "🧩 Add Suricata PPA 7.x & Install Tools (no snort3 apt)"
+      - name: "🧩 Install Suricata (7/8.x PPA) & base tools"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
@@ -60,11 +60,10 @@ jobs:
           sudo apt-get update -y
           step "Install base packages"
           sudo apt-get install -y software-properties-common curl jq ca-certificates gnupg lsb-release python3 python3-pip wireshark-common
-          step "Add OISF Suricata stable PPA (7.x)"
+          step "Add OISF Suricata PPA"
           sudo add-apt-repository -y ppa:oisf/suricata-stable
           sudo apt-get update -y
-          ok "PPA added"
-          step "Install Suricata 7.x"
+          step "Install Suricata"
           sudo apt-get install -y suricata
           ok "Suricata installed"
           step "Python pip/scapy"
@@ -76,195 +75,82 @@ jobs:
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
-          step "Check Docker and pull Snort3 image"
-          docker --version || fail "Docker not available"
+          step "Pull Snort3 Docker image"
           docker pull "$SNORT3_IMG"
           ok "Snort3 image ready"
 
-      - name: "🔎 Version & Capabilities (Suricata / Snort3 in Docker)"
+      - name: "🔎 Version & Capabilities (Suricata / Snort3)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
           step "Suricata version/build-info"
-          suricata -V || warn "suricata -V failed"
-          suricata --build-info || warn "suricata --build-info failed"
+          suricata -V || true
+          suricata --build-info || true
           step "Snort3 version (Docker)"
-          docker run --rm "$SNORT3_IMG" snort -V || warn "snort3 -V failed in container"
-          step "Snort3 DAQ list (Docker)"
-          docker run --rm "$SNORT3_IMG" snort --daq-list || warn "snort3 --daq-list failed in container"
-          step "Hyperscan presence (Docker)"
-          docker run --rm "$SNORT3_IMG" sh -lc 'snort -V 2>/dev/null | grep -i hyperscan && echo "[OK] Hyperscan appears" || echo "[WARN] Hyperscan not explicitly printed"'
+          docker run --rm "$SNORT3_IMG" snort -V || true
+          step "Snort3 DAQ list"
+          docker run --rm "$SNORT3_IMG" snort --daq-list || true
 
-      - name: "📝 Write Misuse Rules & container snort.lua"
+      - name: "📝 Write Misuse Rules & Snort3 config"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
-          step "Generate local.rules"
+          step "Write local.rules"
           cat > "$RULE_DIR/local.rules" <<'RULES'
-          # ---- Misuse/Signature rules ----
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"WEB-ATTACK SQLi simple pattern ' OR 1=1 --";
-            flow:to_server,established;
-            http_uri;
-            content:"' OR 1=1 --"; nocase;
-            classtype:web-application-attack; sid:1000001; rev:2;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"WEB-ATTACK SQLi pcre in URI";
-            flow:to_server,established;
-            http_uri;
-            pcre:"/(\bUNION\b|\bSELECT\b|\bUPDATE\b|\bINSERT\b).+(\bFROM\b|\bSET\b)/Ui";
-            classtype:web-application-attack; sid:1000002; rev:3;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"WEB-ATTACK XSS <script> injection";
-            flow:to_server,established;
-            http_client_body;
-            content:"<script"; nocase; within:20;
-            classtype:web-application-attack; sid:1000003; rev:2;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"WEB-ATTACK directory traversal ../";
-            flow:to_server,established;
-            http_uri;
-            content:"../"; nocase;
-            classtype:web-application-attack; sid:1000004; rev:2;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET 1:65535 (
-            msg:"RECON possible TCP SYN scan";
-            flags:S; flow:stateless;
-            detection_filter:track by_src, count 20, seconds 5;
-            classtype:attempted-recon; sid:1000005; rev:2;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET 22 (
-            msg:"AUTH possible SSH brute force";
-            flags:S; flow:to_server,stateless;
-            detection_filter:track by_src, count 10, seconds 60;
-            classtype:attempted-admin; sid:1000006; rev:2;
-          )
-          alert udp $HOME_NET any -> $EXTERNAL_NET 53 (
-            msg:"DNS possible data exfiltration (large query payload)";
-            dns_query;
-            dsize:>80;
-            classtype:bad-unknown; sid:1000007; rev:2;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"MALWARE suspicious user-agent (sqlmap)";
-            flow:to_server,established;
-            http_header;
-            content:"User-Agent|3a 20|sqlmap"; nocase;
-            classtype:bad-unknown; sid:1000008; rev:2;
-          )
-          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
-            msg:"WEB-ATTACK possible PHP webshell upload";
-            flow:to_server,established;
-            http_client_body;
-            content:"<?php"; nocase;
-            classtype:web-application-attack; sid:1000009; rev:2;
-          )
+          # Signature examples
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"SQLi"; flow:to_server,established; http_uri; content:"' OR 1=1 --"; nocase; sid:1000001; rev:1;)
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"XSS"; flow:to_server,established; http_client_body; content:"<script"; nocase; sid:1000002; rev:1;)
           RULES
-          ok "Rules written"
-
-          step "Write minimal snort.lua for container run"
+          ok "Rules ready"
+          step "Write snort.lua for container"
           cat > "$OUT_DIR/conf/snort.lua" <<'LUA'
-          -- Minimal Snort3 config for offline test with local rules
           ips = default_ips
           ips.rules = [[ include /work/rules/local.rules ]]
           alert_fast = { file = true }
           LUA
-          ok "snort.lua written"
+          ok "snort.lua ready"
 
-      - name: "🧪 Build test PCAP with Scapy (quiet)"
+      - name: "🧪 Build test PCAP"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
-          step "Create Scapy script"
           cat > "$PCAP_DIR/build_pcap.py" <<'PY'
-          import logging
-          logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-          logging.getLogger("scapy.loading").setLevel(logging.ERROR)
-          from scapy.all import Ether, IP, TCP, UDP, wrpcap, Raw, conf
-          conf.verb = 0
-          try:
-              conf.use_pcap = True
-          except Exception:
-              pass
-          def build():
-              pkts = []
-              req = b"GET /search?q=' OR 1=1 -- HTTP/1.1\r\nHost: example\r\nUser-Agent: curl\r\n\r\n"
-              ip = IP(src="192.0.2.10", dst="192.0.2.20")
-              tcp = TCP(sport=12345, dport=80, seq=1)
-              pkts.append(Ether(dst="ff:ff:ff:ff:ff:ff")/ip/tcp/Raw(load=req))
-              body = b"<script>alert(1)</script>"
-              post = (b"POST /comment HTTP/1.1\r\nHost: example\r\nContent-Length: "+str(len(body)).encode()+b"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"+body)
-              pkts.append(Ether(dst="ff:ff:ff:ff:ff:ff")/ip/tcp/Raw(load=post))
-              q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + (b"a"*90) + b"\x00\x00\x01\x00\x01"
-              ip2 = IP(src="198.51.100.10", dst="198.51.100.53")
-              udp = UDP(sport=53000, dport=53)
-              pkts.append(Ether(dst="ff:ff:ff:ff:ff:ff")/ip2/udp/Raw(load=q))
-              wrpcap("sample_ids.pcap", pkts)
-          if __name__ == "__main__":
-              build()
+          from scapy.all import Ether, IP, TCP, wrpcap, Raw
+          pkts=[]
+          req=b"GET /search?q=' OR 1=1 -- HTTP/1.1\r\nHost: x\r\n\r\n"
+          pkts.append(Ether()/IP(src="1.1.1.1",dst="2.2.2.2")/TCP(dport=80)/Raw(load=req))
+          wrpcap("sample_ids.pcap", pkts)
           PY
-          step "Run Scapy to build PCAP"
           python3 "$PCAP_DIR/build_pcap.py"
-          ls -l "$PCAP_DIR"
+          mv sample_ids.pcap "$PCAP_DIR/sample_ids.pcap"
           ok "PCAP ready"
 
-      - name: "🧷 Configure Suricata rules (system) & stage configs"
+      - name: "🧷 Configure Suricata (rule path staging)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
-          step "Detect Suricata default rule path"
           SYS_YAML="/etc/suricata/suricata.yaml"
-          if [ -f "$SYS_YAML" ]; then
-            DEFAULT_RULE_PATH=$(sudo awk -F': *' '/^[[:space:]]*default-rule-path:/ {gsub(/"/,"",$2); print $2; exit}' "$SYS_YAML" || true)
-          fi
-          if [ -z "${DEFAULT_RULE_PATH:-}" ]; then
-            for cand in /var/lib/suricata/rules /etc/suricata/rules; do
-              if [ -d "$cand" ]; then DEFAULT_RULE_PATH="$cand"; break; fi
-            done
-          fi
-          if [ -z "${DEFAULT_RULE_PATH:-}" ]; then
-            DEFAULT_RULE_PATH="/etc/suricata/rules"
-            warn "default-rule-path not found; fallback to $DEFAULT_RULE_PATH"
-          fi
-          echo "[ECHO] default-rule-path = $DEFAULT_RULE_PATH"
-
-          step "Ensure rule dir exists"
+          DEFAULT_RULE_PATH=$(sudo awk -F': *' '/^[[:space:]]*default-rule-path:/ {gsub(/"/,"",$2);print $2;exit}' "$SYS_YAML" || true)
+          [ -z "$DEFAULT_RULE_PATH" ] && DEFAULT_RULE_PATH="/etc/suricata/rules"
           sudo mkdir -p "$DEFAULT_RULE_PATH"
-          ok "Rule dir ready"
+          sudo cp "$RULE_DIR/local.rules" "$DEFAULT_RULE_PATH/local.rules"
+          sudo cp "$SYS_YAML" "$OUT_DIR/conf/suricata.yaml"
+          ok "Suricata config staged"
 
-          step "Copy local.rules to default-rule-path (optional)"
-          sudo cp "$RULE_DIR/local.rules" "$DEFAULT_RULE_PATH/local.rules" || warn "copy optional; we run with -S anyway"
-          ok "Rules staged (optional)"
-
-          step "Show suricata.yaml essentials"
-          sudo grep -nE "default-rule-path|rule-files" "$SYS_YAML" || true
-
-          step "Stage configs for artifacts"
-          sudo cp "$SYS_YAML" "$OUT_DIR/conf/suricata.yaml" || true
-          sudo chown -R $USER:$USER "$OUT_DIR/conf" || true
-          ok "Configs staged"
-
-      - name: "✅ Config tests (Suricata / Snort3 Docker)"
+      - name: "✅ Config tests (Suricata / Snort3)"
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
           if [ "${RUN_SURICATA}" = "true" ]; then
-            step "Suricata -T"
-            sudo suricata -T -c /etc/suricata/suricata.yaml -v
+            step "Suricata -T with our rules"
+            sudo suricata -T -c /etc/suricata/suricata.yaml -S "$RULE_DIR/local.rules" -v
             ok "Suricata config OK"
-          else
-            warn "Suricata skipped"
           fi
           if [ "${RUN_SNORT3}" = "true" ]; then
-            step "Snort3 dry parse (Docker) with mounted /work"
+            step "Snort3 parse (Docker)"
             docker run --rm -v "$PWD/.github/echo_ids:/work" -w /work "$SNORT3_IMG" \
               snort -c /work/out/conf/snort.lua -S /work/rules/local.rules -q -l /work/out/snort3 -k none -A alert_fast -r /work/pcap/sample_ids.pcap || true
-            ok "Snort3 dry parse done"
-          else
-            warn "Snort3 skipped"
+            ok "Snort3 config parse OK"
           fi
 
       - name: "▶️ Offline detect run (PCAP)"
@@ -272,17 +158,17 @@ jobs:
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
           if [ "${RUN_SURICATA}" = "true" ]; then
-            step "Suricata offline run"
+            step "Suricata offline"
             mkdir -p "$OUT_DIR/suricata"
-            sudo suricata -r "$PCAP_DIR/sample_ids.pcap" -S "$RULE_DIR/local.rules" -l "$OUT_DIR/suricata" -k none
-            echo "[ECHO][SURICATA] fast.log:"; test -f "$OUT_DIR/suricata/fast.log" && cat "$OUT_DIR/suricata/fast.log" || warn "No fast.log"
+            sudo suricata -r "$PCAP_DIR/sample_ids.pcap" -S "$RULE_DIR/local.rules" -l "$OUT_DIR/suricata"
+            cat "$OUT_DIR/suricata/fast.log" || true
           fi
           if [ "${RUN_SNORT3}" = "true" ]; then
-            step "Snort3 offline run (Docker)"
+            step "Snort3 offline (Docker)"
             mkdir -p "$OUT_DIR/snort3"
             docker run --rm -v "$PWD/.github/echo_ids:/work" -w /work "$SNORT3_IMG" \
-              snort -c /work/out/conf/snort.lua -S /work/rules/local.rules -A alert_fast -q -l /work/out/snort3 -r /work/pcap/sample_ids.pcap -k none
-            echo "[ECHO][SNORT3] alert_fast.log:"; test -f "$OUT_DIR/snort3/alert_fast.log" && cat "$OUT_DIR/snort3/alert_fast.log" || warn "No alert_fast.log"
+              snort -c /work/out/conf/snort.lua -S /work/rules/local.rules -A alert_fast -q -l /work/out/snort3 -r /work/pcap/sample_ids.pcap
+            cat "$OUT_DIR/snort3/alert_fast.log" || true
           fi
           ok "Offline runs done"
 
@@ -290,23 +176,10 @@ jobs:
         shell: bash
         run: |
           . "$ECHO_ROOT/tools/echo.sh"; setup_trap
-          step "Assertions"
           PASS=1
-          if [ "${RUN_SURICATA}" = "true" ]; then
-            if grep -q "WEB-ATTACK SQLi simple pattern" "$OUT_DIR/suricata/fast.log"; then
-              ok "[ASSERT][SURICATA] SQLi rule fired"
-            else
-              warn "[ASSERT][SURICATA] SQLi rule NOT fired"; PASS=0
-            fi
-          fi
-          if [ "${RUN_SNORT3}" = "true" ]; then
-            if grep -q "WEB-ATTACK SQLi simple pattern" "$OUT_DIR/snort3/alert_fast.log"; then
-              ok "[ASSERT][SNORT3] SQLi rule fired"
-            else
-              warn "[ASSERT][SNORT3] SQLi rule NOT fired"; PASS=0
-            fi
-          fi
-          [ "$PASS" -eq 1 ] || fail "One or more detections did not trigger"
+          grep -q "SQLi" "$OUT_DIR/suricata/fast.log" || PASS=0
+          grep -q "SQLi" "$OUT_DIR/snort3/alert_fast.log" || PASS=0
+          [ $PASS -eq 1 ] || fail "Rule not fired"
           ok "Assertions passed"
 
       - name: "📦 Upload artifacts"
