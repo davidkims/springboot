@@ -1,127 +1,320 @@
-name: Oracle Finance Setup
+name: "🛡️ IDS Misuse-Detection Suite (Suricata 7.x PPA + Snort3 via Docker + ECHO, FINAL)"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *' # 매시간 정각(UTC)
+    inputs:
+      run_suricata:
+        description: "Suricata 테스트 실행 (true/false)"
+        required: false
+        default: "true"
+      run_snort3:
+        description: "Snort3 테스트 실행 (true/false)"
+        required: false
+        default: "true"
+      verbose:
+        description: "자세한 로그 출력 (true/false)"
+        required: false
+        default: "true"
 
 jobs:
-  build:
+  ids-misuse-suite:
     runs-on: ubuntu-latest
+    env:
+      PYTHONWARNINGS: "ignore::SyntaxWarning"
+      ECHO_ROOT: .github/echo_ids
+      OUT_DIR: .github/echo_ids/out
+      RULE_DIR: .github/echo_ids/rules
+      PCAP_DIR: .github/echo_ids/pcap
+      LOG_DIR: .github/echo_ids/logs
+      RUN_SURICATA: ${{ github.event.inputs.run_suricata || 'true' }}
+      RUN_SNORT3: ${{ github.event.inputs.run_snort3 || 'true' }}
+      VERBOSE: ${{ github.event.inputs.verbose || 'true' }}
+      SNORT3_IMG: "ciscotalos/snort3:latest"
 
     steps:
-      - name: 📂 Checkout repository
-        uses: actions/checkout@v5
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
 
-      - name: 🚀 Start Oracle XE container
+      - name: "📁 Prepare dirs & write ECHO helpers"
         shell: bash
         run: |
-          set -euo pipefail
-          echo "[🚀] Starting Oracle XE container"
-          # 컨테이너가 이미 있다면 정리
-          docker rm -f oracle-xe >/dev/null 2>&1 || true
-          docker run -d --name oracle-xe -p 1521:1521 \
-            -e ORACLE_PASSWORD=oracle \
-            gvenzl/oracle-xe:21-full
+          set -Eeuo pipefail
+          mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$RULE_DIR" "$PCAP_DIR" "$LOG_DIR" "$OUT_DIR/conf" "$ECHO_ROOT/tools"
+          cat > "$ECHO_ROOT/tools/echo.sh" <<'EOSH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          step(){ echo -e "\n[STEP] $*"; }
+          ok(){ echo "[OK] $*"; }
+          warn(){ echo "[WARN] $*" >&2; }
+          fail(){ echo "[FAIL] $*" >&2; exit 1; }
+          setup_trap(){ trap 'rc=$?; echo "[TRAP] Failed at: ${BASH_COMMAND} (rc=$rc)" >&2' ERR; }
+          EOSH
+          chmod +x "$ECHO_ROOT/tools/echo.sh"
+          echo "[OK] ECHO helpers ready at $ECHO_ROOT/tools/echo.sh"
 
-          echo "[⏳] Waiting for database to be ready..."
-          # 최대 10분(120 * 5초) 대기
-          for i in $(seq 1 120); do
-            sleep 5
-            if docker logs oracle-xe 2>&1 | grep -Eq "DATABASE IS READY|DATABASE IS READY TO USE"; then
-              echo "[✅] Oracle is ready"
-              break
+      - name: "🧩 Add Suricata PPA 7.x & Install Tools (no snort3 apt)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "APT base update"
+          sudo apt-get update -y
+          step "Install base packages"
+          sudo apt-get install -y software-properties-common curl jq ca-certificates gnupg lsb-release python3 python3-pip wireshark-common
+          step "Add OISF Suricata stable PPA (7.x)"
+          sudo add-apt-repository -y ppa:oisf/suricata-stable
+          sudo apt-get update -y
+          ok "PPA added"
+          step "Install Suricata 7.x"
+          sudo apt-get install -y suricata
+          ok "Suricata installed"
+          step "Python pip/scapy"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install scapy
+          ok "Scapy installed"
+
+      - name: "🐳 Prepare Snort3 Docker image"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Check Docker and pull Snort3 image"
+          docker --version || fail "Docker not available"
+          docker pull "$SNORT3_IMG"
+          ok "Snort3 image ready"
+
+      - name: "🔎 Version & Capabilities (Suricata / Snort3 in Docker)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Suricata version/build-info"
+          suricata -V || warn "suricata -V failed"
+          suricata --build-info || warn "suricata --build-info failed"
+          step "Snort3 version (Docker)"
+          docker run --rm "$SNORT3_IMG" snort -V || warn "snort3 -V failed in container"
+          step "Snort3 DAQ list (Docker)"
+          docker run --rm "$SNORT3_IMG" snort --daq-list || warn "snort3 --daq-list failed in container"
+          step "Hyperscan presence (Docker)"
+          docker run --rm "$SNORT3_IMG" sh -lc 'snort -V 2>/dev/null | grep -i hyperscan && echo "[OK] Hyperscan appears" || echo "[WARN] Hyperscan not explicitly printed"'
+
+      - name: "📝 Write Misuse Rules & container snort.lua"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Generate local.rules"
+          cat > "$RULE_DIR/local.rules" <<'RULES'
+          # ---- Misuse/Signature rules ----
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+            msg:"WEB-ATTACK SQLi simple pattern ' OR 1=1 --";
+            flow:to_server,established;
+            http_uri;
+            content:"' OR 1=1 --"; nocase;
+            classtype:web-application-attack; sid:1000001; rev:2;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+            msg:"WEB-ATTACK SQLi pcre in URI";
+            flow:to_server,established;
+            http_uri;
+            pcre:"/(\bUNION\b|\bSELECT\b|\bUPDATE\b|\bINSERT\b).+(\bFROM\b|\bSET\b)/Ui";
+            classtype:web-application-attack; sid:1000002; rev:3;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+            msg:"WEB-ATTACK XSS <script> injection";
+            flow:to_server,established;
+            http_client_body;
+            content:"<script"; nocase; within:20;
+            classtype:web-application-attack; sid:1000003; rev:2;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+            msg:"WEB-ATTACK directory traversal ../";
+            flow:to_server,established;
+            http_uri;
+            content:"../"; nocase;
+            classtype:web-application-attack; sid:1000004; rev:2;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET 1:65535 (
+            msg:"RECON possible TCP SYN scan";
+            flags:S; flow:stateless;
+            detection_filter:track by_src, count 20, seconds 5;
+            classtype:attempted-recon; sid:1000005; rev:2;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET 22 (
+            msg:"AUTH possible SSH brute force";
+            flags:S; flow:to_server,stateless;
+            detection_filter:track by_src, count 10, seconds 60;
+            classtype:attempted-admin; sid:1000006; rev:2;
+          )
+          alert udp $HOME_NET any -> $EXTERNAL_NET 53 (
+            msg:"DNS possible data exfiltration (large query payload)";
+            dns_query;
+            dsize:>80;
+            classtype:bad-unknown; sid:1000007; rev:2;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+            msg:"MALWARE suspicious user-agent (sqlmap)";
+            flow:to_server,established;
+            http_header;
+            content:"User-Agent|3a 20|sqlmap"; nocase;
+            classtype:bad-unknown; sid:1000008; rev:2;
+          )
+          alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+            msg:"WEB-ATTACK possible PHP webshell upload";
+            flow:to_server,established;
+            http_client_body;
+            content:"<?php"; nocase;
+            classtype:web-application-attack; sid:1000009; rev:2;
+          )
+          RULES
+          ok "Rules written"
+
+          step "Write minimal snort.lua for container run"
+          cat > "$OUT_DIR/conf/snort.lua" <<'LUA'
+          -- Minimal Snort3 config for offline test with local rules
+          ips = default_ips
+          ips.rules = [[ include /work/rules/local.rules ]]
+          alert_fast = { file = true }
+          LUA
+          ok "snort.lua written"
+
+      - name: "🧪 Build test PCAP with Scapy (quiet)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Create Scapy script"
+          cat > "$PCAP_DIR/build_pcap.py" <<'PY'
+          import logging
+          logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+          logging.getLogger("scapy.loading").setLevel(logging.ERROR)
+          from scapy.all import Ether, IP, TCP, UDP, wrpcap, Raw, conf
+          conf.verb = 0
+          try:
+              conf.use_pcap = True
+          except Exception:
+              pass
+          def build():
+              pkts = []
+              req = b"GET /search?q=' OR 1=1 -- HTTP/1.1\r\nHost: example\r\nUser-Agent: curl\r\n\r\n"
+              ip = IP(src="192.0.2.10", dst="192.0.2.20")
+              tcp = TCP(sport=12345, dport=80, seq=1)
+              pkts.append(Ether(dst="ff:ff:ff:ff:ff:ff")/ip/tcp/Raw(load=req))
+              body = b"<script>alert(1)</script>"
+              post = (b"POST /comment HTTP/1.1\r\nHost: example\r\nContent-Length: "+str(len(body)).encode()+b"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"+body)
+              pkts.append(Ether(dst="ff:ff:ff:ff:ff:ff")/ip/tcp/Raw(load=post))
+              q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + (b"a"*90) + b"\x00\x00\x01\x00\x01"
+              ip2 = IP(src="198.51.100.10", dst="198.51.100.53")
+              udp = UDP(sport=53000, dport=53)
+              pkts.append(Ether(dst="ff:ff:ff:ff:ff:ff")/ip2/udp/Raw(load=q))
+              wrpcap("sample_ids.pcap", pkts)
+          if __name__ == "__main__":
+              build()
+          PY
+          step "Run Scapy to build PCAP"
+          python3 "$PCAP_DIR/build_pcap.py"
+          ls -l "$PCAP_DIR"
+          ok "PCAP ready"
+
+      - name: "🧷 Configure Suricata rules (system) & stage configs"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Detect Suricata default rule path"
+          SYS_YAML="/etc/suricata/suricata.yaml"
+          if [ -f "$SYS_YAML" ]; then
+            DEFAULT_RULE_PATH=$(sudo awk -F': *' '/^[[:space:]]*default-rule-path:/ {gsub(/"/,"",$2); print $2; exit}' "$SYS_YAML" || true)
+          fi
+          if [ -z "${DEFAULT_RULE_PATH:-}" ]; then
+            for cand in /var/lib/suricata/rules /etc/suricata/rules; do
+              if [ -d "$cand" ]; then DEFAULT_RULE_PATH="$cand"; break; fi
+            done
+          fi
+          if [ -z "${DEFAULT_RULE_PATH:-}" ]; then
+            DEFAULT_RULE_PATH="/etc/suricata/rules"
+            warn "default-rule-path not found; fallback to $DEFAULT_RULE_PATH"
+          fi
+          echo "[ECHO] default-rule-path = $DEFAULT_RULE_PATH"
+
+          step "Ensure rule dir exists"
+          sudo mkdir -p "$DEFAULT_RULE_PATH"
+          ok "Rule dir ready"
+
+          step "Copy local.rules to default-rule-path (optional)"
+          sudo cp "$RULE_DIR/local.rules" "$DEFAULT_RULE_PATH/local.rules" || warn "copy optional; we run with -S anyway"
+          ok "Rules staged (optional)"
+
+          step "Show suricata.yaml essentials"
+          sudo grep -nE "default-rule-path|rule-files" "$SYS_YAML" || true
+
+          step "Stage configs for artifacts"
+          sudo cp "$SYS_YAML" "$OUT_DIR/conf/suricata.yaml" || true
+          sudo chown -R $USER:$USER "$OUT_DIR/conf" || true
+          ok "Configs staged"
+
+      - name: "✅ Config tests (Suricata / Snort3 Docker)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          if [ "${RUN_SURICATA}" = "true" ]; then
+            step "Suricata -T"
+            sudo suricata -T -c /etc/suricata/suricata.yaml -v
+            ok "Suricata config OK"
+          else
+            warn "Suricata skipped"
+          fi
+          if [ "${RUN_SNORT3}" = "true" ]; then
+            step "Snort3 dry parse (Docker) with mounted /work"
+            docker run --rm -v "$PWD/.github/echo_ids:/work" -w /work "$SNORT3_IMG" \
+              snort -c /work/out/conf/snort.lua -S /work/rules/local.rules -q -l /work/out/snort3 -k none -A alert_fast -r /work/pcap/sample_ids.pcap || true
+            ok "Snort3 dry parse done"
+          else
+            warn "Snort3 skipped"
+          fi
+
+      - name: "▶️ Offline detect run (PCAP)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          if [ "${RUN_SURICATA}" = "true" ]; then
+            step "Suricata offline run"
+            mkdir -p "$OUT_DIR/suricata"
+            sudo suricata -r "$PCAP_DIR/sample_ids.pcap" -S "$RULE_DIR/local.rules" -l "$OUT_DIR/suricata" -k none
+            echo "[ECHO][SURICATA] fast.log:"; test -f "$OUT_DIR/suricata/fast.log" && cat "$OUT_DIR/suricata/fast.log" || warn "No fast.log"
+          fi
+          if [ "${RUN_SNORT3}" = "true" ]; then
+            step "Snort3 offline run (Docker)"
+            mkdir -p "$OUT_DIR/snort3"
+            docker run --rm -v "$PWD/.github/echo_ids:/work" -w /work "$SNORT3_IMG" \
+              snort -c /work/out/conf/snort.lua -S /work/rules/local.rules -A alert_fast -q -l /work/out/snort3 -r /work/pcap/sample_ids.pcap -k none
+            echo "[ECHO][SNORT3] alert_fast.log:"; test -f "$OUT_DIR/snort3/alert_fast.log" && cat "$OUT_DIR/snort3/alert_fast.log" || warn "No alert_fast.log"
+          fi
+          ok "Offline runs done"
+
+      - name: "🔎 Assertions (rules firing)"
+        shell: bash
+        run: |
+          . "$ECHO_ROOT/tools/echo.sh"; setup_trap
+          step "Assertions"
+          PASS=1
+          if [ "${RUN_SURICATA}" = "true" ]; then
+            if grep -q "WEB-ATTACK SQLi simple pattern" "$OUT_DIR/suricata/fast.log"; then
+              ok "[ASSERT][SURICATA] SQLi rule fired"
+            else
+              warn "[ASSERT][SURICATA] SQLi rule NOT fired"; PASS=0
             fi
-            if (( i % 12 == 0 )); then
-              echo "[…] still waiting ($((i*5))s)"
+          fi
+          if [ "${RUN_SNORT3}" = "true" ]; then
+            if grep -q "WEB-ATTACK SQLi simple pattern" "$OUT_DIR/snort3/alert_fast.log"; then
+              ok "[ASSERT][SNORT3] SQLi rule fired"
+            else
+              warn "[ASSERT][SNORT3] SQLi rule NOT fired"; PASS=0
             fi
-            if (( i == 120 )); then
-              echo "[❌] Timeout waiting for Oracle to be ready" >&2
-              docker logs oracle-xe | tail -n 200 || true
-              exit 1
-            fi
-          done
+          fi
+          [ "$PASS" -eq 1 ] || fail "One or more detections did not trigger"
+          ok "Assertions passed"
 
-      - name: 🧱 Create finance schema & transactions table
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[📦] Preparing SQL inside container"
-
-          # 컨테이너 내부에 SQL 파일 생성 후 실행 (heredoc 안전 적용)
-          docker exec oracle-xe bash -lc 'cat > /tmp/setup_finance.sql <<SQL
-          WHENEVER SQLERROR EXIT SQL.SQLCODE
-          SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF ECHO ON
-
-          -- finance 유저가 없으면 생성
-          DECLARE
-            n NUMBER := 0;
-          BEGIN
-            SELECT COUNT(*) INTO n FROM dba_users WHERE username = '\''FINANCE'\'';
-            IF n = 0 THEN
-              EXECUTE IMMEDIATE '\''CREATE USER finance IDENTIFIED BY finance'\'';
-              EXECUTE IMMEDIATE '\''GRANT CONNECT, RESOURCE TO finance'\'';
-              EXECUTE IMMEDIATE '\''ALTER USER finance QUOTA UNLIMITED ON USERS'\'';
-            END IF;
-          END;
-          /
-          -- transactions 테이블 생성 (존재 시 ORA-00955 무시)
-          BEGIN
-            EXECUTE IMMEDIATE q'[
-              CREATE TABLE finance.transactions (
-                id        NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                amount    NUMBER(15,2) NOT NULL,
-                currency  VARCHAR2(3)  NOT NULL,
-                status    VARCHAR2(20) NOT NULL,
-                created_at TIMESTAMP DEFAULT SYSTIMESTAMP
-              )
-            ]';
-          EXCEPTION
-            WHEN OTHERS THEN
-              IF SQLCODE != -955 THEN -- name is already used by an existing object
-                RAISE;
-              END IF;
-          END;
-          /
-          -- 인덱스 예시 (이미 있으면 무시)
-          BEGIN
-            EXECUTE IMMEDIATE '\''CREATE INDEX finance.idx_transactions_status ON finance.transactions(status)'\''; 
-          EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;
-          /
-          -- 샘플 데이터 (비어있을 때만)
-          DECLARE
-            n NUMBER := 0;
-          BEGIN
-            SELECT COUNT(*) INTO n FROM finance.transactions;
-            IF n = 0 THEN
-              INSERT INTO finance.transactions(amount, currency, status) VALUES(1000.00, '\''USD'\'', '\''PENDING'\'');
-              INSERT INTO finance.transactions(amount, currency, status) VALUES(250.50,  '\''EUR'\'', '\''COMPLETED'\'');
-              COMMIT;
-            END IF;
-          END;
-          /
-          EXIT;
-          SQL
-          sqlplus -s system/oracle@XEPDB1 @/tmp/setup_finance.sql'
-
-          echo "[✅] Schema/table ensured"
-
-      - name: 🔎 Smoke test (query count)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[🔎] Counting rows in finance.transactions"
-          docker exec oracle-xe bash -lc 'cat > /tmp/smoke.sql <<SQL
-          SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF ECHO OFF
-          SELECT '\''rows='\'' || COUNT(*) FROM finance.transactions;
-          EXIT;
-          SQL
-          sqlplus -s system/oracle@XEPDB1 @/tmp/smoke.sql' | sed 's/^/[DB]/'
-
-      - name: 🧹 Clean up
-        if: always()
-        shell: bash
-        run: |
-          echo "[🧹] Cleaning up container"
-          docker rm -f oracle-xe >/dev/null 2>&1 || true
-          echo "[✅] Done"
+      - name: "📦 Upload artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ids-misuse-artifacts
+          path: |
+            .github/echo_ids/out/**
+            .github/echo_ids/rules/local.rules
+            .github/echo_ids/pcap/sample_ids.pcap
+          if-no-files-found: warn
