@@ -1,356 +1,380 @@
-name: "🧰 SAP Logon Enterprise Deploy (Echo+Fix v2)"
+name: "🏦 Teradata + DW + OmniChannel EchoOps (TD Sim + Network + Logs)"
 
 on:
   workflow_dispatch:
     inputs:
-      sap_gui_installer_url:
-        description: "SAP GUI 설치파일 URL (선택)"
-        required: false
-        default: ""
-      sap_gui_sha256:
-        description: "설치파일 SHA256(선택)"
-        required: false
-        default: ""
-      landscape_name:
-        description: "Landscape 표시명"
-        required: false
-        default: "Company Landscape"
-      deploy_scope:
-        description: "배포 범위 (PerMachine|PerUser)"
-        required: false
-        default: "PerMachine"
-      create_shortcuts:
-        description: "바탕화면/시작메뉴 바로가기 생성 (true/false)"
-        required: false
+      teradata_mode:
+        description: "Teradata 모드 (simulate | client)"
+        required: true
+        default: "simulate"
+      dw_engine:
+        description: "DW 엔진 (postgres | sqlite)"
+        required: true
+        default: "postgres"
+      run_network:
+        description: "Nginx 네트워크 서버 실행 (true/false)"
+        required: true
         default: "true"
-      dry_run:
-        description: "드라이런 (true/false)"
-        required: false
+      run_omni:
+        description: "옴니채널 서버(FastAPI) 실행 (true/false)"
+        required: true
+        default: "true"
+      do_upgrade:
+        description: "런너 apt 업데이트/업그레이드 수행 (true/false)"
+        required: true
         default: "false"
-      create_release:
-        description: "GitHub Release 생성 (true/false)"
-        required: false
+      generate_rows:
+        description: "샘플 거래 데이터 생성 건수"
+        required: true
+        default: "50"
+      commit_changes:
+        description: "에코 산출물 커밋/푸시 수행 (true/false)"
+        required: true
+        default: "true"
+      push_image:
+        description: "옴니채널 서버 이미지를 GHCR 푸시 (true/false)"
+        required: true
         default: "false"
-      commit_branch:
-        description: "생성물 커밋 브랜치"
-        required: false
-        default: "main"
-
-permissions:
-  contents: write
 
 jobs:
-  sap-logon-deploy:
-    runs-on: windows-latest
+  build:
+    runs-on: ubuntu-latest
     env:
-      ECHO_ROOT: .github/echo_sap
-      OUT_DIR: .github/echo_sap/out
-      SCRIPTS_DIR: .github/echo_sap/scripts
-      TPL_DIR: .github/echo_sap/templates
-      DOC_DIR: .github/echo_sap/docs
-      LOG_DIR: .github/echo_sap/logs
-
+      ECHO_TD: .github/echo_td
+      ECHO_DW: .github/echo_dw
+      ECHO_NET: .github/echo_net
+      ECHO_OMNI: .github/echo_omni
+      ECHO_LOG: .github/echo_logs
+      IMAGE_REGISTRY: ghcr.io
+      IMAGE_OWNER: ${{ github.repository_owner }}
+      OMNI_IMAGE: omni-echo
     steps:
-      - name: Checkout
+      - name: 🛎️ Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare echo folders (robust)
-        shell: pwsh
+      - name: 🧰 Prepare Echo tools & dirs
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          trap { Write-Error "[FATAL] $($_.Exception.Message)"; exit 1 }
+          set -Eeuo pipefail
+          mkdir -p "${ECHO_TD}/sql/teradata" "${ECHO_TD}/sql/td_sim" \
+                   "${ECHO_DW}/db" "${ECHO_DW}/queries" \
+                   "${ECHO_NET}/nginx" "${ECHO_OMNI}" "${ECHO_LOG}"
+          cat > .github/echo_tools.sh <<'BASH'
+          set -Eeuo pipefail
+          echoe(){ echo "[ECHO] $*"; }
+          faile(){ echo "[ECHO][FAIL] $*" >&2; exit 1; }
+          BASH
+          chmod +x .github/echo_tools.sh
+          . .github/echo_tools.sh
+          echoe "Echo tools ready and directories prepared"
 
-          $paths = @(
-            $env:ECHO_ROOT,
-            $env:OUT_DIR,
-            $env:SCRIPTS_DIR,
-            $env:TPL_DIR,
-            $env:DOC_DIR,
-            $env:LOG_DIR
-          ) | Where-Object { $_ -and $_.Trim() -ne "" }
-
-          foreach ($p in $paths) {
-            if (-not (Test-Path -LiteralPath $p)) {
-              New-Item -ItemType Directory -Force -Path $p | Out-Null
-            }
-          }
-          Write-Host "[ECHO][OK] Directories prepared: $($paths -join ', ')"
-
-      - name: Generate deploy script (echo)
-        shell: pwsh
+      - name: 🔧 Optional system upgrade
+        if: ${{ github.event.inputs.do_upgrade == 'true' }}
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          echoe "apt update/upgrade start"
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
+          sudo apt-get install -y sqlite3 jq python3 python3-pip
 
-          $content = @'
-          [CmdletBinding()]
-          param(
-            [string]$InstallerPath = "",
-            [string]$LandscapeXml = "",
-            [string]$SapLogonIni = "",
-            [ValidateSet("PerMachine","PerUser")]
-            [string]$Scope = "PerMachine",
-            [switch]$CreateShortcuts,
-            [switch]$DryRun
-          )
+      - name: 📦 Always-needed packages
+        if: ${{ github.event.inputs.do_upgrade != 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y sqlite3 jq python3 python3-pip
 
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = "Stop"
-          $LogDir = Join-Path $PSScriptRoot "..\logs"
-          if (!(Test-Path $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
-          $LogFile = Join-Path $LogDir ("deploy-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".log")
+      - name: 📝 Echo:TD SQL (Teradata dialect; artifact only)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          cat > "${ECHO_TD}/sql/teradata/001_schema.sql" <<'SQL'
+          -- Teradata dialect (artifact)
+          CREATE DATABASE fin_data FROM DBC;
+          REPLACE VIEW fin_data.v_dim_date AS
+          SELECT CAST(CURRENT_DATE AS DATE) AS as_of_date;
+          REPLACE MULTISET TABLE fin_data.dim_customer, NO FALLBACK (
+            customer_id BIGINT NOT NULL,
+            name VARCHAR(100) CHARACTER SET LATIN NOT CASESPECIFIC,
+            email VARCHAR(200),
+            created_ts TIMESTAMP(0)
+          ) PRIMARY INDEX (customer_id);
+          REPLACE MULTISET TABLE fin_data.dim_account, NO FALLBACK (
+            account_id BIGINT NOT NULL,
+            customer_id BIGINT NOT NULL,
+            bank_code VARCHAR(10),
+            currency CHAR(3),
+            opened_ts TIMESTAMP(0)
+          ) PRIMARY INDEX (account_id);
+          REPLACE MULTISET TABLE fin_data.fact_transaction, NO FALLBACK (
+            txn_id BIGINT NOT NULL,
+            account_id BIGINT NOT NULL,
+            amount DECIMAL(18,2),
+            txn_type VARCHAR(16),
+            txn_ts TIMESTAMP(0)
+          ) PRIMARY INDEX (txn_id);
+          REPLACE MULTISET TABLE fin_data.echo_install_log, NO FALLBACK (
+            installed_at TIMESTAMP(0),
+            component VARCHAR(64),
+            detail VARCHAR(4000)
+          ) PRIMARY INDEX (component);
+          SQL
+          echoe "Wrote Teradata dialect SQL (artifact only)"
 
-          function Write-Log {
-            param([string]$Message,[ValidateSet("INFO","WARN","ERROR")] [string]$Level="INFO")
-            $ts = (Get-Date).ToString("u")
-            $line = "[{0}][{1}] {2}" -f $ts,$Level,$Message
-            Write-Host $line
-            Add-Content -LiteralPath $LogFile -Value $line
-          }
+      - name: 📝 Echo:TD-SIM(Postgres) DDL/DML + Queries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          # TD-SIM DDL (Postgres)
+          cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS td;
+          CREATE TABLE IF NOT EXISTS td.dim_customer(
+            customer_id BIGSERIAL PRIMARY KEY,
+            name        VARCHAR(100) NOT NULL,
+            email       VARCHAR(200),
+            created_ts  TIMESTAMP DEFAULT NOW()
+          );
+          CREATE TABLE IF NOT EXISTS td.dim_account(
+            account_id  BIGSERIAL PRIMARY KEY,
+            customer_id BIGINT NOT NULL REFERENCES td.dim_customer(customer_id),
+            bank_code   VARCHAR(10),
+            currency    CHAR(3) DEFAULT 'KRW',
+            opened_ts   TIMESTAMP DEFAULT NOW()
+          );
+          CREATE TABLE IF NOT EXISTS td.fact_transaction(
+            txn_id     BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL REFERENCES td.dim_account(account_id),
+            amount     NUMERIC(18,2) NOT NULL,
+            txn_type   VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')),
+            txn_ts     TIMESTAMP DEFAULT NOW()
+          );
+          CREATE TABLE IF NOT EXISTS td.echo_install_log(
+            installed_at TIMESTAMP DEFAULT NOW(),
+            component    TEXT,
+            detail       TEXT
+          );
+          SQL
+          # TD-SIM seed
+          cat > "${ECHO_TD}/sql/td_sim/002_seed.sql" <<'SQL'
+          INSERT INTO td.dim_customer(name,email)
+          SELECT '고객'||i, 'user'||i||'@bank.local' FROM generate_series(1,10) AS s(i);
+          INSERT INTO td.dim_account(customer_id, bank_code, currency)
+          SELECT customer_id, CASE WHEN customer_id%5=0 THEN 'NH' WHEN customer_id%4=0 THEN 'KB'
+                 WHEN customer_id%3=0 THEN 'WR' WHEN customer_id%2=0 THEN 'HN' ELSE 'SH' END, 'KRW'
+          FROM td.dim_customer;
+          SQL
+          # DW-style report queries
+          cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
+          SELECT date_trunc('day', txn_ts) AS day,
+                 COUNT(*) AS txn_count, SUM(amount) AS total_amount
+          FROM td.fact_transaction
+          GROUP BY 1 ORDER BY 1 DESC;
+          SQL
+          cat > "${ECHO_DW}/queries/02_top_customers.sql" <<'SQL'
+          SELECT c.customer_id, c.name, SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
+          FROM td.fact_transaction f
+          JOIN td.dim_account a ON a.account_id=f.account_id
+          JOIN td.dim_customer c ON c.customer_id=a.customer_id
+          GROUP BY 1,2 ORDER BY net_flow DESC LIMIT 20;
+          SQL
+          echoe "Wrote Postgres TD-SIM DDL/DML and DW queries"
 
-          function Ensure-Dir { param([string]$Path) if(!(Test-Path $Path)){ New-Item -ItemType Directory -Force -Path $Path | Out-Null } }
-
-          function Install-SapGui {
-            param([string]$Path)
-            if([string]::IsNullOrWhiteSpace($Path) -or !(Test-Path $Path)){
-              Write-Log "Installer not provided or not found. Skip install." "WARN"; return
-            }
-            if($DryRun){ Write-Log "DryRun: would install $Path"; return }
-
-            $ext = [IO.Path]::GetExtension($Path).ToLowerInvariant()
-            if($ext -eq ".msi"){
-              Write-Log "Installing MSI: $Path"
-              $p = Start-Process msiexec.exe -ArgumentList "/i `"$Path`" /qn /norestart" -Wait -PassThru
-              if($p.ExitCode -ne 0){ throw "MSI install failed (rc=$($p.ExitCode))" }
-              Write-Log "MSI install OK"
-              return
-            }
-
-            if($ext -eq ".exe"){
-              Write-Log "Installing EXE (try silent flags): $Path"
-              $candidates = @("/silent","/verysilent","/s","/qn","/quiet","/passive /norestart")
-              foreach($arg in $candidates){
-                Write-Log "Try args: $arg"
-                try{
-                  $p = Start-Process -FilePath $Path -ArgumentList $arg -Wait -PassThru
-                  if($p.ExitCode -eq 0){ Write-Log "EXE install OK with args: $arg"; return }
-                  else { Write-Log "ExitCode=$($p.ExitCode) with args: $arg" "WARN" }
-                } catch { Write-Log "Install attempt failed: $($_.Exception.Message)" "WARN" }
+      - name: 🧱 Echo:Network(Nginx) & Permissions & OmniChannel app
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          # Nginx
+          cat > "${ECHO_NET}/nginx/nginx.conf" <<'CONF'
+          events {}
+          http {
+            server {
+              listen 80;
+              location /health { return 200 'OK'; add_header Content-Type text/plain; }
+              location / {
+                return 200 'OmniChannel Gateway (Nginx)'; add_header Content-Type text/plain;
               }
-              Write-Log "EXE silent install not succeeded; trying SAP*Setup discovery" "WARN"
-            }
-
-            $dir = (Get-Item $Path).Directory.FullName
-            $setup = Get-ChildItem -Path $dir -Recurse -Include *SAP*Setup*.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-            if($setup){
-              Write-Log "Found SAP setup candidate: $($setup.FullName)"
-              if($DryRun){ Write-Log "DryRun: would run $($setup.FullName) /Silent"; return }
-              $p = Start-Process -FilePath $setup.FullName -ArgumentList "/Silent" -Wait -PassThru
-              if($p.ExitCode -ne 0){ throw "SAP setup failed (rc=$($p.ExitCode))" }
-              Write-Log "SAP setup OK"
-            } else {
-              Write-Log "No SAP*Setup*.exe found; installation skipped" "WARN"
             }
           }
+          CONF
+          # Omni(FastAPI)
+          cat > "${ECHO_OMNI}/app.py" <<'PY'
+          from fastapi import FastAPI
+          from datetime import datetime
+          app = FastAPI(title="OmniChannel Echo API")
+          @app.get("/health")
+          def health(): return {"status":"ok","ts":datetime.utcnow().isoformat()}
+          @app.get("/orders/{order_id}")
+          def order(order_id:int): return {"order_id":order_id,"status":"PAID","channel":"web"}
+          @app.get("/accounts/{account_id}")
+          def account(account_id:int): return {"account_id":account_id,"balance":123456.78,"currency":"KRW"}
+          PY
+          cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir fastapi uvicorn
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+          # Permissions helper
+          cat > "${ECHO_DW}/permissions.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          chmod -R a+rX .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni
+          find .github -type f -name "*.sh" -exec chmod +x {} \;
+          echo "[PERM] permissions applied at $(date -Iseconds)"
+          SH
+          chmod +x "${ECHO_DW}/permissions.sh"
+          echoe "Network(nginx), Omni(FastAPI), permissions scripts emitted"
 
-          function Deploy-Landscape {
-            param([string]$Xml,[string]$Ini,[string]$Scope)
-            $ProgramDataSAP = Join-Path $env:ProgramData "SAP"
-            $AppDataSAP = Join-Path $env:AppData "SAP"
-
-            if($Scope -eq "PerMachine"){
-              Ensure-Dir $ProgramDataSAP
-              if($Xml -and (Test-Path $Xml)){
-                Copy-Item -Force -LiteralPath $Xml -Destination (Join-Path $ProgramDataSAP "SAPUILandscape.xml")
-                Write-Log "SAPUILandscape.xml -> $ProgramDataSAP"
-              } else { Write-Log "Landscape XML not provided; skipped" "WARN" }
-
-              if($Ini -and (Test-Path $Ini)){
-                Ensure-Dir $AppDataSAP
-                Copy-Item -Force -LiteralPath $Ini -Destination (Join-Path $AppDataSAP "saplogon.ini")
-                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)"
-              }
-            } else {
-              Ensure-Dir $AppDataSAP
-              if($Xml -and (Test-Path $Xml)){
-                Copy-Item -Force -LiteralPath $Xml -Destination (Join-Path $AppDataSAP "SAPUILandscape.xml")
-                Write-Log "SAPUILandscape.xml -> $AppDataSAP"
-              }
-              if($Ini -and (Test-Path $Ini)){
-                Copy-Item -Force -LiteralPath $Ini -Destination (Join-Path $AppDataSAP "saplogon.ini")
-                Write-Log "saplogon.ini -> $AppDataSAP (legacy clients)"
-              }
-            }
-          }
-
-          function Create-Shortcuts {
-            $candidates = @(
-              "C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe",
-              "C:\Program Files\SAP\FrontEnd\SAPgui\saplogon.exe"
-            )
-            $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if(-not $exe){ Write-Log "saplogon.exe not found; skip shortcuts" "WARN"; return }
-
-            $w = New-Object -ComObject WScript.Shell
-            $publicDesktop = "$env:Public\Desktop"
-            $startMenu = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
-            Ensure-Dir $publicDesktop; Ensure-Dir $startMenu
-
-            $lnk1 = Join-Path $publicDesktop "SAP Logon.lnk"
-            $s1 = $w.CreateShortcut($lnk1); $s1.TargetPath = $exe; $s1.WorkingDirectory = (Split-Path $exe); $s1.Description = "SAP Logon"; $s1.Save()
-            Write-Log "Shortcut created: $lnk1"
-
-            $lnk2 = Join-Path $startMenu "SAP Logon.lnk"
-            $s2 = $w.CreateShortcut($lnk2); $s2.TargetPath = $exe; $s2.WorkingDirectory = (Split-Path $exe); $s2.Description = "SAP Logon"; $s2.Save()
-            Write-Log "Shortcut created: $lnk2"
-          }
-
-          Write-Log "==== SAP Logon Deploy start ===="
-          Write-Log ("Scope="+$Scope+", DryRun="+$DryRun+", CreateShortcuts="+$CreateShortcuts)
-
-          Install-SapGui -Path $InstallerPath
-          Deploy-Landscape -Xml $LandscapeXml -Ini $SapLogonIni -Scope $Scope
-          if($CreateShortcuts){ Create-Shortcuts }
-
-          Write-Log "==== Done ===="
-          Write-Host ("[ECHO][LOG] " + $LogFile)
-          '@
-
-          $scriptPath = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
-          $content | Set-Content -Encoding UTF8 -LiteralPath $scriptPath
-          Write-Host "[ECHO][OK] Generated: $scriptPath"
-
-      - name: Generate templates & docs (echo)
-        shell: pwsh
+      - name: 🧪 Install Teradata client (best-effort) when requested
+        if: ${{ github.event.inputs.teradata_mode == 'client' }}
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          echoe "Attempting to install teradatasql (client)"
+          python3 -m pip install --upgrade pip >/dev/null
+          if python3 -m pip install teradatasql >/dev/null 2>&1; then
+            echo "[OK] teradatasql installed" | tee -a "${ECHO_LOG}/td_client.log"
+          else
+            echo "[WARN] teradatasql not installed (license/network). Continuing." | tee -a "${ECHO_LOG}/td_client.log"
+          fi
 
-          @"
-          # SAP Logon Deploy Scaffold (v2)
-
-          - scripts/deploy_sap_logon.ps1 : 무인 설치 + Landscape 배포 + 바로가기
-          - templates/SAPUILandscape.xml : 샘플 골격
-          - templates/saplogon.ini       : 레거시 호환 샘플
-          - logs/                        : 실행 로그
-          - out/                         : 산출물
-          "@ | Set-Content -Encoding UTF8 $env:DOC_DIR\README_DEPLOY.md
-
-          @"
-          <!-- TEMPLATE ONLY — 실제 운영 파일 사용 권장 -->
-          <?xml version="1.0" encoding="UTF-8"?>
-          <Landscape note="${{ github.event.inputs.landscape_name }}">
-            <Services>
-            </Services>
-          </Landscape>
-          "@ | Set-Content -Encoding UTF8 $env:TPL_DIR\SAPUILandscape.xml
-
-          @";
-          ; TEMPLATE ONLY — 구형/레거시 클라이언트용
-          [Description]
-          ENTRIES=0
-          "@ | Set-Content -Encoding UTF8 $env:TPL_DIR\saplogon.ini
-
-          Write-Host "[ECHO][OK] Templates/docs generated"
-
-      - name: (Optional) Download installer & verify
-        shell: pwsh
+      - name: 🐘 Start TD-SIM (Postgres) and load schema
+        if: ${{ github.event.inputs.teradata_mode == 'simulate' || github.event.inputs.dw_engine == 'postgres' }}
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $url = "${{ github.event.inputs.sap_gui_installer_url }}"
-          if([string]::IsNullOrWhiteSpace($url)){
-            Write-Host "[ECHO][SKIP] No installer URL provided"
-            exit 0
-          }
-          $dl = Join-Path $env:OUT_DIR "SAP_GUI_Setup.exe"
-          Write-Host "[ECHO][GET] $url -> $dl"
-          Invoke-WebRequest -Uri $url -OutFile $dl -UseBasicParsing -TimeoutSec 900
-          if(!(Test-Path $dl)){ throw "Installer not downloaded." }
-          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $dl).Hash.ToLower()
-          $exp = "${{ github.event.inputs.sap_gui_sha256 }}".ToLower()
-          if($exp){
-            if($sha -ne $exp){ throw "SHA256 mismatch. got=$sha expected=$exp" }
-            Write-Host "[ECHO][OK] SHA256 verified"
-          } else {
-            Write-Host "[ECHO][WARN] SHA256 not provided. got=$sha"
-          }
-          "SAP_GUI_INSTALLER=$dl" | Out-File -FilePath $env:OUT_DIR\env.properties -Encoding ascii
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          echoe "Starting Postgres container for TD-SIM"
+          docker rm -f td-sim >/dev/null 2>&1 || true
+          docker run -d --name td-sim -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
+            -v "$PWD/${ECHO_TD}/sql/td_sim":/td:ro postgres:16
+          # Wait
+          for i in {1..30}; do
+            if docker exec td-sim pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          # Load schema & seeds
+          docker exec -u postgres td-sim psql -U postgres -d postgres -f /td/001_schema.sql
+          docker exec -u postgres td-sim psql -U postgres -d postgres -f /td/002_seed.sql
+          # Generate sample transactions
+          COUNT="${{ github.event.inputs.generate_rows }}"
+          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          DECLARE i int;
+          BEGIN
+            FOR i IN 1..${COUNT} LOOP
+              INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
+              SELECT account_id,
+                     (random()*100000)::numeric(18,2),
+                     CASE WHEN random() > 0.5 THEN 'CREDIT' ELSE 'DEBIT' END,
+                     NOW() - (random()*'10 days'::interval)
+              FROM td.dim_account ORDER BY random() LIMIT 1;
+            END LOOP;
+          END $$;
+          INSERT INTO td.echo_install_log(component,detail) VALUES
+            ('td-sim','postgres:16 with td schema, rows='||${COUNT});
+          SQL"
+          echoe "TD-SIM ready with sample data"
 
-      - name: Run deploy script
-        shell: pwsh
+      - name: 🌐 Run Nginx (network server)
+        if: ${{ github.event.inputs.run_network == 'true' }}
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          docker rm -f echo-nginx >/dev/null 2>&1 || true
+          docker run -d --name echo-nginx -p 8088:80 \
+            -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
+            nginx:alpine
+          echo "[NET] nginx listening on :8088" | tee -a "${ECHO_LOG}/network.log"
 
-          $installer = ""
-          $envFile = "$env:OUT_DIR\env.properties"
-          if(Test-Path $envFile){
-            $m = Get-Content $envFile | Where-Object { $_ -match "=" } | ForEach-Object {
-              $kv = $_.Split("=",2); [PSCustomObject]@{ K=$kv[0]; V=$kv[1] }
-            }
-            $installer = ($m | Where-Object { $_.K -eq "SAP_GUI_INSTALLER" } | Select-Object -First 1).V
-          }
-
-          $script = Join-Path $env:SCRIPTS_DIR "deploy_sap_logon.ps1"
-          $xml = Join-Path $env:TPL_DIR "SAPUILandscape.xml"
-          $ini = Join-Path $env:TPL_DIR "saplogon.ini"
-
-          $scope = "${{ github.event.inputs.deploy_scope }}"
-          $mkShort = [bool]::Parse("${{ github.event.inputs.create_shortcuts }}")
-          $dry = [bool]::Parse("${{ github.event.inputs.dry_run }}")
-
-          Write-Host "[ECHO][RUN] $script"
-          & $script `
-            -InstallerPath $installer `
-            -LandscapeXml $xml `
-            -SapLogonIni $ini `
-            -Scope $scope `
-            -CreateShortcuts:($mkShort) `
-            -DryRun:($dry)
-
-      - name: Zip artifact
-        shell: pwsh
+      - name: 🧩 Build & run OmniChannel (FastAPI)
+        if: ${{ github.event.inputs.run_omni == 'true' }}
+        shell: bash
         run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $zip = "$env:OUT_DIR\sap-logon-deploy.zip"
-          if(Test-Path $zip){ Remove-Item -Force $zip }
-          Compress-Archive -Path "$env:ECHO_ROOT\*" -DestinationPath $zip
-          Write-Host "[ECHO][OK] Packed -> $zip"
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          docker build -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
+          docker rm -f omni >/dev/null 2>&1 || true
+          docker run -d --name omni -p 8090:8000 "${OMNI_IMAGE}:latest"
+          echo "[OMNI] FastAPI at :8090/health" | tee -a "${ECHO_LOG}/omni.log"
 
-      - name: Upload artifact
+      - name: 🏷️ (Optional) Push Omni image to GHCR
+        if: ${{ github.event.inputs.push_image == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
+          echo "${GH_TOKEN}" | docker login "${IMAGE_REGISTRY}" -u "${IMAGE_OWNER}" --password-stdin
+          docker tag "${OMNI_IMAGE}:latest" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "[PUSH] ${IMAGE}" | tee -a "${ECHO_LOG}/omni.log"
+
+      - name: 🗃️ Echo install table (SQLite) + snapshot
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          DB="${ECHO_DW}/db/echo_install.db"
+          sqlite3 "${DB}" <<SQL
+          CREATE TABLE IF NOT EXISTS echo_install_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            installed_at TEXT DEFAULT (datetime('now')),
+            component TEXT,
+            detail TEXT
+          );
+          INSERT INTO echo_install_log(component,detail) VALUES
+            ('teradata_mode','${{ github.event.inputs.teradata_mode }}'),
+            ('dw_engine','${{ github.event.inputs.dw_engine }}'),
+            ('network','${{ github.event.inputs.run_network }}'),
+            ('omni','${{ github.event.inputs.run_omni }}');
+          SQL
+          sqlite3 "${DB}" '.headers on' '.mode column' 'SELECT * FROM echo_install_log;' | tee "${ECHO_LOG}/echo_install_log.txt"
+          echo "[ECHO][OK] install log recorded (sqlite)"
+
+      - name: 📤 Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sap-logon-deploy
-          path: .github/echo_sap/out/sap-logon-deploy.zip
-          if-no-files-found: error
-          retention-days: 30
+          name: echo-bundle
+          path: |
+            .github/echo_td
+            .github/echo_dw
+            .github/echo_net
+            .github/echo_omni
+            .github/echo_logs
 
-      - name: Commit scaffold
-        if: ${{ github.event.inputs.commit_branch != '' }}
-        shell: pwsh
+      - name: 🧾 Commit & push (best-effort; skip if no token)
+        if: ${{ github.event.inputs.commit_changes == 'true' }}
+        shell: bash
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git checkout "${{ github.event.inputs.commit_branch }}"
-          git add $env:ECHO_ROOT
-          $status = git status --porcelain
-          if($status){
-            git commit -m "chore(sap): echo scaffold + deploy script [auto]"
-            git push
-            Write-Host "[ECHO][OK] committed/pushed"
-          } else {
-            Write-Host "[ECHO][SKIP] nothing to commit"
-          }
-
-      - name: Create Release (optional)
-        if: ${{ github.event.inputs.create_release == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "sap-deploy-${{ github.run_number }}"
-          name: "SAP Logon Deploy Scaffold #${{ github.run_number }}"
-          body: "Auto-generated SAP Logon deployment scaffold and package."
-          files: |
-            .github/echo_sap/out/sap-logon-deploy.zip
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          git config user.name "echo-bot"
+          git config user.email "echo-bot@users.noreply.github.com"
+          git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
+          if git diff --cached --quiet; then
+            echoe "No changes to commit"
+            exit 0
+          fi
+          git commit -m "EchoOps: TD/DW/Network/Omni auto-generated ($(date -Iseconds))"
+          if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
+            REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
+            git push "${REPO_URL}" HEAD:${{ github.ref_name }}
+            echoe "Pushed changes to ${REPO_URL}"
+          else
+            echo "[WARN] GH_ADMIN_TOKEN missing; skip push" | tee -a "${ECHO_LOG}/commit.log"
+          fi
