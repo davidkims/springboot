@@ -1,16 +1,12 @@
-name: "🏦 Teradata + DW + OmniChannel EchoOps (TD Sim + Network + Logs)"
+name: "🏦 Teradata + DW + OmniChannel EchoOps v2 (Mandatory Upgrade + TD Client + Fixed TD-SIM)"
 
 on:
   workflow_dispatch:
     inputs:
-      teradata_mode:
-        description: "Teradata 모드 (simulate | client)"
+      generate_rows:
+        description: "샘플 거래 데이터 생성 건수"
         required: true
-        default: "simulate"
-      dw_engine:
-        description: "DW 엔진 (postgres | sqlite)"
-        required: true
-        default: "postgres"
+        default: "1000"
       run_network:
         description: "Nginx 네트워크 서버 실행 (true/false)"
         required: true
@@ -19,20 +15,12 @@ on:
         description: "옴니채널 서버(FastAPI) 실행 (true/false)"
         required: true
         default: "true"
-      do_upgrade:
-        description: "런너 apt 업데이트/업그레이드 수행 (true/false)"
-        required: true
-        default: "false"
-      generate_rows:
-        description: "샘플 거래 데이터 생성 건수"
-        required: true
-        default: "50"
       commit_changes:
-        description: "에코 산출물 커밋/푸시 수행 (true/false)"
+        description: "에코 산출물 커밋/푸시 (true/false)"
         required: true
         default: "true"
       push_image:
-        description: "옴니채널 서버 이미지를 GHCR 푸시 (true/false)"
+        description: "옴니채널 이미지를 GHCR 푸시 (true/false)"
         required: true
         default: "false"
 
@@ -63,13 +51,24 @@ jobs:
           set -Eeuo pipefail
           echoe(){ echo "[ECHO] $*"; }
           faile(){ echo "[ECHO][FAIL] $*" >&2; exit 1; }
+          retry(){
+            # retry <tries> <sleep_seconds> -- <cmd...>
+            local tries="$1"; shift
+            local sleep_sec="$1"; shift
+            [ "$1" = "--" ] && shift || true
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge "$tries" ]; then return 1; fi
+              sleep "$sleep_sec"
+            done
+          }
           BASH
           chmod +x .github/echo_tools.sh
           . .github/echo_tools.sh
           echoe "Echo tools ready and directories prepared"
 
-      - name: 🔧 Optional system upgrade
-        if: ${{ github.event.inputs.do_upgrade == 'true' }}
+      - name: ⬆️ Mandatory system upgrade (non-interactive)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -77,15 +76,29 @@ jobs:
           echoe "apt update/upgrade start"
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
-          sudo apt-get install -y sqlite3 jq python3 python3-pip
+          sudo apt-get install -y sqlite3 jq python3 python3-pip docker.io || true
+          echo "[UPGRADE][OK] $(date -Iseconds)" | tee -a "${ECHO_LOG}/upgrade.log"
 
-      - name: 📦 Always-needed packages
-        if: ${{ github.event.inputs.do_upgrade != 'true' }}
+      - name: 🐍 Mandatory Teradata client install (with retries, never fail job)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y sqlite3 jq python3 python3-pip
+          set +euo pipefail  # 이 단계는 실패해도 워크플로우 계속
+          set -u
+          . .github/echo_tools.sh
+          python3 -m pip install --upgrade pip >/dev/null 2>&1
+          LOG="${ECHO_LOG}/td_client_install.log"
+          echo "[TD][INFO] teradatasql install attempt" | tee -a "$LOG"
+          retry 3 3 -- python3 -m pip install teradatasql >>"$LOG" 2>&1
+          RC1=$?
+          echo "[TD][INFO] teradatasqlalchemy install attempt" | tee -a "$LOG"
+          retry 2 3 -- python3 -m pip install teradatasqlalchemy >>"$LOG" 2>&1
+          RC2=$?
+          if [ "$RC1" -ne 0 ] || [ "$RC2" -ne 0 ]; then
+            echo "[TD][WARN] TD client install partial/failed (rc1=${RC1}, rc2=${RC2}). Continuing." | tee -a "$LOG"
+          else
+            echo "[TD][OK] TD client modules installed" | tee -a "$LOG"
+          fi
+          exit 0
 
       - name: 📝 Echo:TD SQL (Teradata dialect; artifact only)
         shell: bash
@@ -125,12 +138,11 @@ jobs:
           SQL
           echoe "Wrote Teradata dialect SQL (artifact only)"
 
-      - name: 📝 Echo:TD-SIM(Postgres) DDL/DML + Queries
+      - name: 📝 Echo:TD-SIM(Postgres) DDL/DML + DW queries
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # TD-SIM DDL (Postgres)
           cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
           CREATE SCHEMA IF NOT EXISTS td;
           CREATE TABLE IF NOT EXISTS td.dim_customer(
@@ -159,7 +171,6 @@ jobs:
             detail       TEXT
           );
           SQL
-          # TD-SIM seed
           cat > "${ECHO_TD}/sql/td_sim/002_seed.sql" <<'SQL'
           INSERT INTO td.dim_customer(name,email)
           SELECT '고객'||i, 'user'||i||'@bank.local' FROM generate_series(1,10) AS s(i);
@@ -168,7 +179,7 @@ jobs:
                  WHEN customer_id%3=0 THEN 'WR' WHEN customer_id%2=0 THEN 'HN' ELSE 'SH' END, 'KRW'
           FROM td.dim_customer;
           SQL
-          # DW-style report queries
+          # DW queries
           cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
           SELECT date_trunc('day', txn_ts) AS day,
                  COUNT(*) AS txn_count, SUM(amount) AS total_amount
@@ -176,7 +187,8 @@ jobs:
           GROUP BY 1 ORDER BY 1 DESC;
           SQL
           cat > "${ECHO_DW}/queries/02_top_customers.sql" <<'SQL'
-          SELECT c.customer_id, c.name, SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
+          SELECT c.customer_id, c.name,
+                 SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
           FROM td.fact_transaction f
           JOIN td.dim_account a ON a.account_id=f.account_id
           JOIN td.dim_customer c ON c.customer_id=a.customer_id
@@ -184,25 +196,67 @@ jobs:
           SQL
           echoe "Wrote Postgres TD-SIM DDL/DML and DW queries"
 
-      - name: 🧱 Echo:Network(Nginx) & Permissions & OmniChannel app
+      - name: 🧱 Start TD-SIM (Postgres) & load schema (with retries)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # Nginx
+          retry 3 3 -- docker pull postgres:16
+          docker rm -f td-sim >/dev/null 2>&1 || true
+          docker run -d --name td-sim -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
+            -v "$PWD/${ECHO_TD}/sql/td_sim":/td:ro postgres:16
+          # wait for ready
+          for i in $(seq 1 60); do
+            if docker exec td-sim pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/001_schema.sql
+          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/002_seed.sql
+          # Generate N rows via pure SQL (NO DO $$ to avoid $$ PID expansion)
+          COUNT="${{ github.event.inputs.generate_rows }}"
+          cat > "${ECHO_TD}/sql/td_sim/003_generate_txn.sql" <<SQL
+          INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
+          SELECT
+            (SELECT account_id FROM td.dim_account ORDER BY random() LIMIT 1),
+            (random()*100000)::numeric(18,2),
+            CASE WHEN random() > 0.5 THEN 'CREDIT' ELSE 'DEBIT' END,
+            NOW() - (random()*interval '10 days')
+          FROM generate_series(1, ${COUNT});
+          INSERT INTO td.echo_install_log(component,detail)
+          VALUES ('td-sim','postgres:16 with td schema, rows='||${COUNT});
+          SQL
+          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/003_generate_txn.sql
+          echo "[TD-SIM][OK] Loaded schema and ${COUNT} rows" | tee -a "${ECHO_LOG}/td_sim.log"
+
+      - name: 🌐 Run Nginx (network server)
+        if: ${{ github.event.inputs.run_network == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          retry 3 3 -- docker pull nginx:alpine
           cat > "${ECHO_NET}/nginx/nginx.conf" <<'CONF'
           events {}
           http {
             server {
               listen 80;
               location /health { return 200 'OK'; add_header Content-Type text/plain; }
-              location / {
-                return 200 'OmniChannel Gateway (Nginx)'; add_header Content-Type text/plain;
-              }
+              location / { return 200 'OmniChannel Gateway (Nginx)'; add_header Content-Type text/plain; }
             }
           }
           CONF
-          # Omni(FastAPI)
+          docker rm -f echo-nginx >/dev/null 2>&1 || true
+          docker run -d --name echo-nginx -p 8088:80 \
+            -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
+            nginx:alpine
+          echo "[NET][OK] nginx listening on :8088" | tee -a "${ECHO_LOG}/network.log"
+
+      - name: 🧩 Build & run OmniChannel (FastAPI)
+        if: ${{ github.event.inputs.run_omni == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
           cat > "${ECHO_OMNI}/app.py" <<'PY'
           from fastapi import FastAPI
           from datetime import datetime
@@ -222,91 +276,11 @@ jobs:
           EXPOSE 8000
           CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
           DOCKER
-          # Permissions helper
-          cat > "${ECHO_DW}/permissions.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          chmod -R a+rX .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni
-          find .github -type f -name "*.sh" -exec chmod +x {} \;
-          echo "[PERM] permissions applied at $(date -Iseconds)"
-          SH
-          chmod +x "${ECHO_DW}/permissions.sh"
-          echoe "Network(nginx), Omni(FastAPI), permissions scripts emitted"
-
-      - name: 🧪 Install Teradata client (best-effort) when requested
-        if: ${{ github.event.inputs.teradata_mode == 'client' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          echoe "Attempting to install teradatasql (client)"
-          python3 -m pip install --upgrade pip >/dev/null
-          if python3 -m pip install teradatasql >/dev/null 2>&1; then
-            echo "[OK] teradatasql installed" | tee -a "${ECHO_LOG}/td_client.log"
-          else
-            echo "[WARN] teradatasql not installed (license/network). Continuing." | tee -a "${ECHO_LOG}/td_client.log"
-          fi
-
-      - name: 🐘 Start TD-SIM (Postgres) and load schema
-        if: ${{ github.event.inputs.teradata_mode == 'simulate' || github.event.inputs.dw_engine == 'postgres' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          echoe "Starting Postgres container for TD-SIM"
-          docker rm -f td-sim >/dev/null 2>&1 || true
-          docker run -d --name td-sim -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
-            -v "$PWD/${ECHO_TD}/sql/td_sim":/td:ro postgres:16
-          # Wait
-          for i in {1..30}; do
-            if docker exec td-sim pg_isready -U postgres >/dev/null 2>&1; then break; fi
-            sleep 2
-          done
-          # Load schema & seeds
-          docker exec -u postgres td-sim psql -U postgres -d postgres -f /td/001_schema.sql
-          docker exec -u postgres td-sim psql -U postgres -d postgres -f /td/002_seed.sql
-          # Generate sample transactions
-          COUNT="${{ github.event.inputs.generate_rows }}"
-          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
-          DO $$
-          DECLARE i int;
-          BEGIN
-            FOR i IN 1..${COUNT} LOOP
-              INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
-              SELECT account_id,
-                     (random()*100000)::numeric(18,2),
-                     CASE WHEN random() > 0.5 THEN 'CREDIT' ELSE 'DEBIT' END,
-                     NOW() - (random()*'10 days'::interval)
-              FROM td.dim_account ORDER BY random() LIMIT 1;
-            END LOOP;
-          END $$;
-          INSERT INTO td.echo_install_log(component,detail) VALUES
-            ('td-sim','postgres:16 with td schema, rows='||${COUNT});
-          SQL"
-          echoe "TD-SIM ready with sample data"
-
-      - name: 🌐 Run Nginx (network server)
-        if: ${{ github.event.inputs.run_network == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          docker rm -f echo-nginx >/dev/null 2>&1 || true
-          docker run -d --name echo-nginx -p 8088:80 \
-            -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
-            nginx:alpine
-          echo "[NET] nginx listening on :8088" | tee -a "${ECHO_LOG}/network.log"
-
-      - name: 🧩 Build & run OmniChannel (FastAPI)
-        if: ${{ github.event.inputs.run_omni == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
+          retry 3 3 -- docker pull python:3.11-slim
           docker build -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
           docker rm -f omni >/dev/null 2>&1 || true
           docker run -d --name omni -p 8090:8000 "${OMNI_IMAGE}:latest"
-          echo "[OMNI] FastAPI at :8090/health" | tee -a "${ECHO_LOG}/omni.log"
+          echo "[OMNI][OK] FastAPI at :8090/health" | tee -a "${ECHO_LOG}/omni.log"
 
       - name: 🏷️ (Optional) Push Omni image to GHCR
         if: ${{ github.event.inputs.push_image == 'true' }}
@@ -336,8 +310,9 @@ jobs:
             detail TEXT
           );
           INSERT INTO echo_install_log(component,detail) VALUES
-            ('teradata_mode','${{ github.event.inputs.teradata_mode }}'),
-            ('dw_engine','${{ github.event.inputs.dw_engine }}'),
+            ('system','upgrade done'),
+            ('td-client','pip teradatasql/teradatasqlalchemy attempted'),
+            ('td-sim','postgres:16 schema+seed'),
             ('network','${{ github.event.inputs.run_network }}'),
             ('omni','${{ github.event.inputs.run_omni }}');
           SQL
@@ -370,7 +345,7 @@ jobs:
             echoe "No changes to commit"
             exit 0
           fi
-          git commit -m "EchoOps: TD/DW/Network/Omni auto-generated ($(date -Iseconds))"
+          git commit -m "EchoOps v2: Mandatory upgrade + TD client + TD-SIM fix ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
