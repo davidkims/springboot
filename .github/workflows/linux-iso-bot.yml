@@ -1,4 +1,4 @@
-name: "🏦 EchoOps v4: TD-SIM + SCD2 + CDC/Kafka + Security + Prom/Grafana + Omni GHCR Push+Sign"
+name: "🏦 EchoOps v5: TD-SIM + SCD2 + CDC/Kafka + Security + Prom/Grafana + Omni GHCR Push+Sign (No APT Docker)"
 
 permissions:
   contents: write
@@ -33,6 +33,7 @@ jobs:
       IMAGE_OWNER: ${{ github.repository_owner }}
       OMNI_IMAGE: omni-echo
       DOCKER_NETWORK: echo-net
+
     steps:
       - name: 🛎️ Checkout
         uses: actions/checkout@v4
@@ -56,23 +57,39 @@ jobs:
           . .github/echo_tools.sh
           echoe "Echo tools ready and directories prepared"
 
-      - name: ⬆️ Mandatory system upgrade (non-interactive)
+      - name: ⬆️ Mandatory system upgrade (no Docker APT install)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
-          sudo apt-get install -y sqlite3 jq python3 python3-pip docker.io gpg gnupg openssl
+          # ⚠️ 절대 docker.io 설치하지 않음 (containerd 충돌 회피)
+          sudo apt-get install -y sqlite3 jq python3 python3-pip gpg gnupg openssl curl ca-certificates
           echo "[UPGRADE][OK] $(date -Iseconds)" | tee -a "${ECHO_LOG}/upgrade.log"
 
-      - name: 🔐 Docker login to GHCR (for push)
+      - name: 🐳 Ensure Docker is available (no APT packages)
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          echo "${GH_TOKEN}" | docker login "${IMAGE_REGISTRY}" -u "${IMAGE_OWNER}" --password-stdin
+          . .github/echo_tools.sh
+          if ! command -v docker >/dev/null 2>&1; then
+            echoe "docker not found; installing via get.docker.com"
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sh get-docker.sh
+          fi
+          docker --version
+          # 일부 러너에서 서비스가 멈춰 있을 수 있음
+          (sudo systemctl start docker || true)
+          docker info >/dev/null 2>&1 || faile "Docker daemon is not running"
+          echoe "Docker is ready"
+
+      - name: 🔐 Docker login to GHCR (required for push)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ env.IMAGE_OWNER }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 🐍 Mandatory Teradata client install (retry; no-fail)
         shell: bash
@@ -93,29 +110,26 @@ jobs:
           fi
           exit 0
 
-      - name: 🧾 Echo SQL:TD-SIM DDL (Dims incl. Bank/Card/Branch/Product/Channel + SCD2) & Fact + Queries
+      - name: 🧾 Echo SQL:TD-SIM DDL + SCD2 + Seeds + Fact + Queries
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # ---------- SCHEMA & DIMS (SCD2 for customer) ----------
           cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
           CREATE SCHEMA IF NOT EXISTS td;
-
-          -- SCD2 Customer Dimension
+          -- SCD2 Customer
           CREATE TABLE IF NOT EXISTS td.dim_customer_scd2(
-            sk             BIGSERIAL PRIMARY KEY,
-            customer_bk    BIGINT NOT NULL,
-            name           VARCHAR(100) NOT NULL,
-            email          VARCHAR(200),
+            sk BIGSERIAL PRIMARY KEY,
+            customer_bk BIGINT NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            email VARCHAR(200),
             effective_from TIMESTAMP NOT NULL,
-            effective_to   TIMESTAMP,
-            is_current     BOOLEAN NOT NULL DEFAULT TRUE,
-            attrib_hash    TEXT NOT NULL
+            effective_to TIMESTAMP,
+            is_current BOOLEAN NOT NULL DEFAULT TRUE,
+            attrib_hash TEXT NOT NULL
           );
           CREATE INDEX IF NOT EXISTS idx_customer_bk ON td.dim_customer_scd2(customer_bk);
-
-          -- Other Conformed Dimensions
+          -- Conformed Dims
           CREATE TABLE IF NOT EXISTS td.dim_bank(
             bank_id BIGSERIAL PRIMARY KEY,
             bank_code VARCHAR(10) UNIQUE NOT NULL,
@@ -123,7 +137,7 @@ jobs:
           );
           CREATE TABLE IF NOT EXISTS td.dim_branch(
             branch_id BIGSERIAL PRIMARY KEY,
-            bank_id   BIGINT NOT NULL REFERENCES td.dim_bank(bank_id),
+            bank_id BIGINT NOT NULL REFERENCES td.dim_bank(bank_id),
             branch_code VARCHAR(20) NOT NULL,
             branch_name VARCHAR(100) NOT NULL
           );
@@ -141,39 +155,31 @@ jobs:
           CREATE TABLE IF NOT EXISTS td.dim_card(
             card_id BIGSERIAL PRIMARY KEY,
             card_bin VARCHAR(10) NOT NULL,
-            brand    VARCHAR(20) NOT NULL
+            brand VARCHAR(20) NOT NULL
           );
-
-          -- Accounts (ties customer SCD2 current row by BK)
           CREATE TABLE IF NOT EXISTS td.dim_account(
-            account_id  BIGSERIAL PRIMARY KEY,
+            account_id BIGSERIAL PRIMARY KEY,
             customer_bk BIGINT NOT NULL,
-            bank_id     BIGINT NOT NULL REFERENCES td.dim_bank(bank_id),
-            opened_ts   TIMESTAMP DEFAULT NOW(),
-            currency    CHAR(3) DEFAULT 'KRW'
+            bank_id BIGINT NOT NULL REFERENCES td.dim_bank(bank_id),
+            opened_ts TIMESTAMP DEFAULT NOW(),
+            currency CHAR(3) DEFAULT 'KRW'
           );
-
-          -- Fact with extended FKs
           CREATE TABLE IF NOT EXISTS td.fact_transaction(
-            txn_id      BIGSERIAL PRIMARY KEY,
-            account_id  BIGINT NOT NULL REFERENCES td.dim_account(account_id),
-            customer_sk BIGINT,  -- snapshot to SCD2 current row
-            product_id  BIGINT REFERENCES td.dim_product(product_id),
-            channel_id  BIGINT REFERENCES td.dim_channel(channel_id),
-            card_id     BIGINT REFERENCES td.dim_card(card_id),
-            amount      NUMERIC(18,2) NOT NULL,
-            txn_type    VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')),
-            txn_ts      TIMESTAMP DEFAULT NOW()
+            txn_id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL REFERENCES td.dim_account(account_id),
+            customer_sk BIGINT,
+            product_id BIGINT REFERENCES td.dim_product(product_id),
+            channel_id BIGINT REFERENCES td.dim_channel(channel_id),
+            card_id BIGINT REFERENCES td.dim_card(card_id),
+            amount NUMERIC(18,2) NOT NULL,
+            txn_type VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')),
+            txn_ts TIMESTAMP DEFAULT NOW()
           );
-
-          -- Echo install log
           CREATE TABLE IF NOT EXISTS td.echo_install_log(
             installed_at TIMESTAMP DEFAULT NOW(),
-            component    TEXT,
-            detail       TEXT
+            component TEXT,
+            detail TEXT
           );
-
-          -- SCD2 Upsert Function for Customer
           CREATE OR REPLACE FUNCTION td.scd2_upsert_customer(p_customer_bk BIGINT, p_name TEXT, p_email TEXT)
           RETURNS VOID AS $$
           DECLARE
@@ -181,48 +187,35 @@ jobs:
             v_curr td.dim_customer_scd2%ROWTYPE;
           BEGIN
             SELECT * INTO v_curr
-              FROM td.dim_customer_scd2
-              WHERE customer_bk = p_customer_bk AND is_current = TRUE
-              ORDER BY effective_from DESC LIMIT 1;
-
+            FROM td.dim_customer_scd2
+            WHERE customer_bk = p_customer_bk AND is_current = TRUE
+            ORDER BY effective_from DESC LIMIT 1;
             IF v_curr.sk IS NULL THEN
               INSERT INTO td.dim_customer_scd2(customer_bk,name,email,effective_from,effective_to,is_current,attrib_hash)
               VALUES (p_customer_bk,p_name,p_email,NOW(),NULL,TRUE,v_hash);
             ELSIF v_curr.attrib_hash <> v_hash THEN
-              UPDATE td.dim_customer_scd2
-                SET effective_to = NOW(), is_current = FALSE
-                WHERE sk = v_curr.sk;
+              UPDATE td.dim_customer_scd2 SET effective_to = NOW(), is_current = FALSE WHERE sk = v_curr.sk;
               INSERT INTO td.dim_customer_scd2(customer_bk,name,email,effective_from,effective_to,is_current,attrib_hash)
               VALUES (p_customer_bk,p_name,p_email,NOW(),NULL,TRUE,v_hash);
             END IF;
           END; $$ LANGUAGE plpgsql;
           SQL
 
-          # ---------- SEED DATA ----------
           cat > "${ECHO_TD}/sql/td_sim/002_seed.sql" <<'SQL'
-          -- Banks
           INSERT INTO td.dim_bank(bank_code,bank_name) VALUES
             ('KB','KB국민은행'),('NH','농협은행'),('WR','우리은행'),
             ('HN','하나은행'),('SH','신한은행')
           ON CONFLICT (bank_code) DO NOTHING;
-
-          -- Channels
           INSERT INTO td.dim_channel(channel_code,channel_name) VALUES
             ('WEB','웹'),('MOB','모바일'),('ATM','ATM'),('BR','영업점')
           ON CONFLICT (channel_code) DO NOTHING;
-
-          -- Products
           INSERT INTO td.dim_product(product_code,product_name,category) VALUES
             ('CHK','입출금','DEPOSIT'),('SAV','적금','DEPOSIT'),
             ('CRD','신용카드','CARD'),('LOAN','대출','LOAN')
           ON CONFLICT (product_code) DO NOTHING;
-
-          -- Cards
           INSERT INTO td.dim_card(card_bin,brand) VALUES
             ('457812','VISA'),('541234','MASTERCARD'),('356000','JCB')
           ON CONFLICT DO NOTHING;
-
-          -- Customers via SCD2 (10 customers)
           DO $$
           DECLARE i INT;
           BEGIN
@@ -230,20 +223,15 @@ jobs:
               PERFORM td.scd2_upsert_customer(i, '고객'||i, 'user'||i||'@bank.local');
             END LOOP;
           END $$;
-
-          -- Branches (per bank)
           INSERT INTO td.dim_branch(bank_id,branch_code,branch_name)
           SELECT b.bank_id, b.bank_code||'-001', b.bank_name||' 본점'
           FROM td.dim_bank b
           ON CONFLICT DO NOTHING;
-
-          -- Accounts per customer
           INSERT INTO td.dim_account(customer_bk, bank_id)
           SELECT c.customer_bk, (SELECT bank_id FROM td.dim_bank ORDER BY random() LIMIT 1)
           FROM (SELECT DISTINCT customer_bk FROM td.dim_customer_scd2) c;
           SQL
 
-          # ---------- FACT LOAD (pure SQL with psql variable :N) ----------
           cat > "${ECHO_TD}/sql/td_sim/003_generate_txn.sql" <<'SQL'
           \set N 1000
           INSERT INTO td.fact_transaction(account_id, customer_sk, product_id, channel_id, card_id, amount, txn_type, txn_ts)
@@ -260,12 +248,10 @@ jobs:
           CROSS JOIN generate_series(1, :N) g;
           SQL
 
-          # ---------- SCD2 change example (for CDC demo) ----------
           cat > "${ECHO_TD}/sql/td_sim/004_scd2_change_example.sql" <<'SQL'
           SELECT td.scd2_upsert_customer(3,'고객03_개명','user3@bank.local');
           SQL
 
-          # ---------- Analytic Queries ----------
           cat > "${ECHO_DW}/queries/11_daily_by_channel.sql" <<'SQL'
           SELECT date_trunc('day', f.txn_ts) AS day, ch.channel_name,
                  COUNT(*) txn_cnt, SUM(f.amount) total_amt
@@ -273,14 +259,12 @@ jobs:
           JOIN td.dim_channel ch ON ch.channel_id=f.channel_id
           GROUP BY 1,2 ORDER BY 1 DESC, 2;
           SQL
-
           cat > "${ECHO_DW}/queries/12_top_products.sql" <<'SQL'
           SELECT p.product_name, COUNT(*) txn_cnt, SUM(f.amount) total_amt
           FROM td.fact_transaction f
           JOIN td.dim_product p ON p.product_id=f.product_id
           GROUP BY 1 ORDER BY total_amt DESC LIMIT 10;
           SQL
-
           echoe "DDL/Seeds/Fact/Queries emitted"
 
       - name: 🧱 Start TD-SIM (Postgres) & load schema/seeds/fact
@@ -325,7 +309,8 @@ jobs:
       - name: 🧩 Build & run OmniChannel (FastAPI + Prom metrics) ➜ GHCR push (MANDATORY)
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_LATEST: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.OMNI_IMAGE }}:latest
+          IMAGE_RUN: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.OMNI_IMAGE }}:run-${{ github.run_number }}
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
@@ -334,25 +319,20 @@ jobs:
           from datetime import datetime
           from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
           from fastapi.responses import Response
-
           app = FastAPI(title="OmniChannel Echo API")
           hits = Counter("omni_hits_total", "Total hits", ["endpoint"])
-
           @app.get("/health")
           def health():
             hits.labels("/health").inc()
             return {"status":"ok","ts":datetime.utcnow().isoformat()}
-
           @app.get("/orders/{order_id}")
           def order(order_id:int):
             hits.labels("/orders").inc()
             return {"order_id":order_id,"status":"PAID","channel":"web"}
-
           @app.get("/accounts/{account_id}")
           def account(account_id:int):
             hits.labels("/accounts").inc()
             return {"account_id":account_id,"balance":123456.78,"currency":"KRW"}
-
           @app.get("/metrics")
           def metrics():
             return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -367,13 +347,13 @@ jobs:
           DOCKER
           retry 3 3 -- docker pull python:3.11-slim
           docker build -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
-          docker tag "${OMNI_IMAGE}:latest" "${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
-          docker tag "${OMNI_IMAGE}:latest" "${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:run-${{ github.run_number }}"
+          docker tag "${OMNI_IMAGE}:latest" "${IMAGE_LATEST}"
+          docker tag "${OMNI_IMAGE}:latest" "${IMAGE_RUN}"
           docker rm -f omni >/dev/null 2>&1 || true
           docker run -d --name omni --network "${DOCKER_NETWORK}" -p 8090:8000 "${OMNI_IMAGE}:latest"
           echo "[OMNI][RUN] :8090/health & /metrics" | tee -a "${ECHO_LOG}/omni.log"
-          docker push "${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
-          docker push "${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:run-${{ github.run_number }}"
+          docker push "${IMAGE_LATEST}"
+          docker push "${IMAGE_RUN}"
           echo "[OMNI][PUSH][OK]" | tee -a "${ECHO_LOG}/omni.log"
 
       - name: 🔏 Install cosign
@@ -489,7 +469,7 @@ jobs:
             detail TEXT
           );
           INSERT INTO echo_install_log(component,detail) VALUES
-            ('system','upgrade done'),
+            ('system','upgrade done (no docker APT)'),
             ('td-client','pip teradatasql/teradatasqlalchemy attempted'),
             ('td-sim','postgres:16 schema+seed+fact'),
             ('omni','built/pushed/signed to GHCR'),
@@ -526,7 +506,7 @@ jobs:
           git config user.email "echo-bot@users.noreply.github.com"
           git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs .github/echo_sec .github/echo_kafka .github/echo_mon || true
           if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v4: SCD2+CDC/Kafka+Security+Monitoring+GHCR push/sign ($(date -Iseconds))"
+          git commit -m "EchoOps v5: fix containerd conflict (no APT docker) + GHCR push/sign + SCD2/CDC/Prom/Grafana ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
