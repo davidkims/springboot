@@ -1,40 +1,27 @@
-name: "🛰 Net Echo (Pre-Docker) — Echo Everywhere (macOS/Windows migration-safe)"
+name: "🛰 Net Echo (Pre-Docker) — Echo + Always Commit + External Upload (No-Fail)"
 
 on:
   workflow_dispatch:
-    inputs:
-      commit_changes:
-        description: "수집 결과를 레포에 커밋/푸시 (GH_ADMIN_TOKEN 필요)"
-        required: false
-        default: "false"
-      pages_deploy:
-        description: "site/net-echo/ 로 결과 복사 (Pages 설정 시)"
-        required: false
-        default: "false"
-      macos_targets:
-        description: 'Unix 잡에서 사용할 OS 배열(JSON) — 예: ["ubuntu-latest","macos-15","macos-14"]'
-        required: false
-        default: '["ubuntu-latest","macos-15","macos-14"]'
-      windows_targets:
-        description: 'Windows 잡에서 사용할 OS 배열(JSON) — 예: ["windows-2025","windows-2022"]'
-        required: false
-        default: '["windows-2025","windows-2022"]'
 
 permissions:
   contents: write
+  pull-requests: write
+  issues: write
 
 env:
   ECHO_ROOT: .github/echo_net
+  TARGET_REPO_OWNER: davidkims
+  TARGET_REPO_NAME: springboot
   GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
 
 jobs:
-  # ---------- Unix (Ubuntu + macOS) ----------
+  # ==================== Unix (Ubuntu + macOS) ====================
   net-echo-unix:
     name: "Unix — Echo (${{ matrix.os }})"
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event.inputs.macos_targets) }}
+        os: [ubuntu-latest, macos-15, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - name: "[ECHO] Checkout"
@@ -44,24 +31,20 @@ jobs:
         if: startsWith(matrix.os, 'macos-') || matrix.os == 'macos-latest'
         shell: bash
         run: |
-          echo "[ECHO] ⚠ macos-latest 라벨은 2025-08-04부터 macOS 15로 순차 마이그레이션됩니다."
-          echo "[ECHO]    상세: actions/runner-images#12520 (예상 완료 8월 말경)"
-          echo "[ECHO]    macOS 14 의존 워크플로우는 라벨을 macos-14로 핀하세요."
+          echo "[ECHO] ⚠ macos-latest → macOS 15 마이그레이션(2025-08-04~). macos-14 종속 시 macos-14로 핀 권장."
 
       - name: "[ECHO] Prepare dirs"
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] mkdir -p ${ECHO_ROOT}/{out,bin,logs}"
           mkdir -p "${ECHO_ROOT}/out" "${ECHO_ROOT}/bin" "${ECHO_ROOT}/logs"
 
-      - name: "[ECHO] Install helper tools (Linux only)"
+      - name: "[ECHO] Install helpers (Linux only)"
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] apt-get update (no-fail)"; sudo apt-get -y update || true
-          echo "[ECHO] install net-tools dnsutils iproute2 ... (no-fail)"
+          sudo apt-get -y update || true
           sudo apt-get -y install net-tools dnsutils iproute2 iptables nftables ethtool lshw || true
 
       - name: "[ECHO] Write Bash collector"
@@ -148,9 +131,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           export ARCHIVE="${ECHO_ROOT}/net_echo_$(date +%Y%m%d_%H%M%S).tar.gz"
-          echo "[ECHO] ARCHIVE=${ARCHIVE}"
           "${ECHO_ROOT}/gather_net_echo.sh"
-          echo "[ECHO] Completed on ${{ matrix.os }}"; ls -al "${ECHO_ROOT}" || true
 
       - name: "[ECHO] Upload artifact (Unix)"
         uses: actions/upload-artifact@v4
@@ -160,11 +141,12 @@ jobs:
             ${{ env.ECHO_ROOT }}/out/**
             ${{ env.ECHO_ROOT }}/INDEX.md
             ${{ env.ECHO_ROOT }}/*.tar.gz
+            ${{ env.ECHO_ROOT }}/gather_net_echo.sh
           if-no-files-found: warn
           retention-days: 14
 
-      - name: "[ECHO] Optional commit to repo"
-        if: ${{ (github.event.inputs.commit_changes == 'true') && env.GH_ADMIN_TOKEN != '' }}
+      # --- 항상 현재 리포에 커밋/푸시 ---
+      - name: "[ECHO] Commit into current repo (always)"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -173,19 +155,84 @@ jobs:
           cp -a "${ECHO_ROOT}/out" "$DEST/out"
           cp -a "${ECHO_ROOT}/INDEX.md" "$DEST/INDEX.md"
           cp -a "${ECHO_ROOT}"/*.tar.gz "$DEST/" 2>/dev/null || true
-          git config user.name "net-echo-bot"
+          cp -a "${ECHO_ROOT}/gather_net_echo.sh" "$DEST/"
+          git config user.name  "net-echo-bot"
+          git config user.email "net-echo@users.noreply.github.com"
+          git add "$DEST" || true
+          git commit -m "[net-echo] ${{ matrix.os }} snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ) [echo]" || echo "[ECHO] Nothing to commit"
+          git push || true
+
+      # --- 외부 리포 업로드: 토큰 없으면 보고서 생성 후 성공 처리 ---
+      - name: "[ECHO] External upload to davidkims/springboot (no-fail)"
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          STATUS_DIR="site/net-echo/status"
+          mkdir -p "${STATUS_DIR}"
+          if [ -z "${GH_TOKEN}" ]; then
+            echo '[ECHO] GH_ADMIN_TOKEN not set; skip external upload.'
+            cat > "${STATUS_DIR}/status.json" <<JSON
+            {"external_upload":"skipped","reason":"missing GH_ADMIN_TOKEN","target_repo":"${TARGET_REPO_OWNER}/${TARGET_REPO_NAME}","time":"$(date -u +%FT%TZ)","os":"${{ matrix.os }}"}
+            JSON
+            cat > "${STATUS_DIR}/STATUS.md" <<MD
+            # External Upload Status
+
+            - **Result**: Skipped  
+            - **Reason**: \`GH_ADMIN_TOKEN\` secret missing  
+            - **Target**: ${TARGET_REPO_OWNER}/${TARGET_REPO_NAME}  
+            - **OS**: ${{ matrix.os }}  
+            - **Time (UTC)**: $(date -u +%F\ %T)  
+
+            > Secrets → **GH_ADMIN_TOKEN**(repo 권한 PAT)을 추가하면 자동 업로드/PR이 생성됩니다.
+            MD
+            git add "${STATUS_DIR}/status.json" "${STATUS_DIR}/STATUS.md" || true
+            git commit -m "[net-echo][status] external upload skipped (no token) ${{
+              matrix.os }} $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+            git push || true
+
+            # (옵션) 리마인드 이슈 생성 시도 — 실패해도 무시
+            if command -v gh >/dev/null 2>&1; then
+              gh issue create --title "Add GH_ADMIN_TOKEN secret for external upload" \
+                --body "External upload to **${TARGET_REPO_OWNER}/${TARGET_REPO_NAME}** skipped.\n\nPlease add \`GH_ADMIN_TOKEN\` (repo-scoped PAT) in **Settings → Secrets and variables → Actions**.\n\nOS: **${{ matrix.os }}**, Run: **#${{ github.run_number }}**" \
+                --label "automation,net-echo" || true
+            fi
+            exit 0
+          fi
+
+          # 토큰이 있으면 외부 리포로 브랜치 생성 + PR 시도
+          rm -rf ext_repo
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO_OWNER}/${TARGET_REPO_NAME}.git" ext_repo
+          cd ext_repo
+          BR="net-echo-sync/${{ github.run_id }}-${{ matrix.os }}"
+          git checkout -b "$BR"
+          DEST="uploads/net-echo/${{ github.repository_owner }}/$(echo '${{ github.repository }}' | tr '/' '_')/${{ github.run_number }}/${{ matrix.os }}"
+          mkdir -p "$DEST"
+          cp -a "../${ECHO_ROOT}/out" "$DEST/out"
+          cp -a "../${ECHO_ROOT}/INDEX.md" "$DEST/INDEX.md"
+          cp -a "../${ECHO_ROOT}"/*.tar.gz "$DEST/" 2>/dev/null || true
+          cp -a "../${ECHO_ROOT}/gather_net_echo.sh" "$DEST/"
+          git config user.name  "net-echo-bot"
           git config user.email "net-echo@users.noreply.github.com"
           git add "$DEST"
-          git commit -m "[net-echo] ${{ matrix.os }} snapshot: $(date -u +%Y-%m-%dT%H:%M:%SZ) [echo]" || { echo "[ECHO] Nothing to commit"; exit 0; }
-          git -c http.extraheader="AUTHORIZATION: bearer $GH_ADMIN_TOKEN" push || true
+          git commit -m "[net-echo] import from ${{ github.repository }} #${{ github.run_number }} (${{ matrix.os }})"
+          git push -u origin "$BR"
+          if command -v gh >/dev/null 2>&1; then
+            gh pr create \
+              --title "[net-echo] ${{ github.repository }} #${{ github.run_number }} (${{ matrix.os }})" \
+              --body  "Auto-imported net echo artifacts.\n- Source: ${{ github.repository }}\n- Run: #${{ github.run_number }}\n- OS: ${{ matrix.os }}\n- Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --base "$(git remote show origin | sed -n 's/.*HEAD branch: //p')" \
+              --head "$BR" || true
+          fi
 
-  # ---------- Windows ----------
+  # ==================== Windows ====================
   net-echo-windows:
     name: "Windows — Echo (${{ matrix.os }})"
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event.inputs.windows_targets) }}
+        os: [windows-2025, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - name: "[ECHO] Checkout"
@@ -194,15 +241,12 @@ jobs:
       - name: "[ECHO] Runner migration notice (Windows)"
         shell: pwsh
         run: |
-          Write-Host "[ECHO] ⚠ windows-latest 라벨은 2025-09-02부터 Windows Server 2025로 순차 마이그레이션됩니다."
-          Write-Host "[ECHO]    상세: actions/runner-images#12677, GitHub Changelog 2025-07-31"
-          Write-Host "[ECHO]    호환 이슈 발생 시 windows-2022 라벨로 핀하세요."
+          Write-Host "[ECHO] ⚠ windows-latest → Windows Server 2025 마이그레이션(2025-09-02~). 호환 이슈 시 windows-2022로 핀 권장."
 
       - name: "[ECHO] Prepare dirs"
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "${{ env.ECHO_ROOT }}\out","${{ env.ECHO_ROOT }}\logs" | Out-Null
-          Write-Host "[ECHO] ECHO_ROOT=${{ env.ECHO_ROOT }}"
 
       - name: "[ECHO] Write PowerShell collector"
         shell: pwsh
@@ -253,20 +297,79 @@ jobs:
             ${{ env.ECHO_ROOT }}\out\**
             ${{ env.ECHO_ROOT }}\INDEX.txt
             ${{ env.ECHO_ROOT }}\*.zip
+            ${{ env.ECHO_ROOT }}\Gather-NetEcho.ps1
           if-no-files-found: warn
           retention-days: 14
 
-      - name: "[ECHO] Optional commit to repo"
-        if: ${{ (github.event.inputs.commit_changes == 'true') && env.GH_ADMIN_TOKEN != '' }}
+      - name: "[ECHO] Commit into current repo (always)"
         shell: pwsh
         run: |
-          $dest = "site/net-echo/${{ matrix.os }}"
+          $DEST = "site/net-echo/${{ matrix.os }}"
+          New-Item -ItemType Directory -Force -Path $DEST | Out-Null
+          Copy-Item -Recurse -Force "${{ env.ECHO_ROOT }}\out" "$DEST\out"
+          Copy-Item -Recurse -Force "${{ env.ECHO_ROOT }}\INDEX.txt" "$DEST\INDEX.txt" -ErrorAction SilentlyContinue
+          Get-ChildItem "${{ env.ECHO_ROOT }}\*.zip" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "$DEST\" }
+          Copy-Item -Force "${{ env.ECHO_ROOT }}\Gather-NetEcho.ps1" "$DEST\" -ErrorAction SilentlyContinue
+          git config user.name  "net-echo-bot"
+          git config user.email "net-echo@users.noreply.github.com"
+          git add $DEST
+          git commit -m "[net-echo] ${{ matrix.os }} snapshot: $(Get-Date -Format s) [echo]" 2>$null
+          git push || $true
+
+      - name: "[ECHO] External upload to davidkims/springboot (no-fail)"
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ env.GH_ADMIN_TOKEN }}
+        run: |
+          $STATUS_DIR = "site/net-echo/status"; New-Item -ItemType Directory -Force -Path $STATUS_DIR | Out-Null
+          if (-not $env:GH_TOKEN) {
+            "[ECHO] GH_ADMIN_TOKEN not set; skip external upload." | Write-Host
+            @"
+            {"external_upload":"skipped","reason":"missing GH_ADMIN_TOKEN","target_repo":"${{ env.TARGET_REPO_OWNER }}/${{ env.TARGET_REPO_NAME }}","time":"$(Get-Date -Format s)","os":"${{ matrix.os }}"}
+            "@ | Out-File -FilePath "$STATUS_DIR\status.json" -Encoding UTF8
+            @"
+            # External Upload Status
+
+            - **Result**: Skipped  
+            - **Reason**: `GH_ADMIN_TOKEN` secret missing  
+            - **Target**: ${{ env.TARGET_REPO_OWNER }}/${{ env.TARGET_REPO_NAME }}  
+            - **OS**: ${{ matrix.os }}  
+            - **Time (local)**: $(Get-Date -Format s)
+
+            > Secrets → **GH_ADMIN_TOKEN**(repo 권한 PAT)을 추가하면 자동 업로드/PR이 생성됩니다.
+            "@ | Out-File -FilePath "$STATUS_DIR\STATUS.md" -Encoding UTF8
+            git add "$STATUS_DIR\status.json","$STATUS_DIR\STATUS.md"
+            git commit -m "[net-echo][status] external upload skipped (no token) ${{ matrix.os }} $(Get-Date -Format s)" 2>$null
+            git push || $true
+
+            if (Get-Command gh -ErrorAction SilentlyContinue) {
+              gh issue create --title "Add GH_ADMIN_TOKEN secret for external upload" `
+                --body "External upload to **${{ env.TARGET_REPO_OWNER }}/${{ env.TARGET_REPO_NAME }}** skipped.`n`nPlease add \`GH_ADMIN_TOKEN\` (repo-scoped PAT) in **Settings → Secrets and variables → Actions**.`n`nOS: **${{ matrix.os }}**, Run: **#${{ github.run_number }}**" `
+                --label "automation,net-echo" 2>$null
+            }
+            exit 0
+          }
+
+          if (Test-Path ext_repo) { Remove-Item -Recurse -Force ext_repo }
+          git clone "https://x-access-token:${env:GH_TOKEN}@github.com/${{ env.TARGET_REPO_OWNER }}/${{ env.TARGET_REPO_NAME }}.git" ext_repo
+          Set-Location ext_repo
+          $BR = "net-echo-sync/${{ github.run_id }}-${{ matrix.os }}"
+          git checkout -b $BR
+          $dest = "uploads/net-echo/${{ github.repository_owner }}/$('${{ github.repository }}' -replace '/', '_')/${{ github.run_number }}/${{ matrix.os }}"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Copy-Item -Recurse -Force "${{ env.ECHO_ROOT }}\out" "$dest\out"
-          Copy-Item -Recurse -Force "${{ env.ECHO_ROOT }}\INDEX.txt" "$dest\INDEX.txt"
-          Get-ChildItem "${{ env.ECHO_ROOT }}\*.zip" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "$dest\" }
-          git config user.name "net-echo-bot"
+          Copy-Item -Recurse -Force "..\${{ env.ECHO_ROOT }}\out" "$dest\out"
+          Copy-Item -Recurse -Force "..\${{ env.ECHO_ROOT }}\INDEX.txt" "$dest\INDEX.txt" -ErrorAction SilentlyContinue
+          Get-ChildItem "..\${{ env.ECHO_ROOT }}\*.zip" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "$dest\" }
+          Copy-Item -Force "..\${{ env.ECHO_ROOT }}\Gather-NetEcho.ps1" "$dest\" -ErrorAction SilentlyContinue
+          git config user.name  "net-echo-bot"
           git config user.email "net-echo@users.noreply.github.com"
           git add $dest
-          git commit -m "[net-echo] ${{ matrix.os }} snapshot: $(Get-Date -Format s) [echo]" 2>$null
-          git -c "http.extraheader=AUTHORIZATION: bearer $env:GH_ADMIN_TOKEN" push || $true
+          git commit -m "[net-echo] import from ${{ github.repository }} #${{ github.run_number }} (${{ matrix.os }})"
+          git push -u origin $BR
+          if (Get-Command gh -ErrorAction SilentlyContinue) {
+            gh pr create `
+              --title "[net-echo] ${{ github.repository }} #${{ github.run_number }} (${{ matrix.os }})" `
+              --body  "Auto-imported net echo artifacts.`n- Source: ${{ github.repository }}`n- Run: #${{ github.run_number }}`n- OS: ${{ matrix.os }}`n- Time: $(Get-Date -Format s)" `
+              --base "$(git remote show origin | Select-String 'HEAD branch:' | ForEach-Object { ($_ -split ':')[1].Trim() })" `
+              --head $BR  2>$null
+          }
