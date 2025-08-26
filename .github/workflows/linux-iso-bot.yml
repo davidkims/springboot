@@ -1,4 +1,4 @@
-name: "🏦 Teradata + DW + OmniChannel EchoOps v2 (Mandatory Upgrade + TD Client + Fixed TD-SIM + RP/DW + OCI Labels)"
+name: "🏦 Teradata + DW + OmniChannel EchoOps v3 (Containerd Fix + CORS + Logs + HEALTHCHECK + FW + OCI Labels)"
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: "1000"
       run_network:
-        description: "Nginx 네트워크 서버 실행 (true/false)"
+        description: "Nginx 리버스프록시 실행 (true/false)"
         required: true
         default: "true"
       run_omni:
@@ -21,6 +21,10 @@ on:
         default: "true"
       push_image:
         description: "옴니채널 이미지를 GHCR 푸시 (true/false)"
+        required: true
+        default: "false"
+      enable_firewall:
+        description: "UFW 방화벽 활성화(실행중 Runner 네트워크에 영향 주의) (true/false)"
         required: true
         default: "false"
 
@@ -36,7 +40,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       ECHO_TD: .github/echo_td
       ECHO_DW: .github/echo_dw
@@ -47,6 +51,7 @@ jobs:
       IMAGE_OWNER: ${{ github.repository_owner }}
       OMNI_IMAGE: omni-echo
       DOCKER_NET: echo-net
+      PROV_DIR: .github/echo_omni
 
     steps:
       - name: 🛎️ Checkout
@@ -58,7 +63,8 @@ jobs:
           set -Eeuo pipefail
           mkdir -p "${ECHO_TD}/sql/teradata" "${ECHO_TD}/sql/td_sim" \
                    "${ECHO_DW}/db" "${ECHO_DW}/queries" \
-                   "${ECHO_NET}/nginx" "${ECHO_OMNI}" "${ECHO_LOG}"
+                   "${ECHO_NET}/nginx" "${ECHO_NET}/logs" \
+                   "${ECHO_OMNI}" "${ECHO_LOG}"
           cat > .github/echo_tools.sh <<'BASH'
           set -Eeuo pipefail
           echoe(){ echo "[ECHO] $*"; }
@@ -79,18 +85,87 @@ jobs:
           . .github/echo_tools.sh
           echoe "Echo tools ready and directories prepared"
 
-      - name: ⬆️ Mandatory system upgrade (non-interactive)
+      - name: 🧯 Docker/containerd 충돌 가드(핀·리포 정리)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          echoe "apt update/upgrade start"
+          # 1) Docker CE apt repo 잔존 시 비활성화
+          for f in /etc/apt/sources.list.d/docker*.list /etc/apt/sources.list.d/*docker*.list; do
+            [ -f "$f" ] && { sudo mv -f "$f" "${f}.disabled"; echoe "disabled repo: $f"; }
+          done
+          # 2) containerd.io를 apt로 선택하지 않도록 핀(우선순위 -1)
+          echo -e "Package: containerd.io\nPin: release *\nPin-Priority: -1\n" | sudo tee /etc/apt/preferences.d/99-docker-containerd-pin >/dev/null
+          # 3) 과거 설치 흔적 정리(있어도 실패하지 않게)
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
-          sudo apt-get install -y sqlite3 jq python3 python3-pip docker.io
+          sudo apt-get -y remove --purge containerd.io || true
+          sudo apt-get -y autoremove || true
+          sudo dpkg --configure -a || true
+          sudo apt-get -y -f install || true
+          echoe "containerd conflict guards applied"
+
+      - name: ⬆️ Mandatory system upgrade + 기본 패키지
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          echoe "System upgrade start"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+          # held/broken 대비 옵션
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confnew -y dist-upgrade || {
+            echoe "dist-upgrade had issues; attempting recovery"
+            sudo apt-get -y -f install || true
+            sudo dpkg --configure -a || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade || true
+          }
+          sudo apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw
           echo "[UPGRADE][OK] $(date -Iseconds)" | tee -a "${ECHO_LOG}/upgrade.log"
 
-      - name: 🐍 Mandatory Teradata client install (with retries, never fail job)
+      - name: 🛞 Docker 가용성 확인 및 기동(미존재시 안전설치)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          if command -v docker >/dev/null 2>&1; then
+            echoe "Docker already present: $(docker --version)"
+          else
+            echoe "Docker not found. Installing ubuntu docker.io (conflict-free)"
+            sudo apt-get update -y
+            sudo apt-get install -y --no-install-recommends docker.io || {
+              echoe "docker.io install failed; attempting recovery flow"
+              sudo apt-get -y -f install || true
+              sudo dpkg --configure -a || true
+              sudo apt-get install -y --no-install-recommends docker.io || faile "Docker install failed"
+            }
+          fi
+          sudo systemctl enable --now docker || true
+          sudo usermod -aG docker "$USER" || true
+          docker info >/dev/null 2>&1 || faile "Docker daemon not running"
+          echoe "Docker ready"
+
+      - name: 🔥 (옵션) UFW 방화벽 설정/활성화
+        if: ${{ github.event.inputs.enable_firewall == 'true' }}
+        shell: bash
+        run: |
+          set +e
+          . .github/echo_tools.sh
+          sudo ufw --version || sudo apt-get install -y ufw
+          # 기본 정책: inbound deny, outbound allow
+          echo "y" | sudo ufw reset
+          sudo ufw default deny incoming
+          sudo ufw default allow outgoing
+          # 필요 포트 허용: Nginx(8088), Omni(8090), TD-SIM(Postgres 5432)
+          sudo ufw allow 8088/tcp
+          sudo ufw allow 8090/tcp
+          sudo ufw allow 5432/tcp
+          # GitHub Runner 통신 보존을 위해 SSH/HTTPS도 허용
+          sudo ufw allow 22/tcp
+          sudo ufw allow 443/tcp
+          echo "y" | sudo ufw enable
+          sudo ufw status verbose | tee -a "${ECHO_LOG}/ufw.log"
+          exit 0
+
+      - name: 🐍 Teradata Python 클라이언트(재시도/무중단)
         shell: bash
         run: |
           set +e
@@ -105,19 +180,19 @@ jobs:
           retry 2 3 -- python3 -m pip install teradatasqlalchemy >>"$LOG" 2>&1
           RC2=$?
           if [ "$RC1" -ne 0 ] || [ "$RC2" -ne 0 ]; then
-            echo "[TD][WARN] TD client install partial/failed (rc1=${RC1}, rc2=${RC2}). Continuing." | tee -a "$LOG"
+            echo "[TD][WARN] partial/failed (rc1=${RC1}, rc2=${RC2}) — continue" | tee -a "$LOG"
           else
-            echo "[TD][OK] TD client modules installed" | tee -a "$LOG"
+            echo "[TD][OK] teradata drivers installed" | tee -a "$LOG"
           fi
           exit 0
 
-      - name: 📝 Echo:TD SQL (Teradata dialect; artifact only)
+      - name: 📝 Echo:Teradata/TD-SIM DDL·DW 쿼리
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
+          # Teradata dialet (아티팩트)
           cat > "${ECHO_TD}/sql/teradata/001_schema.sql" <<'SQL'
-          -- Teradata dialect (artifact)
           CREATE DATABASE fin_data FROM DBC;
           REPLACE VIEW fin_data.v_dim_date AS
           SELECT CAST(CURRENT_DATE AS DATE) AS as_of_date;
@@ -147,13 +222,7 @@ jobs:
             detail VARCHAR(4000)
           ) PRIMARY INDEX (component);
           SQL
-          echoe "Wrote Teradata dialect SQL (artifact only)"
-
-      - name: 📝 Echo:TD-SIM(Postgres) DDL/DML + DW queries
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
+          # TD-SIM(Postgres)
           cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
           CREATE SCHEMA IF NOT EXISTS td;
           CREATE TABLE IF NOT EXISTS td.dim_customer(
@@ -182,7 +251,6 @@ jobs:
             detail       TEXT
           );
           SQL
-
           cat > "${ECHO_TD}/sql/td_sim/002_seed.sql" <<'SQL'
           INSERT INTO td.dim_customer(name,email)
           SELECT '고객'||i, 'user'||i||'@bank.local' FROM generate_series(1,10) AS s(i);
@@ -196,15 +264,13 @@ jobs:
                  'KRW'
           FROM td.dim_customer;
           SQL
-
-          # DW queries (FastAPI에서 읽어 실행)
+          # DW
           cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
           SELECT date_trunc('day', txn_ts) AS day,
                  COUNT(*) AS txn_count, SUM(amount) AS total_amount
           FROM td.fact_transaction
           GROUP BY 1 ORDER BY 1 DESC;
           SQL
-
           cat > "${ECHO_DW}/queries/02_top_customers.sql" <<'SQL'
           SELECT c.customer_id, c.name,
                  SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
@@ -213,19 +279,17 @@ jobs:
           JOIN td.dim_customer c ON c.customer_id=a.customer_id
           GROUP BY 1,2 ORDER BY net_flow DESC LIMIT 20;
           SQL
+          chmod -R a+rX "${ECHO_TD}" "${ECHO_DW}"
 
-          chmod 644 "${ECHO_DW}/queries/"*.sql
-          echoe "Wrote Postgres TD-SIM DDL/DML and DW queries"
-
-      - name: 🕸️ Create Docker network
+      - name: 🕸️ Docker network
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
           docker network create "${DOCKER_NET}" >/dev/null 2>&1 || true
-          echo "[NET][OK] docker network '${DOCKER_NET}' ready" | tee -a "${ECHO_LOG}/network.log"
+          echo "[NET][OK] '${DOCKER_NET}' ready" | tee -a "${ECHO_LOG}/network.log"
 
-      - name: 🧱 Start TD-SIM (Postgres) & load schema (with retries)
+      - name: 🧱 Start TD-SIM(Postgres) & load schema
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -234,18 +298,16 @@ jobs:
           docker rm -f td-sim >/dev/null 2>&1 || true
           docker run -d --name td-sim \
             --network "${DOCKER_NET}" \
+            --restart unless-stopped \
             -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
             -v "$PWD/${ECHO_TD}/sql/td_sim":/td:ro postgres:16
-
-          # wait for ready
+          # wait
           for i in $(seq 1 60); do
             if docker exec td-sim pg_isready -U postgres >/dev/null 2>&1; then break; fi
             sleep 2
           done
-
           docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/001_schema.sql
           docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/002_seed.sql
-
           COUNT="${{ github.event.inputs.generate_rows }}"
           cat > "${ECHO_TD}/sql/td_sim/003_generate_txn.sql" <<SQL
           INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
@@ -258,17 +320,15 @@ jobs:
           INSERT INTO td.echo_install_log(component,detail)
           VALUES ('td-sim','postgres:16 with td schema, rows='|| ${COUNT}::text);
           SQL
-
           docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/003_generate_txn.sql
-          echo "[TD-SIM][OK] Loaded schema and ${COUNT} rows" | tee -a "${ECHO_LOG}/td_sim.log"
+          echo "[TD-SIM][OK] ${COUNT} rows" | tee -a "${ECHO_LOG}/td_sim.log"
 
-      - name: 🧩 Build & run OmniChannel (FastAPI + psycopg2 + DW endpoints)
+      - name: 🧩 Build & run Omni(FastAPI+psycopg2) with HEALTHCHECK
         if: ${{ github.event.inputs.run_omni == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # FastAPI app with DW endpoints
           cat > "${ECHO_OMNI}/app.py" <<'PY'
           import os, json
           from datetime import datetime
@@ -302,16 +362,13 @@ jobs:
               cols = [c[0] for c in cur.description]
               rows = cur.fetchall()
               cur.close(); conn.close()
-              out = []
+              out=[]
               for r in rows:
-                item = {}
-                for k, v in zip(cols, r):
-                  if isinstance(v, (datetime,)):
-                    item[k] = v.isoformat()
-                  elif hasattr(v, "quantize"):  # Decimal
-                    item[k] = float(v)
-                  else:
-                    item[k] = v
+                item={}
+                for k,v in zip(cols,r):
+                  if isinstance(v, datetime): item[k]=v.isoformat()
+                  elif hasattr(v,"quantize"): item[k]=float(v)
+                  else: item[k]=v
                 out.append(item)
               return out
             except Exception as e:
@@ -338,24 +395,22 @@ jobs:
             return JSONResponse(run_sql_file("02_top_customers.sql"))
           PY
 
-          # Dockerfile with psycopg2 and base OCI labels
           cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
           FROM python:3.11-slim
           LABEL org.opencontainers.image.title="omni-echo" \
                 org.opencontainers.image.description="OmniChannel Echo API (FastAPI) + DW endpoints" \
                 org.opencontainers.image.licenses="MIT"
+          RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
           RUN pip install --no-cache-dir fastapi uvicorn psycopg2-binary
           WORKDIR /app
           COPY app.py /app/app.py
           EXPOSE 8000
           ENV QUERIES_DIR=/queries \
               DB_HOST=td-sim DB_PORT=5432 DB_NAME=postgres DB_USER=postgres DB_PASS=postgres
+          HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8000/health || exit 1
           CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
           DOCKER
 
-          chmod 644 "${ECHO_OMNI}/app.py" "${ECHO_OMNI}/Dockerfile"
-
-          # build with dynamic OCI labels
           retry 3 3 -- docker pull python:3.11-slim
           CREATED="$(date -Iseconds)"
           REV="${GITHUB_SHA:-${{ github.sha }}}"
@@ -365,25 +420,27 @@ jobs:
             --label "org.opencontainers.image.source=${SRC}" \
             --label "org.opencontainers.image.revision=${REV}" \
             --label "org.opencontainers.image.created=${CREATED}" \
+            --label "org.opencontainers.image.url=${SRC}/actions/runs/${{ github.run_id }}" \
+            --label "org.opencontainers.image.vendor=${{ github.repository_owner }}" \
             -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
 
-          # run with mounted queries and shared network
           docker rm -f omni >/dev/null 2>&1 || true
           docker run -d --name omni \
             --network "${DOCKER_NET}" \
+            --restart unless-stopped \
             -p 8090:8000 \
             -e DB_HOST=td-sim -e DB_PORT=5432 -e DB_NAME=postgres -e DB_USER=postgres -e DB_PASS=postgres \
             -v "$PWD/${ECHO_DW}/queries":/queries:ro \
             "${OMNI_IMAGE}:latest"
 
-          # wait health
+          # health wait
           for i in $(seq 1 60); do
             if curl -fsS http://localhost:8090/health >/dev/null 2>&1; then break; fi
             sleep 2
           done
-          echo "[OMNI][OK] FastAPI at :8090 (DW endpoints ready)" | tee -a "${ECHO_LOG}/omni.log"
+          echo "[OMNI][OK] FastAPI at :8090" | tee -a "${ECHO_LOG}/omni.log"
 
-      - name: 🌐 Run Nginx (reverse proxy:/api/* -> omni, /dw/* -> omni/dw/*, /health)
+      - name: 🌐 Nginx RP(/api/*, /dw/*) + CORS + 액세스 로그
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
         run: |
@@ -391,16 +448,46 @@ jobs:
           . .github/echo_tools.sh
           retry 3 3 -- docker pull nginx:alpine
           cat > "${ECHO_NET}/nginx/nginx.conf" <<'CONF'
-          events {}
+          user  nginx;
+          worker_processes  auto;
+          error_log  /var/log/nginx/error.log warn;
+          pid        /var/run/nginx.pid;
+
+          events { worker_connections 1024; }
+
           http {
+            log_format echo '$remote_addr - $remote_user [$time_local] "$request" $status '
+                             '$body_bytes_sent "$http_referer" "$http_user_agent" "$request_time"';
+            access_log  /var/log/nginx/echo.access.log echo;
+
+            map $request_method $is_options {
+              default 0;
+              OPTIONS 1;
+            }
+
             server {
               listen 80;
+
               # health
               location = /health { return 200 "OK"; add_header Content-Type text/plain; }
 
+              # 공통 CORS 헤더 함수처럼 사용
+              set $CORS "*";
+
               # Omni API proxy (/api/*)
               location /api/ {
+                if ($is_options) {
+                  add_header Access-Control-Allow-Origin $CORS always;
+                  add_header Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS" always;
+                  add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
+                  add_header Access-Control-Max-Age 86400 always;
+                  return 204;
+                }
+                add_header Access-Control-Allow-Origin $CORS always;
+                add_header Access-Control-Allow-Credentials "true" always;
+
                 proxy_pass http://omni:8000/;
+                proxy_http_version 1.1;
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -409,29 +496,49 @@ jobs:
 
               # DW proxy (/dw/* -> FastAPI /dw/*)
               location /dw/ {
+                if ($is_options) {
+                  add_header Access-Control-Allow-Origin $CORS always;
+                  add_header Access-Control-Allow-Methods "GET,POST,OPTIONS" always;
+                  add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
+                  add_header Access-Control-Max-Age 86400 always;
+                  return 204;
+                }
+                add_header Access-Control-Allow-Origin $CORS always;
+                add_header Access-Control-Allow-Credentials "true" always;
+
                 proxy_pass http://omni:8000/dw/;
+                proxy_http_version 1.1;
                 proxy_set_header Host $host;
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $scheme;
               }
 
-              # default landing
-              location = / { return 200 "OmniChannel Gateway (Nginx)"; add_header Content-Type text/plain; }
+              # landing
+              location = / {
+                add_header Content-Type text/plain;
+                return 200 "OmniChannel Gateway (Nginx)";
+              }
             }
           }
           CONF
-          chmod 644 "${ECHO_NET}/nginx/nginx.conf"
 
           docker rm -f echo-nginx >/dev/null 2>&1 || true
           docker run -d --name echo-nginx \
             --network "${DOCKER_NET}" \
+            --restart unless-stopped \
             -p 8088:80 \
             -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
+            -v "$PWD/${ECHO_NET}/logs":/var/log/nginx \
             nginx:alpine
-          echo "[NET][OK] nginx listening on :8088 (/health, /api/*, /dw/*)" | tee -a "${ECHO_LOG}/network.log"
+          echo "[NET][OK] nginx :8088 with CORS & access log" | tee -a "${ECHO_LOG}/network.log"
 
-      - name: 🏷️ (Optional) Push Omni image to GHCR + PROVENANCE log
+          # 간단 라우팅 헬스 검증
+          curl -fsS http://localhost:8088/health >/dev/null
+          curl -fsS http://localhost:8088/api/health >/dev/null
+          curl -fsS http://localhost:8088/dw/daily-volume >/dev/null || true
+
+      - name: 🏷️ (옵션) GHCR 푸시 + 프로비넌스 로그
         if: ${{ github.event.inputs.push_image == 'true' }}
         shell: bash
         env:
@@ -444,17 +551,18 @@ jobs:
           docker tag "${OMNI_IMAGE}:latest" "${IMAGE}"
           docker push "${IMAGE}"
 
-          # provenance log (best-effort)
           {
             echo "IMAGE=${IMAGE}"
             echo "PUSHED_AT=$(date -Iseconds)"
             echo "SOURCE=https://github.com/${{ github.repository }}"
+            echo "RUN_ID=${{ github.run_id }}"
             echo "REVISION=${{ github.sha }}"
-            echo "LABELS:"
-            docker inspect "${IMAGE}" --format '{{json .Config.Labels}}' 2>/dev/null || echo "{}"
-            echo "LOCAL_LABELS:"
-            docker inspect "${OMNI_IMAGE}:latest" --format '{{json .Config.Labels}}' 2>/dev/null || echo "{}"
-          } | tee "${ECHO_OMNI}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
+            echo "LOCAL_IMAGE_ID=$(docker images --no-trunc --quiet ${OMNI_IMAGE}:latest || true)"
+            echo "REMOTE_INSPECT_LABELS=$(docker inspect ${IMAGE} --format '{{json .Config.Labels}}' 2>/dev/null || echo '{}')"
+            echo "LOCAL_INSPECT_LABELS=$(docker inspect ${OMNI_IMAGE}:latest --format '{{json .Config.Labels}}' 2>/dev/null || echo '{}')"
+            echo "REMOTE_REPO_DIGESTS=$(docker inspect ${IMAGE} --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
+            echo "SIZE_LIST=$(docker image ls ${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE} --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' || true)"
+          } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
 
       - name: 🗃️ Echo install table (SQLite) + snapshot
         shell: bash
@@ -472,13 +580,16 @@ jobs:
           INSERT INTO echo_install_log(component,detail) VALUES
             ('system','upgrade done'),
             ('td-client','pip teradatasql/teradatasqlalchemy attempted'),
-            ('td-sim','postgres:16 schema+seed'),
+            ('td-sim','postgres:16 schema+seed+generate'),
             ('network','${{ github.event.inputs.run_network }}'),
-            ('omni','${{ github.event.inputs.run_omni }}');
+            ('omni','${{ github.event.inputs.run_omni }}'),
+            ('firewall','${{ github.event.inputs.enable_firewall }}');
           SQL
           sqlite3 "${DB}" '.headers on' '.mode column' 'SELECT * FROM echo_install_log;' | tee "${ECHO_LOG}/echo_install_log.txt"
+          sudo chown -R "$USER":"$USER" .github/echo_* || true
           chmod -R a+rX .github/echo_* || true
-          echo "[ECHO][OK] install log recorded (sqlite)"
+          find .github/echo_* -type f -name "*.sh" -exec chmod +x {} \; || true
+          echo "[ECHO][OK] snapshot recorded"
 
       - name: 📤 Upload artifacts
         uses: actions/upload-artifact@v4
@@ -506,7 +617,7 @@ jobs:
             echoe "No changes to commit"
             exit 0
           fi
-          git commit -m "EchoOps v2+: RP(/dw/*,/api/*,/health) + FastAPI(DW) + OCI labels + provenance ($(date -Iseconds))"
+          git commit -m "EchoOps v3: containerd fix + CORS+logs+HEALTHCHECK + FW(opt) + OCI labels + provenance ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
