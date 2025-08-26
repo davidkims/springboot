@@ -1,4 +1,4 @@
-name: "🏦 Teradata + DW + Omni EchoOps v4 (No-systemd Docker Fix + CORS+WAF+RateLimit + Metrics/Logs + Pool + FW + OCI)"
+name: "🏦 Teradata + DW + Omni EchoOps v5 (Mega Unified: containerd guard + sudo-docker + CORS/WAF/RateLimit + Metrics/Logs + Pool + FW + OCI)"
 
 on:
   workflow_dispatch:
@@ -57,7 +57,7 @@ jobs:
       - name: 🛎️ Checkout
         uses: actions/checkout@v4
 
-      - name: 🧰 Prepare Echo tools & dirs
+      - name: 🧰 Prepare Echo tools & dirs (with sudo-docker wrapper)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -69,58 +69,56 @@ jobs:
           set -Eeuo pipefail
           echoe(){ echo "[ECHO] $*"; }
           faile(){ echo "[ECHO][FAIL] $*" >&2; exit 1; }
-          retry(){ local t="$1"; shift; local s="$1"; shift; [ "$1" = "--" ] && shift || true; local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge "$t" ] && return 1; sleep "$s"; done; }
-          # robust docker start for no-systemd runners
+          retry(){ local t="$1"; shift; local s="$1"; shift; [ "${1:-}" = "--" ] && shift || true; local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge "$t" ] && return 1; sleep "$s"; done; }
+
+          # docker 클라이언트 래퍼: 일반 호출 실패 시 sudo -n docker 재시도 (권한 문제 자동 보정)
+          docker(){
+            if command -v /usr/bin/docker >/dev/null 2>&1; then
+              /usr/bin/docker "$@" && return 0
+              command -v sudo >/dev/null 2>&1 && sudo -n /usr/bin/docker "$@" && return 0
+            else
+              command docker "$@" && return 0
+              command -v sudo >/dev/null 2>&1 && sudo -n docker "$@" && return 0
+            fi
+            return 1
+          }
+
+          # 도커 접근성 확인(서비스 직접 기동 최소화)
           start_docker(){
-            if docker info >/dev/null 2>&1; then return 0; fi
-            if command -v systemctl >/dev/null 2>&1; then
-              if systemctl list-unit-files | grep -q '^docker\.service'; then
-                sudo systemctl start docker || true
-              fi
-            fi
-            if ! docker info >/dev/null 2>&1; then
-              sudo service docker start || true
-            fi
-            if ! docker info >/dev/null 2>&1; then
-              echo "[ECHO] starting dockerd directly..."
-              sudo nohup dockerd --host=unix:///var/run/docker.sock \
-                 --iptables=false --ip-masq=false --storage-driver=overlay2 \
-                 --data-root /var/lib/docker >/tmp/dockerd.log 2>&1 &
-              for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
-            fi
-            docker info >/dev/null 2>&1 || faile "Docker daemon not running"
+            docker info >/dev/null 2>&1 && return 0
+            command -v service >/dev/null 2>&1 && sudo -n service docker start >/dev/null 2>&1 || true
+            docker info >/dev/null 2>&1 && return 0
+            faile "Docker daemon not accessible. (try sudo or adjust runner perms)"
           }
           BASH
           chmod +x .github/echo_tools.sh
           . .github/echo_tools.sh
           echoe "Echo tools & directories prepared"
 
-      - name: 🧯 Docker/containerd 충돌 가드 & 기본 패키지
+      - name: 🧯 containerd 충돌 가드 & 기본 패키지
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # Disable leftover Docker CE repos to avoid containerd.io conflicts
+          # Disable residual Docker CE repos to avoid containerd.io pulling
           for f in /etc/apt/sources.list.d/docker*.list /etc/apt/sources.list.d/*docker*.list; do
             [ -f "$f" ] && { sudo mv -f "$f" "${f}.disabled"; echoe "disabled repo: $f"; }
           done
-          # Pin containerd.io to avoid being pulled implicitly
+          # Pin containerd.io
           echo -e "Package: containerd.io\nPin: release *\nPin-Priority: -1\n" | sudo tee /etc/apt/preferences.d/99-docker-containerd-pin >/dev/null
           sudo apt-get update -y
           sudo apt-get -y remove --purge containerd.io || true
           sudo apt-get -y -f install || true
           sudo dpkg --configure -a || true
-          # base pkgs
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            sqlite3 jq python3 python3-pip curl ca-certificates ufw
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw
 
-      - name: 🛞 Docker 가용성 보장(설치·기동·검증)
+      - name: 🛞 Docker 가용성 보장(설치·기동·검증; no systemd)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
           if command -v docker >/dev/null 2>&1; then
-            echoe "Docker present: $(docker --version)"
+            echoe "Docker present: $(docker --version || true)"
           else
             echoe "Installing ubuntu docker.io (conflict-free)"
             sudo apt-get update -y
@@ -131,12 +129,12 @@ jobs:
               sudo apt-get install -y --no-install-recommends docker.io || faile "Docker install failed"
             }
           fi
-          # no 'enable --now' — use robust starter for non-systemd
-          sudo usermod -aG docker "$USER" || true
+          # group add (무해; 현재 셸 즉시 반영 안됨)
+          getent group docker >/dev/null 2>&1 && sudo usermod -aG docker "$USER" || true
           start_docker
-          echoe "Docker ready"
+          echoe "Docker ready & accessible"
 
-      - name: 🐍 Teradata 클라이언트(무중단/재시도)
+      - name: 🐍 Teradata Python 클라이언트(재시도/무중단)
         shell: bash
         run: |
           set +e; set -u
@@ -150,11 +148,12 @@ jobs:
           [ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && echo "[TD][OK] installed" | tee -a "$LOG" || echo "[TD][WARN] partial/failed rc1=$RC1 rc2=$RC2" | tee -a "$LOG"
           exit 0
 
-      - name: 📝 Echo:TD/TD-SIM DDL + DW 쿼리
+      - name: 📝 Echo: TD/TD-SIM DDL + DW 쿼리
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
+          # Teradata artifact
           cat > "${ECHO_TD}/sql/teradata/001_schema.sql" <<'SQL'
           CREATE DATABASE fin_data FROM DBC;
           REPLACE VIEW fin_data.v_dim_date AS SELECT CAST(CURRENT_DATE AS DATE) AS as_of_date;
@@ -163,6 +162,7 @@ jobs:
           REPLACE MULTISET TABLE fin_data.fact_transaction, NO FALLBACK (txn_id BIGINT NOT NULL, account_id BIGINT NOT NULL, amount DECIMAL(18,2), txn_type VARCHAR(16), txn_ts TIMESTAMP(0)) PRIMARY INDEX (txn_id);
           REPLACE MULTISET TABLE fin_data.echo_install_log, NO FALLBACK (installed_at TIMESTAMP(0), component VARCHAR(64), detail VARCHAR(4000)) PRIMARY INDEX (component);
           SQL
+          # TD-SIM (Postgres)
           cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
           CREATE SCHEMA IF NOT EXISTS td;
           CREATE TABLE IF NOT EXISTS td.dim_customer( customer_id BIGSERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, email VARCHAR(200), created_ts TIMESTAMP DEFAULT NOW() );
@@ -176,6 +176,7 @@ jobs:
           SELECT customer_id, CASE WHEN customer_id%5=0 THEN 'NH' WHEN customer_id%4=0 THEN 'KB' WHEN customer_id%3=0 THEN 'WR' WHEN customer_id%2=0 THEN 'HN' ELSE 'SH' END, 'KRW'
           FROM td.dim_customer;
           SQL
+          # DW queries
           cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
           SELECT date_trunc('day', txn_ts) AS day, COUNT(*) AS txn_count, SUM(amount) AS total_amount FROM td.fact_transaction GROUP BY 1 ORDER BY 1 DESC;
           SQL
@@ -225,21 +226,20 @@ jobs:
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
           cat > "${ECHO_OMNI}/app.py" <<'PY'
-          import os, json
+          import os
           from datetime import datetime
           from typing import List, Dict, Any
           import psycopg2
           from psycopg2.pool import SimpleConnectionPool
           from fastapi import FastAPI, HTTPException
           from fastapi.responses import JSONResponse, Response
-          from prometheus_client import CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST, Counter
+          from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
 
           DB_HOST=os.getenv("DB_HOST","td-sim"); DB_PORT=int(os.getenv("DB_PORT","5432"))
           DB_NAME=os.getenv("DB_NAME","postgres"); DB_USER=os.getenv("DB_USER","postgres"); DB_PASS=os.getenv("DB_PASS","postgres")
           QUERIES_DIR=os.getenv("QUERIES_DIR","/queries")
 
           app=FastAPI(title="OmniChannel Echo API (DW+Metrics)")
-
           pool: SimpleConnectionPool|None=None
           REQ_COUNTER=Counter("omni_requests_total","HTTP requests",["path"])
 
@@ -257,7 +257,8 @@ jobs:
             sql_path=os.path.join(QUERIES_DIR,path)
             if not os.path.isfile(sql_path):
               raise HTTPException(status_code=404, detail=f"SQL not found: {path}")
-            sql=open(sql_path,"r",encoding="utf-8").read()
+            with open(sql_path,"r",encoding="utf-8") as f:
+              sql=f.read()
             try:
               conn=pool.getconn()
               cur=conn.cursor()
@@ -304,10 +305,7 @@ jobs:
 
           @app.get("/metrics")
           def metrics():
-            reg=CollectorRegistry()
-            # default registry already holds counters; just export global registry
-            data=generate_latest()  # default REGISTRY
-            return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+            return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
           PY
 
           cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
@@ -360,12 +358,12 @@ jobs:
           events { worker_connections 1024; }
 
           http {
-            # ---- Logs
+            # Logs
             log_format echo '$remote_addr - $remote_user [$time_local] "$request" $status '
                              '$body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time';
             access_log  /var/log/nginx/echo.access.log echo;
 
-            # ---- Rate Limit (per-IP 5r/s, burst 20)
+            # Rate Limit & Conn limit
             limit_req_zone $binary_remote_addr zone=req_zone:10m rate=5r/s;
             limit_conn_zone $binary_remote_addr zone=conn_zone:10m;
 
@@ -374,20 +372,20 @@ jobs:
             server {
               listen 80;
 
-              # ---- Health
+              # Health
               location = /health { return 200 "OK"; add_header Content-Type text/plain; }
 
-              # ---- Nginx stub_status for exporter
+              # nginx stub_status for exporter
               location = /nginx_status { stub_status; allow all; }
 
-              # ---- Simple WAF rules (deny sensitive paths / obvious payloads)
+              # Simple WAF: deny sensitive paths & trivial payloads
               location ~* (\.env|/\.git|/\.ht|wp-admin|wp-login) { deny all; }
               location ~* (%2e%2e|\.{2}/|<script|%3Cscript) { return 403; }
 
-              # ---- Common CORS headers
+              # CORS common
               set $CORS "*";
 
-              # ---- /api/*
+              # /api/*
               location /api/ {
                 limit_req zone=req_zone burst=20 nodelay;
                 limit_conn conn_zone 100;
@@ -408,7 +406,7 @@ jobs:
                 proxy_set_header X-Forwarded-Proto $scheme;
               }
 
-              # ---- /dw/*  (cache-friendly)
+              # /dw/* (cache-friendly)
               location /dw/ {
                 limit_req zone=req_zone burst=20 nodelay;
                 if ($is_options) {
@@ -429,7 +427,7 @@ jobs:
                 proxy_set_header X-Forwarded-Proto $scheme;
               }
 
-              # ---- Landing
+              # landing
               location = / { add_header Content-Type text/plain; return 200 "OmniChannel Gateway (Nginx)"; }
             }
           }
@@ -444,7 +442,7 @@ jobs:
             nginx:alpine
           echoe "nginx :8088 ready"
 
-          # nginx exporter (9113 -> Prometheus scrape)
+          # nginx exporter (9113)
           docker rm -f nginx-exp >/dev/null 2>&1 || true
           docker run -d --name nginx-exp --network "${DOCKER_NET}" --restart unless-stopped \
             -p 9113:9113 \
@@ -458,7 +456,7 @@ jobs:
           curl -fsS http://localhost:8088/dw/daily-volume >/dev/null || true
           curl -fsS http://localhost:9113/metrics | head -n1
 
-      - name: 📈 Loki(3100) + Promtail(Docker SD) — 로그 수집
+      - name: 📈 Loki(3100) + Promtail(Docker SD) — 로그 파이프
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
         run: |
@@ -472,27 +470,16 @@ jobs:
             -config.file=/etc/loki/local-config.yaml
 
           cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
-          server:
-            http_listen_port: 9080
-            grpc_listen_port: 0
-          positions:
-            filename: /tmp/positions.yaml
-          clients:
-            - url: http://loki:3100/loki/api/v1/push
+          server: { http_listen_port: 9080, grpc_listen_port: 0 }
+          positions: { filename: /tmp/positions.yaml }
+          clients: [ { url: http://loki:3100/loki/api/v1/push } ]
           scrape_configs:
             - job_name: docker
-              docker_sd_configs:
-                - host: unix:///var/run/docker.sock
+              docker_sd_configs: [ { host: unix:///var/run/docker.sock } ]
               relabel_configs:
-                - source_labels: ['__meta_docker_container_name']
-                  regex: '/(echo-nginx|nginx-exp|omni|td-sim).*'
-                  action: keep
-                - source_labels: ['__meta_docker_container_name']
-                  target_label: container
-                  regex: '/(.*)'
-                  replacement: '$1'
-              pipeline_stages:
-                - docker: {}
+                - { source_labels: ['__meta_docker_container_name'], regex: '/(echo-nginx|nginx-exp|omni|td-sim).*', action: keep }
+                - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '$1' }
+              pipeline_stages: [ { docker: {} } ]
           YAML
 
           docker rm -f promtail >/dev/null 2>&1 || true
@@ -560,9 +547,9 @@ jobs:
             component TEXT, detail TEXT
           );
           INSERT INTO echo_install_log(component,detail) VALUES
-            ('docker','ready'),
+            ('docker','ready (sudo wrapper)'),
             ('td-sim','postgres:16 schema+seed+generate'),
-            ('nginx','rp+cors+ratelimit+waf'),
+            ('nginx','rp+cors+ratelimit+waf+exporter'),
             ('omni','dw+metrics+pool+health'),
             ('loki/promtail','3100+docker sd');
           SQL
@@ -593,7 +580,7 @@ jobs:
           git config user.email "echo-bot@users.noreply.github.com"
           git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
           if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v4: docker(no-systemd fix)+CORS/WAF/RateLimit+metrics(logs)+pool+FW(opt)+OCI ($(date -Iseconds))"
+          git commit -m "EchoOps v5 Mega: containerd guard + sudo-docker + CORS/WAF/RateLimit + Metrics/Logs + Pool + FW(opt) + OCI ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
