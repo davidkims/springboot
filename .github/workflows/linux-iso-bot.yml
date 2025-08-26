@@ -1,4 +1,4 @@
-name: "🏦 Teradata + DW + Omni EchoOps v7 (Mega Unified: Podman Fallback + Readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW)"
+name: "🏦 Teradata + DW + Omni EchoOps v7.1 (Mega Unified: Podman Fallback + Readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW)"
 
 on:
   workflow_dispatch:
@@ -72,7 +72,6 @@ jobs:
           retry(){ local t="$1"; shift; local s="$1"; shift; [ "${1:-}" = "--" ] && shift || true; local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge "$t" ] && return 1; sleep "$s"; done; }
           wait_http(){ local url="$1"; local max="${2:-60}"; local i=0; while true; do curl -fsS --max-time 3 "$url" >/dev/null 2>&1 && return 0; i=$((i+1)); [ "$i" -ge "$max" ] && return 1; sleep 1; done; }
 
-          # ------ Podman fallback installer
           ensure_podman(){
             echo "[ECHO] installing podman fallback..."
             sudo apt-get update -y
@@ -81,7 +80,6 @@ jobs:
             podman info >/dev/null 2>&1 || true
           }
 
-          # ------ docker wrapper: normal -> sudo -> podman(fallback)
           docker(){
             if [ "${USE_PODMAN:-0}" = "1" ]; then
               podman "$@"; return
@@ -101,7 +99,6 @@ jobs:
             return 1
           }
 
-          # ------ engine start: prefer docker; else switch to podman
           start_docker(){
             docker info >/dev/null 2>&1 && { echo "[ECHO] engine=docker"; return 0; }
             if command -v service >/dev/null 2>&1; then
@@ -125,7 +122,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # Disable residual Docker CE repos to avoid containerd.io pulling
           for f in /etc/apt/sources.list.d/docker*.list /etc/apt/sources.list.d/*docker*.list; do
             [ -f "$f" ] && { sudo mv -f "$f" "${f}.disabled"; echoe "disabled repo: $f"; }
           done
@@ -370,8 +366,14 @@ jobs:
               location = /health { return 200 "OK"; add_header Content-Type text/plain; }
               location = /nginx_status { stub_status; allow all; }
 
-              location ~* (\.env|/\.git|/\.ht|wp-admin|wp-login) { deny all; }
-              location ~* (%2e%2e|\.{2}/|<script|%3Cscript) { return 403; }
+              # ---- Simple WAF (분할된 안전 정규식)
+              location ~* \.env { deny all; }
+              location ~* /\.git { deny all; }
+              location ~* /\.ht { deny all; }
+              location ~* \.\./ { return 403; }
+              location ~* %2e%2e { return 403; }
+              location ~* <script { return 403; }
+              location ~* %3Cscript { return 403; }
 
               set $CORS "*";
 
@@ -432,7 +434,7 @@ jobs:
             -v "$PWD/${ECHO_NET}/logs":/var/log/nginx \
             nginx:alpine
 
-          # Ready 대기
+          # Ready 대기 + 진단
           if ! wait_http "http://localhost:8088/health" 60; then
             echo "⚠️ Nginx /health 대기 실패 — 진단 출력"
             echo "---- ps ----"; docker ps -a || true
@@ -584,7 +586,7 @@ jobs:
           git config user.email "echo-bot@users.noreply.github.com"
           git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
           if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v7 Mega: Podman fallback + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
+          git commit -m "EchoOps v7.1 Mega: Podman fallback + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
