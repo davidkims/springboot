@@ -1,9 +1,4 @@
-name: "🏦 EchoOps v6: TD-SIM + SCD2 + CDC/Kafka + Security + Prom/Grafana + Omni GHCR Push+Sign (Digest-Pinned)"
-
-permissions:
-  contents: write
-  packages: write
-  id-token: write
+name: "🏦 Teradata + DW + OmniChannel EchoOps v2 (Mandatory Upgrade + TD Client + Fixed TD-SIM + RP/DW + OCI Labels)"
 
 on:
   workflow_dispatch:
@@ -11,28 +6,47 @@ on:
       generate_rows:
         description: "샘플 거래 데이터 생성 건수"
         required: true
-        default: "1500"
+        default: "1000"
+      run_network:
+        description: "Nginx 네트워크 서버 실행 (true/false)"
+        required: true
+        default: "true"
+      run_omni:
+        description: "옴니채널 서버(FastAPI) 실행 (true/false)"
+        required: true
+        default: "true"
       commit_changes:
         description: "에코 산출물 커밋/푸시 (true/false)"
         required: true
         default: "true"
+      push_image:
+        description: "옴니채널 이미지를 GHCR 푸시 (true/false)"
+        required: true
+        default: "false"
+
+permissions:
+  contents: write
+  packages: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       ECHO_TD: .github/echo_td
       ECHO_DW: .github/echo_dw
       ECHO_NET: .github/echo_net
       ECHO_OMNI: .github/echo_omni
       ECHO_LOG: .github/echo_logs
-      ECHO_SEC: .github/echo_sec
-      ECHO_KAFKA: .github/echo_kafka
-      ECHO_MON: .github/echo_mon
       IMAGE_REGISTRY: ghcr.io
       IMAGE_OWNER: ${{ github.repository_owner }}
       OMNI_IMAGE: omni-echo
-      DOCKER_NETWORK: echo-net
+      DOCKER_NET: echo-net
 
     steps:
       - name: 🛎️ Checkout
@@ -42,472 +56,405 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "${ECHO_TD}/sql/td_sim" "${ECHO_TD}/sql/teradata" \
-                   "${ECHO_DW}/db" "${ECHO_DW}/queries" "${ECHO_DW}/scripts" \
-                   "${ECHO_NET}/nginx" "${ECHO_OMNI}" "${ECHO_LOG}" \
-                   "${ECHO_SEC}" "${ECHO_KAFKA}/events" \
-                   "${ECHO_MON}/prometheus" "${ECHO_MON}/grafana/provisioning/datasources"
+          mkdir -p "${ECHO_TD}/sql/teradata" "${ECHO_TD}/sql/td_sim" \
+                   "${ECHO_DW}/db" "${ECHO_DW}/queries" \
+                   "${ECHO_NET}/nginx" "${ECHO_OMNI}" "${ECHO_LOG}"
           cat > .github/echo_tools.sh <<'BASH'
           set -Eeuo pipefail
           echoe(){ echo "[ECHO] $*"; }
           faile(){ echo "[ECHO][FAIL] $*" >&2; exit 1; }
-          retry(){ local t="$1"; shift; local s="$1"; shift; [ "$1" = "--" ] && shift || true; local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge "$t" ] && return 1; sleep "$s"; done; }
+          retry(){
+            local tries="$1"; shift
+            local sleep_sec="$1"; shift
+            [ "$1" = "--" ] && shift || true
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge "$tries" ]; then return 1; fi
+              sleep "$sleep_sec"
+            done
+          }
           BASH
           chmod +x .github/echo_tools.sh
           . .github/echo_tools.sh
           echoe "Echo tools ready and directories prepared"
 
-      - name: ⬆️ Mandatory system upgrade (no Docker APT install)
+      - name: ⬆️ Mandatory system upgrade (non-interactive)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
+          echoe "apt update/upgrade start"
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
-          # ⚠️ docker.io/컨테이너 런타임은 APT로 설치하지 않음(충돌 방지)
-          sudo apt-get install -y sqlite3 jq python3 python3-pip gpg gnupg openssl curl ca-certificates
+          sudo apt-get install -y sqlite3 jq python3 python3-pip docker.io
           echo "[UPGRADE][OK] $(date -Iseconds)" | tee -a "${ECHO_LOG}/upgrade.log"
 
-      - name: 🐳 Ensure Docker is available (no APT docker)
+      - name: 🐍 Mandatory Teradata client install (with retries, never fail job)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          if ! command -v docker >/dev/null 2>&1; then
-            echoe "docker not found; installing via get.docker.com"
-            curl -fsSL https://get.docker.com -o get-docker.sh
-            sh get-docker.sh
-          fi
-          docker --version
-          (sudo systemctl start docker || true)
-          docker info >/dev/null 2>&1 || faile "Docker daemon is not running"
-          echoe "Docker is ready"
-
-      - name: 🔐 Docker login to GHCR (required for push)
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.IMAGE_REGISTRY }}
-          username: ${{ env.IMAGE_OWNER }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 🐍 Mandatory Teradata client install (retry; no-fail)
-        shell: bash
-        run: |
-          set +euo pipefail
+          set +e
           set -u
           . .github/echo_tools.sh
+          python3 -m pip install --upgrade pip >/dev/null 2>&1
           LOG="${ECHO_LOG}/td_client_install.log"
-          python3 -m pip install --upgrade pip >>"$LOG" 2>&1
+          echo "[TD][INFO] teradatasql install attempt" | tee -a "$LOG"
           retry 3 3 -- python3 -m pip install teradatasql >>"$LOG" 2>&1
           RC1=$?
+          echo "[TD][INFO] teradatasqlalchemy install attempt" | tee -a "$LOG"
           retry 2 3 -- python3 -m pip install teradatasqlalchemy >>"$LOG" 2>&1
           RC2=$?
           if [ "$RC1" -ne 0 ] || [ "$RC2" -ne 0 ]; then
-            echo "[TD][WARN] teradata client partial/failed (rc1=${RC1}, rc2=${RC2})" | tee -a "$LOG"
+            echo "[TD][WARN] TD client install partial/failed (rc1=${RC1}, rc2=${RC2}). Continuing." | tee -a "$LOG"
           else
-            echo "[TD][OK] teradata client installed" | tee -a "$LOG"
+            echo "[TD][OK] TD client modules installed" | tee -a "$LOG"
           fi
           exit 0
 
-      - name: 🧾 Echo SQL:TD-SIM DDL + SCD2 + Seeds + Fact + Queries
+      - name: 📝 Echo:TD SQL (Teradata dialect; artifact only)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          # ---------- SCHEMA & DIMS (SCD2 for customer) ----------
+          cat > "${ECHO_TD}/sql/teradata/001_schema.sql" <<'SQL'
+          -- Teradata dialect (artifact)
+          CREATE DATABASE fin_data FROM DBC;
+          REPLACE VIEW fin_data.v_dim_date AS
+          SELECT CAST(CURRENT_DATE AS DATE) AS as_of_date;
+          REPLACE MULTISET TABLE fin_data.dim_customer, NO FALLBACK (
+            customer_id BIGINT NOT NULL,
+            name VARCHAR(100) CHARACTER SET LATIN NOT CASESPECIFIC,
+            email VARCHAR(200),
+            created_ts TIMESTAMP(0)
+          ) PRIMARY INDEX (customer_id);
+          REPLACE MULTISET TABLE fin_data.dim_account, NO FALLBACK (
+            account_id BIGINT NOT NULL,
+            customer_id BIGINT NOT NULL,
+            bank_code VARCHAR(10),
+            currency CHAR(3),
+            opened_ts TIMESTAMP(0)
+          ) PRIMARY INDEX (account_id);
+          REPLACE MULTISET TABLE fin_data.fact_transaction, NO FALLBACK (
+            txn_id BIGINT NOT NULL,
+            account_id BIGINT NOT NULL,
+            amount DECIMAL(18,2),
+            txn_type VARCHAR(16),
+            txn_ts TIMESTAMP(0)
+          ) PRIMARY INDEX (txn_id);
+          REPLACE MULTISET TABLE fin_data.echo_install_log, NO FALLBACK (
+            installed_at TIMESTAMP(0),
+            component VARCHAR(64),
+            detail VARCHAR(4000)
+          ) PRIMARY INDEX (component);
+          SQL
+          echoe "Wrote Teradata dialect SQL (artifact only)"
+
+      - name: 📝 Echo:TD-SIM(Postgres) DDL/DML + DW queries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
           cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
           CREATE SCHEMA IF NOT EXISTS td;
-
-          -- SCD2 Customer Dimension
-          CREATE TABLE IF NOT EXISTS td.dim_customer_scd2(
-            sk             BIGSERIAL PRIMARY KEY,
-            customer_bk    BIGINT NOT NULL,
-            name           VARCHAR(100) NOT NULL,
-            email          VARCHAR(200),
-            effective_from TIMESTAMP NOT NULL,
-            effective_to   TIMESTAMP,
-            is_current     BOOLEAN NOT NULL DEFAULT TRUE,
-            attrib_hash    TEXT NOT NULL
+          CREATE TABLE IF NOT EXISTS td.dim_customer(
+            customer_id BIGSERIAL PRIMARY KEY,
+            name        VARCHAR(100) NOT NULL,
+            email       VARCHAR(200),
+            created_ts  TIMESTAMP DEFAULT NOW()
           );
-          CREATE INDEX IF NOT EXISTS idx_customer_bk ON td.dim_customer_scd2(customer_bk);
-
-          -- Other Conformed Dimensions
-          CREATE TABLE IF NOT EXISTS td.dim_bank(
-            bank_id BIGSERIAL PRIMARY KEY,
-            bank_code VARCHAR(10) UNIQUE NOT NULL,
-            bank_name VARCHAR(100) NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS td.dim_branch(
-            branch_id BIGSERIAL PRIMARY KEY,
-            bank_id   BIGINT NOT NULL REFERENCES td.dim_bank(bank_id),
-            branch_code VARCHAR(20) NOT NULL,
-            branch_name VARCHAR(100) NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS td.dim_product(
-            product_id BIGSERIAL PRIMARY KEY,
-            product_code VARCHAR(20) UNIQUE NOT NULL,
-            product_name VARCHAR(100) NOT NULL,
-            category VARCHAR(50)
-          );
-          CREATE TABLE IF NOT EXISTS td.dim_channel(
-            channel_id BIGSERIAL PRIMARY KEY,
-            channel_code VARCHAR(20) UNIQUE NOT NULL,
-            channel_name VARCHAR(100) NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS td.dim_card(
-            card_id BIGSERIAL PRIMARY KEY,
-            card_bin VARCHAR(10) NOT NULL,
-            brand    VARCHAR(20) NOT NULL
-          );
-
-          -- Accounts (ties customer SCD2 current row by BK)
           CREATE TABLE IF NOT EXISTS td.dim_account(
             account_id  BIGSERIAL PRIMARY KEY,
-            customer_bk BIGINT NOT NULL,
-            bank_id     BIGINT NOT NULL REFERENCES td.dim_bank(bank_id),
-            opened_ts   TIMESTAMP DEFAULT NOW(),
-            currency    CHAR(3) DEFAULT 'KRW'
+            customer_id BIGINT NOT NULL REFERENCES td.dim_customer(customer_id),
+            bank_code   VARCHAR(10),
+            currency    CHAR(3) DEFAULT 'KRW',
+            opened_ts   TIMESTAMP DEFAULT NOW()
           );
-
-          -- Fact with extended FKs
           CREATE TABLE IF NOT EXISTS td.fact_transaction(
-            txn_id      BIGSERIAL PRIMARY KEY,
-            account_id  BIGINT NOT NULL REFERENCES td.dim_account(account_id),
-            customer_sk BIGINT,  -- snapshot to SCD2 current row
-            product_id  BIGINT REFERENCES td.dim_product(product_id),
-            channel_id  BIGINT REFERENCES td.dim_channel(channel_id),
-            card_id     BIGINT REFERENCES td.dim_card(card_id),
-            amount      NUMERIC(18,2) NOT NULL,
-            txn_type    VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')),
-            txn_ts      TIMESTAMP DEFAULT NOW()
+            txn_id     BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL REFERENCES td.dim_account(account_id),
+            amount     NUMERIC(18,2) NOT NULL,
+            txn_type   VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')),
+            txn_ts     TIMESTAMP DEFAULT NOW()
           );
-
-          -- Echo install log
           CREATE TABLE IF NOT EXISTS td.echo_install_log(
             installed_at TIMESTAMP DEFAULT NOW(),
             component    TEXT,
             detail       TEXT
           );
-
-          -- SCD2 Upsert Function for Customer
-          CREATE OR REPLACE FUNCTION td.scd2_upsert_customer(p_customer_bk BIGINT, p_name TEXT, p_email TEXT)
-          RETURNS VOID AS $$
-          DECLARE
-            v_hash TEXT := md5(coalesce(p_name,'') || '|' || coalesce(p_email,''));
-            v_curr td.dim_customer_scd2%ROWTYPE;
-          BEGIN
-            SELECT * INTO v_curr
-              FROM td.dim_customer_scd2
-              WHERE customer_bk = p_customer_bk AND is_current = TRUE
-              ORDER BY effective_from DESC LIMIT 1;
-
-            IF v_curr.sk IS NULL THEN
-              INSERT INTO td.dim_customer_scd2(customer_bk,name,email,effective_from,effective_to,is_current,attrib_hash)
-              VALUES (p_customer_bk,p_name,p_email,NOW(),NULL,TRUE,v_hash);
-            ELSIF v_curr.attrib_hash <> v_hash THEN
-              UPDATE td.dim_customer_scd2
-                SET effective_to = NOW(), is_current = FALSE
-                WHERE sk = v_curr.sk;
-              INSERT INTO td.dim_customer_scd2(customer_bk,name,email,effective_from,effective_to,is_current,attrib_hash)
-              VALUES (p_customer_bk,p_name,p_email,NOW(),NULL,TRUE,v_hash);
-            END IF;
-          END; $$ LANGUAGE plpgsql;
           SQL
 
-          # ---------- SEED DATA ----------
           cat > "${ECHO_TD}/sql/td_sim/002_seed.sql" <<'SQL'
-          -- Banks
-          INSERT INTO td.dim_bank(bank_code,bank_name) VALUES
-            ('KB','KB국민은행'),('NH','농협은행'),('WR','우리은행'),
-            ('HN','하나은행'),('SH','신한은행')
-          ON CONFLICT (bank_code) DO NOTHING;
-
-          -- Channels
-          INSERT INTO td.dim_channel(channel_code,channel_name) VALUES
-            ('WEB','웹'),('MOB','모바일'),('ATM','ATM'),('BR','영업점')
-          ON CONFLICT (channel_code) DO NOTHING;
-
-          -- Products
-          INSERT INTO td.dim_product(product_code,product_name,category) VALUES
-            ('CHK','입출금','DEPOSIT'),('SAV','적금','DEPOSIT'),
-            ('CRD','신용카드','CARD'),('LOAN','대출','LOAN')
-          ON CONFLICT (product_code) DO NOTHING;
-
-          -- Cards
-          INSERT INTO td.dim_card(card_bin,brand) VALUES
-            ('457812','VISA'),('541234','MASTERCARD'),('356000','JCB')
-          ON CONFLICT DO NOTHING;
-
-          -- Customers via SCD2 (10 customers)
-          DO $$
-          DECLARE i INT;
-          BEGIN
-            FOR i IN 1..10 LOOP
-              PERFORM td.scd2_upsert_customer(i, '고객'||i, 'user'||i||'@bank.local');
-            END LOOP;
-          END $$;
-
-          -- Branches (per bank)
-          INSERT INTO td.dim_branch(bank_id,branch_code,branch_name)
-          SELECT b.bank_id, b.bank_code||'-001', b.bank_name||' 본점'
-          FROM td.dim_bank b
-          ON CONFLICT DO NOTHING;
-
-          -- Accounts per customer
-          INSERT INTO td.dim_account(customer_bk, bank_id)
-          SELECT c.customer_bk, (SELECT bank_id FROM td.dim_bank ORDER BY random() LIMIT 1)
-          FROM (SELECT DISTINCT customer_bk FROM td.dim_customer_scd2) c;
+          INSERT INTO td.dim_customer(name,email)
+          SELECT '고객'||i, 'user'||i||'@bank.local' FROM generate_series(1,10) AS s(i);
+          INSERT INTO td.dim_account(customer_id, bank_code, currency)
+          SELECT customer_id,
+                 CASE WHEN customer_id%5=0 THEN 'NH'
+                      WHEN customer_id%4=0 THEN 'KB'
+                      WHEN customer_id%3=0 THEN 'WR'
+                      WHEN customer_id%2=0 THEN 'HN'
+                      ELSE 'SH' END,
+                 'KRW'
+          FROM td.dim_customer;
           SQL
 
-          # ---------- FACT LOAD (pure SQL with psql variable :N) ----------
-          cat > "${ECHO_TD}/sql/td_sim/003_generate_txn.sql" <<'SQL'
-          \set N 1000
-          INSERT INTO td.fact_transaction(account_id, customer_sk, product_id, channel_id, card_id, amount, txn_type, txn_ts)
-          SELECT
-            a.account_id,
-            (SELECT sk FROM td.dim_customer_scd2 s WHERE s.customer_bk = a.customer_bk AND s.is_current = TRUE LIMIT 1),
-            (SELECT product_id FROM td.dim_product ORDER BY random() LIMIT 1),
-            (SELECT channel_id FROM td.dim_channel ORDER BY random() LIMIT 1),
-            (SELECT card_id FROM td.dim_card ORDER BY random() LIMIT 1),
-            (random()*100000)::numeric(18,2),
-            CASE WHEN random()>0.5 THEN 'CREDIT' ELSE 'DEBIT' END,
-            NOW() - (random()*interval '10 days')
-          FROM td.dim_account a
-          CROSS JOIN generate_series(1, :N) g;
+          # DW queries (FastAPI에서 읽어 실행)
+          cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
+          SELECT date_trunc('day', txn_ts) AS day,
+                 COUNT(*) AS txn_count, SUM(amount) AS total_amount
+          FROM td.fact_transaction
+          GROUP BY 1 ORDER BY 1 DESC;
           SQL
 
-          # ---------- SCD2 change example (for CDC demo) ----------
-          cat > "${ECHO_TD}/sql/td_sim/004_scd2_change_example.sql" <<'SQL'
-          SELECT td.scd2_upsert_customer(3,'고객03_개명','user3@bank.local');
-          SQL
-
-          # ---------- Analytic Queries ----------
-          cat > "${ECHO_DW}/queries/11_daily_by_channel.sql" <<'SQL'
-          SELECT date_trunc('day', f.txn_ts) AS day, ch.channel_name,
-                 COUNT(*) txn_cnt, SUM(f.amount) total_amt
+          cat > "${ECHO_DW}/queries/02_top_customers.sql" <<'SQL'
+          SELECT c.customer_id, c.name,
+                 SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
           FROM td.fact_transaction f
-          JOIN td.dim_channel ch ON ch.channel_id=f.channel_id
-          GROUP BY 1,2 ORDER BY 1 DESC, 2;
+          JOIN td.dim_account a ON a.account_id=f.account_id
+          JOIN td.dim_customer c ON c.customer_id=a.customer_id
+          GROUP BY 1,2 ORDER BY net_flow DESC LIMIT 20;
           SQL
 
-          cat > "${ECHO_DW}/queries/12_top_products.sql" <<'SQL'
-          SELECT p.product_name, COUNT(*) txn_cnt, SUM(f.amount) total_amt
-          FROM td.fact_transaction f
-          JOIN td.dim_product p ON p.product_id=f.product_id
-          GROUP BY 1 ORDER BY total_amt DESC LIMIT 10;
-          SQL
+          chmod 644 "${ECHO_DW}/queries/"*.sql
+          echoe "Wrote Postgres TD-SIM DDL/DML and DW queries"
 
-          echoe "DDL/Seeds/Fact/Queries emitted"
+      - name: 🕸️ Create Docker network
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          docker network create "${DOCKER_NET}" >/dev/null 2>&1 || true
+          echo "[NET][OK] docker network '${DOCKER_NET}' ready" | tee -a "${ECHO_LOG}/network.log"
 
-      - name: 🧱 Start TD-SIM (Postgres) & load schema/seeds/fact
+      - name: 🧱 Start TD-SIM (Postgres) & load schema (with retries)
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
           retry 3 3 -- docker pull postgres:16
-          docker network create "${DOCKER_NETWORK}" >/dev/null 2>&1 || true
           docker rm -f td-sim >/dev/null 2>&1 || true
-          docker run -d --name td-sim --network "${DOCKER_NETWORK}" \
+          docker run -d --name td-sim \
+            --network "${DOCKER_NET}" \
             -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
             -v "$PWD/${ECHO_TD}/sql/td_sim":/td:ro postgres:16
+
+          # wait for ready
           for i in $(seq 1 60); do
-            if docker exec td-sim pg_isready -U postgres >/dev/null 2>&1; then break; fi; sleep 2; done
+            if docker exec td-sim pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+
           docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/001_schema.sql
           docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/002_seed.sql
-          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v N=${{ github.event.inputs.generate_rows }} -f /td/003_generate_txn.sql
-          echo "[TD-SIM][OK] schema+seed+fact" | tee -a "${ECHO_LOG}/td_sim.log"
 
-      - name: 🌐 Run Nginx (network server)
+          COUNT="${{ github.event.inputs.generate_rows }}"
+          cat > "${ECHO_TD}/sql/td_sim/003_generate_txn.sql" <<SQL
+          INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
+          SELECT
+            (SELECT account_id FROM td.dim_account ORDER BY random() LIMIT 1),
+            (random()*100000)::numeric(18,2),
+            CASE WHEN random() > 0.5 THEN 'CREDIT' ELSE 'DEBIT' END,
+            NOW() - (random()*interval '10 days')
+          FROM generate_series(1, ${COUNT});
+          INSERT INTO td.echo_install_log(component,detail)
+          VALUES ('td-sim','postgres:16 with td schema, rows='|| ${COUNT}::text);
+          SQL
+
+          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/003_generate_txn.sql
+          echo "[TD-SIM][OK] Loaded schema and ${COUNT} rows" | tee -a "${ECHO_LOG}/td_sim.log"
+
+      - name: 🧩 Build & run OmniChannel (FastAPI + psycopg2 + DW endpoints)
+        if: ${{ github.event.inputs.run_omni == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . .github/echo_tools.sh
+          # FastAPI app with DW endpoints
+          cat > "${ECHO_OMNI}/app.py" <<'PY'
+          import os, json
+          from datetime import datetime
+          from typing import List, Dict, Any
+          import psycopg2
+          from fastapi import FastAPI, HTTPException
+          from fastapi.responses import JSONResponse
+
+          DB_HOST = os.getenv("DB_HOST", "td-sim")
+          DB_PORT = int(os.getenv("DB_PORT", "5432"))
+          DB_NAME = os.getenv("DB_NAME", "postgres")
+          DB_USER = os.getenv("DB_USER", "postgres")
+          DB_PASS = os.getenv("DB_PASS", "postgres")
+          QUERIES_DIR = os.getenv("QUERIES_DIR", "/queries")
+
+          app = FastAPI(title="OmniChannel Echo API (DW enabled)")
+
+          def run_sql_file(path:str) -> List[Dict[str, Any]]:
+            sql_path = os.path.join(QUERIES_DIR, path)
+            if not os.path.isfile(sql_path):
+              raise HTTPException(status_code=404, detail=f"SQL not found: {path}")
+            with open(sql_path, "r", encoding="utf-8") as f:
+              sql = f.read()
+            try:
+              conn = psycopg2.connect(
+                host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+                user=DB_USER, password=DB_PASS
+              )
+              cur = conn.cursor()
+              cur.execute(sql)
+              cols = [c[0] for c in cur.description]
+              rows = cur.fetchall()
+              cur.close(); conn.close()
+              out = []
+              for r in rows:
+                item = {}
+                for k, v in zip(cols, r):
+                  if isinstance(v, (datetime,)):
+                    item[k] = v.isoformat()
+                  elif hasattr(v, "quantize"):  # Decimal
+                    item[k] = float(v)
+                  else:
+                    item[k] = v
+                out.append(item)
+              return out
+            except Exception as e:
+              raise HTTPException(status_code=500, detail=str(e))
+
+          @app.get("/health")
+          def health():
+            return {"status":"ok","ts":datetime.utcnow().isoformat()}
+
+          @app.get("/orders/{order_id}")
+          def order(order_id:int):
+            return {"order_id":order_id,"status":"PAID","channel":"web"}
+
+          @app.get("/accounts/{account_id}")
+          def account(account_id:int):
+            return {"account_id":account_id,"balance":123456.78,"currency":"KRW"}
+
+          @app.get("/dw/daily-volume")
+          def dw_daily_volume():
+            return JSONResponse(run_sql_file("01_daily_volume.sql"))
+
+          @app.get("/dw/top-customers")
+          def dw_top_customers():
+            return JSONResponse(run_sql_file("02_top_customers.sql"))
+          PY
+
+          # Dockerfile with psycopg2 and base OCI labels
+          cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
+          FROM python:3.11-slim
+          LABEL org.opencontainers.image.title="omni-echo" \
+                org.opencontainers.image.description="OmniChannel Echo API (FastAPI) + DW endpoints" \
+                org.opencontainers.image.licenses="MIT"
+          RUN pip install --no-cache-dir fastapi uvicorn psycopg2-binary
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          ENV QUERIES_DIR=/queries \
+              DB_HOST=td-sim DB_PORT=5432 DB_NAME=postgres DB_USER=postgres DB_PASS=postgres
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+
+          chmod 644 "${ECHO_OMNI}/app.py" "${ECHO_OMNI}/Dockerfile"
+
+          # build with dynamic OCI labels
+          retry 3 3 -- docker pull python:3.11-slim
+          CREATED="$(date -Iseconds)"
+          REV="${GITHUB_SHA:-${{ github.sha }}}"
+          SRC="https://github.com/${{ github.repository }}"
+          docker build \
+            --label "org.opencontainers.image.title=${OMNI_IMAGE}" \
+            --label "org.opencontainers.image.source=${SRC}" \
+            --label "org.opencontainers.image.revision=${REV}" \
+            --label "org.opencontainers.image.created=${CREATED}" \
+            -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
+
+          # run with mounted queries and shared network
+          docker rm -f omni >/dev/null 2>&1 || true
+          docker run -d --name omni \
+            --network "${DOCKER_NET}" \
+            -p 8090:8000 \
+            -e DB_HOST=td-sim -e DB_PORT=5432 -e DB_NAME=postgres -e DB_USER=postgres -e DB_PASS=postgres \
+            -v "$PWD/${ECHO_DW}/queries":/queries:ro \
+            "${OMNI_IMAGE}:latest"
+
+          # wait health
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8090/health >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          echo "[OMNI][OK] FastAPI at :8090 (DW endpoints ready)" | tee -a "${ECHO_LOG}/omni.log"
+
+      - name: 🌐 Run Nginx (reverse proxy:/api/* -> omni, /dw/* -> omni/dw/*, /health)
+        if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
           retry 3 3 -- docker pull nginx:alpine
-          docker rm -f echo-nginx >/dev/null 2>&1 || true
           cat > "${ECHO_NET}/nginx/nginx.conf" <<'CONF'
           events {}
           http {
             server {
               listen 80;
-              location /health { return 200 'OK'; add_header Content-Type text/plain; }
-              location / { return 200 'OmniChannel Gateway (Nginx)'; add_header Content-Type text/plain; }
+              # health
+              location = /health { return 200 "OK"; add_header Content-Type text/plain; }
+
+              # Omni API proxy (/api/*)
+              location /api/ {
+                proxy_pass http://omni:8000/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              # DW proxy (/dw/* -> FastAPI /dw/*)
+              location /dw/ {
+                proxy_pass http://omni:8000/dw/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              # default landing
+              location = / { return 200 "OmniChannel Gateway (Nginx)"; add_header Content-Type text/plain; }
             }
           }
           CONF
-          docker run -d --name echo-nginx --network "${DOCKER_NETWORK}" -p 8088:80 \
-            -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro nginx:alpine
-          echo "[NET][OK] nginx :8088" | tee -a "${ECHO_LOG}/network.log"
+          chmod 644 "${ECHO_NET}/nginx/nginx.conf"
 
-      - name: 🧩 Build & run OmniChannel (FastAPI + Prom metrics) ➜ GHCR push (MANDATORY)
+          docker rm -f echo-nginx >/dev/null 2>&1 || true
+          docker run -d --name echo-nginx \
+            --network "${DOCKER_NET}" \
+            -p 8088:80 \
+            -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
+            nginx:alpine
+          echo "[NET][OK] nginx listening on :8088 (/health, /api/*, /dw/*)" | tee -a "${ECHO_LOG}/network.log"
+
+      - name: 🏷️ (Optional) Push Omni image to GHCR + PROVENANCE log
+        if: ${{ github.event.inputs.push_image == 'true' }}
         shell: bash
         env:
-          IMAGE_LATEST: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.OMNI_IMAGE }}:latest
-          IMAGE_RUN: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.OMNI_IMAGE }}:run-${{ github.run_number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          cat > "${ECHO_OMNI}/app.py" <<'PY'
-          from fastapi import FastAPI
-          from datetime import datetime
-          from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
-          from fastapi.responses import Response
-          app = FastAPI(title="OmniChannel Echo API")
-          hits = Counter("omni_hits_total", "Total hits", ["endpoint"])
-          @app.get("/health")
-          def health():
-            hits.labels("/health").inc()
-            return {"status":"ok","ts":datetime.utcnow().isoformat()}
-          @app.get("/orders/{order_id}")
-          def order(order_id:int):
-            hits.labels("/orders").inc()
-            return {"order_id":order_id,"status":"PAID","channel":"web"}
-          @app.get("/accounts/{account_id}")
-          def account(account_id:int):
-            hits.labels("/accounts").inc()
-            return {"account_id":account_id,"balance":123456.78,"currency":"KRW"}
-          @app.get("/metrics")
-          def metrics():
-            return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-          PY
-          cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
-          FROM python:3.11-slim
-          RUN pip install --no-cache-dir fastapi uvicorn prometheus-client
-          WORKDIR /app
-          COPY app.py /app/app.py
-          EXPOSE 8000
-          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
-          DOCKER
-          retry 3 3 -- docker pull python:3.11-slim
-          docker build -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
-          docker tag "${OMNI_IMAGE}:latest" "${IMAGE_LATEST}"
-          docker tag "${OMNI_IMAGE}:latest" "${IMAGE_RUN}"
-          docker rm -f omni >/dev/null 2>&1 || true
-          docker run -d --name omni --network "${DOCKER_NETWORK}" -p 8090:8000 "${OMNI_IMAGE}:latest"
-          echo "[OMNI][RUN] :8090/health & /metrics" | tee -a "${ECHO_LOG}/omni.log"
-          docker push "${IMAGE_LATEST}"
-          docker push "${IMAGE_RUN}"
-          echo "[OMNI][PUSH][OK]" | tee -a "${ECHO_LOG}/omni.log"
+          IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
+          echo "${GITHUB_TOKEN}" | docker login "${IMAGE_REGISTRY}" -u "${IMAGE_OWNER}" --password-stdin
+          docker tag "${OMNI_IMAGE}:latest" "${IMAGE}"
+          docker push "${IMAGE}"
 
-      - name: 🔏 Install cosign
-        uses: sigstore/cosign-installer@v3.6.0
-
-      - name: 🏷️ Resolve immutable digests for pushed images
-        id: digest
-        shell: bash
-        env:
-          IMAGE_LATEST: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.OMNI_IMAGE }}:latest
-          IMAGE_RUN: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.OMNI_IMAGE }}:run-${{ github.run_number }}
-        run: |
-          set -Eeuo pipefail
-          docker pull "${IMAGE_RUN}"
-          docker pull "${IMAGE_LATEST}"
-          DIGEST_RUN="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_RUN}")"
-          DIGEST_LATEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_LATEST}")"
-          echo "run=${DIGEST_RUN}" >> "$GITHUB_OUTPUT"
-          echo "latest=${DIGEST_LATEST}" >> "$GITHUB_OUTPUT"
-          echo "[COSIGN][INFO] RUN digest: ${DIGEST_RUN}"
-          echo "[COSIGN][INFO] LATEST digest: ${DIGEST_LATEST}"
-
-      - name: 🖊️ Cosign sign & verify (keyless, digest-pinned)
-        shell: bash
-        env:
-          COSIGN_EXPERIMENTAL: "1"
-          IMG_RUN_DIGEST: ${{ steps.digest.outputs.run }}
-          CERT_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
-          CERT_ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          set -Eeuo pipefail
-          echo "[COSIGN] Using identity: ${CERT_IDENTITY}"
-          cosign sign --yes "${IMG_RUN_DIGEST}"
-          cosign verify \
-            --certificate-identity "${CERT_IDENTITY}" \
-            --certificate-oidc-issuer "${CERT_ISSUER}" \
-            "${IMG_RUN_DIGEST}"
-          echo "[COSIGN][OK] Signed & verified ${IMG_RUN_DIGEST}"
-
-      - name: 📈 Prometheus + 📊 Grafana (scrape Omni /metrics)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          retry 3 3 -- docker pull prom/prometheus:latest
-          retry 3 3 -- docker pull grafana/grafana:latest
-          cat > "${ECHO_MON}/prometheus/prometheus.yml" <<'YML'
-          global:
-            scrape_interval: 15s
-          scrape_configs:
-            - job_name: 'omni'
-              metrics_path: /metrics
-              static_configs:
-                - targets: ['omni:8000']
-                  labels: {service: 'omni'}
-          YML
-          cat > "${ECHO_MON}/grafana/provisioning/datasources/prometheus.yaml" <<'YML'
-          apiVersion: 1
-          datasources:
-            - name: Prometheus
-              type: prometheus
-              access: proxy
-              url: http://prometheus:9090
-              isDefault: true
-          YML
-          docker rm -f prometheus grafana >/dev/null 2>&1 || true
-          docker run -d --name prometheus --network "${DOCKER_NETWORK}" -p 9090:9090 \
-            -v "$PWD/${ECHO_MON}/prometheus/prometheus.yml":/etc/prometheus/prometheus.yml:ro \
-            prom/prometheus:latest
-          docker run -d --name grafana --network "${DOCKER_NETWORK}" -p 3000:3000 \
-            -v "$PWD/${ECHO_MON}/grafana/provisioning":/etc/grafana/provisioning:ro \
-            -e GF_SECURITY_ADMIN_PASSWORD=admin grafana/grafana:latest
-          echo "[MON][OK] Prometheus:9090 Grafana:3000" | tee -a "${ECHO_LOG}/monitor.log"
-
-      - name: ⚡ Kafka (KRaft) + CDC topic & events
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          retry 3 3 -- docker pull bitnami/kafka:3.7
-          docker rm -f kafka >/dev/null 2>&1 || true
-          docker run -d --name kafka --network "${DOCKER_NETWORK}" -p 9092:9092 \
-            -e KAFKA_ENABLE_KRAFT=yes \
-            -e KAFKA_CFG_NODE_ID=1 \
-            -e KAFKA_CFG_PROCESS_ROLES=broker,controller \
-            -e KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093 \
-            -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
-            -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092 \
-            -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
-            -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-            bitnami/kafka:3.7
-          sleep 10
-          docker exec kafka bash -lc "kafka-topics.sh --create --if-not-exists --topic cdc.fin.dim_customer --bootstrap-server localhost:9092"
-          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/004_scd2_change_example.sql
-          docker exec -u postgres td-sim psql -U postgres -d postgres -At -c \
-            "SELECT json_build_object('customer_bk',customer_bk,'name',name,'email',email,'effective_from',effective_from,'effective_to',effective_to,'is_current',is_current)::text FROM td.dim_customer_scd2 WHERE customer_bk=3 ORDER BY effective_from" \
-            > "${ECHO_KAFKA}/events/customer_3.jsonl"
-          docker exec -i kafka bash -lc "kafka-console-producer.sh --bootstrap-server localhost:9092 --topic cdc.fin.dim_customer" < "${ECHO_KAFKA}/events/customer_3.jsonl"
-          echo "[CDC][OK] produced events for BK=3 to topic cdc.fin.dim_customer" | tee -a "${ECHO_LOG}/kafka.log"
-
-      - name: 🔐 Security Echo Scripts (GPG/OpenSSL) + sample run
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          cat > "${ECHO_SEC}/gpg_quickgen.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          gpg --batch --yes --quick-gen-key "echo-bot <echo@local>" default default 0
-          gpg --list-keys "echo-bot"
-          SH
-          cat > "${ECHO_SEC}/openssl_encrypt.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo "THIS IS SECRET" > secret.txt
-          openssl enc -aes-256-cbc -pbkdf2 -salt -in secret.txt -out secret.txt.enc -k "echo-pass"
-          rm -f secret.txt
-          SH
-          chmod +x "${ECHO_SEC}/gpg_quickgen.sh" "${ECHO_SEC}/openssl_encrypt.sh"
-          (cd "${ECHO_SEC}" && ./openssl_encrypt.sh)
-          echo "[SEC][OK] OpenSSL sample encrypted" | tee -a "${ECHO_LOG}/security.log"
-          (cd "${ECHO_SEC}" && ./gpg_quickgen.sh) || echo "[SEC][WARN] gpg quick-gen skipped/failed" | tee -a "${ECHO_LOG}/security.log"
+          # provenance log (best-effort)
+          {
+            echo "IMAGE=${IMAGE}"
+            echo "PUSHED_AT=$(date -Iseconds)"
+            echo "SOURCE=https://github.com/${{ github.repository }}"
+            echo "REVISION=${{ github.sha }}"
+            echo "LABELS:"
+            docker inspect "${IMAGE}" --format '{{json .Config.Labels}}' 2>/dev/null || echo "{}"
+            echo "LOCAL_LABELS:"
+            docker inspect "${OMNI_IMAGE}:latest" --format '{{json .Config.Labels}}' 2>/dev/null || echo "{}"
+          } | tee "${ECHO_OMNI}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
 
       - name: 🗃️ Echo install table (SQLite) + snapshot
         shell: bash
@@ -523,15 +470,14 @@ jobs:
             detail TEXT
           );
           INSERT INTO echo_install_log(component,detail) VALUES
-            ('system','upgrade done (no docker APT)'),
+            ('system','upgrade done'),
             ('td-client','pip teradatasql/teradatasqlalchemy attempted'),
-            ('td-sim','postgres:16 schema+seed+fact'),
-            ('omni','built/pushed/signed+verified (digest)'),
-            ('monitor','prometheus+grafana up'),
-            ('kafka','topic+cdc produced'),
-            ('security','openssl/gpg scripts run');
+            ('td-sim','postgres:16 schema+seed'),
+            ('network','${{ github.event.inputs.run_network }}'),
+            ('omni','${{ github.event.inputs.run_omni }}');
           SQL
           sqlite3 "${DB}" '.headers on' '.mode column' 'SELECT * FROM echo_install_log;' | tee "${ECHO_LOG}/echo_install_log.txt"
+          chmod -R a+rX .github/echo_* || true
           echo "[ECHO][OK] install log recorded (sqlite)"
 
       - name: 📤 Upload artifacts
@@ -544,11 +490,8 @@ jobs:
             .github/echo_net
             .github/echo_omni
             .github/echo_logs
-            .github/echo_sec
-            .github/echo_kafka
-            .github/echo_mon
 
-      - name: 🧾 Commit & push Echo outputs (best-effort)
+      - name: 🧾 Commit & push (best-effort; skip if no token)
         if: ${{ github.event.inputs.commit_changes == 'true' }}
         shell: bash
         env:
@@ -558,13 +501,16 @@ jobs:
           . .github/echo_tools.sh
           git config user.name "echo-bot"
           git config user.email "echo-bot@users.noreply.github.com"
-          git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs .github/echo_sec .github/echo_kafka .github/echo_mon || true
-          if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v6: digest-pinned cosign + GHCR push + SCD2/CDC + Security + Prom/Grafana ($(date -Iseconds))"
+          git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
+          if git diff --cached --quiet; then
+            echoe "No changes to commit"
+            exit 0
+          fi
+          git commit -m "EchoOps v2+: RP(/dw/*,/api/*,/health) + FastAPI(DW) + OCI labels + provenance ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
-            echoe "Pushed changes to ${REPO_URL}"
+            echoe "Pushed changes"
           else
             echo "[WARN] GH_ADMIN_TOKEN missing; skip push" | tee -a "${ECHO_LOG}/commit.log"
           fi
