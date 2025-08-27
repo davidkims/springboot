@@ -1,4 +1,4 @@
-name: "🏦 Teradata + DW + Omni EchoOps v7.3 (Mega Unified: Podman Fallback + Readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW + Nginx network + Ledgers + Podman file_sd)"
+name: "🏦 Teradata + DW + Omni EchoOps v7.7 (Full Mega Unified: Podman/Docker + Ledger Partition/MV + Prometheus+Alertmanager + Loki+Promtail + SBOM+Cosign+Provenance + OCI FW)"
 
 on:
   workflow_dispatch:
@@ -34,6 +34,7 @@ permissions:
   contents: write
   packages: write
   actions: read
+  id-token: write   # cosign keyless 서명(OIDC)용
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,7 +43,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 85
+    timeout-minutes: 120
     env:
       ECHO_TD: .github/echo_td
       ECHO_DW: .github/echo_dw
@@ -65,7 +66,7 @@ jobs:
           set -Eeuo pipefail
           mkdir -p "${ECHO_TD}/sql/teradata" "${ECHO_TD}/sql/td_sim" \
                    "${ECHO_DW}/db" "${ECHO_DW}/queries" \
-                   "${ECHO_NET}/nginx" "${ECHO_NET}/logs" "${ECHO_NET}/promtail" \
+                   "${ECHO_NET}/nginx" "${ECHO_NET}/logs" "${ECHO_NET}/promtail" "${ECHO_NET}/prometheus" \
                    "${ECHO_OMNI}" "${ECHO_LOG}"
           cat > .github/echo_tools.sh <<'BASH'
           set -Eeuo pipefail
@@ -81,16 +82,9 @@ jobs:
             podman info >/dev/null 2>&1 || true
           }
           docker(){
-            if [ "${USE_PODMAN:-0}" = "1" ]; then
-              podman "$@"; return
-            fi
-            if command -v /usr/bin/docker >/dev/null 2>&1; then
-              /usr/bin/docker "$@" && return 0
-              command -v sudo >/dev/null 2>&1 && sudo -n /usr/bin/docker "$@" && return 0
-            else
-              command docker "$@" && return 0
-              command -v sudo >/dev/null 2>&1 && sudo -n docker "$@" && return 0
-            fi
+            if [ "${USE_PODMAN:-0}" = "1" ]; then podman "$@"; return; fi
+            if command -v /usr/bin/docker >/dev/null 2>&1; then /usr/bin/docker "$@" && return 0; fi
+            if command -v docker >/dev/null 2>&1; then docker "$@" && return 0; fi
             if command -v podman >/dev/null 2>&1; then
               USE_PODMAN=1; export USE_PODMAN
               [ -n "${GITHUB_ENV:-}" ] && echo "USE_PODMAN=1" >> "$GITHUB_ENV"
@@ -115,6 +109,7 @@ jobs:
           chmod +x .github/echo_tools.sh
           . .github/echo_tools.sh
           echoe "Echo tools & directories prepared"
+
       - name: 🧯 containerd 충돌 가드 & 기본 패키지
         shell: bash
         run: |
@@ -129,6 +124,7 @@ jobs:
           sudo apt-get -y -f install || true
           sudo dpkg --configure -a || true
           sudo apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw gawk
+
       - name: 🛞 컨테이너 엔진 준비(도커 우선, 자동 Podman 폴백)
         shell: bash
         run: |
@@ -139,6 +135,7 @@ jobs:
           fi
           start_docker
           echoe "Engine ready (docker or podman). USE_PODMAN=${USE_PODMAN:-0}"
+
       - name: 🐍 Teradata Python 클라이언트(재시도/무중단)
         shell: bash
         run: |
@@ -152,6 +149,7 @@ jobs:
           retry 2 3 -- python3 -m pip install teradatasqlalchemy >>"$LOG" 2>&1; RC2=$?
           [ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && echo "[TD][OK] installed" | tee -a "$LOG" || echo "[TD][WARN] partial/failed rc1=$RC1 rc2=$RC2" | tee -a "$LOG"
           exit 0
+
       - name: 📝 Echo:TD/TD-SIM DDL + DW 쿼리
         shell: bash
         run: |
@@ -189,6 +187,7 @@ jobs:
           GROUP BY 1,2 ORDER BY net_flow DESC LIMIT 20;
           SQL
           chmod -R a+rX "${ECHO_TD}" "${ECHO_DW}"
+
       - name: 🕸️ 컨테이너 네트워크
         shell: bash
         run: |
@@ -196,6 +195,7 @@ jobs:
           . .github/echo_tools.sh
           docker network create "${DOCKER_NET}" >/dev/null 2>&1 || true
           echoe "network '${DOCKER_NET}' ready (engine=${USE_PODMAN:+podman}${USE_PODMAN:-docker})"
+
       - name: 🧱 Start TD-SIM(Postgres) & load schema
         shell: bash
         run: |
@@ -220,6 +220,7 @@ jobs:
           SQL
           docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/003_generate_txn.sql
           echoe "TD-SIM loaded ${COUNT} rows"
+
       - name: 🧩 Build & run Omni(FastAPI + Pool + /metrics + cache headers + HEALTHCHECK)
         if: ${{ github.event.inputs.run_omni == 'true' }}
         shell: bash
@@ -321,6 +322,7 @@ jobs:
             -v "$PWD/${ECHO_DW}/queries":/queries:ro "${OMNI_IMAGE}:latest"
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
           echo "[OMNI][OK] :8090 (health, /metrics, /dw/*)" | tee -a "${ECHO_LOG}/omni.log"
+
       - name: 🌐 Nginx RP(/api, /dw, /health) + CORS + RateLimit + WAF + Logs + Exporter (readiness & diagnostics + traffic boost)
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
@@ -345,7 +347,7 @@ jobs:
               listen 80;
               location = /health { return 200 "OK"; add_header Content-Type text/plain; }
               location = /nginx_status { stub_status; allow all; }
-              # ---- Simple WAF
+              # Simple WAF
               location ~* \.env { deny all; }
               location ~* /\.git { deny all; }
               location ~* /\.ht { deny all; }
@@ -420,12 +422,13 @@ jobs:
             echo "⚠️ exporter readiness 실패 — 로그 출력"; docker logs --tail=100 nginx-exp || true
             faile "nginx exporter readiness failed"
           fi
-          # 라우팅 스모크 + 트래픽 보강(로그 생성 촉진)
+          # 트래픽 보강(로그 생성 촉진)
           for i in $(seq 1 5); do
             curl -fsS "http://localhost:8088/health" >/dev/null || true
             curl -fsS "http://localhost:8088/api/health" >/dev/null || true
             curl -fsS "http://localhost:8088/dw/daily-volume" >/dev/null || true
           done
+
       # ===== 로깅(엔진 분기): Loki + Promtail =====
       - name: 📈 Logs (Docker engine) — Loki + Promtail(docker_sd)
         if: ${{ github.event.inputs.run_network == 'true' && env.USE_PODMAN != '1' }}
@@ -456,6 +459,7 @@ jobs:
             -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
             grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
           echo "[LOG] Docker engine: Loki :3100 + Promtail(docker_sd)"
+
       - name: 📈 Logs (Podman engine) — Loki + Promtail(file_sd via bind)
         if: ${{ github.event.inputs.run_network == 'true' && env.USE_PODMAN == '1' }}
         shell: bash
@@ -479,12 +483,12 @@ jobs:
                     __path__: /var/log/nginx/echo.access.log
           YAML
           docker rm -f promtail >/dev/null 2>&1 || true
-          # Nginx 로그 디렉터리를 Promtail 컨테이너에 /var/log/nginx 로 마운트
           docker run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
             -v "$PWD/${ECHO_NET}/logs":/var/log/nginx:ro \
             -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
             grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
           echo "[LOG] Podman engine: Loki :3100 + Promtail(file_sd)"
+
       - name: 🔥 (옵션) UFW 방화벽 활성화
         if: ${{ github.event.inputs.enable_firewall == 'true' }}
         shell: bash
@@ -499,11 +503,14 @@ jobs:
           sudo ufw allow 5432/tcp   # postgres
           sudo ufw allow 9113/tcp   # exporter
           sudo ufw allow 3100/tcp   # loki
+          sudo ufw allow 9090/tcp   # prometheus
+          sudo ufw allow 9093/tcp   # alertmanager
           sudo ufw allow 22/tcp
           sudo ufw allow 443/tcp
           sudo ufw --force enable
           sudo ufw status verbose | tee -a "${ECHO_LOG}/ufw.log"
           exit 0
+
       # =========================
       # 📚 서비스별 원장(ledger) 생성/적재
       # =========================
@@ -537,6 +544,7 @@ jobs:
             txn_count=EXCLUDED.txn_count,
             total_amount=EXCLUDED.total_amount;
           SQL"
+
       - name: 🧾 Parse Nginx access log → CSV (ledger.nginx_access)
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
@@ -558,6 +566,7 @@ jobs:
             print raw_time "," ip "," method "," path "," status "," bytes "," rt "," referer "," ua
           }' "$LOGFILE" > "$CSV"
           echo "[LEDGER] parsed -> $CSV (size: $(wc -c < "$CSV"))"
+
       - name: 📨 Load Nginx CSV into Postgres ledger.nginx_access (robust, podman-safe)
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
@@ -580,6 +589,7 @@ jobs:
           docker exec td-sim bash -lc 'id && ls -ld / /tmp /tmp/ingest && ls -l /tmp/ingest/echo.access.csv' \
             | tee -a "${ECHO_LOG}/ledger_diagnostics.txt"
           echo "[LEDGER] nginx_access loaded"
+
       - name: 🧷 Record service events to Postgres (omni/logs/engine)
         shell: bash
         run: |
@@ -595,17 +605,154 @@ jobs:
           ON CONFLICT DO NOTHING;
           SQL"
           echo "[LEDGER] service_event updated"
-      - name: 🏷️ (옵션) GHCR 푸시 + PROVENANCE
+
+      # ======================
+      # 🧮 Ledger Partition + MV Snapshot (일/월) 자동 재계산
+      # ======================
+      - name: 🧮 Ledger Partition + MV Snapshot
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          docker exec -u postgres td-sim psql -U postgres -d postgres <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS ledger;
+          CREATE TABLE IF NOT EXISTS ledger.fact_txn_day(
+            day DATE PRIMARY KEY, txn_count BIGINT, total_amount NUMERIC(20,2)
+          );
+          CREATE TABLE IF NOT EXISTS ledger.fact_txn_month(
+            month DATE PRIMARY KEY, txn_count BIGINT, total_amount NUMERIC(20,2)
+          );
+          CREATE MATERIALIZED VIEW IF NOT EXISTS ledger.mv_daily_summary AS
+            SELECT date_trunc('day', txn_ts)::date AS day,
+                   COUNT(*) AS txn_count, SUM(amount) AS total_amount
+            FROM td.fact_transaction GROUP BY 1;
+          REFRESH MATERIALIZED VIEW ledger.mv_daily_summary;
+          -- 월 집계 업데이트
+          INSERT INTO ledger.fact_txn_month(month, txn_count, total_amount)
+          SELECT date_trunc('month', day)::date AS month,
+                 SUM(txn_count), SUM(total_amount)
+          FROM ledger.mv_daily_summary
+          GROUP BY 1
+          ON CONFLICT (month) DO UPDATE
+          SET txn_count = EXCLUDED.txn_count,
+              total_amount = EXCLUDED.total_amount;
+          -- 일 집계 업데이트
+          INSERT INTO ledger.fact_txn_day(day, txn_count, total_amount)
+          SELECT day, txn_count, total_amount FROM ledger.mv_daily_summary
+          ON CONFLICT (day) DO UPDATE
+          SET txn_count = EXCLUDED.txn_count,
+              total_amount = EXCLUDED.total_amount;
+          SQL
+
+      # ======================
+      # 📊 Prometheus 서버 + Alertmanager (룰 자동 생성/적용)
+      # ======================
+      - name: 📊 Prometheus & Alertmanager (generate configs & run)
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          mkdir -p "${ECHO_NET}/prometheus"
+          # Recording rules
+          cat > "${ECHO_NET}/prometheus/recording_rules.yml" <<'YAML'
+          groups:
+          - name: omni.rules
+            interval: 30s
+            rules:
+            - record: omni_requests_rate_5m
+              expr: rate(omni_requests_total[5m])
+          YAML
+          # Alert rules (다운 감지 위주로 현실화)
+          cat > "${ECHO_NET}/prometheus/alert_rules.yml" <<'YAML'
+          groups:
+          - name: omni.alerts
+            rules:
+            - alert: OmniDown
+              expr: up{job="omni"} == 0
+              for: 1m
+              labels: { severity: critical }
+              annotations: { summary: "Omni target is down" }
+            - alert: NginxExporterDown
+              expr: up{job="nginx-exp"} == 0
+              for: 2m
+              labels: { severity: warning }
+              annotations: { summary: "Nginx exporter is down" }
+          YAML
+          # Prometheus main config
+          cat > "${ECHO_NET}/prometheus/prometheus.yml" <<'YAML'
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 30s
+          rule_files:
+            - /etc/prometheus/recording_rules.yml
+            - /etc/prometheus/alert_rules.yml
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets: ["alertmanager:9093"]
+          scrape_configs:
+            - job_name: 'omni'
+              metrics_path: /metrics
+              static_configs:
+                - targets: ['omni:8000']
+            - job_name: 'nginx-exp'
+              metrics_path: /metrics
+              static_configs:
+                - targets: ['nginx-exp:9113']
+            - job_name: 'loki'
+              metrics_path: /metrics
+              static_configs:
+                - targets: ['loki:3100']
+          YAML
+          # Run Alertmanager & Prometheus
+          docker rm -f alertmanager prometheus >/dev/null 2>&1 || true
+          docker run -d --name alertmanager --network "${DOCKER_NET}" \
+            -p 9093:9093 prom/alertmanager
+          docker run -d --name prometheus --network "${DOCKER_NET}" \
+            -p 9090:9090 \
+            -v "$PWD/${ECHO_NET}/prometheus/prometheus.yml":/etc/prometheus/prometheus.yml:ro \
+            -v "$PWD/${ECHO_NET}/prometheus/recording_rules.yml":/etc/prometheus/recording_rules.yml:ro \
+            -v "$PWD/${ECHO_NET}/prometheus/alert_rules.yml":/etc/prometheus/alert_rules.yml:ro \
+            prom/prometheus:v2.51.2 \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.retention.time=1d \
+            --web.enable-lifecycle
+          wait_http "http://localhost:9090/-/ready" 60 || faile "Prometheus not ready"
+          echo "[PROM] Prometheus :9090 up; Alertmanager :9093 up"
+
+      # ======================
+      # 🏷️ (옵션) GHCR 푸시 + SBOM + cosign 서명 + OCI provenance JSON
+      # ======================
+      - name: 🔐 Install cosign (keyless)
+        if: ${{ github.event.inputs.push_image == 'true' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: 🏷️ GHCR Push + SBOM + Cosign + Provenance
         if: ${{ github.event.inputs.push_image == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_EXPERIMENTAL: "1"   # keyless 서명
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
           IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
           echo "${GITHUB_TOKEN}" | docker login "${IMAGE_REGISTRY}" -u "${IMAGE_OWNER}" --password-stdin
           docker tag "${OMNI_IMAGE}:latest" "${IMAGE}"
           docker push "${IMAGE}"
+
+          mkdir -p "${PROV_DIR}/supplychain"
+
+          # SBOM (Syft via container)
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            anchore/syft:latest "${IMAGE}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json"
+
+          # Vulnerability report (Trivy via container)
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --timeout 10m --format json "${IMAGE}" > "${PROV_DIR}/supplychain/sbom-trivy.json"
+
+          # Cosign keyless sign & attest
+          cosign sign --yes "${IMAGE}"
+          echo '{"buildType":"github-actions","builder":"echo-ops"}' > "${PROV_DIR}/supplychain/provenance.json"
+          cosign attest --yes --predicate "${PROV_DIR}/supplychain/provenance.json" --type slsaprovenance "${IMAGE}"
+
           {
             echo "IMAGE=${IMAGE}"
             echo "PUSHED_AT=$(date -Iseconds)"
@@ -614,10 +761,9 @@ jobs:
             echo "REVISION=${{ github.sha }}"
             echo "ENGINE=${USE_PODMAN:+podman}${USE_PODMAN:-docker}"
             echo "LOCAL_IMAGE_ID=$(docker images --no-trunc --quiet ${OMNI_IMAGE}:latest || true)"
-            echo "REMOTE_INSPECT_LABELS=$(docker inspect ${IMAGE} --format '{{json .Config.Labels}}' 2>/dev/null || echo '{}')"
-            echo "LOCAL_INSPECT_LABELS=$(docker inspect ${OMNI_IMAGE}:latest --format '{{json .Config.Labels}}' 2>/dev/null || echo '{}')"
             echo "REMOTE_REPO_DIGESTS=$(docker inspect ${IMAGE} --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
           } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
+
       - name: 🗃️ Snapshot(SQLite) + 권한 정리 (원장 이벤트 동시 기록)
         shell: bash
         run: |
@@ -639,7 +785,8 @@ jobs:
             ('td-sim','postgres:16 schema+seed+generate'),
             ('nginx','rp+cors+ratelimit+waf+exporter'),
             ('omni','dw+metrics+pool+health'),
-            ('logs', CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'loki+promtail(file_sd)' ELSE 'loki+promtail(docker_sd)' END);
+            ('logs', CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'loki+promtail(file_sd)' ELSE 'loki+promtail(docker_sd)' END),
+            ('prom','prometheus+alertmanager up');
           INSERT INTO ledger_event(service,event,detail) VALUES
             ('schedule','tick','*/10min'),
             ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END);
@@ -648,6 +795,7 @@ jobs:
           sudo chown -R "$USER":"$USER" .github/echo_* || true
           chmod -R a+rX .github/echo_* || true
           find .github/echo_* -type f -name "*.sh" -exec chmod +x {} \; || true
+
       - name: 📤 Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -658,6 +806,7 @@ jobs:
             .github/echo_net
             .github/echo_omni
             .github/echo_logs
+
       - name: 🧾 Commit & push (best effort)
         if: ${{ github.event.inputs.commit_changes == 'true' }}
         shell: bash
@@ -669,7 +818,7 @@ jobs:
           git config user.email "echo-bot@users.noreply.github.com"
           git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
           if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v7.3 Mega: */10 schedule + per-service ledgers + Podman file_sd Promtail + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
+          git commit -m "EchoOps v7.7 Full Mega: */10 schedule + ledgers(partition/MV) + Prometheus/Alertmanager + Loki/Promtail + SBOM/Cosign/Provenance + readiness + CORS/WAF/RateLimit + OCI + FW(opt) ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
