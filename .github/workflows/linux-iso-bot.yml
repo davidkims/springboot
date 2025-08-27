@@ -27,6 +27,8 @@ on:
         description: "UFW 방화벽 활성화(러너 네트워크 영향 주의)"
         required: true
         default: "false"
+  schedule:
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: write
@@ -71,7 +73,6 @@ jobs:
           faile(){ echo "[ECHO][FAIL] $*" >&2; exit 1; }
           retry(){ local t="$1"; shift; local s="$1"; shift; [ "${1:-}" = "--" ] && shift || true; local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge "$t" ] && return 1; sleep "$s"; done; }
           wait_http(){ local url="$1"; local max="${2:-60}"; local i=0; while true; do curl -fsS --max-time 3 "$url" >/dev/null 2>&1 && return 0; i=$((i+1)); [ "$i" -ge "$max" ] && return 1; sleep 1; done; }
-
           ensure_podman(){
             echo "[ECHO] installing podman fallback..."
             sudo apt-get update -y
@@ -79,7 +80,6 @@ jobs:
             command -v podman >/dev/null 2>&1 || faile "podman not installed"
             podman info >/dev/null 2>&1 || true
           }
-
           docker(){
             if [ "${USE_PODMAN:-0}" = "1" ]; then
               podman "$@"; return
@@ -98,7 +98,6 @@ jobs:
             fi
             return 1
           }
-
           start_docker(){
             docker info >/dev/null 2>&1 && { echo "[ECHO] engine=docker"; return 0; }
             if command -v service >/dev/null 2>&1; then
@@ -130,7 +129,7 @@ jobs:
           sudo apt-get -y remove --purge containerd.io || true
           sudo apt-get -y -f install || true
           sudo dpkg --configure -a || true
-          sudo apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw
+          sudo apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw gawk
 
       - name: 🛞 컨테이너 엔진 준비(도커 우선, 자동 Podman 폴백)
         shell: bash
@@ -242,26 +241,33 @@ jobs:
           from fastapi import FastAPI, HTTPException
           from fastapi.responses import JSONResponse, Response
           from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
-
           DB_HOST=os.getenv("DB_HOST","td-sim"); DB_PORT=int(os.getenv("DB_PORT","5432"))
           DB_NAME=os.getenv("DB_NAME","postgres"); DB_USER=os.getenv("DB_USER","postgres"); DB_PASS=os.getenv("DB_PASS","postgres")
           QUERIES_DIR=os.getenv("QUERIES_DIR","/queries")
-
           app=FastAPI(title="OmniChannel Echo API (DW+Metrics)")
           pool: SimpleConnectionPool|None=None
           REQ_COUNTER=Counter("omni_requests_total","HTTP requests",["path"])
-
           @app.on_event("startup")
           def _startup():
             global pool
             pool=SimpleConnectionPool(minconn=1,maxconn=8, host=DB_HOST,port=DB_PORT,dbname=DB_NAME,user=DB_USER,password=DB_PASS)
-
+            # Ledger bootstrap (shared)
+            with pool.getconn() as c:
+              with c.cursor() as cur:
+                cur.execute("""CREATE SCHEMA IF NOT EXISTS ledger;
+                               CREATE TABLE IF NOT EXISTS ledger.service_event(
+                                 id BIGSERIAL PRIMARY KEY, at TIMESTAMP DEFAULT NOW(),
+                                 service TEXT, event TEXT, detail TEXT);
+                            """)
+                cur.execute("INSERT INTO ledger.service_event(service,event,detail) VALUES (%s,%s,%s)",
+                            ("omni","startup","uvicorn up"))
+                c.commit()
           @app.on_event("shutdown")
           def _shutdown():
             global pool
             if pool: pool.closeall()
-
           def run_sql_file(path:str)->List[Dict[str,Any]]:
+            import os
             sql_path=os.path.join(QUERIES_DIR,path)
             if not os.path.isfile(sql_path): raise HTTPException(status_code=404, detail=f"SQL not found: {path}")
             with open(sql_path,"r",encoding="utf-8") as f: sql=f.read()
@@ -280,26 +286,19 @@ jobs:
               return out
             except Exception as e:
               raise HTTPException(status_code=500, detail=str(e))
-
           @app.get("/health")
           def health(): REQ_COUNTER.labels("/health").inc(); return {"status":"ok","ts":datetime.utcnow().isoformat()}
-
           @app.get("/orders/{order_id}")
           def order(order_id:int): REQ_COUNTER.labels("/orders").inc(); return {"order_id":order_id,"status":"PAID","channel":"web"}
-
           @app.get("/accounts/{account_id}")
           def account(account_id:int): REQ_COUNTER.labels("/accounts").inc(); return {"account_id":account_id,"balance":123456.78,"currency":"KRW"}
-
           @app.get("/dw/daily-volume")
           def dw_daily_volume(): REQ_COUNTER.labels("/dw/daily-volume").inc(); return JSONResponse(run_sql_file("01_daily_volume.sql"), headers={"Cache-Control":"public, max-age=60"})
-
           @app.get("/dw/top-customers")
           def dw_top_customers(): REQ_COUNTER.labels("/dw/top-customers").inc(); return JSONResponse(run_sql_file("02_top_customers.sql"), headers={"Cache-Control":"public, max-age=60"})
-
           @app.get("/metrics")
           def metrics(): return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
           PY
-
           cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
           FROM python:3.11-slim
           LABEL org.opencontainers.image.title="omni-echo" \
@@ -314,7 +313,6 @@ jobs:
           HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8000/health || exit 1
           CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
           DOCKER
-
           retry 3 3 -- docker pull python:3.11-slim
           CREATED="$(date -Iseconds)"; REV="${GITHUB_SHA:-${{ github.sha }}}"; SRC="https://github.com/${{ github.repository }}"
           docker build --label "org.opencontainers.image.title=${OMNI_IMAGE}" \
@@ -324,13 +322,11 @@ jobs:
                        --label "org.opencontainers.image.url=${SRC}/actions/runs/${{ github.run_id }}" \
                        --label "org.opencontainers.image.vendor=${{ github.repository_owner }}" \
                        -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
-
           docker rm -f omni >/dev/null 2>&1 || true
           docker run -d --name omni --network "${DOCKER_NET}" --restart unless-stopped \
             -p 8090:8000 \
             -e DB_HOST=td-sim -e DB_PORT=5432 -e DB_NAME=postgres -e DB_USER=postgres -e DB_PASS=postgres \
             -v "$PWD/${ECHO_DW}/queries":/queries:ro "${OMNI_IMAGE}:latest"
-
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
           echo "[OMNI][OK] :8090 (health, /metrics, /dw/*)" | tee -a "${ECHO_LOG}/omni.log"
 
@@ -341,32 +337,24 @@ jobs:
           set -Eeuo pipefail; . .github/echo_tools.sh
           retry 3 3 -- docker pull nginx:alpine
           retry 3 3 -- docker pull nginx/nginx-prometheus-exporter:0.11.0
-
           cat > "${ECHO_NET}/nginx/nginx.conf" <<'CONF'
           user  nginx;
           worker_processes  auto;
           error_log  /var/log/nginx/error.log warn;
           pid        /var/run/nginx.pid;
-
           events { worker_connections 1024; }
-
           http {
             log_format echo '$remote_addr - $remote_user [$time_local] "$request" $status '
                              '$body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time';
             access_log  /var/log/nginx/echo.access.log echo;
-
             limit_req_zone $binary_remote_addr zone=req_zone:10m rate=5r/s;
             limit_conn_zone $binary_remote_addr zone=conn_zone:10m;
-
             map $request_method $is_options { default 0; OPTIONS 1; }
-
             server {
               listen 80;
-
               location = /health { return 200 "OK"; add_header Content-Type text/plain; }
               location = /nginx_status { stub_status; allow all; }
-
-              # ---- Simple WAF (분할된 안전 정규식)
+              # ---- Simple WAF
               location ~* \.env { deny all; }
               location ~* /\.git { deny all; }
               location ~* /\.ht { deny all; }
@@ -374,9 +362,7 @@ jobs:
               location ~* %2e%2e { return 403; }
               location ~* <script { return 403; }
               location ~* %3Cscript { return 403; }
-
               set $CORS "*";
-
               location /api/ {
                 limit_req zone=req_zone burst=20 nodelay;
                 limit_conn conn_zone 100;
@@ -388,7 +374,6 @@ jobs:
                 }
                 add_header Access-Control-Allow-Origin $CORS always;
                 add_header Access-Control-Allow-Credentials "true" always;
-
                 proxy_pass http://omni:8000/;
                 proxy_http_version 1.1;
                 proxy_set_header Host $host;
@@ -396,7 +381,6 @@ jobs:
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $scheme;
               }
-
               location /dw/ {
                 limit_req zone=req_zone burst=20 nodelay;
                 if ($is_options) {
@@ -408,7 +392,6 @@ jobs:
                 add_header Access-Control-Allow-Origin $CORS always;
                 add_header Access-Control-Allow-Credentials "true" always;
                 add_header Cache-Control "public, max-age=60";
-
                 proxy_pass http://omni:8000/dw/;
                 proxy_http_version 1.1;
                 proxy_set_header Host $host;
@@ -416,25 +399,18 @@ jobs:
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $scheme;
               }
-
               location = / { add_header Content-Type text/plain; return 200 "OmniChannel Gateway (Nginx)"; }
             }
           }
           CONF
           chmod 644 "${ECHO_NET}/nginx/nginx.conf"
-
-          # 사전 설정 검증
           docker run --rm --network "${DOCKER_NET}" -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro nginx:alpine nginx -t
-
-          # 기동
           docker rm -f echo-nginx >/dev/null 2>&1 || true
           docker run -d --name echo-nginx --network "${DOCKER_NET}" --restart unless-stopped \
             -p 8088:80 \
             -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
             -v "$PWD/${ECHO_NET}/logs":/var/log/nginx \
             nginx:alpine
-
-          # Ready 대기 + 진단
           if ! wait_http "http://localhost:8088/health" 60; then
             echo "⚠️ Nginx /health 대기 실패 — 진단 출력"
             echo "---- ps ----"; docker ps -a || true
@@ -443,20 +419,15 @@ jobs:
             faile "Nginx readiness failed"
           fi
           echo "[NET][OK] nginx :8088 ready"
-
-          # Exporter
           docker rm -f nginx-exp >/dev/null 2>&1 || true
           docker run -d --name nginx-exp --network "${DOCKER_NET}" --restart unless-stopped \
             -p 9113:9113 \
             nginx/nginx-prometheus-exporter:0.11.0 \
             -nginx.scrape-uri=http://echo-nginx/nginx_status
-
           if ! wait_http "http://localhost:9113/metrics" 30; then
             echo "⚠️ exporter readiness 실패 — 로그 출력"; docker logs --tail=100 nginx-exp || true
             faile "nginx exporter readiness failed"
           fi
-
-          # 라우팅 스모크
           wait_http "http://localhost:8088/api/health" 60
           curl -fsS --max-time 5 http://localhost:8088/dw/daily-volume >/dev/null || true
 
@@ -471,11 +442,9 @@ jobs:
           fi
           retry 3 3 -- docker pull grafana/loki:2.9.0
           retry 3 3 -- docker pull grafana/promtail:2.9.0
-
           docker rm -f loki >/dev/null 2>&1 || true
           docker run -d --name loki --network "${DOCKER_NET}" --restart unless-stopped \
             -p 3100:3100 grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
-
           cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
           server: { http_listen_port: 9080, grpc_listen_port: 0 }
           positions: { filename: /tmp/positions.yaml }
@@ -488,14 +457,12 @@ jobs:
                 - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '$1' }
               pipeline_stages: [ { docker: {} } ]
           YAML
-
           docker rm -f promtail >/dev/null 2>&1 || true
           docker run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
             -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
             -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
             grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
-
           echo "[LOG] Loki :3100, Promtail collecting docker logs"
 
       - name: 🔥 (옵션) UFW 방화벽 활성화
@@ -517,6 +484,95 @@ jobs:
           sudo ufw --force enable
           sudo ufw status verbose | tee -a "${ECHO_LOG}/ufw.log"
           exit 0
+
+      # =========================
+      # 📚 서비스별 원장(ledger) 생성/적재
+      # =========================
+      - name: 🧮 Build ledgers (schema/tables) on Postgres
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS ledger;
+          CREATE TABLE IF NOT EXISTS ledger.service_event(
+            id BIGSERIAL PRIMARY KEY,
+            at TIMESTAMP DEFAULT NOW(),
+            service TEXT, event TEXT, detail TEXT
+          );
+          CREATE TABLE IF NOT EXISTS ledger.dw_daily_volume(
+            day DATE, txn_count BIGINT, total_amount NUMERIC(20,2),
+            PRIMARY KEY(day)
+          );
+          -- Nginx 접근 로그 원장(가공 CSV 적재용)
+          CREATE TABLE IF NOT EXISTS ledger.nginx_access(
+            raw_time TEXT, ip TEXT, method TEXT, path TEXT,
+            status INT, bytes BIGINT, req_time DOUBLE PRECISION,
+            referer TEXT, ua TEXT
+          );
+          -- DW 일일 볼륨 스냅샷 적재
+          INSERT INTO ledger.service_event(service,event,detail)
+          VALUES ('td-sim','ready','schema+seed+txn generated') ON CONFLICT DO NOTHING;
+          INSERT INTO ledger.dw_daily_volume(day,txn_count,total_amount)
+          SELECT d.day::date, d.txn_count, d.total_amount
+          FROM (SELECT date_trunc('day', txn_ts) AS day, COUNT(*) AS txn_count, SUM(amount) AS total_amount
+                FROM td.fact_transaction GROUP BY 1) d
+          ON CONFLICT (day) DO UPDATE SET
+            txn_count=EXCLUDED.txn_count,
+            total_amount=EXCLUDED.total_amount;
+          SQL"
+
+      - name: 🧾 Parse Nginx access log → CSV (ledger.nginx_access)
+        if: ${{ github.event.inputs.run_network == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          LOGFILE="${ECHO_NET}/logs/echo.access.log"
+          CSV="${ECHO_NET}/logs/echo.access.csv"
+          if [ ! -s "$LOGFILE" ]; then
+            echo "[LEDGER] Nginx access log not found (skip parse)"; exit 0
+          fi
+          # 로그 포맷:
+          # $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time
+          gawk '{
+            ip=$1;
+            match($0, /\[([^\]]+)\]/, m); raw_time=m[1];
+            match($0, /"([^"]+)"/, r); req=r[1]; split(req, a, " "); method=a[1]; path=a[2];
+            match($0, /"[^"]+"\s+([0-9]{3})\s+([0-9]+)/, s); status=s[1]; bytes=s[2];
+            match($0, /"[^"]+"\s+[0-9]{3}\s+[0-9]+\s+"([^"]*)"\s+"([^"]*)"/, h); referer=h[1]; ua=h[2];
+            match($0, /rt=([0-9.]+)/, t); rt=t[1];
+            gsub(/,/," ",referer); gsub(/,/," ",ua); gsub(/,/," ",path);
+            print raw_time "," ip "," method "," path "," status "," bytes "," rt "," referer "," ua
+          }' "$LOGFILE" > "$CSV"
+          echo "[LEDGER] parsed -> $CSV (size: $(wc -c < "$CSV"))"
+
+      - name: 📨 Load Nginx CSV into Postgres ledger.nginx_access
+        if: ${{ github.event.inputs.run_network == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          CSV="${ECHO_NET}/logs/echo.access.csv"
+          [ -s "$CSV" ] || { echo "[LEDGER] CSV empty, skip load"; exit 0; }
+          docker exec -u postgres td-sim bash -lc "mkdir -p /logs"
+          docker cp "$CSV" td-sim:/logs/echo.access.csv
+          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \"\\copy ledger.nginx_access(raw_time,ip,method,path,status,bytes,req_time,referer,ua) FROM '/logs/echo.access.csv' WITH (FORMAT CSV)\""
+          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -c \"INSERT INTO ledger.service_event(service,event,detail) VALUES ('nginx','log_ingest','nginx access CSV loaded')\""
+          echo "[LEDGER] nginx_access loaded"
+
+      - name: 🧷 Record service events to Postgres (omni/logs/engine)
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          SVC_NET="${{ github.event.inputs.run_network }}"
+          SVC_OMNI="${{ github.event.inputs.run_omni }}"
+          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO ledger.service_event(service,event,detail) VALUES
+            ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END),
+            ('omni','state','${SVC_OMNI}'),
+            ('nginx','state','${SVC_NET}'),
+            ('logs','state',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'promtail_skipped' ELSE 'loki+promtail' END)
+          ON CONFLICT DO NOTHING;
+          SQL"
+          echo "[LEDGER] service_event updated"
 
       - name: 🏷️ (옵션) GHCR 푸시 + PROVENANCE
         if: ${{ github.event.inputs.push_image == 'true' }}
@@ -542,7 +598,7 @@ jobs:
             echo "REMOTE_REPO_DIGESTS=$(docker inspect ${IMAGE} --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
           } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
 
-      - name: 🗃️ Snapshot(SQLite) + 권한 정리
+      - name: 🗃️ Snapshot(SQLite) + 권한 정리 (원장 이벤트 동시 기록)
         shell: bash
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
@@ -553,14 +609,22 @@ jobs:
             installed_at TEXT DEFAULT (datetime('now')),
             component TEXT, detail TEXT
           );
+          CREATE TABLE IF NOT EXISTS ledger_event(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now')),
+            service TEXT, event TEXT, detail TEXT
+          );
           INSERT INTO echo_install_log(component,detail) VALUES
             ('engine', 'docker' || CASE WHEN '${USE_PODMAN:-0}'='1' THEN '+podman' ELSE '' END),
             ('td-sim','postgres:16 schema+seed+generate'),
             ('nginx','rp+cors+ratelimit+waf+exporter'),
             ('omni','dw+metrics+pool+health'),
             ('logs','loki/promtail '||CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'skipped' ELSE 'enabled' END);
+          INSERT INTO ledger_event(service,event,detail) VALUES
+            ('schedule','tick','*/10min'),
+            ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END);
           SQL
-          sqlite3 "${DB}" '.headers on' '.mode column' 'SELECT * FROM echo_install_log;' | tee "${ECHO_LOG}/echo_install_log.txt"
+          sqlite3 "${DB}" '.headers on' '.mode column' 'SELECT * FROM echo_install_log;'
           sudo chown -R "$USER":"$USER" .github/echo_* || true
           chmod -R a+rX .github/echo_* || true
           find .github/echo_* -type f -name "*.sh" -exec chmod +x {} \; || true
@@ -587,7 +651,7 @@ jobs:
           git config user.email "echo-bot@users.noreply.github.com"
           git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
           if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v7.1 Mega: Podman fallback + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
+          git commit -m "EchoOps v7.2 Mega: */10 schedule + per-service ledger (PG + CSV ingest) + Podman fallback + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
