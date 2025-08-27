@@ -1,4 +1,4 @@
-name: "🏦 Teradata + DW + Omni EchoOps v7.2 (Mega Unified: Podman Fallback + Readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW + Nginx test on network)"
+name: "🏦 Teradata + DW + Omni EchoOps v7.3 (Mega Unified: Podman Fallback + Readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW + Nginx network + Ledgers + Podman file_sd)"
 
 on:
   workflow_dispatch:
@@ -251,7 +251,6 @@ jobs:
           def _startup():
             global pool
             pool=SimpleConnectionPool(minconn=1,maxconn=8, host=DB_HOST,port=DB_PORT,dbname=DB_NAME,user=DB_USER,password=DB_PASS)
-            # Ledger bootstrap (shared)
             with pool.getconn() as c:
               with c.cursor() as cur:
                 cur.execute("""CREATE SCHEMA IF NOT EXISTS ledger;
@@ -330,7 +329,7 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
           echo "[OMNI][OK] :8090 (health, /metrics, /dw/*)" | tee -a "${ECHO_LOG}/omni.log"
 
-      - name: 🌐 Nginx RP(/api, /dw, /health) + CORS + RateLimit + WAF + Logs + Exporter (readiness & diagnostics)
+      - name: 🌐 Nginx RP(/api, /dw, /health) + CORS + RateLimit + WAF + Logs + Exporter (readiness & diagnostics + traffic boost)
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
         run: |
@@ -419,6 +418,7 @@ jobs:
             faile "Nginx readiness failed"
           fi
           echo "[NET][OK] nginx :8088 ready"
+          # Exporter
           docker rm -f nginx-exp >/dev/null 2>&1 || true
           docker run -d --name nginx-exp --network "${DOCKER_NET}" --restart unless-stopped \
             -p 9113:9113 \
@@ -428,18 +428,19 @@ jobs:
             echo "⚠️ exporter readiness 실패 — 로그 출력"; docker logs --tail=100 nginx-exp || true
             faile "nginx exporter readiness failed"
           fi
-          wait_http "http://localhost:8088/api/health" 60
-          curl -fsS --max-time 5 http://localhost:8088/dw/daily-volume >/dev/null || true
+          # 라우팅 스모크 + 트래픽 보강(로그 생성 촉진)
+          for i in $(seq 1 5); do
+            curl -fsS "http://localhost:8088/health" >/dev/null || true
+            curl -fsS "http://localhost:8088/api/health" >/dev/null || true
+            curl -fsS "http://localhost:8088/dw/daily-volume" >/dev/null || true
+          done
 
-      - name: 📈 Loki(3100) + Promtail(Docker SD) — (Docker 엔진일 때만)
-        if: ${{ github.event.inputs.run_network == 'true' }}
+      # ===== 로깅(엔진 분기): Loki + Promtail =====
+      - name: 📈 Logs (Docker engine) — Loki + Promtail(docker_sd)
+        if: ${{ github.event.inputs.run_network == 'true' && env.USE_PODMAN != '1' }}
         shell: bash
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
-          if [ "${USE_PODMAN:-0}" = "1" ]; then
-            echo "[LOG] Podman 엔진 - Docker socket 미제공 가능성으로 Promtail(Docker SD) 스킵"
-            exit 0
-          fi
           retry 3 3 -- docker pull grafana/loki:2.9.0
           retry 3 3 -- docker pull grafana/promtail:2.9.0
           docker rm -f loki >/dev/null 2>&1 || true
@@ -463,7 +464,37 @@ jobs:
             -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
             -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
             grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
-          echo "[LOG] Loki :3100, Promtail collecting docker logs"
+          echo "[LOG] Docker engine: Loki :3100 + Promtail(docker_sd)"
+
+      - name: 📈 Logs (Podman engine) — Loki + Promtail(file_sd via bind)
+        if: ${{ github.event.inputs.run_network == 'true' && env.USE_PODMAN == '1' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          retry 3 3 -- docker pull grafana/loki:2.9.0
+          retry 3 3 -- docker pull grafana/promtail:2.9.0
+          docker rm -f loki >/dev/null 2>&1 || true
+          docker run -d --name loki --network "${DOCKER_NET}" --restart unless-stopped \
+            -p 3100:3100 grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
+          cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
+          server: { http_listen_port: 9080, grpc_listen_port: 0 }
+          positions: { filename: /tmp/positions.yaml }
+          clients: [ { url: http://loki:3100/loki/api/v1/push } ]
+          scrape_configs:
+            - job_name: nginx_files
+              static_configs:
+                - targets: [localhost]
+                  labels:
+                    job: nginx
+                    __path__: /var/log/nginx/echo.access.log
+          YAML
+          docker rm -f promtail >/dev/null 2>&1 || true
+          # Nginx 로그 디렉터리를 Promtail 컨테이너에 /var/log/nginx 로 마운트
+          docker run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
+            -v "$PWD/${ECHO_NET}/logs":/var/log/nginx:ro \
+            -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
+            grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
+          echo "[LOG] Podman engine: Loki :3100 + Promtail(file_sd)"
 
       - name: 🔥 (옵션) UFW 방화벽 활성화
         if: ${{ github.event.inputs.enable_firewall == 'true' }}
@@ -503,13 +534,11 @@ jobs:
             day DATE, txn_count BIGINT, total_amount NUMERIC(20,2),
             PRIMARY KEY(day)
           );
-          -- Nginx 접근 로그 원장(가공 CSV 적재용)
           CREATE TABLE IF NOT EXISTS ledger.nginx_access(
             raw_time TEXT, ip TEXT, method TEXT, path TEXT,
             status INT, bytes BIGINT, req_time DOUBLE PRECISION,
             referer TEXT, ua TEXT
           );
-          -- DW 일일 볼륨 스냅샷 적재
           INSERT INTO ledger.service_event(service,event,detail)
           VALUES ('td-sim','ready','schema+seed+txn generated') ON CONFLICT DO NOTHING;
           INSERT INTO ledger.dw_daily_volume(day,txn_count,total_amount)
@@ -531,8 +560,6 @@ jobs:
           if [ ! -s "$LOGFILE" ]; then
             echo "[LEDGER] Nginx access log not found (skip parse)"; exit 0
           fi
-          # 로그 포맷:
-          # $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time
           gawk '{
             ip=$1;
             match($0, /\[([^\]]+)\]/, m); raw_time=m[1];
@@ -545,17 +572,27 @@ jobs:
           }' "$LOGFILE" > "$CSV"
           echo "[LEDGER] parsed -> $CSV (size: $(wc -c < "$CSV"))"
 
-      - name: 📨 Load Nginx CSV into Postgres ledger.nginx_access
+      - name: 📨 Load Nginx CSV into Postgres ledger.nginx_access (robust, podman-safe)
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
           CSV="${ECHO_NET}/logs/echo.access.csv"
-          [ -s "$CSV" ] || { echo "[LEDGER] CSV empty, skip load"; exit 0; }
-          docker exec -u postgres td-sim bash -lc "mkdir -p /logs"
-          docker cp "$CSV" td-sim:/logs/echo.access.csv
-          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \"\\copy ledger.nginx_access(raw_time,ip,method,path,status,bytes,req_time,referer,ua) FROM '/logs/echo.access.csv' WITH (FORMAT CSV)\""
-          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -c \"INSERT INTO ledger.service_event(service,event,detail) VALUES ('nginx','log_ingest','nginx access CSV loaded')\""
+          if [ ! -s "$CSV" ]; then
+            echo "[LEDGER] CSV empty or missing, skip load"
+            exit 0
+          fi
+          docker exec td-sim bash -lc 'mkdir -p /tmp/ingest && chmod 1777 /tmp/ingest'
+          docker cp "$CSV" td-sim:/tmp/ingest/echo.access.csv
+          docker exec -u postgres td-sim bash -lc \
+            "psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \"\\copy ledger.nginx_access(raw_time,ip,method,path,status,bytes,req_time,referer,ua) FROM '/tmp/ingest/echo.access.csv' WITH (FORMAT CSV)\""
+          docker exec -u postgres td-sim psql -U postgres -d postgres -c \
+            "INSERT INTO ledger.service_event(service,event,detail) VALUES ('nginx','log_ingest','nginx access CSV loaded via /tmp/ingest')"
+          docker exec -u postgres td-sim psql -U postgres -d postgres -c \
+            "SELECT COUNT(*) AS rows_in_nginx_access FROM ledger.nginx_access;" \
+            | tee -a "${ECHO_LOG}/ledger_stats.txt"
+          docker exec td-sim bash -lc 'id && ls -ld / /tmp /tmp/ingest && ls -l /tmp/ingest/echo.access.csv' \
+            | tee -a "${ECHO_LOG}/ledger_diagnostics.txt"
           echo "[LEDGER] nginx_access loaded"
 
       - name: 🧷 Record service events to Postgres (omni/logs/engine)
@@ -569,7 +606,7 @@ jobs:
             ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END),
             ('omni','state','${SVC_OMNI}'),
             ('nginx','state','${SVC_NET}'),
-            ('logs','state',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'promtail_skipped' ELSE 'loki+promtail' END)
+            ('logs','state',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'promtail_file_sd' ELSE 'loki+promtail_docker_sd' END)
           ON CONFLICT DO NOTHING;
           SQL"
           echo "[LEDGER] service_event updated"
@@ -619,7 +656,7 @@ jobs:
             ('td-sim','postgres:16 schema+seed+generate'),
             ('nginx','rp+cors+ratelimit+waf+exporter'),
             ('omni','dw+metrics+pool+health'),
-            ('logs','loki/promtail '||CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'skipped' ELSE 'enabled' END);
+            ('logs', CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'loki+promtail(file_sd)' ELSE 'loki+promtail(docker_sd)' END);
           INSERT INTO ledger_event(service,event,detail) VALUES
             ('schedule','tick','*/10min'),
             ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END);
@@ -651,7 +688,7 @@ jobs:
           git config user.email "echo-bot@users.noreply.github.com"
           git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
           if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v7.2 Mega: */10 schedule + per-service ledger (PG + CSV ingest) + Podman fallback + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
+          git commit -m "EchoOps v7.3 Mega: */10 schedule + per-service ledgers + Podman file_sd Promtail + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
             git push "${REPO_URL}" HEAD:${{ github.ref_name }}
