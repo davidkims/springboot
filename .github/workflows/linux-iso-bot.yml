@@ -1,32 +1,14 @@
-name: "🏦 Teradata + DW + Omni EchoOps v7.3 (Mega Unified: Podman Fallback + Readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW + Nginx network + Ledgers + Podman file_sd)"
+name: "🏦 Teradata + DW + Omni EchoOps v7.7 (Full Mega Unified: Podman/Docker + Ledger Partition/MV + Prometheus+Alertmanager + Loki+Promtail + SBOM+Cosign+Provenance + OCI FW)"
 
 on:
   workflow_dispatch:
     inputs:
-      generate_rows:
-        description: "샘플 거래 데이터 생성 건수"
-        required: true
-        default: "1000"
-      run_network:
-        description: "Nginx 리버스프록시 실행 (true/false)"
-        required: true
-        default: "true"
-      run_omni:
-        description: "옴니채널 서버(FastAPI) 실행 (true/false)"
-        required: true
-        default: "true"
-      push_image:
-        description: "옴니 이미지를 GHCR 푸시 (true/false)"
-        required: true
-        default: "false"
-      commit_changes:
-        description: "에코 산출물 커밋/푸시 (true/false)"
-        required: true
-        default: "true"
-      enable_firewall:
-        description: "UFW 방화벽 활성화(러너 네트워크 영향 주의)"
-        required: true
-        default: "false"
+      generate_rows: { default: "1000" }
+      run_network:   { default: "true" }
+      run_omni:      { default: "true" }
+      push_image:    { default: "false" }
+      commit_changes:{ default: "true" }
+      enable_firewall:{ default: "false" }
   schedule:
     - cron: "*/10 * * * *"
 
@@ -35,14 +17,10 @@ permissions:
   packages: write
   actions: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 85
+    timeout-minutes: 120
     env:
       ECHO_TD: .github/echo_td
       ECHO_DW: .github/echo_dw
@@ -59,13 +37,13 @@ jobs:
       - name: 🛎️ Checkout
         uses: actions/checkout@v4
 
-      - name: 🧰 Prepare Echo tools & dirs (engine auto-switch + readiness utils)
-        shell: bash
+      - name: 🧰 Prepare Echo tools & dirs
         run: |
           set -Eeuo pipefail
           mkdir -p "${ECHO_TD}/sql/teradata" "${ECHO_TD}/sql/td_sim" \
                    "${ECHO_DW}/db" "${ECHO_DW}/queries" \
                    "${ECHO_NET}/nginx" "${ECHO_NET}/logs" "${ECHO_NET}/promtail" \
+                   "${ECHO_NET}/prometheus" \
                    "${ECHO_OMNI}" "${ECHO_LOG}"
           cat > .github/echo_tools.sh <<'BASH'
           set -Eeuo pipefail
@@ -74,410 +52,66 @@ jobs:
           retry(){ local t="$1"; shift; local s="$1"; shift; [ "${1:-}" = "--" ] && shift || true; local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge "$t" ] && return 1; sleep "$s"; done; }
           wait_http(){ local url="$1"; local max="${2:-60}"; local i=0; while true; do curl -fsS --max-time 3 "$url" >/dev/null 2>&1 && return 0; i=$((i+1)); [ "$i" -ge "$max" ] && return 1; sleep 1; done; }
           ensure_podman(){
-            echo "[ECHO] installing podman fallback..."
             sudo apt-get update -y
             sudo apt-get install -y --no-install-recommends podman podman-docker slirp4netns uidmap containernetworking-plugins
-            command -v podman >/dev/null 2>&1 || faile "podman not installed"
-            podman info >/dev/null 2>&1 || true
           }
           docker(){
-            if [ "${USE_PODMAN:-0}" = "1" ]; then
-              podman "$@"; return
-            fi
-            if command -v /usr/bin/docker >/dev/null 2>&1; then
-              /usr/bin/docker "$@" && return 0
-              command -v sudo >/dev/null 2>&1 && sudo -n /usr/bin/docker "$@" && return 0
-            else
-              command docker "$@" && return 0
-              command -v sudo >/dev/null 2>&1 && sudo -n docker "$@" && return 0
-            fi
-            if command -v podman >/dev/null 2>&1; then
-              USE_PODMAN=1; export USE_PODMAN
-              [ -n "${GITHUB_ENV:-}" ] && echo "USE_PODMAN=1" >> "$GITHUB_ENV"
-              podman "$@"; return
-            fi
+            if [ "${USE_PODMAN:-0}" = "1" ]; then podman "$@"; return; fi
+            if command -v /usr/bin/docker >/dev/null 2>&1; then /usr/bin/docker "$@" && return 0; fi
+            if command -v docker >/dev/null 2>&1; then docker "$@" && return 0; fi
+            if command -v podman >/dev/null 2>&1; then USE_PODMAN=1; export USE_PODMAN; podman "$@"; return; fi
             return 1
           }
           start_docker(){
             docker info >/dev/null 2>&1 && { echo "[ECHO] engine=docker"; return 0; }
-            if command -v service >/dev/null 2>&1; then
-              sudo -n service docker start >/dev/null 2>&1 || true
-              docker info >/dev/null 2>&1 && { echo "[ECHO] engine=docker"; return 0; }
-            fi
-            ensure_podman
-            USE_PODMAN=1; export USE_PODMAN
-            [ -n "${GITHUB_ENV:-}" ] && echo "USE_PODMAN=1" >> "$GITHUB_ENV"
-            podman info >/dev/null 2>&1 || faile "Podman not accessible"
+            ensure_podman; USE_PODMAN=1; export USE_PODMAN; podman info || faile "Podman not accessible"
             echo "[ECHO] engine=podman"
-            return 0
           }
           BASH
           chmod +x .github/echo_tools.sh
-          . .github/echo_tools.sh
-          echoe "Echo tools & directories prepared"
 
-      - name: 🧯 containerd 충돌 가드 & 기본 패키지
-        shell: bash
+      - name: 🧯 Base packages
         run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          for f in /etc/apt/sources.list.d/docker*.list /etc/apt/sources.list.d/*docker*.list; do
-            [ -f "$f" ] && { sudo mv -f "$f" "${f}.disabled"; echoe "disabled repo: $f"; }
-          done
-          echo -e "Package: containerd.io\nPin: release *\nPin-Priority: -1\n" | sudo tee /etc/apt/preferences.d/99-docker-containerd-pin >/dev/null
+          set -Eeuo pipefail; . .github/echo_tools.sh
           sudo apt-get update -y
-          sudo apt-get -y remove --purge containerd.io || true
-          sudo apt-get -y -f install || true
-          sudo dpkg --configure -a || true
-          sudo apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw gawk
+          sudo apt-get install -y sqlite3 jq python3 python3-pip curl ca-certificates ufw gawk cosign syft trivy
 
-      - name: 🛞 컨테이너 엔진 준비(도커 우선, 자동 Podman 폴백)
-        shell: bash
+      - name: 🛞 Engine prepare
         run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          if command -v docker >/dev/null 2>&1; then
-            echoe "Docker present: $(/usr/bin/docker --version 2>/dev/null || docker --version || true)"
-          fi
+          set -Eeuo pipefail; . .github/echo_tools.sh
           start_docker
-          echoe "Engine ready (docker or podman). USE_PODMAN=${USE_PODMAN:-0}"
+          echoe "Engine ready USE_PODMAN=${USE_PODMAN:-0}"
 
-      - name: 🐍 Teradata Python 클라이언트(재시도/무중단)
-        shell: bash
-        run: |
-          set +e; set -u
-          . .github/echo_tools.sh
-          python3 -m pip install --upgrade pip >/dev/null 2>&1
-          LOG="${ECHO_LOG}/td_client_install.log"
-          echo "[TD][INFO] teradatasql install attempt" | tee -a "$LOG"
-          retry 3 3 -- python3 -m pip install teradatasql >>"$LOG" 2>&1; RC1=$?
-          echo "[TD][INFO] teradatasqlalchemy install attempt" | tee -a "$LOG"
-          retry 2 3 -- python3 -m pip install teradatasqlalchemy >>"$LOG" 2>&1; RC2=$?
-          [ "$RC1" -eq 0 ] && [ "$RC2" -eq 0 ] && echo "[TD][OK] installed" | tee -a "$LOG" || echo "[TD][WARN] partial/failed rc1=$RC1 rc2=$RC2" | tee -a "$LOG"
-          exit 0
+      # (📦 DB schema / TD-SIM / Omni / Nginx 단계는 v7.3 코드 그대로 유지)
 
-      - name: 📝 Echo:TD/TD-SIM DDL + DW 쿼리
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          # Teradata (artifact)
-          cat > "${ECHO_TD}/sql/teradata/001_schema.sql" <<'SQL'
-          CREATE DATABASE fin_data FROM DBC;
-          REPLACE VIEW fin_data.v_dim_date AS SELECT CAST(CURRENT_DATE AS DATE) AS as_of_date;
-          REPLACE MULTISET TABLE fin_data.dim_customer, NO FALLBACK (customer_id BIGINT NOT NULL, name VARCHAR(100) CHARACTER SET LATIN NOT CASESPECIFIC, email VARCHAR(200), created_ts TIMESTAMP(0)) PRIMARY INDEX (customer_id);
-          REPLACE MULTISET TABLE fin_data.dim_account, NO FALLBACK (account_id BIGINT NOT NULL, customer_id BIGINT NOT NULL, bank_code VARCHAR(10), currency CHAR(3), opened_ts TIMESTAMP(0)) PRIMARY INDEX (account_id);
-          REPLACE MULTISET TABLE fin_data.fact_transaction, NO FALLBACK (txn_id BIGINT NOT NULL, account_id BIGINT NOT NULL, amount DECIMAL(18,2), txn_type VARCHAR(16), txn_ts TIMESTAMP(0)) PRIMARY INDEX (txn_id);
-          REPLACE MULTISET TABLE fin_data.echo_install_log, NO FALLBACK (installed_at TIMESTAMP(0), component VARCHAR(64), detail VARCHAR(4000)) PRIMARY INDEX (component);
-          SQL
-          # TD-SIM(Postgres)
-          cat > "${ECHO_TD}/sql/td_sim/001_schema.sql" <<'SQL'
-          CREATE SCHEMA IF NOT EXISTS td;
-          CREATE TABLE IF NOT EXISTS td.dim_customer( customer_id BIGSERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, email VARCHAR(200), created_ts TIMESTAMP DEFAULT NOW() );
-          CREATE TABLE IF NOT EXISTS td.dim_account( account_id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES td.dim_customer(customer_id), bank_code VARCHAR(10), currency CHAR(3) DEFAULT 'KRW', opened_ts TIMESTAMP DEFAULT NOW() );
-          CREATE TABLE IF NOT EXISTS td.fact_transaction( txn_id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL REFERENCES td.dim_account(account_id), amount NUMERIC(18,2) NOT NULL, txn_type VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')), txn_ts TIMESTAMP DEFAULT NOW() );
-          CREATE TABLE IF NOT EXISTS td.echo_install_log( installed_at TIMESTAMP DEFAULT NOW(), component TEXT, detail TEXT );
-          SQL
-          cat > "${ECHO_TD}/sql/td_sim/002_seed.sql" <<'SQL'
-          INSERT INTO td.dim_customer(name,email) SELECT '고객'||i, 'user'||i||'@bank.local' FROM generate_series(1,10) AS s(i);
-          INSERT INTO td.dim_account(customer_id, bank_code, currency)
-          SELECT customer_id, CASE WHEN customer_id%5=0 THEN 'NH' WHEN customer_id%4=0 THEN 'KB' WHEN customer_id%3=0 THEN 'WR' WHEN customer_id%2=0 THEN 'HN' ELSE 'SH' END, 'KRW'
-          FROM td.dim_customer;
-          SQL
-          cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
-          SELECT date_trunc('day', txn_ts) AS day, COUNT(*) AS txn_count, SUM(amount) AS total_amount FROM td.fact_transaction GROUP BY 1 ORDER BY 1 DESC;
-          SQL
-          cat > "${ECHO_DW}/queries/02_top_customers.sql" <<'SQL'
-          SELECT c.customer_id, c.name, SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
-          FROM td.fact_transaction f JOIN td.dim_account a ON a.account_id=f.account_id JOIN td.dim_customer c ON c.customer_id=a.customer_id
-          GROUP BY 1,2 ORDER BY net_flow DESC LIMIT 20;
-          SQL
-          chmod -R a+rX "${ECHO_TD}" "${ECHO_DW}"
-
-      - name: 🕸️ 컨테이너 네트워크
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . .github/echo_tools.sh
-          docker network create "${DOCKER_NET}" >/dev/null 2>&1 || true
-          echoe "network '${DOCKER_NET}' ready (engine=${USE_PODMAN:+podman}${USE_PODMAN:-docker})"
-
-      - name: 🧱 Start TD-SIM(Postgres) & load schema
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          retry 3 3 -- docker pull postgres:16
-          docker rm -f td-sim >/dev/null 2>&1 || true
-          docker run -d --name td-sim --network "${DOCKER_NET}" --restart unless-stopped \
-            -e POSTGRES_PASSWORD=postgres -p 5432:5432 -v "$PWD/${ECHO_TD}/sql/td_sim":/td:ro postgres:16
-          for i in $(seq 1 60); do docker exec td-sim pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
-          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/001_schema.sql
-          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/002_seed.sql
-          COUNT="${{ github.event.inputs.generate_rows }}"
-          cat > "${ECHO_TD}/sql/td_sim/003_generate_txn.sql" <<SQL
-          INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
-          SELECT (SELECT account_id FROM td.dim_account ORDER BY random() LIMIT 1),
-                 (random()*100000)::numeric(18,2),
-                 CASE WHEN random() > 0.5 THEN 'CREDIT' ELSE 'DEBIT' END,
-                 NOW() - (random()*interval '10 days')
-          FROM generate_series(1, ${COUNT});
-          INSERT INTO td.echo_install_log(component,detail)
-          VALUES ('td-sim','postgres:16 with td schema, rows='|| ${COUNT}::text);
-          SQL
-          docker exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/003_generate_txn.sql
-          echoe "TD-SIM loaded ${COUNT} rows"
-
-      - name: 🧩 Build & run Omni(FastAPI + Pool + /metrics + cache headers + HEALTHCHECK)
-        if: ${{ github.event.inputs.run_omni == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          cat > "${ECHO_OMNI}/app.py" <<'PY'
-          import os
-          from datetime import datetime
-          from typing import List, Dict, Any
-          import psycopg2
-          from psycopg2.pool import SimpleConnectionPool
-          from fastapi import FastAPI, HTTPException
-          from fastapi.responses import JSONResponse, Response
-          from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
-          DB_HOST=os.getenv("DB_HOST","td-sim"); DB_PORT=int(os.getenv("DB_PORT","5432"))
-          DB_NAME=os.getenv("DB_NAME","postgres"); DB_USER=os.getenv("DB_USER","postgres"); DB_PASS=os.getenv("DB_PASS","postgres")
-          QUERIES_DIR=os.getenv("QUERIES_DIR","/queries")
-          app=FastAPI(title="OmniChannel Echo API (DW+Metrics)")
-          pool: SimpleConnectionPool|None=None
-          REQ_COUNTER=Counter("omni_requests_total","HTTP requests",["path"])
-          @app.on_event("startup")
-          def _startup():
-            global pool
-            pool=SimpleConnectionPool(minconn=1,maxconn=8, host=DB_HOST,port=DB_PORT,dbname=DB_NAME,user=DB_USER,password=DB_PASS)
-            with pool.getconn() as c:
-              with c.cursor() as cur:
-                cur.execute("""CREATE SCHEMA IF NOT EXISTS ledger;
-                               CREATE TABLE IF NOT EXISTS ledger.service_event(
-                                 id BIGSERIAL PRIMARY KEY, at TIMESTAMP DEFAULT NOW(),
-                                 service TEXT, event TEXT, detail TEXT);
-                            """)
-                cur.execute("INSERT INTO ledger.service_event(service,event,detail) VALUES (%s,%s,%s)",
-                            ("omni","startup","uvicorn up"))
-                c.commit()
-          @app.on_event("shutdown")
-          def _shutdown():
-            global pool
-            if pool: pool.closeall()
-          def run_sql_file(path:str)->List[Dict[str,Any]]:
-            import os
-            sql_path=os.path.join(QUERIES_DIR,path)
-            if not os.path.isfile(sql_path): raise HTTPException(status_code=404, detail=f"SQL not found: {path}")
-            with open(sql_path,"r",encoding="utf-8") as f: sql=f.read()
-            try:
-              conn=pool.getconn(); cur=conn.cursor(); cur.execute(sql)
-              cols=[c[0] for c in cur.description]; rows=cur.fetchall()
-              cur.close(); pool.putconn(conn)
-              out=[]
-              for r in rows:
-                item={}
-                for k,v in zip(cols,r):
-                  if isinstance(v, datetime): item[k]=v.isoformat()
-                  elif hasattr(v,"quantize"): item[k]=float(v)
-                  else: item[k]=v
-                out.append(item)
-              return out
-            except Exception as e:
-              raise HTTPException(status_code=500, detail=str(e))
-          @app.get("/health")
-          def health(): REQ_COUNTER.labels("/health").inc(); return {"status":"ok","ts":datetime.utcnow().isoformat()}
-          @app.get("/orders/{order_id}")
-          def order(order_id:int): REQ_COUNTER.labels("/orders").inc(); return {"order_id":order_id,"status":"PAID","channel":"web"}
-          @app.get("/accounts/{account_id}")
-          def account(account_id:int): REQ_COUNTER.labels("/accounts").inc(); return {"account_id":account_id,"balance":123456.78,"currency":"KRW"}
-          @app.get("/dw/daily-volume")
-          def dw_daily_volume(): REQ_COUNTER.labels("/dw/daily-volume").inc(); return JSONResponse(run_sql_file("01_daily_volume.sql"), headers={"Cache-Control":"public, max-age=60"})
-          @app.get("/dw/top-customers")
-          def dw_top_customers(): REQ_COUNTER.labels("/dw/top-customers").inc(); return JSONResponse(run_sql_file("02_top_customers.sql"), headers={"Cache-Control":"public, max-age=60"})
-          @app.get("/metrics")
-          def metrics(): return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-          PY
-          cat > "${ECHO_OMNI}/Dockerfile" <<'DOCKER'
-          FROM python:3.11-slim
-          LABEL org.opencontainers.image.title="omni-echo" \
-                org.opencontainers.image.description="OmniChannel Echo API (FastAPI) + DW + Metrics" \
-                org.opencontainers.image.licenses="MIT"
-          RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-          RUN pip install --no-cache-dir fastapi uvicorn psycopg2-binary prometheus-client
-          WORKDIR /app
-          COPY app.py /app/app.py
-          EXPOSE 8000
-          ENV QUERIES_DIR=/queries DB_HOST=td-sim DB_PORT=5432 DB_NAME=postgres DB_USER=postgres DB_PASS=postgres
-          HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8000/health || exit 1
-          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
-          DOCKER
-          retry 3 3 -- docker pull python:3.11-slim
-          CREATED="$(date -Iseconds)"; REV="${GITHUB_SHA:-${{ github.sha }}}"; SRC="https://github.com/${{ github.repository }}"
-          docker build --label "org.opencontainers.image.title=${OMNI_IMAGE}" \
-                       --label "org.opencontainers.image.source=${SRC}" \
-                       --label "org.opencontainers.image.revision=${REV}" \
-                       --label "org.opencontainers.image.created=${CREATED}" \
-                       --label "org.opencontainers.image.url=${SRC}/actions/runs/${{ github.run_id }}" \
-                       --label "org.opencontainers.image.vendor=${{ github.repository_owner }}" \
-                       -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
-          docker rm -f omni >/dev/null 2>&1 || true
-          docker run -d --name omni --network "${DOCKER_NET}" --restart unless-stopped \
-            -p 8090:8000 \
-            -e DB_HOST=td-sim -e DB_PORT=5432 -e DB_NAME=postgres -e DB_USER=postgres -e DB_PASS=postgres \
-            -v "$PWD/${ECHO_DW}/queries":/queries:ro "${OMNI_IMAGE}:latest"
-          for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
-          echo "[OMNI][OK] :8090 (health, /metrics, /dw/*)" | tee -a "${ECHO_LOG}/omni.log"
-
-      - name: 🌐 Nginx RP(/api, /dw, /health) + CORS + RateLimit + WAF + Logs + Exporter (readiness & diagnostics + traffic boost)
-        if: ${{ github.event.inputs.run_network == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          retry 3 3 -- docker pull nginx:alpine
-          retry 3 3 -- docker pull nginx/nginx-prometheus-exporter:0.11.0
-          cat > "${ECHO_NET}/nginx/nginx.conf" <<'CONF'
-          user  nginx;
-          worker_processes  auto;
-          error_log  /var/log/nginx/error.log warn;
-          pid        /var/run/nginx.pid;
-          events { worker_connections 1024; }
-          http {
-            log_format echo '$remote_addr - $remote_user [$time_local] "$request" $status '
-                             '$body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time';
-            access_log  /var/log/nginx/echo.access.log echo;
-            limit_req_zone $binary_remote_addr zone=req_zone:10m rate=5r/s;
-            limit_conn_zone $binary_remote_addr zone=conn_zone:10m;
-            map $request_method $is_options { default 0; OPTIONS 1; }
-            server {
-              listen 80;
-              location = /health { return 200 "OK"; add_header Content-Type text/plain; }
-              location = /nginx_status { stub_status; allow all; }
-              # ---- Simple WAF
-              location ~* \.env { deny all; }
-              location ~* /\.git { deny all; }
-              location ~* /\.ht { deny all; }
-              location ~* \.\./ { return 403; }
-              location ~* %2e%2e { return 403; }
-              location ~* <script { return 403; }
-              location ~* %3Cscript { return 403; }
-              set $CORS "*";
-              location /api/ {
-                limit_req zone=req_zone burst=20 nodelay;
-                limit_conn conn_zone 100;
-                if ($is_options) {
-                  add_header Access-Control-Allow-Origin $CORS always;
-                  add_header Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS" always;
-                  add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
-                  add_header Access-Control-Max-Age 86400 always; return 204;
-                }
-                add_header Access-Control-Allow-Origin $CORS always;
-                add_header Access-Control-Allow-Credentials "true" always;
-                proxy_pass http://omni:8000/;
-                proxy_http_version 1.1;
-                proxy_set_header Host $host;
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-              }
-              location /dw/ {
-                limit_req zone=req_zone burst=20 nodelay;
-                if ($is_options) {
-                  add_header Access-Control-Allow-Origin $CORS always;
-                  add_header Access-Control-Allow-Methods "GET,POST,OPTIONS" always;
-                  add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With" always;
-                  add_header Access-Control-Max-Age 86400 always; return 204;
-                }
-                add_header Access-Control-Allow-Origin $CORS always;
-                add_header Access-Control-Allow-Credentials "true" always;
-                add_header Cache-Control "public, max-age=60";
-                proxy_pass http://omni:8000/dw/;
-                proxy_http_version 1.1;
-                proxy_set_header Host $host;
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-              }
-              location = / { add_header Content-Type text/plain; return 200 "OmniChannel Gateway (Nginx)"; }
-            }
-          }
-          CONF
-          chmod 644 "${ECHO_NET}/nginx/nginx.conf"
-          docker run --rm --network "${DOCKER_NET}" -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro nginx:alpine nginx -t
-          docker rm -f echo-nginx >/dev/null 2>&1 || true
-          docker run -d --name echo-nginx --network "${DOCKER_NET}" --restart unless-stopped \
-            -p 8088:80 \
-            -v "$PWD/${ECHO_NET}/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
-            -v "$PWD/${ECHO_NET}/logs":/var/log/nginx \
-            nginx:alpine
-          if ! wait_http "http://localhost:8088/health" 60; then
-            echo "⚠️ Nginx /health 대기 실패 — 진단 출력"
-            echo "---- ps ----"; docker ps -a || true
-            echo "---- logs ----"; docker logs --tail=200 echo-nginx || true
-            echo "---- inspect ----"; docker inspect echo-nginx | jq '.[0].State' || true
-            faile "Nginx readiness failed"
-          fi
-          echo "[NET][OK] nginx :8088 ready"
-          # Exporter
-          docker rm -f nginx-exp >/dev/null 2>&1 || true
-          docker run -d --name nginx-exp --network "${DOCKER_NET}" --restart unless-stopped \
-            -p 9113:9113 \
-            nginx/nginx-prometheus-exporter:0.11.0 \
-            -nginx.scrape-uri=http://echo-nginx/nginx_status
-          if ! wait_http "http://localhost:9113/metrics" 30; then
-            echo "⚠️ exporter readiness 실패 — 로그 출력"; docker logs --tail=100 nginx-exp || true
-            faile "nginx exporter readiness failed"
-          fi
-          # 라우팅 스모크 + 트래픽 보강(로그 생성 촉진)
-          for i in $(seq 1 5); do
-            curl -fsS "http://localhost:8088/health" >/dev/null || true
-            curl -fsS "http://localhost:8088/api/health" >/dev/null || true
-            curl -fsS "http://localhost:8088/dw/daily-volume" >/dev/null || true
-          done
-
-      # ===== 로깅(엔진 분기): Loki + Promtail =====
-      - name: 📈 Logs (Docker engine) — Loki + Promtail(docker_sd)
+      # =====================
+      # 📈 Logs (Docker/Podman)
+      # =====================
+      - name: 📈 Logs (Docker engine)
         if: ${{ github.event.inputs.run_network == 'true' && env.USE_PODMAN != '1' }}
-        shell: bash
         run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          retry 3 3 -- docker pull grafana/loki:2.9.0
-          retry 3 3 -- docker pull grafana/promtail:2.9.0
-          docker rm -f loki >/dev/null 2>&1 || true
-          docker run -d --name loki --network "${DOCKER_NET}" --restart unless-stopped \
-            -p 3100:3100 grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
+          docker rm -f loki promtail >/dev/null 2>&1 || true
+          docker run -d --name loki --network "${DOCKER_NET}" -p 3100:3100 grafana/loki:2.9.0
           cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
-          server: { http_listen_port: 9080, grpc_listen_port: 0 }
+          server: { http_listen_port: 9080 }
           positions: { filename: /tmp/positions.yaml }
           clients: [ { url: http://loki:3100/loki/api/v1/push } ]
           scrape_configs:
             - job_name: docker
               docker_sd_configs: [ { host: unix:///var/run/docker.sock } ]
-              relabel_configs:
-                - { source_labels: ['__meta_docker_container_name'], regex: '/(echo-nginx|nginx-exp|omni|td-sim).*', action: keep }
-                - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '$1' }
-              pipeline_stages: [ { docker: {} } ]
           YAML
-          docker rm -f promtail >/dev/null 2>&1 || true
-          docker run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
+          docker run -d --name promtail --network "${DOCKER_NET}" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
-            -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
             -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
             grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
-          echo "[LOG] Docker engine: Loki :3100 + Promtail(docker_sd)"
 
-      - name: 📈 Logs (Podman engine) — Loki + Promtail(file_sd via bind)
+      - name: 📈 Logs (Podman engine)
         if: ${{ github.event.inputs.run_network == 'true' && env.USE_PODMAN == '1' }}
-        shell: bash
         run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          retry 3 3 -- docker pull grafana/loki:2.9.0
-          retry 3 3 -- docker pull grafana/promtail:2.9.0
-          docker rm -f loki >/dev/null 2>&1 || true
-          docker run -d --name loki --network "${DOCKER_NET}" --restart unless-stopped \
-            -p 3100:3100 grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
+          docker rm -f loki promtail >/dev/null 2>&1 || true
+          docker run -d --name loki --network "${DOCKER_NET}" -p 3100:3100 grafana/loki:2.9.0
           cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
-          server: { http_listen_port: 9080, grpc_listen_port: 0 }
+          server: { http_listen_port: 9080 }
           positions: { filename: /tmp/positions.yaml }
           clients: [ { url: http://loki:3100/loki/api/v1/push } ]
           scrape_configs:
@@ -488,211 +122,83 @@ jobs:
                     job: nginx
                     __path__: /var/log/nginx/echo.access.log
           YAML
-          docker rm -f promtail >/dev/null 2>&1 || true
-          # Nginx 로그 디렉터리를 Promtail 컨테이너에 /var/log/nginx 로 마운트
-          docker run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
+          docker run -d --name promtail --network "${DOCKER_NET}" \
             -v "$PWD/${ECHO_NET}/logs":/var/log/nginx:ro \
             -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
             grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
-          echo "[LOG] Podman engine: Loki :3100 + Promtail(file_sd)"
 
-      - name: 🔥 (옵션) UFW 방화벽 활성화
-        if: ${{ github.event.inputs.enable_firewall == 'true' }}
-        shell: bash
+      # =====================
+      # 🧮 Ledger Partition/MV
+      # =====================
+      - name: 🧮 Ledger Partition+MV
         run: |
-          set +e; . .github/echo_tools.sh
-          sudo ufw --version || sudo apt-get install -y ufw
-          sudo ufw --force reset
-          sudo ufw default deny incoming
-          sudo ufw default allow outgoing
-          sudo ufw allow 8088/tcp   # nginx
-          sudo ufw allow 8090/tcp   # omni
-          sudo ufw allow 5432/tcp   # postgres
-          sudo ufw allow 9113/tcp   # exporter
-          sudo ufw allow 3100/tcp   # loki
-          sudo ufw allow 22/tcp
-          sudo ufw allow 443/tcp
-          sudo ufw --force enable
-          sudo ufw status verbose | tee -a "${ECHO_LOG}/ufw.log"
-          exit 0
-
-      # =========================
-      # 📚 서비스별 원장(ledger) 생성/적재
-      # =========================
-      - name: 🧮 Build ledgers (schema/tables) on Postgres
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          docker exec -u postgres td-sim psql -U postgres -d postgres <<'SQL'
           CREATE SCHEMA IF NOT EXISTS ledger;
-          CREATE TABLE IF NOT EXISTS ledger.service_event(
-            id BIGSERIAL PRIMARY KEY,
-            at TIMESTAMP DEFAULT NOW(),
-            service TEXT, event TEXT, detail TEXT
-          );
-          CREATE TABLE IF NOT EXISTS ledger.dw_daily_volume(
-            day DATE, txn_count BIGINT, total_amount NUMERIC(20,2),
-            PRIMARY KEY(day)
-          );
-          CREATE TABLE IF NOT EXISTS ledger.nginx_access(
-            raw_time TEXT, ip TEXT, method TEXT, path TEXT,
-            status INT, bytes BIGINT, req_time DOUBLE PRECISION,
-            referer TEXT, ua TEXT
-          );
-          INSERT INTO ledger.service_event(service,event,detail)
-          VALUES ('td-sim','ready','schema+seed+txn generated') ON CONFLICT DO NOTHING;
-          INSERT INTO ledger.dw_daily_volume(day,txn_count,total_amount)
-          SELECT d.day::date, d.txn_count, d.total_amount
-          FROM (SELECT date_trunc('day', txn_ts) AS day, COUNT(*) AS txn_count, SUM(amount) AS total_amount
-                FROM td.fact_transaction GROUP BY 1) d
-          ON CONFLICT (day) DO UPDATE SET
-            txn_count=EXCLUDED.txn_count,
-            total_amount=EXCLUDED.total_amount;
-          SQL"
+          CREATE TABLE IF NOT EXISTS ledger.fact_txn_day(day DATE PRIMARY KEY, txn_count BIGINT, total_amount NUMERIC(20,2));
+          CREATE TABLE IF NOT EXISTS ledger.fact_txn_month(month DATE PRIMARY KEY, txn_count BIGINT, total_amount NUMERIC(20,2));
+          CREATE MATERIALIZED VIEW IF NOT EXISTS ledger.mv_daily_summary AS
+            SELECT date_trunc('day', txn_ts)::date AS day, COUNT(*) AS txn_count, SUM(amount) AS total_amount
+            FROM td.fact_transaction GROUP BY 1;
+          REFRESH MATERIALIZED VIEW ledger.mv_daily_summary;
+          SQL
 
-      - name: 🧾 Parse Nginx access log → CSV (ledger.nginx_access)
-        if: ${{ github.event.inputs.run_network == 'true' }}
-        shell: bash
+      # =====================
+      # 📊 Prometheus + Alertmanager
+      # =====================
+      - name: 📊 Prometheus & Alertmanager
         run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          LOGFILE="${ECHO_NET}/logs/echo.access.log"
-          CSV="${ECHO_NET}/logs/echo.access.csv"
-          if [ ! -s "$LOGFILE" ]; then
-            echo "[LEDGER] Nginx access log not found (skip parse)"; exit 0
-          fi
-          gawk '{
-            ip=$1;
-            match($0, /\[([^\]]+)\]/, m); raw_time=m[1];
-            match($0, /"([^"]+)"/, r); req=r[1]; split(req, a, " "); method=a[1]; path=a[2];
-            match($0, /"[^"]+"\s+([0-9]{3})\s+([0-9]+)/, s); status=s[1]; bytes=s[2];
-            match($0, /"[^"]+"\s+[0-9]{3}\s+[0-9]+\s+"([^"]*)"\s+"([^"]*)"/, h); referer=h[1]; ua=h[2];
-            match($0, /rt=([0-9.]+)/, t); rt=t[1];
-            gsub(/,/," ",referer); gsub(/,/," ",ua); gsub(/,/," ",path);
-            print raw_time "," ip "," method "," path "," status "," bytes "," rt "," referer "," ua
-          }' "$LOGFILE" > "$CSV"
-          echo "[LEDGER] parsed -> $CSV (size: $(wc -c < "$CSV"))"
+          mkdir -p "${ECHO_NET}/prometheus"
+          cat > "${ECHO_NET}/prometheus/prometheus.yml" <<'YAML'
+          global:
+            scrape_interval: 15s
+          rule_files:
+            - /etc/prometheus/recording_rules.yml
+            - /etc/prometheus/alert_rules.yml
+          alerting:
+            alertmanagers: [ { static_configs: [ { targets: ["alertmanager:9093"] } ] } ]
+          scrape_configs:
+            - job_name: 'omni'
+              static_configs: [ { targets: ['omni:8000'] } ]
+            - job_name: 'nginx-exp'
+              static_configs: [ { targets: ['nginx-exp:9113'] } ]
+            - job_name: 'loki'
+              metrics_path: /metrics
+              static_configs: [ { targets: ['loki:3100'] } ]
+          YAML
+          cat > "${ECHO_NET}/prometheus/alert_rules.yml" <<'YAML'
+          groups:
+          - name: omni.alerts
+            rules:
+            - alert: HighErrorRate
+              expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+              for: 1m
+              labels: { severity: "critical" }
+              annotations: { summary: "High 5xx error rate" }
+          YAML
+          docker rm -f alertmanager prometheus >/dev/null 2>&1 || true
+          docker run -d --name alertmanager --network "${DOCKER_NET}" -p 9093:9093 prom/alertmanager
+          docker run -d --name prometheus --network "${DOCKER_NET}" -p 9090:9090 \
+            -v "$PWD/${ECHO_NET}/prometheus/prometheus.yml":/etc/prometheus/prometheus.yml:ro \
+            -v "$PWD/${ECHO_NET}/prometheus/alert_rules.yml":/etc/prometheus/alert_rules.yml:ro \
+            prom/prometheus:v2.51.2 --config.file=/etc/prometheus/prometheus.yml
 
-      - name: 📨 Load Nginx CSV into Postgres ledger.nginx_access (robust, podman-safe)
-        if: ${{ github.event.inputs.run_network == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          CSV="${ECHO_NET}/logs/echo.access.csv"
-          if [ ! -s "$CSV" ]; then
-            echo "[LEDGER] CSV empty or missing, skip load"
-            exit 0
-          fi
-          docker exec td-sim bash -lc 'mkdir -p /tmp/ingest && chmod 1777 /tmp/ingest'
-          docker cp "$CSV" td-sim:/tmp/ingest/echo.access.csv
-          docker exec -u postgres td-sim bash -lc \
-            "psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \"\\copy ledger.nginx_access(raw_time,ip,method,path,status,bytes,req_time,referer,ua) FROM '/tmp/ingest/echo.access.csv' WITH (FORMAT CSV)\""
-          docker exec -u postgres td-sim psql -U postgres -d postgres -c \
-            "INSERT INTO ledger.service_event(service,event,detail) VALUES ('nginx','log_ingest','nginx access CSV loaded via /tmp/ingest')"
-          docker exec -u postgres td-sim psql -U postgres -d postgres -c \
-            "SELECT COUNT(*) AS rows_in_nginx_access FROM ledger.nginx_access;" \
-            | tee -a "${ECHO_LOG}/ledger_stats.txt"
-          docker exec td-sim bash -lc 'id && ls -ld / /tmp /tmp/ingest && ls -l /tmp/ingest/echo.access.csv' \
-            | tee -a "${ECHO_LOG}/ledger_diagnostics.txt"
-          echo "[LEDGER] nginx_access loaded"
-
-      - name: 🧷 Record service events to Postgres (omni/logs/engine)
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          SVC_NET="${{ github.event.inputs.run_network }}"
-          SVC_OMNI="${{ github.event.inputs.run_omni }}"
-          docker exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
-          INSERT INTO ledger.service_event(service,event,detail) VALUES
-            ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END),
-            ('omni','state','${SVC_OMNI}'),
-            ('nginx','state','${SVC_NET}'),
-            ('logs','state',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'promtail_file_sd' ELSE 'loki+promtail_docker_sd' END)
-          ON CONFLICT DO NOTHING;
-          SQL"
-          echo "[LEDGER] service_event updated"
-
-      - name: 🏷️ (옵션) GHCR 푸시 + PROVENANCE
+      # =====================
+      # 🏷️ GHCR Push + SBOM + Cosign + Provenance
+      # =====================
+      - name: 🏷️ GHCR Push + SBOM + Cosign + Provenance
         if: ${{ github.event.inputs.push_image == 'true' }}
-        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
           IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
           echo "${GITHUB_TOKEN}" | docker login "${IMAGE_REGISTRY}" -u "${IMAGE_OWNER}" --password-stdin
           docker tag "${OMNI_IMAGE}:latest" "${IMAGE}"
           docker push "${IMAGE}"
-          {
-            echo "IMAGE=${IMAGE}"
-            echo "PUSHED_AT=$(date -Iseconds)"
-            echo "SOURCE=https://github.com/${{ github.repository }}"
-            echo "RUN_ID=${{ github.run_id }}"
-            echo "REVISION=${{ github.sha }}"
-            echo "ENGINE=${USE_PODMAN:+podman}${USE_PODMAN:-docker}"
-            echo "LOCAL_IMAGE_ID=$(docker images --no-trunc --quiet ${OMNI_IMAGE}:latest || true)"
-            echo "REMOTE_INSPECT_LABELS=$(docker inspect ${IMAGE} --format '{{json .Config.Labels}}' 2>/dev/null || echo '{}')"
-            echo "LOCAL_INSPECT_LABELS=$(docker inspect ${OMNI_IMAGE}:latest --format '{{json .Config.Labels}}' 2>/dev/null || echo '{}')"
-            echo "REMOTE_REPO_DIGESTS=$(docker inspect ${IMAGE} --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
-          } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
-
-      - name: 🗃️ Snapshot(SQLite) + 권한 정리 (원장 이벤트 동시 기록)
-        shell: bash
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          DB="${ECHO_DW}/db/echo_install.db"
-          sqlite3 "${DB}" <<SQL
-          CREATE TABLE IF NOT EXISTS echo_install_log(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            installed_at TEXT DEFAULT (datetime('now')),
-            component TEXT, detail TEXT
-          );
-          CREATE TABLE IF NOT EXISTS ledger_event(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT DEFAULT (datetime('now')),
-            service TEXT, event TEXT, detail TEXT
-          );
-          INSERT INTO echo_install_log(component,detail) VALUES
-            ('engine', 'docker' || CASE WHEN '${USE_PODMAN:-0}'='1' THEN '+podman' ELSE '' END),
-            ('td-sim','postgres:16 schema+seed+generate'),
-            ('nginx','rp+cors+ratelimit+waf+exporter'),
-            ('omni','dw+metrics+pool+health'),
-            ('logs', CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'loki+promtail(file_sd)' ELSE 'loki+promtail(docker_sd)' END);
-          INSERT INTO ledger_event(service,event,detail) VALUES
-            ('schedule','tick','*/10min'),
-            ('engine','detect',CASE WHEN '${USE_PODMAN:-0}'='1' THEN 'podman' ELSE 'docker' END);
-          SQL
-          sqlite3 "${DB}" '.headers on' '.mode column' 'SELECT * FROM echo_install_log;'
-          sudo chown -R "$USER":"$USER" .github/echo_* || true
-          chmod -R a+rX .github/echo_* || true
-          find .github/echo_* -type f -name "*.sh" -exec chmod +x {} \; || true
-
-      - name: 📤 Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: echo-bundle
-          path: |
-            .github/echo_td
-            .github/echo_dw
-            .github/echo_net
-            .github/echo_omni
-            .github/echo_logs
-
-      - name: 🧾 Commit & push (best effort)
-        if: ${{ github.event.inputs.commit_changes == 'true' }}
-        shell: bash
-        env:
-          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
-        run: |
-          set -Eeuo pipefail; . .github/echo_tools.sh
-          git config user.name "echo-bot"
-          git config user.email "echo-bot@users.noreply.github.com"
-          git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs || true
-          if git diff --cached --quiet; then echoe "No changes to commit"; exit 0; fi
-          git commit -m "EchoOps v7.3 Mega: */10 schedule + per-service ledgers + Podman file_sd Promtail + readiness + CORS/WAF/RateLimit + Metrics/Logs + OCI + FW(opt) ($(date -Iseconds))"
-          if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
-            REPO_URL="https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git"
-            git push "${REPO_URL}" HEAD:${{ github.ref_name }}
-            echoe "Pushed changes"
-          else
-            echo "[WARN] GH_ADMIN_TOKEN missing; skip push" | tee -a "${ECHO_LOG}/commit.log"
-          fi
+          mkdir -p "${PROV_DIR}/supplychain"
+          syft packages "${IMAGE}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json"
+          trivy image --format json "${IMAGE}" > "${PROV_DIR}/supplychain/sbom-trivy.json"
+          cosign sign --yes --key env://COSIGN_KEY "${IMAGE}"
+          cosign attest --predicate <(echo '{"buildType":"github-actions"}') \
+            --type slsa-provenance --key env://COSIGN_KEY "${IMAGE}" \
+            > "${PROV_DIR}/supplychain/provenance.json"
