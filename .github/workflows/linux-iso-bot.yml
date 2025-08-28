@@ -68,8 +68,7 @@ jobs:
                    "${ECHO_DW}/db" "${ECHO_DW}/queries" \
                    "${ECHO_NET}/nginx" "${ECHO_NET}/logs" "${ECHO_NET}/promtail" "${ECHO_NET}/prometheus" \
                    "${ECHO_OMNI}" "${ECHO_LOG}"
-
-          # === DROP-IN REPLACEMENT: 안전 엔진 유틸 ===
+          # === 안전 엔진 유틸 (drop-in) ===
           cat > .github/echo_tools.sh <<'BASH'
           set -Eeuo pipefail
           echoe(){ echo "[ECHO] $*"; }
@@ -146,7 +145,6 @@ jobs:
             return 0
           }
           BASH
-
           chmod +x .github/echo_tools.sh
           . .github/echo_tools.sh
           echoe "Echo tools & directories prepared"
@@ -365,7 +363,7 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
           echo "[OMNI][OK] :8090 (health, /metrics, /dw/*)" | tee -a "${ECHO_LOG}/omni.log"
 
-      - name: 🌐 Nginx RP(/api, /dw, /health) + CORS + RateLimit + WAF + Logs + Exporter (readiness & diagnostics + traffic boost)
+      - name: 🌐 Nginx RP(/api, /dw, /health) + CORS + RateLimit + WAF + Logs + Exporter
         if: ${{ github.event.inputs.run_network == 'true' }}
         shell: bash
         run: |
@@ -464,7 +462,7 @@ jobs:
             echo "⚠️ exporter readiness 실패 — 로그 출력"; ctr logs --tail=100 nginx-exp || true
             faile "nginx exporter readiness failed"
           fi
-          # 트래픽 보강(로그 생성 촉진)
+          # 트래픽 보강
           for i in $(seq 1 5); do
             curl -fsS "http://localhost:8088/health" >/dev/null || true
             curl -fsS "http://localhost:8088/api/health" >/dev/null || true
@@ -648,9 +646,6 @@ jobs:
           SQL"
           echo "[LEDGER] service_event updated"
 
-      # ======================
-      # 🧮 Ledger Partition + MV Snapshot (일/월) 자동 재계산
-      # ======================
       - name: 🧮 Ledger Partition + MV Snapshot
         shell: bash
         run: |
@@ -683,9 +678,6 @@ jobs:
               total_amount = EXCLUDED.total_amount;
           SQL
 
-      # ======================
-      # 📊 Prometheus 서버 + Alertmanager (룰 자동 생성/적용)
-      # ======================
       - name: 📊 Prometheus & Alertmanager (generate configs & run)
         shell: bash
         run: |
@@ -755,46 +747,86 @@ jobs:
           echo "[PROM] Prometheus :9090 up; Alertmanager :9093 up"
 
       # ======================
-      # 🏷️ (옵션) GHCR 푸시 + SBOM + cosign 서명 + OCI provenance JSON
-      #   - 소켓 의존 제거: Syft/Trivy는 '원격 이미지 레퍼런스'로 스캔
+      # 🏷️ GHCR 푸시 + SBOM + cosign (digest signing) + provenance
       # ======================
       - name: 🔐 Install cosign (keyless)
         if: ${{ github.event.inputs.push_image == 'true' }}
         uses: sigstore/cosign-installer@v3
 
-      - name: 🏷️ GHCR Push + SBOM + Cosign + Provenance
+      - name: 🔑 GHCR login for cosign
+        if: ${{ github.event.inputs.push_image == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: 🏷️ GHCR Push + SBOM + Cosign + Provenance (digest signing)
         if: ${{ github.event.inputs.push_image == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
           IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
+
+          # Push with ctr (engine-agnostic)
           echo "${GITHUB_TOKEN}" | ctr login "${IMAGE_REGISTRY}" -u "${IMAGE_OWNER}" --password-stdin
           ctr tag "${OMNI_IMAGE}:latest" "${IMAGE}"
           ctr push "${IMAGE}"
 
+          # Create provenance predicate BEFORE attest
           mkdir -p "${PROV_DIR}/supplychain"
-          # SBOM via Syft (remote ref; no docker.sock)
-          ctr run --rm anchore/syft:latest "${IMAGE}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json"
-          # Vulnerability via Trivy (remote ref)
-          ctr run --rm aquasec/trivy:latest image --timeout 10m --format json "${IMAGE}" > "${PROV_DIR}/supplychain/sbom-trivy.json"
-
-          # Cosign keyless sign & attest
-          cosign sign --yes "${IMAGE}"
           echo '{"buildType":"github-actions","builder":"echo-ops"}' > "${PROV_DIR}/supplychain/provenance.json"
-          cosign attest --yes --predicate "${PROV_DIR}/supplychain/provenance.json" --type slsaprovenance "${IMAGE}"
+
+          # Resolve remote digest reference
+          REF_DIGEST=""
+          if docker inspect "${IMAGE}" --format '{{index .RepoDigests 0}}' >/dev/null 2>&1; then
+            REF_DIGEST="$(docker inspect "${IMAGE}" --format '{{index .RepoDigests 0}}')"
+          fi
+          if [ -z "${REF_DIGEST}" ] && command -v podman >/dev/null 2>&1; then
+            D="$(podman image inspect "${IMAGE}" --format '{{.Digest}}' 2>/dev/null || true)"
+            if [ -n "$D" ] && [ "$D" != "<none>" ]; then
+              REF_DIGEST="${IMAGE%:*}@${D}"
+            fi
+          fi
+          if [ -z "${REF_DIGEST}" ]; then
+            ctr pull "${IMAGE}" || true
+            if docker inspect "${IMAGE}" --format '{{index .RepoDigests 0}}' >/dev/null 2>&1; then
+              REF_DIGEST="$(docker inspect "${IMAGE}" --format '{{index .RepoDigests 0}}')"
+            fi
+          fi
+          SIGN_TARGET="${REF_DIGEST:-${IMAGE}}"
+          echo "[PROV] signing target: ${SIGN_TARGET}"
+
+          # SBOM & vuln scan via remote ref (no docker.sock)
+          ctr run --rm anchore/syft:latest "${SIGN_TARGET}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json" || true
+          ctr run --rm aquasec/trivy:latest image --timeout 10m --format json "${SIGN_TARGET}" > "${PROV_DIR}/supplychain/sbom-trivy.json" || true
+
+          # cosign sign + attest with retries
+          ok=0
+          for i in 1 2 3; do
+            if cosign sign "${SIGN_TARGET}" && \
+               cosign attest --predicate "${PROV_DIR}/supplychain/provenance.json" --type slsaprovenance "${SIGN_TARGET}"; then
+              ok=1; break
+            fi
+            echo "[WARN] cosign attempt #$i failed; retrying in 5s..." >&2
+            sleep 5
+          done
+          [ "$ok" = "1" ] || { echo "[FAIL] cosign sign/attest failed"; exit 1; }
 
           {
             echo "IMAGE=${IMAGE}"
+            echo "SIGN_TARGET=${SIGN_TARGET}"
             echo "PUSHED_AT=$(date -Iseconds)"
             echo "SOURCE=https://github.com/${{ github.repository }}"
             echo "RUN_ID=${{ github.run_id }}"
             echo "REVISION=${{ github.sha }}"
             echo "ENGINE=${USE_PODMAN:+podman}${USE_PODMAN:-docker}"
             echo "LOCAL_IMAGE_ID=$(ctr images --no-trunc --quiet ${OMNI_IMAGE}:latest || true)"
-            echo "REMOTE_REPO_DIGESTS=$(ctr inspect ${IMAGE} --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
           } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
 
       - name: 🗃️ Snapshot(SQLite) + 권한 정리 (원장 이벤트 동시 기록)
