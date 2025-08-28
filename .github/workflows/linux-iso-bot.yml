@@ -27,35 +27,6 @@ on:
         description: "UFW 방화벽 활성화(러너 네트워크 영향 주의)"
         required: true
         default: "false"
-      # 슬롯 & 하드닝 옵션
-      slots_omni:
-        description: "Omni 서버 슬롯 수(컨테이너 복제 개수)"
-        required: true
-        default: "1"
-      slots_nginx:
-        description: "Nginx 슬롯(레코드)"
-        required: true
-        default: "1"
-      slots_td_sim:
-        description: "TD-SIM(Postgres) 슬롯(레코드)"
-        required: true
-        default: "1"
-      slots_prometheus:
-        description: "Prometheus 슬롯(레코드)"
-        required: true
-        default: "1"
-      slots_alertmanager:
-        description: "Alertmanager 슬롯(레코드)"
-        required: true
-        default: "1"
-      slots_loki:
-        description: "Loki 슬롯(레코드)"
-        required: true
-        default: "1"
-      slots_promtail:
-        description: "Promtail 슬롯(레코드)"
-        required: true
-        default: "1"
       install_nic_tools:
         description: "NIC 툴/드라이버 설치 (true/false)"
         required: true
@@ -64,6 +35,10 @@ on:
         description: "커널 설치/업그레이드 (재부팅 필요) (true/false)"
         required: true
         default: "false"
+      slots:
+        description: '슬롯 JSON (예: {"omni":2,"nginx":1,"td":1,"prometheus":1,"alertmanager":1,"loki":1,"promtail":1})'
+        required: true
+        default: '{"omni":1,"nginx":1,"td":1,"prometheus":1,"alertmanager":1,"loki":1,"promtail":1}'
 
   schedule:
     - cron: "*/10 * * * *"
@@ -72,7 +47,7 @@ permissions:
   contents: write
   packages: write
   actions: read
-  id-token: write
+  id-token: write   # cosign keyless
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -93,14 +68,7 @@ jobs:
       OMNI_IMAGE: omni-echo
       DOCKER_NET: echo-net
       PROV_DIR: .github/echo_omni
-      # 슬롯 수 (환경전파)
-      SLOTS_OMNI: ${{ github.event.inputs.slots_omni }}
-      SLOTS_NGINX: ${{ github.event.inputs.slots_nginx }}
-      SLOTS_TD: ${{ github.event.inputs.slots_td_sim }}
-      SLOTS_PROM: ${{ github.event.inputs.slots_prometheus }}
-      SLOTS_ALERT: ${{ github.event.inputs.slots_alertmanager }}
-      SLOTS_LOKI: ${{ github.event.inputs.slots_loki }}
-      SLOTS_PROMTAIL: ${{ github.event.inputs.slots_promtail }}
+      SLOTS_JSON: ${{ github.event.inputs.slots }}
 
     steps:
       - name: 🛎️ Checkout
@@ -124,9 +92,30 @@ jobs:
           resolve(){ DOCKER_BIN="$(command -v /usr/bin/docker || true)"; [ -z "$DOCKER_BIN" ] && DOCKER_BIN="$(command -v docker || true)"; PODMAN_BIN="$(command -v podman || true)"; export DOCKER_BIN PODMAN_BIN; }
           resolve
           ctr(){ if [ "${USE_PODMAN:-0}" = "1" ]; then [ -n "${PODMAN_BIN:-}" ] || faile "podman NA"; "$PODMAN_BIN" "$@"; else [ -n "${DOCKER_BIN:-}" ] || faile "docker NA"; "$DOCKER_BIN" "$@"; fi; }
-          start_docker(){ resolve; if [ -n "${DOCKER_BIN:-}" ]; then set +e; "$DOCKER_BIN" info >/dev/null 2>&1; rc=$?; set -e; if [ $rc -eq 0 ]; then USE_PODMAN=0; export USE_PODMAN; echo "USE_PODMAN=0" >> "$GITHUB_ENV"; return 0; fi; command -v service >/dev/null 2>&1 && { set +e; sudo -n service docker start >/dev/null 2>&1; "$DOCKER_BIN" info >/dev/null 2>&1 && { USE_PODMAN=0; export USE_PODMAN; echo "USE_PODMAN=0" >> "$GITHUB_ENV"; return 0; }; set -e; }; fi; ensure_podman; resolve; USE_PODMAN=1; export USE_PODMAN; echo "USE_PODMAN=1" >> "$GITHUB_ENV"; }
+          start_docker(){
+            resolve
+            if [ -n "${DOCKER_BIN:-}" ]; then
+              set +e; "$DOCKER_BIN" info >/dev/null 2>&1; rc=$?; set -e
+              if [ $rc -eq 0 ]; then USE_PODMAN=0; export USE_PODMAN; echo "USE_PODMAN=0" >> "$GITHUB_ENV"; return 0; fi
+              command -v service >/dev/null 2>&1 && { set +e; sudo -n service docker start >/dev/null 2>&1; "$DOCKER_BIN" info >/dev/null 2>&1 && { USE_PODMAN=0; export USE_PODMAN; echo "USE_PODMAN=0" >> "$GITHUB_ENV"; return 0; }; set -e; }
+            fi
+            ensure_podman; resolve; USE_PODMAN=1; export USE_PODMAN; echo "USE_PODMAN=1" >> "$GITHUB_ENV"
+          }
           BASH
           chmod +x .github/echo_tools.sh
+
+      - name: 🔢 Parse slots JSON → export env
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SJ='${{ env.SLOTS_JSON }}'
+          omni=$(jq -r '.omni // 1' <<<"$SJ");         echo "SLOTS_OMNI=$omni" >> "$GITHUB_ENV"
+          nginx=$(jq -r '.nginx // 1' <<<"$SJ");       echo "SLOTS_NGINX=$nginx" >> "$GITHUB_ENV"
+          td=$(jq -r '.td // 1' <<<"$SJ");             echo "SLOTS_TD=$td" >> "$GITHUB_ENV"
+          prom=$(jq -r '.prometheus // 1' <<<"$SJ");   echo "SLOTS_PROM=$prom" >> "$GITHUB_ENV"
+          alert=$(jq -r '.alertmanager // 1' <<<"$SJ");echo "SLOTS_ALERT=$alert" >> "$GITHUB_ENV"
+          loki=$(jq -r '.loki // 1' <<<"$SJ");         echo "SLOTS_LOKI=$loki" >> "$GITHUB_ENV"
+          promtail=$(jq -r '.promtail // 1' <<<"$SJ"); echo "SLOTS_PROMTAIL=$promtail" >> "$GITHUB_ENV"
 
       - name: 🧯 containerd 충돌 가드 & 기본 패키지
         shell: bash
@@ -469,9 +458,9 @@ jobs:
           gen(){ svc="$1"; n="$2"; ctr exec -u postgres td-sim psql -U postgres -d postgres -c "WITH s AS (SELECT generate_series(1, ${n}) AS i) INSERT INTO ledger.service_slot(service,slot_id) SELECT '${svc}', i FROM s ON CONFLICT DO NOTHING"; }
           gen omni ${SLOTS_OMNI}; gen nginx ${SLOTS_NGINX}; gen "td-sim" ${SLOTS_TD}; gen prometheus ${SLOTS_PROM}; gen alertmanager ${SLOTS_ALERT}; gen loki ${SLOTS_LOKI}; gen promtail ${SLOTS_PROMTAIL}
           KERNEL="$(uname -r)"; HOST="$(hostname)"
-          SLOTS_JSON="$(jq -c '.slots' < "${ECHO_NET}/device_info.json")"
-          NIC_JSON="$(jq -c '.nic'   < "${ECHO_NET}/device_info.json")"
-          ctr exec -u postgres td-sim psql -U postgres -d postgres -c "INSERT INTO ledger.device_info(hostname,kernel,slots,nic) VALUES ('${HOST}','${KERNEL}','${SLOTS_JSON}'::jsonb,'${NIC_JSON}'::jsonb)"
+          SLOTS_JSON_COMPACT="$(jq -c '.slots' < "${ECHO_NET}/device_info.json")"
+          NIC_JSON_COMPACT="$(jq -c '.nic'   < "${ECHO_NET}/device_info.json")"
+          ctr exec -u postgres td-sim psql -U postgres -d postgres -c "INSERT INTO ledger.device_info(hostname,kernel,slots,nic) VALUES ('${HOST}','${KERNEL}','${SLOTS_JSON_COMPACT}'::jsonb,'${NIC_JSON_COMPACT}'::jsonb)"
 
       - name: 🧾 Nginx 로그 → CSV → Postgres 적재
         if: ${{ github.event.inputs.run_network == 'true' }}
@@ -545,7 +534,6 @@ jobs:
               metrics_path: /metrics
               static_configs: [ { targets: ['loki:3100'] } ]
           YAML
-          . .github/echo_tools.sh
           ctr rm -f alertmanager prometheus >/dev/null 2>&1 || true
           ctr run -d --name alertmanager --network "${DOCKER_NET}" -p 9093:9093 \
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
@@ -562,14 +550,14 @@ jobs:
         if: ${{ github.event.inputs.push_image == 'true' }}
         uses: sigstore/cosign-installer@v3
 
-      - name: 🔑 GHCR login (actor)
+      - name: 🔑 GHCR login (engine-agnostic)
         if: ${{ github.event.inputs.push_image == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -Eeuo pipefail
-          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          set -Eeuo pipefail; . .github/echo_tools.sh
+          echo "${GITHUB_TOKEN}" | ctr login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: 🏷️ Push → resolve digest → SBOM/Scan → cosign sign/attest
         if: ${{ github.event.inputs.push_image == 'true' }}
@@ -581,10 +569,10 @@ jobs:
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
           IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
-          echo "${GITHUB_TOKEN}" | ctr login "${IMAGE_REGISTRY}" -u "${{ github.actor }}" --password-stdin
           ctr tag "${OMNI_IMAGE}:latest" "${IMAGE}"
           ctr push "${IMAGE}"
-          # digest 조회(지연 대응)
+
+          # digest 조회(인덱싱 지연 대응)
           DIGEST=""
           for i in $(seq 1 12); do
             set +e
@@ -596,13 +584,15 @@ jobs:
           [ -n "$DIGEST" ] || { echo "[FAIL] cannot resolve digest for ${IMAGE}"; exit 1; }
           SIGN_TARGET="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}@${DIGEST}"
           echo "[INFO] SIGN_TARGET=${SIGN_TARGET}"
+
           # SBOM/취약점 스캔(원격 인증)
           mkdir -p "${PROV_DIR}/supplychain"
           ctr run --rm -e SYFT_REGISTRY_AUTH_USERNAME="${{ github.actor }}" -e SYFT_REGISTRY_AUTH_PASSWORD="${GITHUB_TOKEN}" \
             anchore/syft:latest "${SIGN_TARGET}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json" || true
           ctr run --rm -e TRIVY_USERNAME="${{ github.actor }}" -e TRIVY_PASSWORD="${GITHUB_TOKEN}" \
             aquasec/trivy:latest image --timeout 10m --format json "${SIGN_TARGET}" > "${PROV_DIR}/supplychain/sbom-trivy.json" || true
-          # cosign sign/attest
+
+          # cosign sign/attest (digest 대상)
           echo '{"buildType":"github-actions","builder":"echo-ops"}' > "${PROV_DIR}/supplychain/provenance.json"
           ok=0
           for i in 1 2 3; do
@@ -628,7 +618,7 @@ jobs:
           );
           INSERT INTO echo_install_log(component,detail) VALUES
             ('engine','docker/podman auto'), ('td-sim','postgres:16 schema+seed+generate'),
-            ('nginx','rp+cors+ratelimit+waf+exporter'), ('omni','dw+metrics+pool+health+slots=${SLOTS_OMNI}'),
+            ('nginx','rp+cors+ratelimit+waf+exporter'), ('omni','dw+metrics+pool+health+slots='||'${SLOTS_OMNI}'),
             ('logs','loki+promtail'), ('prom','prometheus+alertmanager'),
             ('nic','install=${{ github.event.inputs.install_nic_tools }}'),
             ('kernel','upgrade=${{ github.event.inputs.upgrade_kernel }}');
