@@ -27,7 +27,6 @@ on:
         description: "UFW 방화벽 활성화(러너 네트워크 영향 주의)"
         required: true
         default: "false"
-      # 슬롯/하드닝 핵심 옵션(총 10개 제한 충족)
       slots_omni:
         description: "Omni 서버 슬롯 수(컨테이너 복제 개수)"
         required: true
@@ -52,7 +51,7 @@ permissions:
   contents: write
   packages: write
   actions: read
-  id-token: write   # cosign OIDC
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -63,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
+      # ---- 공통 경로/이미지 ----
       ECHO_TD: .github/echo_td
       ECHO_DW: .github/echo_dw
       ECHO_NET: .github/echo_net
@@ -73,10 +73,18 @@ jobs:
       OMNI_IMAGE: omni-echo
       DOCKER_NET: echo-net
       PROV_DIR: .github/echo_omni
-      # 슬롯 수 (입력/기본값)
-      SLOTS_OMNI: ${{ github.event.inputs.slots_omni }}
-      SLOTS_TD: ${{ github.event.inputs.slots_td_sim }}
-      # 다른 컴포넌트 슬롯은 기본 1 (필요시 여기만 수정)
+
+      # ---- 입력값 기본값(스케줄/수동 모두 안전) ----
+      RUN_NETWORK: ${{ github.event.inputs.run_network || 'true' }}
+      RUN_OMNI: ${{ github.event.inputs.run_omni || 'true' }}
+      PUSH_IMAGE: ${{ github.event.inputs.push_image || 'false' }}
+      COMMIT_CHANGES: ${{ github.event.inputs.commit_changes || 'true' }}
+      ENABLE_FIREWALL: ${{ github.event.inputs.enable_firewall || 'false' }}
+
+      # 슬롯(빈값 방지)
+      SLOTS_OMNI: ${{ github.event.inputs.slots_omni || '1' }}
+      SLOTS_TD:   ${{ github.event.inputs.slots_td_sim || '1' }}
+      # 나머지는 내부 기본 1
       SLOTS_NGINX: "1"
       SLOTS_PROM: "1"
       SLOTS_ALERT: "1"
@@ -133,12 +141,12 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          if [ "${{ github.event.inputs.install_nic_tools }}" = "true" ]; then
+          if [ "${{ env.INSTALL_NIC_TOOLS || github.event.inputs.install_nic_tools }}" = "true" ] || [ "${{ github.event.inputs.install_nic_tools }}" = "true" ]; then
             sudo apt-get update -y
             sudo apt-get install -y --no-install-recommends ethtool net-tools iproute2 pciutils usbutils lshw bridge-utils vlan ifenslave iperf3 linux-firmware "linux-modules-extra-$(uname -r)" || true
             sudo modprobe 8021q || true; sudo modprobe bonding || true
           fi
-          if [ "${{ github.event.inputs.upgrade_kernel }}" = "true" ]; then
+          if [ "${{ env.UPGRADE_KERNEL || github.event.inputs.upgrade_kernel }}" = "true" ] || [ "${{ github.event.inputs.upgrade_kernel }}" = "true" ]; then
             if apt-cache policy linux-generic-hwe-24.04 | grep -q Candidate; then sudo apt-get install -y linux-generic-hwe-24.04
             elif apt-cache policy linux-generic-hwe-22.04 | grep -q Candidate; then sudo apt-get install -y linux-generic-hwe-22.04
             else sudo apt-get install -y linux-image-generic linux-headers-generic; fi
@@ -186,13 +194,38 @@ jobs:
           mkdir -p "${ECHO_NET}"
           NIC_JSON="$(ip -j link show 2>/dev/null || echo '[]')"
           OS_NAME="$(. /etc/os-release; echo "${NAME} ${VERSION_ID}")"
-          jq -n --arg kernel "$(uname -r)" \
-                --arg uname "$(uname -a)" \
-                --arg os "$OS_NAME" \
-                --argjson nic "$NIC_JSON" \
-                --argjson slots "$(jq -n --argjson omni ${SLOTS_OMNI} --argjson td ${SLOTS_TD} --argjson nginx ${SLOTS_NGINX} --argjson prom ${SLOTS_PROM} --argjson alert ${SLOTS_ALERT} --argjson loki ${SLOTS_LOKI} --argjson promtail ${SLOTS_PROMTAIL} '{omni:$omni,td:$td,nginx:$nginx,prometheus:$prom,alertmanager:$alert,loki:$loki,promtail:$promtail}')" \
-                '{ts: now|todate, kernel:$kernel, uname:$uname, os:$os, nic:$nic, slots:$slots}' \
-            > "${ECHO_NET}/device_info.json"
+
+          # 빈 값/비정상 값도 안전하게 숫자로 변환
+          SLOTS_OMNI_SAFE="${SLOTS_OMNI:-1}"
+          SLOTS_TD_SAFE="${SLOTS_TD:-1}"
+          SLOTS_NGINX_SAFE="${SLOTS_NGINX:-1}"
+          SLOTS_PROM_SAFE="${SLOTS_PROM:-1}"
+          SLOTS_ALERT_SAFE="${SLOTS_ALERT:-1}"
+          SLOTS_LOKI_SAFE="${SLOTS_LOKI:-1}"
+          SLOTS_PROMTAIL_SAFE="${SLOTS_PROMTAIL:-1}"
+
+          jq -n \
+            --arg kernel "$(uname -r)" \
+            --arg uname "$(uname -a)" \
+            --arg os "$OS_NAME" \
+            --argjson nic "$NIC_JSON" \
+            --arg omni "$SLOTS_OMNI_SAFE" \
+            --arg td "$SLOTS_TD_SAFE" \
+            --arg nginx "$SLOTS_NGINX_SAFE" \
+            --arg prom "$SLOTS_PROM_SAFE" \
+            --arg alert "$SLOTS_ALERT_SAFE" \
+            --arg loki "$SLOTS_LOKI_SAFE" \
+            --arg promtail "$SLOTS_PROMTAIL_SAFE" \
+            '{
+              ts: (now|todate),
+              kernel: $kernel, uname: $uname, os: $os, nic: $nic,
+              slots: {
+                omni: ($omni|tonumber), td: ($td|tonumber),
+                nginx: ($nginx|tonumber), prometheus: ($prom|tonumber),
+                alertmanager: ($alert|tonumber), loki: ($loki|tonumber),
+                promtail: ($promtail|tonumber)
+              }
+            }' > "${ECHO_NET}/device_info.json"
 
       - name: 🕸️ 네트워크
         shell: bash
@@ -213,7 +246,7 @@ jobs:
             -e POSTGRES_PASSWORD=postgres postgres:16
           for i in $(seq 1 60); do ctr exec td-sim pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
           ctr exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/001_schema.sql
-          COUNT="${{ github.event.inputs.generate_rows }}"
+          COUNT="${{ github.event.inputs.generate_rows || '1000' }}"
           ctr exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
           INSERT INTO td.dim_customer(name,email) SELECT '고객'||i, 'user'||i||'@bank.local' FROM generate_series(1,10) AS s(i);
           INSERT INTO td.dim_account(customer_id, bank_code, currency)
@@ -228,7 +261,7 @@ jobs:
           SQL"
 
       - name: 🧩 Omni(FastAPI) 이미지 빌드 + 슬롯 기동
-        if: ${{ github.event.inputs.run_omni == 'true' }}
+        if: ${{ env.RUN_OMNI == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
@@ -346,7 +379,7 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
 
       - name: 🌐 Nginx RP(슬롯 라우팅) + Exporter
-        if: ${{ github.event.inputs.run_network == 'true' }}
+        if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
@@ -401,10 +434,10 @@ jobs:
             nginx/nginx-prometheus-exporter:0.11.0 -nginx.scrape-uri=http://echo-nginx/nginx_status
 
       # =======================
-      # 📈 Logs (Loki/Promtail) — Podman↔Docker 자동 전환
+      # 📈 Logs (Loki/Promtail) — Podman↔Docker 자동 전환 + 파일로그 Fallback
       # =======================
       - name: 📈 Logs (Loki/Promtail, engine별)
-        if: ${{ github.event.inputs.run_network == 'true' }}
+        if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail; . .github/echo_tools.sh
@@ -421,38 +454,60 @@ jobs:
           mkdir -p "${ECHO_NET}/promtail"
 
           if [ "${USE_PODMAN:-0}" = "1" ]; then
-            echo "[LOG] Podman detected → promtail uses journald input"
-            cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
-            server:
-              http_listen_port: 9080
-              grpc_listen_port: 0
-            positions:
-              filename: /tmp/positions.yaml
-            clients:
-              - url: http://loki:3100/loki/api/v1/push
-            scrape_configs:
-              - job_name: journal
-                journal:
-                  json: true
-                  path: /var/log/journal
-                  max_age: 12h
-                relabel_configs:
-                  - source_labels: ['__journal__CONTAINER_NAME']
-                    action: keep
-                    regex: '(echo-nginx|nginx-exp|omni.*|td-sim).*'
-                  - source_labels: ['__journal__CONTAINER_NAME']
-                    target_label: container
-                  - source_labels: ['__journal__CONTAINER_ID']
-                    target_label: container_id
-            YAML
-
-            ctr rm -f promtail >/dev/null 2>&1 || true
-            ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
-              -v /var/log/journal:/var/log/journal:ro \
-              -v /run/log/journal:/run/log/journal:ro \
-              -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
-              -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
-              grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
+            echo "[LOG] Podman detected"
+            if [ -d /var/log/journal ] || [ -S /run/systemd/journal/socket ]; then
+              echo "[LOG] journald available → promtail uses journald"
+              cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
+              server:
+                http_listen_port: 9080
+                grpc_listen_port: 0
+              positions:
+                filename: /tmp/positions.yaml
+              clients:
+                - url: http://loki:3100/loki/api/v1/push
+              scrape_configs:
+                - job_name: journal
+                  journal:
+                    json: true
+                    path: /var/log/journal
+                    max_age: 12h
+                  relabel_configs:
+                    - source_labels: ['__journal__CONTAINER_NAME']
+                      action: keep
+                      regex: '(echo-nginx|nginx-exp|omni.*|td-sim).*'
+                    - source_labels: ['__journal__CONTAINER_NAME']
+                      target_label: container
+                    - source_labels: ['__journal__CONTAINER_ID']
+                      target_label: container_id
+              YAML
+              ctr rm -f promtail >/dev/null 2>&1 || true
+              ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
+                -v /var/log/journal:/var/log/journal:ro \
+                -v /run/log/journal:/run/log/journal:ro \
+                -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
+                -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
+                grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
+            else
+              echo "[LOG] journald not found → fallback to Nginx file tail"
+              cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
+              server: { http_listen_port: 9080, grpc_listen_port: 0 }
+              positions: { filename: /tmp/positions.yaml }
+              clients: [ { url: http://loki:3100/loki/api/v1/push } ]
+              scrape_configs:
+                - job_name: nginx-files
+                  static_configs:
+                    - targets: [ 'localhost' ]
+                      labels:
+                        job: nginx
+                        __path__: /var/echo-logs/*.log
+              YAML
+              ctr rm -f promtail >/dev/null 2>&1 || true
+              ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
+                -v "$PWD/${ECHO_NET}/logs":/var/echo-logs:ro \
+                -v "$PWD/${ECHO_NET}/promtail/config.yml":/etc/promtail/config.yml:ro \
+                -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
+                grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
+            fi
           else
             echo "[LOG] Docker detected → promtail uses docker_sd"
             cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
@@ -467,7 +522,6 @@ jobs:
                   - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '$1' }
                 pipeline_stages: [ { docker: {} } ]
             YAML
-
             ctr rm -f promtail >/dev/null 2>&1 || true
             ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
               -v /var/run/docker.sock:/var/run/docker.sock:ro \
@@ -478,7 +532,7 @@ jobs:
           fi
 
       - name: 🔥 (옵션) UFW 방화벽
-        if: ${{ github.event.inputs.enable_firewall == 'true' }}
+        if: ${{ env.ENABLE_FIREWALL == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -508,7 +562,7 @@ jobs:
           ctr exec -u postgres td-sim psql -U postgres -d postgres -c "INSERT INTO ledger.device_info(hostname,kernel,slots,nic) VALUES ('${HOST}','${KERNEL}','${SLOTS_JSON}'::jsonb,'${NIC_JSON}'::jsonb)"
 
       - name: 🧾 Nginx 로그 → CSV → Postgres 적재
-        if: ${{ github.event.inputs.run_network == 'true' }}
+        if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -595,20 +649,28 @@ jobs:
 
       # ===== GHCR push + SBOM + Cosign (digest signing; auth/지연 대응) =====
       - name: 🔐 Install cosign (keyless)
-        if: ${{ github.event.inputs.push_image == 'true' }}
+        if: ${{ env.PUSH_IMAGE == 'true' }}
         uses: sigstore/cosign-installer@v3
 
-      - name: 🔑 GHCR login (actor)
-        if: ${{ github.event.inputs.push_image == 'true' }}
+      - name: 🔑 GHCR login (CLI auto-detect)
+        if: ${{ env.PUSH_IMAGE == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if command -v docker >/dev/null 2>&1; then
+            echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          elif command -v podman >/dev/null 2>&1; then
+            echo "${GITHUB_TOKEN}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          elif command -v skopeo >/dev/null 2>&1; then
+            echo "${GITHUB_TOKEN}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          else
+            echo "[WARN] no container login tool found; continuing (will use registry auth via ctr)"
+          fi
 
       - name: 🏷️ Push → resolve digest → SBOM/Scan → cosign sign/attest
-        if: ${{ github.event.inputs.push_image == 'true' }}
+        if: ${{ env.PUSH_IMAGE == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -619,7 +681,8 @@ jobs:
           IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
           echo "${GITHUB_TOKEN}" | ctr login "${IMAGE_REGISTRY}" -u "${{ github.actor }}" --password-stdin
           ctr tag "${OMNI_IMAGE}:latest" "${IMAGE}"
-          ctr push "${IMAGE}"
+          retry 3 5 -- ctr push "${IMAGE}"
+
           # digest 조회 재시도(인덱싱 지연)
           DIGEST=""
           for i in $(seq 1 12); do
@@ -632,12 +695,14 @@ jobs:
           [ -n "$DIGEST" ] || { echo "[FAIL] cannot resolve digest for ${IMAGE}"; exit 1; }
           SIGN_TARGET="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}@${DIGEST}"
           echo "[INFO] SIGN_TARGET=${SIGN_TARGET}"
+
           # SBOM/취약점 (원격 인증)
           mkdir -p "${PROV_DIR}/supplychain"
           retry 3 5 -- ctr run --rm -e SYFT_REGISTRY_AUTH_USERNAME="${{ github.actor }}" -e SYFT_REGISTRY_AUTH_PASSWORD="${GITHUB_TOKEN}" \
             anchore/syft:latest "${SIGN_TARGET}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json"
           retry 3 5 -- ctr run --rm -e TRIVY_USERNAME="${{ github.actor }}" -e TRIVY_PASSWORD="${GITHUB_TOKEN}" \
             aquasec/trivy:latest image --timeout 10m --format json "${SIGN_TARGET}" > "${PROV_DIR}/supplychain/sbom-trivy.json"
+
           # cosign sign/attest (digest 대상)
           echo '{"buildType":"github-actions","builder":"echo-ops"}' > "${PROV_DIR}/supplychain/provenance.json"
           ok=0
@@ -664,10 +729,10 @@ jobs:
           );
           INSERT INTO echo_install_log(component,detail) VALUES
             ('engine','docker/podman auto'), ('td-sim','postgres:16 schema+seed+generate'),
-            ('nginx','rp+cors+ratelimit+waf+exporter'), ('omni',"dw+metrics+pool+health+slots=${SLOTS_OMNI}"),
+            ('nginx','rp+cors+ratelimit+waf+exporter'), ('omni','dw+metrics+pool+health+slots=${SLOTS_OMNI}'),
             ('logs','loki+promtail'), ('prom','prometheus+alertmanager'),
-            ('nic','install=${{ github.event.inputs.install_nic_tools }}'),
-            ('kernel','upgrade=${{ github.event.inputs.upgrade_kernel }}');
+            ('nic','install=${{ github.event.inputs.install_nic_tools || 'true' }}'),
+            ('kernel','upgrade=${{ github.event.inputs.upgrade_kernel || 'false' }}');
           SQL
           sudo chown -R "$USER":"$USER" .github/echo_* || true
           chmod -R a+rX .github/echo_* || true
@@ -684,7 +749,7 @@ jobs:
             .github/echo_logs
 
       - name: 🧾 Commit & push (best effort)
-        if: ${{ github.event.inputs.commit_changes == 'true' }}
+        if: ${{ env.COMMIT_CHANGES == 'true' }}
         shell: bash
         env:
           GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
