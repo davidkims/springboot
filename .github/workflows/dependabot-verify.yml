@@ -21,22 +21,211 @@ jobs:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    env:
+      NET_NAME: echo-net
+      PG_IMAGE: postgres:16
+      NGINX_IMAGE: nginx:alpine
+      OMNI_IMAGE: omni-smoke
+      OMNI_PORT: "8090"
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Engine up
+      - name: Prep helpers (engine autodetect)
+        id: prep
         shell: bash
         run: |
           set -Eeuo pipefail
-          . .github/echo_tools.sh || true
-          if [ -f .github/echo_tools.sh ]; then start_docker; fi
-          docker --version || true
-          podman --version || true
+          retry(){ n="$1"; shift; s="$1"; shift; for i in $(seq 1 "$n"); do "$@" && exit 0 || sleep "$s"; done; exit 1; }
+          resolve(){
+            DOCKER_BIN="$(command -v docker || true)"
+            PODMAN_BIN="$(command -v podman || true)"
+            if [ -n "$DOCKER_BIN" ]; then
+              if $DOCKER_BIN info >/dev/null 2>&1; then ENGINE=docker
+              else ENGINE=podman
+              fi
+            else
+              ENGINE=podman
+            fi
+            echo "ENGINE=$ENGINE" | tee -a "$GITHUB_OUTPUT"
+          }
+          ctr(){ if [ "$ENGINE" = "podman" ]; then podman "$@"; else docker "$@"; fi; }
+          export -f retry resolve ctr
+          resolve
+          echo "Engine: ${ENGINE}"
+          ctr --version || true
 
-      - name: Quick pull targets
+      - name: Pull base images (fast-fail tolerant)
         shell: bash
         run: |
           set -Eeuo pipefail
-          for img in postgres:16 nginx:alpine grafana/loki:2.9.0; do
-            (docker pull "$img" || podman pull "$img") || true
+          ENGINE="${{ steps.prep.outputs.ENGINE }}"
+          if [ "$ENGINE" = "podman" ]; then R=podman; else R=docker; fi
+          for img in "${PG_IMAGE}" "${NGINX_IMAGE}" python:3.11-slim; do
+            ($R pull "$img") || true
           done
+
+      - name: Create network
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ENGINE="${{ steps.prep.outputs.ENGINE }}"
+          if [ "$ENGINE" = "podman" ]; then R=podman; else R=docker; fi
+          $R network create "${NET_NAME}" >/dev/null 2>&1 || true
+          $R network ls
+
+      - name: Start td-sim (Postgres) + schema/seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ENGINE="${{ steps.prep.outputs.ENGINE }}"
+          if [ "$ENGINE" = "podman" ]; then R=podman; else R=docker; fi
+
+          $R rm -f td-sim >/dev/null 2>&1 || true
+          $R run -d --name td-sim --network "${NET_NAME}" -e POSTGRES_PASSWORD=postgres -p 5432:5432 "${PG_IMAGE}"
+
+          # wait ready
+          for i in $(seq 1 60); do
+            ($R exec td-sim pg_isready -U postgres >/dev/null 2>&1) && break
+            sleep 2
+          done
+
+          # schema + small seed
+          $R exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS td;
+          CREATE TABLE IF NOT EXISTS td.dim_customer(
+            customer_id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT, created_ts TIMESTAMP DEFAULT NOW()
+          );
+          CREATE TABLE IF NOT EXISTS td.dim_account(
+            account_id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES td.dim_customer(customer_id),
+            bank_code TEXT, currency CHAR(3) DEFAULT 'KRW', opened_ts TIMESTAMP DEFAULT NOW()
+          );
+          CREATE TABLE IF NOT EXISTS td.fact_transaction(
+            txn_id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL REFERENCES td.dim_account(account_id),
+            amount NUMERIC(18,2) NOT NULL, txn_type TEXT CHECK (txn_type IN ('DEBIT','CREDIT')),
+            txn_ts TIMESTAMP DEFAULT NOW()
+          );
+          INSERT INTO td.dim_customer(name,email)
+          SELECT 'user'||g, 'u'||g||'@demo.local'
+          FROM generate_series(1,5) g ON CONFLICT DO NOTHING;
+          INSERT INTO td.dim_account(customer_id, bank_code, currency)
+          SELECT customer_id, 'KB', 'KRW' FROM td.dim_customer ON CONFLICT DO NOTHING;
+          INSERT INTO td.fact_transaction(account_id, amount, txn_type, txn_ts)
+          SELECT account_id, 1000 + (random()*10000)::int, CASE WHEN random()>0.5 THEN 'CREDIT' ELSE 'DEBIT' END, NOW()
+          FROM td.dim_account LIMIT 20;
+          SQL"
+
+      - name: Build Omni(FastAPI) image (minimal DB check)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ENGINE="${{ steps.prep.outputs.ENGINE }}"
+          if [ "$ENGINE" = "podman" ]; then R=podman; else R=docker; fi
+
+          mkdir -p .omni
+          cat > .omni/app.py <<'PY'
+          import os
+          from fastapi import FastAPI
+          from fastapi.responses import JSONResponse
+          import psycopg2, socket
+
+          app = FastAPI(title="Omni Smoke")
+
+          DB_HOST = os.getenv("DB_HOST","td-sim")
+          DB_PORT = int(os.getenv("DB_PORT","5432"))
+          DB_NAME = os.getenv("DB_NAME","postgres")
+          DB_USER = os.getenv("DB_USER","postgres")
+          DB_PASS = os.getenv("DB_PASS","postgres")
+
+          @app.get("/health")
+          def health():
+            try:
+              conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS)
+              cur = conn.cursor()
+              cur.execute("SELECT 1")
+              cur.fetchone()
+              cur.close(); conn.close()
+              return {"status":"ok","db":"up","host":socket.gethostname()}
+            except Exception as e:
+              return JSONResponse({"status":"degraded","error":str(e)}, status_code=503)
+          PY
+
+          cat > .omni/Dockerfile <<'DOCKER'
+          FROM python:3.11-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+          RUN pip install --no-cache-dir fastapi uvicorn psycopg2-binary
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          ENV DB_HOST=td-sim DB_PORT=5432 DB_NAME=postgres DB_USER=postgres DB_PASS=postgres
+          HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8000/health || exit 1
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+
+          $R build -t "${OMNI_IMAGE}:latest" .omni
+
+      - name: Run Omni + Nginx (reverse-proxy)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ENGINE="${{ steps.prep.outputs.ENGINE }}"
+          if [ "$ENGINE" = "podman" ]; then R=podman; else R=docker; fi
+
+          # Omni
+          $R rm -f omni-1 >/dev/null 2>&1 || true
+          $R run -d --name omni-1 --network "${NET_NAME}" \
+            -e DB_HOST=td-sim -e DB_PORT=5432 -e DB_NAME=postgres -e DB_USER=postgres -e DB_PASS=postgres \
+            -p "${OMNI_PORT}:8000" "${OMNI_IMAGE}:latest"
+
+          # Nginx (RP -> omni-1)
+          mkdir -p .nginx
+          cat > .nginx/nginx.conf <<'CONF'
+          events { worker_connections 256; }
+          http {
+            upstream omni_up { server omni-1:8000; }
+            server {
+              listen 80;
+              location = /health { return 200 "OK"; add_header Content-Type text/plain; }
+              location / { proxy_pass http://omni_up; proxy_set_header Host $host; }
+            }
+          }
+          CONF
+
+          $R rm -f echo-nginx >/dev/null 2>&1 || true
+          $R run -d --name echo-nginx --network "${NET_NAME}" -p 8088:80 \
+            -v "$PWD/.nginx/nginx.conf:/etc/nginx/nginx.conf:ro" "${NGINX_IMAGE}"
+
+          # wait omni
+          for i in $(seq 1 60); do
+            curl -fsS "http://127.0.0.1:${OMNI_PORT}/health" && break || true
+            sleep 2
+          done
+
+      - name: Verify endpoints
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "== Omni direct =="
+          curl -fsS "http://127.0.0.1:${OMNI_PORT}/health" | tee omni_health.json
+          echo "== Nginx gateway =="
+          curl -fsS "http://127.0.0.1:8088/health" | tee nginx_health.txt
+
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-results
+          path: |
+            omni_health.json
+            nginx_health.txt
+
+      - name: Cleanup (always)
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ENGINE="${{ steps.prep.outputs.ENGINE }}"
+          if [ "$ENGINE" = "podman" ]; then R=podman; else R=docker; fi
+          for c in echo-nginx omni-1 td-sim; do $R rm -f "$c" >/dev/null 2>&1 || true; done
+          $R network rm "${NET_NAME}" >/dev/null 2>&1 || true
