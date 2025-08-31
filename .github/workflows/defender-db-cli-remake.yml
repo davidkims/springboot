@@ -3,6 +3,10 @@ name: "⚙️ Maven + Spring Boot: Install/Upgrade + Echo Perm + Release"
 on:
   workflow_dispatch:
     inputs:
+      project_dir:
+        description: "프로젝트가 위치한 디렉토리 (pom.xml이 존재하는 경로). 모노레포면 서브폴더 지정"
+        required: true
+        default: "."
       spring_boot_version:
         description: "(선택) 적용할 Spring Boot 버전 (예: 3.3.3). 비우면 현재 pom.xml 유지"
         required: false
@@ -48,6 +52,24 @@ jobs:
     steps:
       - name: "Checkout"
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 태그/릴리즈 푸시에 필요
+
+      - name: "Ensure pom.xml exists"
+        id: preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROJ_DIR="${{ inputs.project_dir }}"
+          echo "[ECHO] Looking for pom.xml under: $PROJ_DIR"
+          if [ ! -f "$PROJ_DIR/pom.xml" ]; then
+            echo "[ECHO][FAIL] No pom.xml at $PROJ_DIR" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "[ECHO] Repository tree:" | tee -a "$GITHUB_STEP_SUMMARY"
+            (ls -la; echo; find . -maxdepth 2 -type f -name pom.xml -printf "FOUND: %p
+" || true) | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "projectDir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
 
       - name: "Setup Temurin JDK"
         uses: actions/setup-java@v4
@@ -55,6 +77,8 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
+          cache-dependency-path: |
+            ${{ steps.preflight.outputs.projectDir }}/pom.xml
 
       - name: "(Optional) Setup specific Maven"
         if: ${{ inputs.maven_version != '' }}
@@ -74,7 +98,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR"
-          printf "[ECHO][OK] Directories prepared: %s %s %s %s %s\n" "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR"
+          printf "[ECHO][OK] Directories prepared: %s %s %s %s %s
+" "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR"
 
       - name: "Generate Echo Permission files"
         shell: bash
@@ -117,29 +142,33 @@ jobs:
       - name: "(Optional) Upgrade Spring Boot version in pom.xml"
         if: ${{ inputs.spring_boot_version != '' }}
         shell: bash
+        working-directory: ${{ steps.preflight.outputs.projectDir }}
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] Upgrade Spring Boot to ${SPRING_BOOT_VERSION:-${{ inputs.spring_boot_version }}}"
+          echo "[ECHO] Upgrade Spring Boot to ${{ inputs.spring_boot_version }}"
           mvn -B -e \
             versions:set-property \
             -Dproperty=spring-boot.version \
             -DnewVersion="${{ inputs.spring_boot_version }}" \
-            -DgenerateBackupPoms=false | tee "$LOG_DIR/versions-set-spring-boot.log"
+            -DgenerateBackupPoms=false | tee "$GITHUB_WORKSPACE/$LOG_DIR/versions-set-spring-boot.log"
 
       - name: "(Optional) Run tests"
         if: ${{ inputs.run_tests == 'true' }}
         shell: bash
+        working-directory: ${{ steps.preflight.outputs.projectDir }}
         run: |
           set -Eeuo pipefail
-          mvn -B -U -e -DskipTests=false test | tee "$LOG_DIR/mvn-test.log"
+          mvn -B -U -e -DskipTests=false test | tee "$GITHUB_WORKSPACE/$LOG_DIR/mvn-test.log"
 
       - name: "Build (package)"
         shell: bash
+        working-directory: ${{ steps.preflight.outputs.projectDir }}
         run: |
           set -Eeuo pipefail
-          mvn -B -U -e -DskipTests=${{ inputs.run_tests != 'true' }} package | tee "$LOG_DIR/mvn-package.log"
+          mvn -B -U -e -DskipTests=${{ inputs.run_tests != 'true' }} package | tee "$GITHUB_WORKSPACE/$LOG_DIR/mvn-package.log"
           # Collect artifacts (jar/war)
-          find . -type f \( -name "*.jar" -o -name "*.war" \) -not -name "original-*.jar" -print -exec cp -v {} "$ARTIFACT_DIR/" \;
+          mkdir -p "$GITHUB_WORKSPACE/$ARTIFACT_DIR"
+          find target -type f \( -name "*.jar" -o -name "*.war" \) -not -name "original-*.jar" -print -exec cp -v {} "$GITHUB_WORKSPACE/$ARTIFACT_DIR/" \;
 
       - name: "Upload build artifacts"
         if: ${{ inputs.distribute_artifacts == 'true' }}
@@ -152,7 +181,9 @@ jobs:
 
       - name: "(Optional) Bump version, tag & commit"
         if: ${{ inputs.create_release == 'true' }}
+        id: bump
         shell: bash
+        working-directory: ${{ steps.preflight.outputs.projectDir }}
         env:
           BUMP_TYPE: ${{ inputs.bump_type }}
           GIT_AUTHOR_NAME: github-actions
@@ -181,14 +212,14 @@ jobs:
           git tag -a "v$NEXT_VER" -m "Release v$NEXT_VER"
           git push origin HEAD:$(git rev-parse --abbrev-ref HEAD)
           git push origin "v$NEXT_VER"
-          echo "NEXT_VER=$NEXT_VER" >> $GITHUB_ENV
+          echo "next_ver=$NEXT_VER" >> "$GITHUB_OUTPUT"
 
       - name: "(Optional) Create GitHub Release"
         if: ${{ inputs.create_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.NEXT_VER }}
-          name: v${{ env.NEXT_VER }}
+          tag_name: v${{ steps.bump.outputs.next_ver }}
+          name: v${{ steps.bump.outputs.next_ver }}
           body: |
             ✅ Automated release
             - Maven: ${{ inputs.maven_version != '' && inputs.maven_version || 'default' }}
@@ -210,10 +241,12 @@ jobs:
         run: |
           set -Eeuo pipefail
           echo "Build done." | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "\n### Tool Versions" >> "$GITHUB_STEP_SUMMARY"
+          echo "
+### Tool Versions" >> "$GITHUB_STEP_SUMMARY"
           echo "- Java: $(java -version 2>&1 | head -1)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Maven: $(mvn -v | head -1)" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "${NEXT_VER:-}" ]; then
-            echo "\n### Release" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Created tag v$NEXT_VER" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.bump.outputs.next_ver }}" ]; then
+            echo "
+### Release" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Created tag v${{ steps.bump.outputs.next_ver }}" >> "$GITHUB_STEP_SUMMARY"
           fi
