@@ -1,4 +1,4 @@
-name: "⚙️ Maven + Spring Boot: Install/Upgrade + Echo Perm + Release"
+name: "⚙️ Maven + Spring Boot: Install/Upgrade + Echo Perm + Release (Full Echo Suite)"
 
 on:
   workflow_dispatch:
@@ -43,6 +43,9 @@ env:
   LOG_DIR: .github/echo_java/logs
   PERM_DIR: .github/echo_java/permissions
   ARTIFACT_DIR: .github/echo_java/artifacts
+  TOOLS_DIR: .github/echo_java/tools
+  SCRIPTS_DIR: .github/echo_java/scripts
+  DOC_DIR: .github/echo_java/docs
 
 jobs:
   build_and_release:
@@ -58,18 +61,105 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: "Bootstrap Echo Suite (dirs + tools + docs + scripts)"
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR" "$TOOLS_DIR" "$SCRIPTS_DIR" "$DOC_DIR"
+          # echo.sh: 통합 로깅/헬퍼
+          cat > "$TOOLS_DIR/echo.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeo pipefail
+          _ts(){ date +"%Y-%m-%d %H:%M:%S"; }
+          log(){ printf "[ECHO][%s] %s" "$1" "$2"; }
+          ok(){ log OK "$*"; }
+          warn(){ log WARN "$*"; }
+          fail(){ log FAIL "$*"; exit 1; }
+          section(){ printf "
+          ensure_dir(){ mkdir -p "$1" && ok "mkdir -p $1"; }
+          # maven helpers
+          mvn_run(){ mvn -B -U -e "$@"; }
+          SH
+          chmod +x "$TOOLS_DIR/echo.sh"
+          # 권한 적용 스크립트
+          cat > "$SCRIPTS_DIR/apply_permissions.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/echo.sh"
+          section "Apply permissions"
+          CHMOD_LIST="${PERM_DIR}/chmod.list"
+          CHOWN_LIST="${PERM_DIR}/chown.list"
+          if [ -f "$CHMOD_LIST" ]; then
+            while read -r mode path || [ -n "$mode" ]; do
+              [[ -z "${mode:-}" || "${mode:0:1}" = "#" ]] && continue
+              for f in $(echo "$path"); do
+                if [ -e "$f" ]; then chmod "$mode" "$f" && ok "chmod $mode $f"; else warn "skip $f"; fi
+              done
+            done < "$CHMOD_LIST"
+          fi
+          if [ -f "$CHOWN_LIST" ]; then
+            while read -r owner path || [ -n "$owner" ]; do
+              [[ -z "${owner:-}" || "${owner:0:1}" = "#" ]] && continue
+              for f in $(echo "$path"); do
+                if [ -e "$f" ]; then sudo chown "$owner" "$f" && ok "chown $owner $f"; else warn "skip $f"; fi
+              done
+            done < "$CHOWN_LIST"
+          fi
+          ok "Permissions applied"
+          SH
+          chmod +x "$SCRIPTS_DIR/apply_permissions.sh"
+          # 아티팩트 수집 스크립트
+          cat > "$SCRIPTS_DIR/collect_artifacts.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/echo.sh"
+          section "Collect artifacts"
+          ensure_dir "$ARTIFACT_DIR"
+          SRC_DIR="${1:-target}"
+          find "$SRC_DIR" -type f \( -name "*.jar" -o -name "*.war" \) -not -name "original-*.jar" -print -exec cp -v {} "$ARTIFACT_DIR/" \;
+          ok "Artifacts collected into $ARTIFACT_DIR"
+          SH
+          chmod +x "$SCRIPTS_DIR/collect_artifacts.sh"
+          # 권한 리스트 템플릿
+          cat > "$PERM_DIR/chmod.list" <<'LST'
+          # perms target
+          0755 scripts/*.sh
+          0644 README.md
+          0755 mvnw
+          LST
+          cat > "$PERM_DIR/chown.list" <<'LST'
+          # owner:group target (러너 환경상 root:root 그대로 둘 수 있음)
+          root:root .github/echo_java/**/*
+          LST
+          # 문서/인덱스
+          cat > "$DOC_DIR/README.md" <<'MD'
+          # Echo Java Suite
+          - 통합 로깅(OK/WARN/FAIL)
+          - 권한 적용 및 아티팩트 수집 스크립트
+          - GitHub Actions 빌드/릴리즈와 연동
+          MD
+          cat > "$ECHO_ROOT/INDEX.md" <<'MD'
+          # Index
+          - tools/echo.sh
+          - scripts/apply_permissions.sh, scripts/collect_artifacts.sh
+          - permissions/chmod.list, permissions/chown.list
+          - artifacts/, logs/, out/, docs/
+          MD
+          . "$TOOLS_DIR/echo.sh"; ok "Echo suite bootstrapped"
+
       - name: "Ensure pom.xml exists"
         id: preflight
         run: |
           set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"
           PROJ_DIR="${{ inputs.project_dir }}"
+          section "Preflight: pom.xml check"
           echo "[ECHO] Looking for pom.xml under: $PROJ_DIR"
           if [ ! -f "$PROJ_DIR/pom.xml" ]; then
-            echo "[ECHO][FAIL] No pom.xml at $PROJ_DIR" | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "[ECHO] Repository tree:" | tee -a "$GITHUB_STEP_SUMMARY"
+            warn "No pom.xml at $PROJ_DIR"
             { ls -la; echo; find . -maxdepth 2 -type f -name pom.xml | sed 's/^/FOUND: /'; } | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
+            fail "Abort: missing pom.xml"
           fi
+          ok "Found $PROJ_DIR/pom.xml"
           echo "projectDir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
 
       - name: "Setup Temurin JDK"
@@ -90,79 +180,48 @@ jobs:
       - name: "Show tool versions"
         run: |
           set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"
+          section "Tool versions"
           echo "[ECHO] java: $(java -version 2>&1 | head -1)"
           echo "[ECHO] mvn : $(mvn -v | head -1)"
+          ok "Tool probe complete"
 
-      - name: "Prepare Echo directories"
+      - name: "Apply Permission Echo (pre-build)"
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR"
-          printf "[ECHO][OK] Directories prepared: %s %s %s %s %s
-" "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR"
-
-      - name: "Generate Echo Permission files"
-        run: |
-          set -Eeuo pipefail
-          cat > "$PERM_DIR/chmod.list" <<'LST'
-          # perms target
-          0755 scripts/*.sh
-          0644 README.md
-          0755 mvnw
-          LST
-          cat > "$PERM_DIR/chown.list" <<'LST'
-          # owner:group target (러너 환경상 root:root 그대로 둘 수 있음)
-          root:root .github/echo_java/**/*
-          LST
-          cat > "$PERM_DIR/apply.sh" <<'SH'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          echo "[ECHO] Apply permissions..."
-          if [ -f "$(dirname "$0")/chmod.list" ]; then
-            while read -r mode path; do
-              [[ -z "${mode:-}" || "${mode:0:1}" = "#" ]] && continue
-              for f in $(echo "$path"); do
-                [ -e "$f" ] && chmod "$mode" "$f" && echo "[OK] chmod $mode $f" || echo "[WARN] skip $f"
-              done
-            done < "$(dirname "$0")/chmod.list"
-          fi
-          if [ -f "$(dirname "$0")/chown.list" ]; then
-            while read -r owner path; do
-              [[ -z "${owner:-}" || "${owner:0:1}" = "#" ]] && continue
-              for f in $(echo "$path"); do
-                [ -e "$f" ] && sudo chown "$owner" "$f" && echo "[OK] chown $owner $f" || echo "[WARN] skip $f"
-              done
-            done < "$(dirname "$0")/chown.list"
-          fi
-          echo "[ECHO][DONE] Permissions applied"
-          SH
-          chmod +x "$PERM_DIR/apply.sh"
+          . "$TOOLS_DIR/echo.sh"
+          bash "$SCRIPTS_DIR/apply_permissions.sh" | tee "$LOG_DIR/perm-pre.log"
 
       - name: "(Optional) Upgrade Spring Boot version in pom.xml"
         if: ${{ inputs.spring_boot_version != '' }}
         working-directory: ${{ steps.preflight.outputs.projectDir }}
         run: |
           set -Eeuo pipefail
+          . "$GITHUB_WORKSPACE/$TOOLS_DIR/echo.sh"
+          section "Upgrade Spring Boot"
           echo "[ECHO] Upgrade Spring Boot to ${{ inputs.spring_boot_version }}"
-          mvn -B -e \
-            versions:set-property \
-            -Dproperty=spring-boot.version \
-            -DnewVersion="${{ inputs.spring_boot_version }}" \
-            -DgenerateBackupPoms=false | tee "$GITHUB_WORKSPACE/$LOG_DIR/versions-set-spring-boot.log"
+          mvn_run versions:set-property -Dproperty=spring-boot.version -DnewVersion="${{ inputs.spring_boot_version }}" -DgenerateBackupPoms=false | tee "$GITHUB_WORKSPACE/$LOG_DIR/versions-set-spring-boot.log"
+          ok "Spring Boot property updated"
 
       - name: "(Optional) Run tests"
         if: ${{ inputs.run_tests == 'true' }}
         working-directory: ${{ steps.preflight.outputs.projectDir }}
         run: |
           set -Eeuo pipefail
-          mvn -B -U -e -DskipTests=false test | tee "$GITHUB_WORKSPACE/$LOG_DIR/mvn-test.log"
+          . "$GITHUB_WORKSPACE/$TOOLS_DIR/echo.sh"
+          section "Run tests"
+          mvn_run -DskipTests=false test | tee "$GITHUB_WORKSPACE/$LOG_DIR/mvn-test.log"
+          ok "Tests finished"
 
       - name: "Build (package)"
         working-directory: ${{ steps.preflight.outputs.projectDir }}
         run: |
           set -Eeuo pipefail
-          mvn -B -U -e -DskipTests=${{ inputs.run_tests != 'true' }} package | tee "$GITHUB_WORKSPACE/$LOG_DIR/mvn-package.log"
-          mkdir -p "$GITHUB_WORKSPACE/$ARTIFACT_DIR"
-          find target -type f \( -name "*.jar" -o -name "*.war" \) -not -name "original-*.jar" -print -exec cp -v {} "$GITHUB_WORKSPACE/$ARTIFACT_DIR/" \;
+          . "$GITHUB_WORKSPACE/$TOOLS_DIR/echo.sh"
+          section "Maven package"
+          mvn_run -DskipTests=${{ inputs.run_tests != 'true' }} package | tee "$GITHUB_WORKSPACE/$LOG_DIR/mvn-package.log"
+          bash "$GITHUB_WORKSPACE/$SCRIPTS_DIR/collect_artifacts.sh" target | tee "$GITHUB_WORKSPACE/$LOG_DIR/artifacts.log"
+          ok "Package & collect done"
 
       - name: "Upload build artifacts"
         if: ${{ inputs.distribute_artifacts == 'true' }}
@@ -185,6 +244,8 @@ jobs:
           GIT_COMMITTER_EMAIL: github-actions@github.com
         run: |
           set -Eeuo pipefail
+          . "$GITHUB_WORKSPACE/$TOOLS_DIR/echo.sh"
+          section "Version bump & tag"
           CURR_VER=$(xmllint --xpath '/*[local-name()="project"]/*[local-name()="version"]/text()' pom.xml 2>/dev/null || echo "0.1.0-SNAPSHOT")
           echo "[ECHO] Current version: $CURR_VER"
           BASE_VER=${CURR_VER%-SNAPSHOT}
@@ -205,6 +266,7 @@ jobs:
           git push origin HEAD:$(git rev-parse --abbrev-ref HEAD)
           git push origin "v$NEXT_VER"
           echo "next_ver=$NEXT_VER" >> "$GITHUB_OUTPUT"
+          ok "Tagged v$NEXT_VER"
 
       - name: "(Optional) Create GitHub Release"
         if: ${{ inputs.create_release == 'true' }}
@@ -222,14 +284,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "Apply Permission Echo"
+      - name: "Apply Permission Echo (post-build)"
         run: |
           set -Eeuo pipefail
-          bash "$PERM_DIR/apply.sh" | tee "$LOG_DIR/perm-apply.log"
+          . "$TOOLS_DIR/echo.sh"
+          bash "$SCRIPTS_DIR/apply_permissions.sh" | tee "$LOG_DIR/perm-post.log"
+          ok "Permission echo complete"
 
       - name: "Summary"
         run: |
           set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"
+          section "Summary"
           echo "Build done." | tee -a "$GITHUB_STEP_SUMMARY"
           echo "
 ### Tool Versions" >> "$GITHUB_STEP_SUMMARY"
@@ -240,3 +306,4 @@ jobs:
 ### Release" >> "$GITHUB_STEP_SUMMARY"
             echo "- Created tag v${{ steps.bump.outputs.next_ver }}" >> "$GITHUB_STEP_SUMMARY"
           fi
+          ok "Summary generated"
