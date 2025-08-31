@@ -44,9 +44,9 @@ on:
         required: true
         default: "false"
       image_name:
-        description: "Docker 이미지 이름 (OWNER/NAME 또는 ghcr.io/OWNER/NAME)"
+        description: "Docker 이미지 이름 (예: ghcr.io/OWNER/NAME) — 비우면 자동 계산"
         required: false
-        default: "ghcr.io/${{ github.repository_owner }}/springboot-app"
+        default: ""
       workflow_options:
         description: "추가 옵션 (skip_wrapper_gen:true,skip_permissions:true 등)"
         required: false
@@ -82,14 +82,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1) Echo 스위트/프로젝트 생성이 먼저 (pom.xml 확보)
+      # (1) config 파싱 + echo 스택 부트스트랩 + pom 자동생성
       - name: "Parse project configuration"
         id: parse_config
         run: |
           set -Eeuo pipefail
           IFS=':' read -r GROUP_ID ARTIFACT_ID PACKAGE_NAME <<< "${{ inputs.project_config }}"
-          echo "group_id=${GROUP_ID:-com.example}" >> "$GITHUB_OUTPUT"
-          echo "artifact_id=${ARTIFACT_ID:-demo-app}" >> "$GITHUB_OUTPUT"
+          echo "group_id=${GROUP_ID:-com.example}"       >> "$GITHUB_OUTPUT"
+          echo "artifact_id=${ARTIFACT_ID:-demo-app}"     >> "$GITHUB_OUTPUT"
           echo "package_name=${PACKAGE_NAME:-com.example.demo}" >> "$GITHUB_OUTPUT"
 
       - name: "Bootstrap Echo Suite (dirs + tools + scripts)"
@@ -123,14 +123,12 @@ jobs:
           ok "Collected -> $ARTIFACT_DIR"
           SH
           chmod +x "$SCRIPTS_DIR/collect_artifacts.sh"
-          # 프로젝트 자동 생성 스크립트 (이전 답변의 create_spring_boot_project.sh 동일)
           cat > "$SCRIPTS_DIR/create_spring_boot_project.sh" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           . "${ECHO_ROOT}/tools/echo.sh"
           GROUP_ID="$1"; ARTIFACT_ID="$2"; PACKAGE_NAME="$3"; SBV="$4"; TARGET="${5:-.}"
           section "Create Spring Boot Project ($GROUP_ID:$ARTIFACT_ID)"
-          # 최소 pom + src 생성 (상세 코드는 이전 답변과 동일; 분량상 축약)
           mkdir -p "$TARGET/src/main/java" "$TARGET/src/test/java" "$TARGET/src/main/resources" "$TARGET/src/test/resources"
           cat > "$TARGET/pom.xml" <<EOF
           <?xml version="1.0" encoding="UTF-8"?><project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -170,14 +168,13 @@ jobs:
             ok "pom.xml exists"
           fi
 
-      # 2) 이제 pom.xml이 있으므로 setup-java + cache 실행 (에러 해결 핵심)
+      # (2) 이제 pom.xml 확보 -> setup-java + cache
       - name: "Set up Java (with Maven cache)"
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
-          # 멀티모듈/서브디렉토리까지 안전 캐시
           cache-dependency-path: |
             ${{ inputs.project_dir }}/pom.xml
             ${{ inputs.project_dir }}/**/pom.xml
@@ -293,7 +290,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # (옵션) Docker 빌드/푸시 — GHCR 권한 필요 (GITHUB_TOKEN 패키지 쓰기 OK)
+      # (3) Docker 이미지 이름을 런타임에 안전 계산
+      - name: "Resolve image name"
+        id: img
+        run: |
+          set -Eeuo pipefail
+          if [ -n "${{ inputs.image_name }}" ]; then
+            IMG="${{ inputs.image_name }}"
+          else
+            # inputs 기본값이 비면: ghcr.io/<owner>/<repo-name-또는-springboot-app>
+            OWNER="${{ github.repository_owner }}"
+            IMG="ghcr.io/${OWNER}/springboot-app"
+          fi
+          echo "value=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "[ECHO][OK] Image = ${IMG}"
+
       - name: "Login to GHCR"
         if: ${{ inputs.build_docker == 'true' }}
         run: |
@@ -304,7 +315,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           cd "${{ inputs.project_dir }}"
-          IMG="${{ inputs.image_name }}"
+          IMG="${{ steps.img.outputs.value }}"
           TAG="${{ inputs.create_release == 'true' && steps.rel.outputs.next || 'dev' }}"
           docker build -t "${IMG}:${TAG}" .
           docker push "${IMG}:${TAG}"
