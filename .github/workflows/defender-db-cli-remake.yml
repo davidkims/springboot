@@ -11,18 +11,10 @@ on:
         description: "pom.xml이 없을 때 자동으로 Spring Boot 프로젝트 생성 (true/false)"
         required: true
         default: "true"
-      group_id:
-        description: "Maven GroupId (자동 생성 시 사용)"
+      project_config:
+        description: "프로젝트 설정 (format: groupId:artifactId:packageName 예: com.example:demo-app:com.example.demo)"
         required: false
-        default: "com.example"
-      artifact_id:
-        description: "Maven ArtifactId (자동 생성 시 사용)"
-        required: false
-        default: "demo-app"
-      package_name:
-        description: "Java 패키지명 (자동 생성 시 사용)"
-        required: false
-        default: "com.example.demo"
+        default: "com.example:demo-app:com.example.demo"
       spring_boot_version:
         description: "(선택) 적용할 Spring Boot 버전 (예: 3.3.3). 비우면 현재 pom.xml 유지"
         required: false
@@ -47,6 +39,10 @@ on:
         description: "빌드 산출물 업로드 (Artifacts) (true/false)"
         required: true
         default: "true"
+      workflow_options:
+        description: "추가 옵션 (skip_wrapper_gen:false,skip_permissions:false 등)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -76,6 +72,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: "Parse project configuration"
+        id: parse_config
+        run: |
+          set -Eeuo pipefail
+          PROJECT_CONFIG="${{ inputs.project_config }}"
+          IFS=':' read -r GROUP_ID ARTIFACT_ID PACKAGE_NAME <<< "$PROJECT_CONFIG"
+          
+          # 기본값 설정
+          GROUP_ID="${GROUP_ID:-com.example}"
+          ARTIFACT_ID="${ARTIFACT_ID:-demo-app}"
+          PACKAGE_NAME="${PACKAGE_NAME:-com.example.demo}"
+          
+          echo "group_id=$GROUP_ID" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          
+          echo "[CONFIG] Group ID: $GROUP_ID"
+          echo "[CONFIG] Artifact ID: $ARTIFACT_ID"
+          echo "[CONFIG] Package Name: $PACKAGE_NAME"
 
       - name: "Bootstrap Echo Suite (dirs + tools + docs + scripts)"
         run: |
@@ -270,7 +286,7 @@ jobs:
           logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} - %msg%n
           EOF
           
-          # mvnw wrapper 생성을 위한 임시 명령어 (나중에 Maven에서 생성됨)
+          # .gitignore 생성
           cat > "$TARGET_DIR/.gitignore" <<EOF
           target/
           !.mvn/wrapper/maven-wrapper.jar
@@ -366,9 +382,9 @@ jobs:
             if [ "${{ inputs.auto_create_project }}" = "true" ]; then
               section "Auto-create Spring Boot project"
               bash "$SCRIPTS_DIR/create_spring_boot_project.sh" \
-                "${{ inputs.group_id }}" \
-                "${{ inputs.artifact_id }}" \
-                "${{ inputs.package_name }}" \
+                "${{ steps.parse_config.outputs.group_id }}" \
+                "${{ steps.parse_config.outputs.artifact_id }}" \
+                "${{ steps.parse_config.outputs.package_name }}" \
                 "${{ inputs.spring_boot_version }}" \
                 "$PROJ_DIR"
               ok "Spring Boot project created at $PROJ_DIR"
@@ -383,13 +399,15 @@ jobs:
           
           echo "projectDir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
           
-          # Maven Wrapper 생성 (없는 경우)
-          cd "$PROJ_DIR"
-          if [ ! -f "mvnw" ]; then
-            section "Generate Maven Wrapper"
-            mvn -B wrapper:wrapper -Dmaven=3.9.9
-            chmod +x mvnw
-            ok "Maven wrapper generated"
+          # Maven Wrapper 생성 (없는 경우) - workflow_options에서 skip_wrapper_gen이 없으면 실행
+          if [[ "${{ inputs.workflow_options }}" != *"skip_wrapper_gen:true"* ]]; then
+            cd "$PROJ_DIR"
+            if [ ! -f "mvnw" ]; then
+              section "Generate Maven Wrapper"
+              mvn -B wrapper:wrapper -Dmaven=3.9.9
+              chmod +x mvnw
+              ok "Maven wrapper generated"
+            fi
           fi
 
       - name: "Show tool versions"
@@ -406,6 +424,7 @@ jobs:
           ok "Tool probe complete"
 
       - name: "Apply Permission Echo (pre-build)"
+        if: ${{ !contains(inputs.workflow_options, 'skip_permissions:true') }}
         run: |
           set -Eeuo pipefail
           . "$TOOLS_DIR/echo.sh"
@@ -499,12 +518,14 @@ jobs:
             - Spring Boot: ${{ inputs.spring_boot_version != '' && inputs.spring_boot_version || 'pom.xml default' }}
             - Bump: ${{ inputs.bump_type }}
             - Auto-created: ${{ inputs.auto_create_project == 'true' && 'Yes' || 'No' }}
+            - Project: ${{ steps.parse_config.outputs.group_id }}:${{ steps.parse_config.outputs.artifact_id }}
           files: |
             ${{ env.ARTIFACT_DIR }}/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: "Apply Permission Echo (post-build)"
+        if: ${{ !contains(inputs.workflow_options, 'skip_permissions:true') }}
         run: |
           set -Eeuo pipefail
           . "$TOOLS_DIR/echo.sh"
@@ -526,8 +547,9 @@ jobs:
           echo "- Project Dir: ${{ steps.preflight.outputs.projectDir }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Auto-created: ${{ inputs.auto_create_project == 'true' && 'Yes' || 'No' }}" >> "$GITHUB_STEP_SUMMARY"
           if [ "${{ inputs.auto_create_project }}" = "true" ]; then
-            echo "- Group ID: ${{ inputs.group_id }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Artifact ID: ${{ inputs.artifact_id }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Group ID: ${{ steps.parse_config.outputs.group_id }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Artifact ID: ${{ steps.parse_config.outputs.artifact_id }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Package Name: ${{ steps.parse_config.outputs.package_name }}" >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -n "${{ steps.bump.outputs.next_ver || '' }}" ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
