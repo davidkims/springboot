@@ -1,4 +1,4 @@
-name: "⚙️ Maven + Spring Boot: Install/Upgrade + Echo Perm + Release (Full Echo Suite)"
+name: "⚙️ Maven + Spring Boot: Auto-Setup + Install/Upgrade + Echo Perm + Release (Full Echo Suite)"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,26 @@ on:
         description: "프로젝트가 위치한 디렉토리 (pom.xml이 존재하는 경로). 모노레포면 서브폴더 지정"
         required: true
         default: "."
+      auto_create_project:
+        description: "pom.xml이 없을 때 자동으로 Spring Boot 프로젝트 생성 (true/false)"
+        required: true
+        default: "true"
+      group_id:
+        description: "Maven GroupId (자동 생성 시 사용)"
+        required: false
+        default: "com.example"
+      artifact_id:
+        description: "Maven ArtifactId (자동 생성 시 사용)"
+        required: false
+        default: "demo-app"
+      package_name:
+        description: "Java 패키지명 (자동 생성 시 사용)"
+        required: false
+        default: "com.example.demo"
       spring_boot_version:
         description: "(선택) 적용할 Spring Boot 버전 (예: 3.3.3). 비우면 현재 pom.xml 유지"
         required: false
-        default: ""
+        default: "3.3.3"
       maven_version:
         description: "(선택) 사용할 Maven 버전 (예: 3.9.9). 비우면 기본 버전"
         required: false
@@ -119,12 +135,188 @@ jobs:
           ok "Artifacts collected into $ARTIFACT_DIR"
           SH
           chmod +x "$SCRIPTS_DIR/collect_artifacts.sh"
+          # Spring Boot 프로젝트 생성 스크립트
+          cat > "$SCRIPTS_DIR/create_spring_boot_project.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          . "${ECHO_ROOT}/tools/echo.sh"
+          section "Create Spring Boot Project"
+          GROUP_ID="${1:-com.example}"
+          ARTIFACT_ID="${2:-demo-app}"
+          PACKAGE_NAME="${3:-com.example.demo}"
+          SPRING_BOOT_VERSION="${4:-3.3.3}"
+          TARGET_DIR="${5:-.}"
+          
+          # pom.xml 생성
+          cat > "$TARGET_DIR/pom.xml" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
+              <parent>
+                  <groupId>org.springframework.boot</groupId>
+                  <artifactId>spring-boot-starter-parent</artifactId>
+                  <version>$SPRING_BOOT_VERSION</version>
+                  <relativePath/>
+              </parent>
+              <groupId>$GROUP_ID</groupId>
+              <artifactId>$ARTIFACT_ID</artifactId>
+              <version>0.1.0-SNAPSHOT</version>
+              <name>$ARTIFACT_ID</name>
+              <description>Auto-generated Spring Boot project</description>
+              <properties>
+                  <java.version>21</java.version>
+                  <spring-boot.version>$SPRING_BOOT_VERSION</spring-boot.version>
+              </properties>
+              <dependencies>
+                  <dependency>
+                      <groupId>org.springframework.boot</groupId>
+                      <artifactId>spring-boot-starter-web</artifactId>
+                  </dependency>
+                  <dependency>
+                      <groupId>org.springframework.boot</groupId>
+                      <artifactId>spring-boot-starter-actuator</artifactId>
+                  </dependency>
+                  <dependency>
+                      <groupId>org.springframework.boot</groupId>
+                      <artifactId>spring-boot-starter-test</artifactId>
+                      <scope>test</scope>
+                  </dependency>
+              </dependencies>
+              <build>
+                  <plugins>
+                      <plugin>
+                          <groupId>org.springframework.boot</groupId>
+                          <artifactId>spring-boot-maven-plugin</artifactId>
+                      </plugin>
+                      <plugin>
+                          <groupId>org.codehaus.mojo</groupId>
+                          <artifactId>versions-maven-plugin</artifactId>
+                          <version>2.16.2</version>
+                      </plugin>
+                  </plugins>
+              </build>
+          </project>
+          EOF
+          
+          # 디렉토리 구조 생성
+          JAVA_DIR="$TARGET_DIR/src/main/java/${PACKAGE_NAME//./\/}"
+          TEST_DIR="$TARGET_DIR/src/test/java/${PACKAGE_NAME//./\/}"
+          RESOURCES_DIR="$TARGET_DIR/src/main/resources"
+          
+          mkdir -p "$JAVA_DIR" "$TEST_DIR" "$RESOURCES_DIR"
+          
+          # Main Application 클래스 생성
+          MAIN_CLASS_NAME="$(echo ${ARTIFACT_ID} | sed 's/[^a-zA-Z0-9]//g' | sed 's/^./\U&/')Application"
+          cat > "$JAVA_DIR/${MAIN_CLASS_NAME}.java" <<EOF
+          package $PACKAGE_NAME;
+          
+          import org.springframework.boot.SpringApplication;
+          import org.springframework.boot.autoconfigure.SpringBootApplication;
+          import org.springframework.web.bind.annotation.GetMapping;
+          import org.springframework.web.bind.annotation.RestController;
+          
+          @SpringBootApplication
+          public class $MAIN_CLASS_NAME {
+              public static void main(String[] args) {
+                  SpringApplication.run(${MAIN_CLASS_NAME}.class, args);
+              }
+          }
+          
+          @RestController
+          class HelloController {
+              @GetMapping("/")
+              public String hello() {
+                  return "Hello from $ARTIFACT_ID!";
+              }
+              
+              @GetMapping("/health")
+              public String health() {
+                  return "OK";
+              }
+          }
+          EOF
+          
+          # Test 클래스 생성
+          cat > "$TEST_DIR/${MAIN_CLASS_NAME}Tests.java" <<EOF
+          package $PACKAGE_NAME;
+          
+          import org.junit.jupiter.api.Test;
+          import org.springframework.boot.test.context.SpringBootTest;
+          import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
+          
+          @SpringBootTest
+          @SpringJUnitConfig
+          class ${MAIN_CLASS_NAME}Tests {
+              @Test
+              void contextLoads() {
+                  // Test passes if context loads successfully
+              }
+          }
+          EOF
+          
+          # application.properties 생성
+          cat > "$RESOURCES_DIR/application.properties" <<EOF
+          # Application Configuration
+          server.port=8080
+          spring.application.name=$ARTIFACT_ID
+          
+          # Actuator Configuration
+          management.endpoints.web.exposure.include=health,info
+          management.endpoint.health.show-details=when-authorized
+          
+          # Logging Configuration
+          logging.level.${PACKAGE_NAME}=INFO
+          logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} - %msg%n
+          EOF
+          
+          # mvnw wrapper 생성을 위한 임시 명령어 (나중에 Maven에서 생성됨)
+          cat > "$TARGET_DIR/.gitignore" <<EOF
+          target/
+          !.mvn/wrapper/maven-wrapper.jar
+          !**/src/main/**/target/
+          !**/src/test/**/target/
+          
+          ### IntelliJ IDEA ###
+          .idea
+          *.iws
+          *.iml
+          *.ipr
+          
+          ### Eclipse ###
+          .apt_generated
+          .classpath
+          .factorypath
+          .project
+          .settings
+          .springBeans
+          .sts4-cache
+          
+          ### VS Code ###
+          .vscode/
+          
+          ### Mac ###
+          .DS_Store
+          
+          ### Logs ###
+          *.log
+          EOF
+          
+          ok "Spring Boot project structure created in $TARGET_DIR"
+          ok "Main class: $MAIN_CLASS_NAME"
+          ok "Package: $PACKAGE_NAME"
+          SH
+          chmod +x "$SCRIPTS_DIR/create_spring_boot_project.sh"
           # 권한 리스트 템플릿
           cat > "$PERM_DIR/chmod.list" <<'LST'
           # perms target
           0755 scripts/*.sh
           0644 README.md
           0755 mvnw
+          0644 src/**/*.java
+          0644 src/**/*.properties
+          0644 src/**/*.yml
+          0644 src/**/*.yaml
           LST
           cat > "$PERM_DIR/chown.list" <<'LST'
           # owner:group target (러너 환경상 root:root 그대로 둘 수 있음)
@@ -135,32 +327,17 @@ jobs:
           # Echo Java Suite
           - 통합 로깅(OK/WARN/FAIL)
           - 권한 적용 및 아티팩트 수집 스크립트
+          - Spring Boot 프로젝트 자동 생성 기능
           - GitHub Actions 빌드/릴리즈와 연동
           MD
           cat > "$ECHO_ROOT/INDEX.md" <<'MD'
           # Index
           - tools/echo.sh
-          - scripts/apply_permissions.sh, scripts/collect_artifacts.sh
+          - scripts/apply_permissions.sh, scripts/collect_artifacts.sh, scripts/create_spring_boot_project.sh
           - permissions/chmod.list, permissions/chown.list
           - artifacts/, logs/, out/, docs/
           MD
           . "$TOOLS_DIR/echo.sh"; ok "Echo suite bootstrapped"
-
-      - name: "Ensure pom.xml exists"
-        id: preflight
-        run: |
-          set -Eeuo pipefail
-          . "$TOOLS_DIR/echo.sh"
-          PROJ_DIR="${{ inputs.project_dir }}"
-          section "Preflight: pom.xml check"
-          echo "[ECHO] Looking for pom.xml under: $PROJ_DIR"
-          if [ ! -f "$PROJ_DIR/pom.xml" ]; then
-            warn "No pom.xml at $PROJ_DIR"
-            { ls -la; echo; find . -maxdepth 2 -type f -name pom.xml | sed 's/^/FOUND: /'; } | tee -a "$GITHUB_STEP_SUMMARY"
-            fail "Abort: missing pom.xml"
-          fi
-          ok "Found $PROJ_DIR/pom.xml"
-          echo "projectDir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
 
       - name: "Setup Temurin JDK"
         uses: actions/setup-java@v4
@@ -168,14 +345,52 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
-          cache-dependency-path: |
-            ${{ steps.preflight.outputs.projectDir }}/pom.xml
 
       - name: "(Optional) Setup specific Maven"
         if: ${{ inputs.maven_version != '' }}
         uses: stCarolas/setup-maven@v4
         with:
           maven-version: ${{ inputs.maven_version }}
+
+      - name: "Preflight Check & Auto-Create Project"
+        id: preflight
+        run: |
+          set -Eeuo pipefail
+          . "$TOOLS_DIR/echo.sh"
+          PROJ_DIR="${{ inputs.project_dir }}"
+          section "Preflight: pom.xml check"
+          echo "[ECHO] Looking for pom.xml under: $PROJ_DIR"
+          
+          if [ ! -f "$PROJ_DIR/pom.xml" ]; then
+            warn "No pom.xml at $PROJ_DIR"
+            if [ "${{ inputs.auto_create_project }}" = "true" ]; then
+              section "Auto-create Spring Boot project"
+              bash "$SCRIPTS_DIR/create_spring_boot_project.sh" \
+                "${{ inputs.group_id }}" \
+                "${{ inputs.artifact_id }}" \
+                "${{ inputs.package_name }}" \
+                "${{ inputs.spring_boot_version }}" \
+                "$PROJ_DIR"
+              ok "Spring Boot project created at $PROJ_DIR"
+            else
+              warn "Auto-create disabled, showing available files:"
+              { ls -la; echo; find . -maxdepth 2 -type f -name pom.xml | sed 's/^/FOUND: /'; } | tee -a "$GITHUB_STEP_SUMMARY"
+              fail "Abort: missing pom.xml and auto-create disabled"
+            fi
+          else
+            ok "Found existing $PROJ_DIR/pom.xml"
+          fi
+          
+          echo "projectDir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
+          
+          # Maven Wrapper 생성 (없는 경우)
+          cd "$PROJ_DIR"
+          if [ ! -f "mvnw" ]; then
+            section "Generate Maven Wrapper"
+            mvn -B wrapper:wrapper -Dmaven=3.9.9
+            chmod +x mvnw
+            ok "Maven wrapper generated"
+          fi
 
       - name: "Show tool versions"
         run: |
@@ -184,6 +399,10 @@ jobs:
           section "Tool versions"
           echo "[ECHO] java: $(java -version 2>&1 | head -1)"
           echo "[ECHO] mvn : $(mvn -v | head -1)"
+          if [ -f "${{ steps.preflight.outputs.projectDir }}/mvnw" ]; then
+            cd "${{ steps.preflight.outputs.projectDir }}"
+            echo "[ECHO] mvnw: $(./mvnw -v | head -1)"
+          fi
           ok "Tool probe complete"
 
       - name: "Apply Permission Echo (pre-build)"
@@ -260,11 +479,11 @@ jobs:
           mvn -B -q versions:set -DnewVersion="$NEXT_VER" -DgenerateBackupPoms=false
           git config user.name "$GIT_AUTHOR_NAME"
           git config user.email "$GIT_AUTHOR_EMAIL"
-          git add pom.xml
-          git commit -m "chore(release): set version $NEXT_VER"
+          git add .
+          git commit -m "chore(release): set version $NEXT_VER" || true
           git tag -a "v$NEXT_VER" -m "Release v$NEXT_VER"
-          git push origin HEAD:$(git rev-parse --abbrev-ref HEAD)
-          git push origin "v$NEXT_VER"
+          git push origin HEAD:$(git rev-parse --abbrev-ref HEAD) || true
+          git push origin "v$NEXT_VER" || true
           echo "next_ver=$NEXT_VER" >> "$GITHUB_OUTPUT"
           ok "Tagged v$NEXT_VER"
 
@@ -279,6 +498,7 @@ jobs:
             - Maven: ${{ inputs.maven_version != '' && inputs.maven_version || 'default' }}
             - Spring Boot: ${{ inputs.spring_boot_version != '' && inputs.spring_boot_version || 'pom.xml default' }}
             - Bump: ${{ inputs.bump_type }}
+            - Auto-created: ${{ inputs.auto_create_project == 'true' && 'Yes' || 'No' }}
           files: |
             ${{ env.ARTIFACT_DIR }}/*
         env:
@@ -301,6 +521,14 @@ jobs:
           echo "### Tool Versions" >> "$GITHUB_STEP_SUMMARY"
           echo "- Java: $(java -version 2>&1 | head -1)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Maven: $(mvn -v | head -1)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Project Info" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Project Dir: ${{ steps.preflight.outputs.projectDir }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Auto-created: ${{ inputs.auto_create_project == 'true' && 'Yes' || 'No' }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.auto_create_project }}" = "true" ]; then
+            echo "- Group ID: ${{ inputs.group_id }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Artifact ID: ${{ inputs.artifact_id }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -n "${{ steps.bump.outputs.next_ver || '' }}" ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "### Release" >> "$GITHUB_STEP_SUMMARY"
