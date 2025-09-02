@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       project_dir:
-        description: "프로젝트가 위치한 디렉토리 (pom.xml이 존재하는 경로). 모노레포면 서브폴더 지정"
+        description: "프로젝트가 위치한 디렉토리 (pom.xml 경로)"
         required: true
         default: "."
       auto_create_project:
-        description: "pom.xml이 없을 때 자동으로 Spring Boot 프로젝트 생성 (true/false)"
+        description: "pom.xml 없을 때 자동 생성 (true/false)"
         required: true
         default: "true"
       project_config:
@@ -20,42 +20,34 @@ on:
         required: false
         default: "3.3.3"
       maven_version:
-        description: "Maven 버전 (예: 3.9.9). 비우면 기본"
+        description: "Maven 버전 (예: 3.9.9). 비우면 기본 사용"
         required: false
         default: ""
-      bump_type:
-        description: "버전 증가 유형 (patch|minor|major)"
-        required: false
-        default: "patch"
       run_tests:
         description: "빌드 전 테스트 실행 (true/false)"
         required: true
         default: "true"
       create_release:
-        description: "릴리스/태그/아티팩트 업로드 (true/false)"
+        description: "버전 bump+태그+Release 생성 (true/false)"
         required: true
         default: "true"
-      distribute_artifacts:
-        description: "Artifacts 업로드 (true/false)"
-        required: true
-        default: "true"
+      bump_type:
+        description: "버전 증가 유형 (patch|minor|major)"
+        required: false
+        default: "patch"
       build_docker:
         description: "Docker 이미지 빌드/푸시 (true/false)"
         required: true
         default: "false"
       image_name:
-        description: "Docker 이미지 이름 (예: ghcr.io/OWNER/NAME) — 비우면 자동 계산"
-        required: false
-        default: ""
-      workflow_options:
-        description: "추가 옵션 (skip_wrapper_gen:true,skip_permissions:true 등)"
+        description: "Docker 이미지 이름 (비우면 ghcr.io/<owner>/<repo>)"
         required: false
         default: ""
 
 permissions:
   contents: write
-  actions: read
   packages: write
+  actions: read
 
 env:
   JAVA_VERSION: "21"
@@ -82,20 +74,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      # (1) config 파싱 + echo 스택 부트스트랩 + pom 자동생성
+      # (0) Echo 스택 부트스트랩 + 설정 파싱
       - name: "Parse project configuration"
         id: parse_config
         run: |
           set -Eeuo pipefail
           IFS=':' read -r GROUP_ID ARTIFACT_ID PACKAGE_NAME <<< "${{ inputs.project_config }}"
-          echo "group_id=${GROUP_ID:-com.example}"       >> "$GITHUB_OUTPUT"
-          echo "artifact_id=${ARTIFACT_ID:-demo-app}"     >> "$GITHUB_OUTPUT"
-          echo "package_name=${PACKAGE_NAME:-com.example.demo}" >> "$GITHUB_OUTPUT"
+          echo "group_id=${GROUP_ID:-com.example}"                 >> "$GITHUB_OUTPUT"
+          echo "artifact_id=${ARTIFACT_ID:-demo-app}"               >> "$GITHUB_OUTPUT"
+          echo "package_name=${PACKAGE_NAME:-com.example.demo}"     >> "$GITHUB_OUTPUT"
 
       - name: "Bootstrap Echo Suite (dirs + tools + scripts)"
         run: |
           set -Eeuo pipefail
           mkdir -p "$ECHO_ROOT" "$OUT_DIR" "$LOG_DIR" "$PERM_DIR" "$ARTIFACT_DIR" "$TOOLS_DIR" "$SCRIPTS_DIR" "$DOC_DIR"
+
           cat > "$TOOLS_DIR/echo.sh" <<'SH'
           #!/usr/bin/env bash
           set -Eeo pipefail
@@ -105,6 +98,7 @@ jobs:
           is_true(){ [[ "${1,,}" == "true" ]]; }
           SH
           chmod +x "$TOOLS_DIR/echo.sh"
+
           cat > "$SCRIPTS_DIR/apply_permissions.sh" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -113,6 +107,7 @@ jobs:
           find . -name "*.sh" -path "./.github/echo_java/*" -exec chmod 755 {} \; && ok "chmod +x done"
           SH
           chmod +x "$SCRIPTS_DIR/apply_permissions.sh"
+
           cat > "$SCRIPTS_DIR/collect_artifacts.sh" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -123,6 +118,7 @@ jobs:
           ok "Collected -> $ARTIFACT_DIR"
           SH
           chmod +x "$SCRIPTS_DIR/collect_artifacts.sh"
+
           cat > "$SCRIPTS_DIR/create_spring_boot_project.sh" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -130,24 +126,63 @@ jobs:
           GROUP_ID="$1"; ARTIFACT_ID="$2"; PACKAGE_NAME="$3"; SBV="$4"; TARGET="${5:-.}"
           section "Create Spring Boot Project ($GROUP_ID:$ARTIFACT_ID)"
           mkdir -p "$TARGET/src/main/java" "$TARGET/src/test/java" "$TARGET/src/main/resources" "$TARGET/src/test/resources"
+          # pom.xml
           cat > "$TARGET/pom.xml" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?><project xmlns="http://maven.apache.org/POM/4.0.0"
-           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-           xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
             <modelVersion>4.0.0</modelVersion>
-            <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>${SBV:-3.3.3}</version></parent>
-            <groupId>${GROUP_ID}</groupId><artifactId>${ARTIFACT_ID}</artifactId><version>0.1.0-SNAPSHOT</version>
-            <properties><java.version>21</java.version></properties>
+            <parent>
+              <groupId>org.springframework.boot</groupId>
+              <artifactId>spring-boot-starter-parent</artifactId>
+              <version>${SBV:-3.3.3}</version>
+            </parent>
+            <groupId>${GROUP_ID}</groupId>
+            <artifactId>${ARTIFACT_ID}</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+            <properties>
+              <java.version>21</java.version>
+            </properties>
             <dependencies>
-              <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
-              <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
-              <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope></dependency>
-              <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+              <dependency>
+                <groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId>
+              </dependency>
+              <dependency>
+                <groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId>
+              </dependency>
+              <dependency>
+                <groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope>
+              </dependency>
+              <dependency>
+                <groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope>
+              </dependency>
             </dependencies>
-            <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>
+            <build>
+              <plugins>
+                <plugin>
+                  <groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId>
+                </plugin>
+              </plugins>
+            </build>
           </project>
           EOF
-          ok "pom.xml created at $TARGET/pom.xml"
+          # DemoApplication
+          PKG_DIR="$TARGET/src/main/java/$(echo "$PACKAGE_NAME" | tr '.' '/')"
+          mkdir -p "$PKG_DIR"
+          cat > "$PKG_DIR/DemoApplication.java" <<EOF
+          package ${PACKAGE_NAME};
+          import org.springframework.boot.SpringApplication;
+          import org.springframework.boot.autoconfigure.SpringBootApplication;
+          import org.springframework.web.bind.annotation.GetMapping;
+          import org.springframework.web.bind.annotation.RestController;
+          @SpringBootApplication
+          public class DemoApplication {
+            @RestController static class Api {
+              @GetMapping("/") public String hello() { return "Hello Echo!"; }
+            }
+            public static void main(String[] args){ SpringApplication.run(DemoApplication.class, args); }
+          }
+          EOF
+          ok "Project created at $TARGET"
           SH
           chmod +x "$SCRIPTS_DIR/create_spring_boot_project.sh"
 
@@ -168,7 +203,7 @@ jobs:
             ok "pom.xml exists"
           fi
 
-      # (2) 이제 pom.xml 확보 -> setup-java + cache
+      # (1) JDK + Maven 캐시
       - name: "Set up Java (with Maven cache)"
         uses: actions/setup-java@v4
         with:
@@ -207,17 +242,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           cd "${{ inputs.project_dir }}"
-          if [[ ! "$(echo "${{ inputs.workflow_options }}" | tr '[:upper:]' '[:lower:]')" =~ "skip_wrapper_gen:true" ]]; then
-            [ -f mvnw ] || mvn -N -q wrapper:wrapper
-            chmod +x mvnw || true
-          fi
+          [ -f mvnw ] || mvn -N -q wrapper:wrapper
+          chmod +x mvnw || true
 
-      - name: "Apply Echo permissions (optional)"
+      - name: "Apply Echo permissions"
         run: |
           set -Eeuo pipefail
-          if [[ ! "$(echo "${{ inputs.workflow_options }}" | tr '[:upper:]' '[:lower:]')" =~ "skip_permissions:true" ]]; then
-            "${GITHUB_WORKSPACE}/${SCRIPTS_DIR}/apply_permissions.sh"
-          fi
+          "${GITHUB_WORKSPACE}/${SCRIPTS_DIR}/apply_permissions.sh"
 
       - name: "Pin / Upgrade Spring Boot version (if provided)"
         run: |
@@ -235,6 +266,7 @@ jobs:
             echo "[ECHO][OK] Keep current Spring Boot version"
           fi
 
+      # (2) 빌드 + 아티팩트 수집 + 업로드(항상)
       - name: "Resolve & Build (tests optional)"
         id: build
         run: |
@@ -247,13 +279,15 @@ jobs:
           fi
           "${GITHUB_WORKSPACE}/${SCRIPTS_DIR}/collect_artifacts.sh" "target"
 
-      - name: "Upload artifacts (if enabled)"
-        if: ${{ inputs.distribute_artifacts == 'true' }}
+      - name: "Upload artifacts"
         uses: actions/upload-artifact@v4
         with:
           name: maven-artifacts
           path: ${{ env.ARTIFACT_DIR }}/*
+          if-no-files-found: warn
+          retention-days: 7
 
+      # (3) Release (옵션)
       - name: "Compute next version & tag (if release)"
         if: ${{ inputs.create_release == 'true' }}
         id: rel
@@ -290,25 +324,65 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # (3) Docker 이미지 이름을 런타임에 안전 계산
+      # (4) Docker (옵션): Dockerfile/.dockerignore 보장 + 이미지 이름 계산 + 빌드/푸시
+      - name: "Ensure Dockerfile & .dockerignore (if missing)"
+        if: ${{ inputs.build_docker == 'true' }}
+        run: |
+          set -Eeuo pipefail
+          cd "${{ inputs.project_dir }}"
+          if [ ! -f Dockerfile ]; then
+            cat > Dockerfile <<'DOCKER'
+            FROM eclipse-temurin:21-jre
+            ARG JAR_FILE=target/app.jar
+            WORKDIR /app
+            COPY ${JAR_FILE} /app/app.jar
+            EXPOSE 8080
+            ENTRYPOINT ["java","-jar","/app/app.jar"]
+            DOCKER
+          fi
+          if [ ! -f .dockerignore ]; then
+            cat > .dockerignore <<'IGN'
+            target/
+            .git/
+            .github/
+            .idea/
+            .vscode/
+            IGN
+          fi
+
       - name: "Resolve image name"
         id: img
+        if: ${{ inputs.build_docker == 'true' }}
         run: |
           set -Eeuo pipefail
           if [ -n "${{ inputs.image_name }}" ]; then
             IMG="${{ inputs.image_name }}"
           else
-            # inputs 기본값이 비면: ghcr.io/<owner>/<repo-name-또는-springboot-app>
             OWNER="${{ github.repository_owner }}"
-            IMG="ghcr.io/${OWNER}/springboot-app"
+            REPO="${GITHUB_REPOSITORY#*/}"
+            IMG="ghcr.io/${OWNER}/${REPO}"
           fi
-          echo "value=${IMG}" >> "$GITHUB_OUTPUT"
-          echo "[ECHO][OK] Image = ${IMG}"
+          IMG_LOWER="$(echo "$IMG" | tr '[:upper:]' '[:lower:]')"
+          echo "value=${IMG_LOWER}" >> "$GITHUB_OUTPUT"
+          echo "[ECHO][OK] Image = ${IMG_LOWER}"
 
       - name: "Login to GHCR"
         if: ${{ inputs.build_docker == 'true' }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: "Compute JAR file for Docker build"
+        id: jar
+        if: ${{ inputs.build_docker == 'true' }}
+        run: |
+          set -Eeuo pipefail
+          cd "${{ inputs.project_dir }}"
+          JAR="$(ls target/*.jar 2>/dev/null | grep -v 'original-' | head -n 1 || true)"
+          if [ -z "$JAR" ]; then
+            echo "[ECHO][FAIL] No JAR found in target/"; exit 1
+          fi
+          echo "path=$JAR" >> "$GITHUB_OUTPUT"
+          echo "[ECHO][OK] JAR = $JAR"
 
       - name: "Build & Push Docker"
         if: ${{ inputs.build_docker == 'true' }}
@@ -316,10 +390,11 @@ jobs:
           set -Eeuo pipefail
           cd "${{ inputs.project_dir }}"
           IMG="${{ steps.img.outputs.value }}"
-          TAG="${{ inputs.create_release == 'true' && steps.rel.outputs.next || 'dev' }}"
-          docker build -t "${IMG}:${TAG}" .
+          TAG="$([ "${{ inputs.create_release }}" = "true" ] && echo "${{ steps.rel.outputs.next }}" || echo "dev")"
+          docker build --build-arg JAR_FILE="${{ steps.jar.outputs.path }}" -t "${IMG}:${TAG}" .
           docker push "${IMG}:${TAG}"
 
+      # (5) Echo 산출물 커밋
       - name: "Commit Echo outputs (if changed)"
         run: |
           set -Eeuo pipefail
