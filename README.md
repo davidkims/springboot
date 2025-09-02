@@ -23,3 +23,10 @@ Add the `--delete` flag to remove the files instead of just listing them:
 python scripts/remove_provenance_files.py --root . --delete
 ```
 
+
+### Setup Guides
+
+- [Docker](docker/README.md)
+- [Java](java/README.md)
+- [Maven](maven/README.md)
+- [Spring Boot](springboot/README.md)
