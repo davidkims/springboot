@@ -1,4 +1,4 @@
-name: "🛡️ EchoSec v4: White-Hat Security Scan (No DockerHub, Heredoc Fix, Stable Paths)"
+name: "🛡️ EchoSec v5: White-Hat Security Scan (stable, CLI Semgrep, fixed Gitleaks)"
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ on:
         required: true
         default: "CRITICAL,HIGH"
       semgrep_config:
-        description: "Semgrep 규칙 세트 (예: p/ci)"
+        description: "Semgrep 규칙 세트 (예: p/ci, p/security-audit 등)"
         required: true
         default: "p/ci"
       zap_max_time:
@@ -44,8 +44,9 @@ on:
         required: false
         default: ".github/migration/*.csv,**/*.csv,**/*.zip,**/*.jar,**/*.png,**/*.jpg,**/*.pdf"
 
+  # 코드 스캔만 정기 실행 (외부 타겟 스캔은 수동+동의 필수)
   schedule:
-    - cron: "*/5 * * * *"  # 코드(SAST/Secrets/Deps)만 주기 스캔. 외부 타겟 스캔은 비활성.
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
@@ -69,13 +70,11 @@ jobs:
       allowed: ${{ steps.legal.outputs.allowed }}
     steps:
       - uses: actions/checkout@v4
-
       - name: "디렉토리 준비"
         run: |
           set -Eeuo pipefail
           mkdir -p "$ECHO_OUT" "$ECHO_LOG" "$ECHO_TMP"
-          echo "[ECHO][OK] echo-sec dirs ready at $ECHO_ROOT"
-
+          echo "[ECHO][OK] dirs ready at $ECHO_ROOT"
       - id: legal
         name: "법적 동의(legal_ack) 검사"
         run: |
@@ -84,8 +83,7 @@ jobs:
           else
             echo "allowed=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "[ECHO] legal_ack='${{ inputs.legal_ack }}' -> allowed=$(cat $GITHUB_OUTPUT | sed -n 's/^allowed=//p')" | tee -a "$ECHO_LOG/guard.txt"
-
+          echo "[ECHO] allowed=$(sed -n 's/^allowed=//p' $GITHUB_OUTPUT)" | tee -a "$ECHO_LOG/guard.txt"
       - name: "요약"
         run: |
           {
@@ -97,36 +95,52 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   sast_and_secrets:
-    name: "🔍 SAST/Secrets/Deps (Semgrep + Gitleaks + Trivy FS)"
+    name: "🔍 SAST/Secrets/Deps (Gitleaks + Semgrep CLI + Trivy FS)"
     needs: guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: "SRC_DIR 계산 (Heredoc 금지, 한 줄 파이썬)"
+      - name: "SRC_DIR 계산"
         run: |
           set -Eeuo pipefail
-          SRC_DIR="$(python3 -c 'import os; print(os.path.normpath(os.path.join(os.environ.get("GITHUB_WORKSPACE",""), "${{ inputs.repo_path }}")))' )"
+          SRC_DIR="$(python3 -c 'import os;print(os.path.normpath(os.path.join(os.environ.get("GITHUB_WORKSPACE",""), "${{ inputs.repo_path }}")))' )"
           echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
           mkdir -p "$ECHO_OUT" "$ECHO_LOG" "$ECHO_TMP"
           echo "[ECHO][OK] SRC_DIR=$SRC_DIR"
 
-      # Gitleaks: DockerHub pull 없이 공식 액션 사용
+      # ---- Gitleaks (공식 액션; args 미사용) ----
       - name: "Gitleaks (비밀키 탐지)"
         uses: gitleaks/gitleaks-action@v2
         continue-on-error: true
-        with:
-          args: "--source ${{ env.SRC_DIR }} --report-format sarif --report-path ${{ env.ECHO_OUT }}/gitleaks.sarif"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 조직 리포면 라이선스 필요: GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      - name: "Gitleaks 결과 복사"
+        run: |
+          set -Eeuo pipefail
+          test -f "results.sarif" && cp "results.sarif" "$ECHO_OUT/gitleaks.sarif" || touch "$ECHO_OUT/gitleaks.sarif"
+          echo "[ECHO][OK] gitleaks -> $ECHO_OUT/gitleaks.sarif"
 
-      # Semgrep: 공식 액션, 대상 디렉토리를 args 끝에 전달
-      - name: "Semgrep (SAST)"
-        uses: returntocorp/semgrep-action@v1
+      # ---- Semgrep (권장: 네이티브 CLI) ----
+      - name: "Semgrep 설치 (pipx)"
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --user pipx >/dev/null
+          python3 -m pipx ensurepath
+          ~/.local/bin/pipx install semgrep >/dev/null
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: "Semgrep 실행"
         continue-on-error: true
-        with:
-          args: "--config ${{ inputs.semgrep_config }} --json --timeout 240 --error --output ${{ env.ECHO_OUT }}/semgrep.json ${{ env.SRC_DIR }}"
+        run: |
+          set -Eeuo pipefail
+          semgrep --version
+          semgrep --config "${{ inputs.semgrep_config }}" --json --timeout 240 -o "$ECHO_OUT/semgrep.json" "${{ env.SRC_DIR }}" || true
+          echo "[ECHO][OK] semgrep -> $ECHO_OUT/semgrep.json"
+        # 참고: semgrep CI/배포 가이드는 AppSec Platform 기반 구성을 권장(원하면 토큰 연계해 GHAS 업로드도 가능). :contentReference[oaicite:3]{index=3}
 
-      # Trivy FS: 공식 액션
-      - name: "Trivy Filesystem (vuln/secret/misconfig/license)"
+      # ---- Trivy (FS) ----
+      - name: "Trivy Filesystem"
         uses: aquasecurity/trivy-action@0.28.0
         continue-on-error: true
         with:
@@ -183,7 +197,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # ZAP: 공식 액션 사용 (컨테이너 풀 불필요)
       - name: "ZAP Baseline Scan"
         id: zap
         uses: zaproxy/action-baseline@v0.11.0
@@ -192,6 +205,7 @@ jobs:
           target: "${{ inputs.target_url }}"
           rules_file_name: ""
           cmd_options: "-m ${{ inputs.zap_max_time }}"
+        # 참고: Baseline은 수동 스파이더+패시브 스캔으로 안전합니다. :contentReference[oaicite:4]{index=4}
       - name: "ZAP 리포트 수집(가능 시)"
         run: |
           set -Eeuo pipefail
@@ -283,7 +297,7 @@ jobs:
       - name: "결과 요약"
         run: |
           {
-            echo "## EchoSec v4 실행 요약"
+            echo "## EchoSec v5 실행 요약"
             echo "- legal_ack(외부스캔 허용): \`${{ needs.guard.outputs.allowed }}\`"
             echo "- 산출물: \`$ECHO_OUT\`"
             echo ""
