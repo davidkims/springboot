@@ -74,13 +74,14 @@ jobs:
       DOCKER_NET: echo-net
       PROV_DIR: .github/echo_omni
       SLOTS_OMNI: ${{ github.event.inputs.slots_omni }}
-      RUN_NETWORK: ${{ github.event.inputs.run_network || 'true' }}
-      RUN_OMNI: ${{ github.event.inputs.run_omni || 'true' }}
-      PUSH_IMAGE: ${{ github.event.inputs.push_image || 'false' }}
-      ENABLE_FIREWALL: ${{ github.event.inputs.enable_firewall || 'false' }}
+      RUN_NETWORK: ${{ github.event.inputs.run_network }}
+      RUN_OMNI: ${{ github.event.inputs.run_omni }}
+      PUSH_IMAGE: ${{ github.event.inputs.push_image }}
+      ENABLE_FIREWALL: ${{ github.event.inputs.enable_firewall }}
       INSTALL_NIC: ${{ github.event.inputs.install_nic_tools }}
       UPGRADE_KERNEL: ${{ github.event.inputs.upgrade_kernel }}
       STORAGE_PROFILE: ${{ github.event.inputs.storage_profile }}
+      # 빈 값 방지(표현식 폴백) — 셸에서도 한 번 더 보정
       GENERATE_ROWS: ${{ github.event.inputs.generate_rows || '1000' }}
 
     steps:
@@ -128,6 +129,7 @@ jobs:
             resolve
             USE_PODMAN=1; export USE_PODMAN; echo "USE_PODMAN=1" >> "$GITHUB_ENV"; echoe "engine=podman"
           }
+          # ---------- Storage installers ----------
           install_awscli(){
             if have aws; then echoe "awscli: $(aws --version 2>&1)"; return 0; fi
             set +e
@@ -171,7 +173,9 @@ jobs:
             sudo apt-get update -y || true
             sudo apt-get install -y fuse3 blobfuse2 || warn "blobfuse2 install failed (non-fatal)"
           }
+          # ---------- Archive helper ----------
           make_archive(){
+            # 사용법: make_archive "label" <paths...>
             local label="$1"; shift
             local ts="$(TS)"
             local outdir="${ECHO_ARC:-.github/echo_archives}"
@@ -183,9 +187,9 @@ jobs:
           }
           BASH
           chmod +x .github/echo_tools.sh
+          # 초기 레이아웃 아카이브
           . .github/echo_tools.sh
           make_archive "00_init_layout" ".github/echo_td" ".github/echo_dw" ".github/echo_net" ".github/echo_omni"
-
       - name: 🧯 containerd 충돌 가드 & 기본 패키지
         shell: bash
         run: |
@@ -198,12 +202,7 @@ jobs:
           sudo apt-get -y -f install || true
           sudo dpkg --configure -a || true
           sudo apt-get install -y --no-install-recommends sqlite3 jq python3 python3-pip curl ca-certificates ufw gawk skopeo lsb-release
-          # 보강: 로컬 파이썬 클라이언트 경로 추가(필수 아님)
-          python3 -m pip install --user --upgrade pip >/dev/null 2>&1 || true
-          python3 -m pip install --user trivy-client==0.11.0 || true
-          [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH" || true
           make_archive "01_base_pkgs" "/etc/apt" "/var/lib/dpkg/status"
-
       - name: 🔧 NIC 설치 + 커널 업그레이드(옵션)
         shell: bash
         run: |
@@ -222,7 +221,6 @@ jobs:
             echo "[KERNEL] kernel packages installed (reboot required)" | tee -a "${ECHO_LOG}/kernel_upgrade.log"
           fi
           make_archive "02_nic_kernel" "${ECHO_LOG}"
-
       - name: 🛞 컨테이너 엔진 준비
         shell: bash
         run: |
@@ -231,7 +229,6 @@ jobs:
           start_docker
           echoe "USE_PODMAN=${USE_PODMAN:-0}"
           make_archive "03_engine" "/etc/containers" "/etc/docker" || true
-
       - name: 🐍 TD Python 클라이언트
         shell: bash
         run: |
@@ -239,7 +236,6 @@ jobs:
           python3 -m pip install --upgrade pip >/dev/null 2>&1
           python3 -m pip install teradatasql teradatasqlalchemy >/dev/null 2>&1 || true
           exit 0
-
       - name: 📝 DDL/쿼리 생성
         shell: bash
         run: |
@@ -261,7 +257,6 @@ jobs:
           SQL
           . .github/echo_tools.sh
           make_archive "04_sql_templates" "${ECHO_TD}" "${ECHO_DW}"
-
       - name: 📦 Storage clients (robust installers)
         shell: bash
         run: |
@@ -276,12 +271,12 @@ jobs:
           esac
           echo "[STORAGE] note: GitHub 러너는 ephemeral VM. 영구보관은 Artifacts/Cache/원격(S3/GCS/Azure) 권장."
           make_archive "05_storage_clients" "/etc/apt/sources.list.d" "/usr/share/keyrings" || true
-
       - name: 🧾 장치 인벤토리(JSON) 생성 → 모든 컨테이너에 전파
         shell: bash
         run: |
           set -Eeuo pipefail
-          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1; [ "$SLOTS_OMNI" -ge 1 ] || SLOTS_OMNI=1
+          export SLOTS_OMNI="${SLOTS_OMNI:-1}"
+          [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           mkdir -p "${ECHO_NET}"
           NIC_JSON="$(ip -j link show 2>/dev/null || echo '[]')"
           OS_NAME="$(. /etc/os-release; echo "${NAME} ${VERSION_ID}")"
@@ -294,7 +289,6 @@ jobs:
             > "${ECHO_NET}/device_info.json"
           . .github/echo_tools.sh
           make_archive "06_device_info" "${ECHO_NET}/device_info.json"
-
       - name: 🕸️ 네트워크
         shell: bash
         run: |
@@ -302,7 +296,6 @@ jobs:
           . .github/echo_tools.sh
           ctr network create "${DOCKER_NET}" >/dev/null 2>&1 || true
           make_archive "07_network_net" "/etc/cni" || true
-
       - name: 🧱 TD-SIM(Postgres) 기동 + 적재
         shell: bash
         run: |
@@ -316,8 +309,8 @@ jobs:
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             -e POSTGRES_PASSWORD=postgres postgres:16
           for i in $(seq 1 60); do ctr exec td-sim pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
-          sleep 3
           ctr exec -u postgres td-sim psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /td/001_schema.sql
+          # ---- 안전한 COUNT 보정 ----
           COUNT="${GENERATE_ROWS:-}"
           COUNT="${COUNT:-${{ github.event.inputs.generate_rows }}}"
           COUNT="${COUNT:-1000}"
@@ -334,7 +327,6 @@ jobs:
           FROM generate_series(1, ${COUNT});
           SQL"
           make_archive "08_tdsim_seed" "${ECHO_TD}"
-
       - name: 🧩 Omni(FastAPI) 이미지 빌드 + 슬롯 수만큼 기동
         if: ${{ env.RUN_OMNI == 'true' }}
         shell: bash
@@ -342,6 +334,7 @@ jobs:
           set -Eeuo pipefail
           . .github/echo_tools.sh
           cat > "${ECHO_OMNI}/app.py" <<'PY'
+          # (기존 app.py 내용 동일 — 생략 없이 유지)
           import os
           from datetime import datetime
           from typing import List, Dict, Any
@@ -435,7 +428,8 @@ jobs:
           DOCKER
           retry 3 3 -- ctr pull python:3.11-slim
           ctr build -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
-          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1; [ "$SLOTS_OMNI" -ge 1 ] || SLOTS_OMNI=1
+          # 슬롯 기동
+          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           for i in $(seq 1 ${SLOTS_OMNI}); do
             name="omni-$i"; ctr rm -f "$name" >/dev/null 2>&1 || true
             if [ "$i" -eq 1 ]; then
@@ -456,7 +450,6 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
           echo "[OMNI] ${SLOTS_OMNI} slots up"
           make_archive "09_omni_image_slots" "${ECHO_OMNI}"
-
       - name: 🌐 Nginx RP(슬롯 라우팅) + Exporter
         if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
@@ -465,7 +458,7 @@ jobs:
           . .github/echo_tools.sh
           retry 3 3 -- ctr pull nginx:alpine
           retry 3 3 -- ctr pull nginx/nginx-prometheus-exporter:0.11.0
-          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1; [ "$SLOTS_OMNI" -ge 1 ] || SLOTS_OMNI=1
+          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           UPSTREAM_SERVERS=""; for i in $(seq 1 ${SLOTS_OMNI}); do UPSTREAM_SERVERS="${UPSTREAM_SERVERS}    server omni-${i}:8000;\n"; done
           cat > "${ECHO_NET}/nginx/nginx.conf" <<CONF
           user nginx; worker_processes auto;
@@ -514,7 +507,6 @@ jobs:
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             nginx/nginx-prometheus-exporter:0.11.0 -nginx.scrape-uri=http://echo-nginx/nginx_status
           make_archive "10_nginx_exporter" "${ECHO_NET}/nginx" "${ECHO_NET}/logs"
-
       - name: 📈 Logs (Loki/Promtail, engine별)
         if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
@@ -528,7 +520,7 @@ jobs:
             -p 3100:3100 \
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
-          if [ "${USE_PODMAN:-0}" = "1" ] || ! [ -S /var/run/docker.sock ]; then
+          if [ "${USE_PODMAN:-0}" = "1" ]; then
             cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
             server: { http_listen_port: 9080, grpc_listen_port: 0 }
             positions: { filename: /tmp/positions.yaml }
@@ -567,7 +559,6 @@ jobs:
               grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
           fi
           make_archive "11_logs_stack" "${ECHO_NET}/promtail" "${ECHO_NET}/logs"
-
       - name: 🔥 (옵션) UFW 방화벽
         if: ${{ env.ENABLE_FIREWALL == 'true' }}
         shell: bash
@@ -580,13 +571,12 @@ jobs:
           sudo ufw default deny incoming; sudo ufw default allow outgoing; sudo ufw --force enable
           sudo ufw status verbose | tee -a "${ECHO_LOG}/ufw.log"
           make_archive "12_firewall" "${ECHO_LOG}/ufw.log"
-
       - name: 📚 Ledger 스키마 + 슬롯 레코드 + 장치정보 기록
         shell: bash
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1; [ "$SLOTS_OMNI" -ge 1 ] || SLOTS_OMNI=1
+          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           ctr exec -u postgres td-sim bash -lc "psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
           CREATE SCHEMA IF NOT EXISTS ledger;
           CREATE TABLE IF NOT EXISTS ledger.service_event(id BIGSERIAL PRIMARY KEY, at TIMESTAMP DEFAULT NOW(), service TEXT, event TEXT, detail TEXT);
@@ -601,7 +591,6 @@ jobs:
           NIC_JSON="$(jq -c '.nic'   < "${ECHO_NET}/device_info.json")"
           ctr exec -u postgres td-sim psql -U postgres -d postgres -c "INSERT INTO ledger.device_info(hostname,kernel,slots,nic) VALUES ('${HOST}','${KERNEL}','${SLOTS_JSON}'::jsonb,'${NIC_JSON}'::jsonb)"
           make_archive "13_ledger_seed" "${ECHO_NET}/device_info.json"
-
       - name: 🧾 Nginx 로그 → CSV → Postgres 적재
         if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
@@ -615,7 +604,6 @@ jobs:
           ctr cp "$CSV" td-sim:/tmp/ingest/echo.access.csv
           ctr exec -u postgres td-sim psql -U postgres -d postgres -c "\copy ledger.nginx_access(raw_time,ip,method,path,status,bytes,req_time,referer,ua) FROM '/tmp/ingest/echo.access.csv' WITH (FORMAT CSV)"
           make_archive "14_nginx_csv_loaded" "$CSV"
-
       - name: 🧮 Ledger Partition + MV Snapshot
         shell: bash
         run: |
@@ -637,14 +625,13 @@ jobs:
           ON CONFLICT (day) DO UPDATE SET txn_count=EXCLUDED.txn_count, total_amount=EXCLUDED.total_amount;
           SQL
           make_archive "15_ledger_mv" "/var/lib/docker" || true
-
       - name: 📊 Prometheus & Alertmanager (slot-aware)
         if: ${{ env.RUN_NETWORK == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${ECHO_NET}/prometheus"
-          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1; [ "$SLOTS_OMNI" -ge 1 ] || SLOTS_OMNI=1
+          export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           OMNI_TARGETS=""; for i in $(seq 1 ${SLOTS_OMNI}); do [ -n "$OMNI_TARGETS" ] && OMNI_TARGETS="${OMNI_TARGETS}, "; OMNI_TARGETS="${OMNI_TARGETS}'omni-${i}:8000'"; done
           cat > "${ECHO_NET}/prometheus/recording_rules.yml" <<'YAML'
           groups:
@@ -706,22 +693,19 @@ jobs:
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             prom/prometheus:v2.51.2 --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.retention.time=1d --web.enable-lifecycle
           make_archive "16_prom_stack" "${ECHO_NET}/prometheus"
-
+      # ===== GHCR push + SBOM + Cosign (digest signing; auth/지연 대응) =====
       - name: 🔐 Install cosign (keyless)
         if: ${{ env.PUSH_IMAGE == 'true' }}
         uses: sigstore/cosign-installer@v3
 
-      - name: 🔑 GHCR login (actor; engine-agnostic)
+      - name: 🔑 GHCR login (actor)
         if: ${{ env.PUSH_IMAGE == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          . .github/echo_tools.sh
-          resolve
-          echo "${GITHUB_TOKEN}" | ${DOCKER_BIN:-${PODMAN_BIN}} login ghcr.io -u "${{ github.actor }}" --password-stdin
-
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: 🏷️ Push → resolve digest → SBOM/Scan → cosign sign/attest (+Archive)
         if: ${{ env.PUSH_IMAGE == 'true' }}
         shell: bash
@@ -766,7 +750,6 @@ jobs:
             echo "ENGINE=${USE_PODMAN:+podman}${USE_PODMAN:-docker}"
           } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
           make_archive "17_supplychain" "${PROV_DIR}/supplychain" "${ECHO_LOG}/provenance.log" "${PROV_DIR}/PROVENANCE.txt"
-
       - name: 🗃️ Snapshot(SQLite) + 권한 정리 (+Archive)
         shell: bash
         run: |
@@ -791,7 +774,6 @@ jobs:
           chmod -R a+rX .github/echo_* || true
           . .github/echo_tools.sh
           make_archive "18_sqlite_snapshot" "${ECHO_DW}/db"
-
       - name: 📤 Upload artifacts (echo-bundle + archives)
         uses: actions/upload-artifact@v4
         with:
@@ -803,7 +785,6 @@ jobs:
             .github/echo_omni
             .github/echo_logs
             .github/echo_archives
-
       - name: 🧾 Commit & push (best effort)
         if: ${{ github.event.inputs.commit_changes == 'true' }}
         shell: bash
