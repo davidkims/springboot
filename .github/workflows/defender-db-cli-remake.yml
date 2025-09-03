@@ -1,4 +1,4 @@
-name: "🛡️ EchoSec v3: White-Hat Security Scan (No DockerHub Pulls)"
+name: "🛡️ EchoSec v4: White-Hat Security Scan (No DockerHub, Heredoc Fix, Stable Paths)"
 
 on:
   workflow_dispatch:
@@ -45,7 +45,7 @@ on:
         default: ".github/migration/*.csv,**/*.csv,**/*.zip,**/*.jar,**/*.png,**/*.jpg,**/*.pdf"
 
   schedule:
-    - cron: "*/5 * * * *"  # 코드 스캔만 주기 실행
+    - cron: "*/5 * * * *"  # 코드(SAST/Secrets/Deps)만 주기 스캔. 외부 타겟 스캔은 비활성.
 
 permissions:
   contents: read
@@ -69,16 +69,23 @@ jobs:
       allowed: ${{ steps.legal.outputs.allowed }}
     steps:
       - uses: actions/checkout@v4
+
       - name: "디렉토리 준비"
         run: |
           set -Eeuo pipefail
           mkdir -p "$ECHO_OUT" "$ECHO_LOG" "$ECHO_TMP"
           echo "[ECHO][OK] echo-sec dirs ready at $ECHO_ROOT"
+
       - id: legal
         name: "법적 동의(legal_ack) 검사"
         run: |
-          [[ "${{ inputs.legal_ack }}" == "I OWN THIS" ]] && echo "allowed=true"  >> "$GITHUB_OUTPUT" || echo "allowed=false" >> "$GITHUB_OUTPUT"
-          echo "[ECHO] legal_ack='${{ inputs.legal_ack }}' -> allowed=${{ steps.legal.outputs.allowed || 'false' }}" | tee -a "$ECHO_LOG/guard.txt"
+          if [[ "${{ inputs.legal_ack }}" == "I OWN THIS" ]]; then
+            echo "allowed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "[ECHO] legal_ack='${{ inputs.legal_ack }}' -> allowed=$(cat $GITHUB_OUTPUT | sed -n 's/^allowed=//p')" | tee -a "$ECHO_LOG/guard.txt"
+
       - name: "요약"
         run: |
           {
@@ -96,29 +103,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: "SRC_DIR 계산"
-        id: srcdir
+      - name: "SRC_DIR 계산 (Heredoc 금지, 한 줄 파이썬)"
         run: |
-          python3 - <<'PY'
-          import os
-          p=os.path.normpath(os.path.join(os.environ['GITHUB_WORKSPACE'], '${{ inputs.repo_path }}'))
-          print(f"SRC_DIR={p}")
-          PY >> $GITHUB_ENV
-          echo "[ECHO][OK] SRC_DIR set"
+          set -Eeuo pipefail
+          SRC_DIR="$(python3 -c 'import os; print(os.path.normpath(os.path.join(os.environ.get("GITHUB_WORKSPACE",""), "${{ inputs.repo_path }}")))' )"
+          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$ECHO_OUT" "$ECHO_LOG" "$ECHO_TMP"
+          echo "[ECHO][OK] SRC_DIR=$SRC_DIR"
 
-      # Gitleaks: DockerHub pull 대신 공식 액션 사용
+      # Gitleaks: DockerHub pull 없이 공식 액션 사용
       - name: "Gitleaks (비밀키 탐지)"
         uses: gitleaks/gitleaks-action@v2
         continue-on-error: true
         with:
           args: "--source ${{ env.SRC_DIR }} --report-format sarif --report-path ${{ env.ECHO_OUT }}/gitleaks.sarif"
 
-      # Semgrep: 공식 액션 (토큰 없이 로컬 규칙 실행 모드)
+      # Semgrep: 공식 액션, 대상 디렉토리를 args 끝에 전달
       - name: "Semgrep (SAST)"
         uses: returntocorp/semgrep-action@v1
         continue-on-error: true
         with:
-          args: "--config ${{ inputs.semgrep_config }} --json --timeout 240 --error --output ${{ env.ECHO_OUT }}/semgrep.json"
+          args: "--config ${{ inputs.semgrep_config }} --json --timeout 240 --error --output ${{ env.ECHO_OUT }}/semgrep.json ${{ env.SRC_DIR }}"
 
       # Trivy FS: 공식 액션
       - name: "Trivy Filesystem (vuln/secret/misconfig/license)"
@@ -178,7 +183,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # ZAP: 공식 액션 (컨테이너 풀 불필요)
+      # ZAP: 공식 액션 사용 (컨테이너 풀 불필요)
       - name: "ZAP Baseline Scan"
         id: zap
         uses: zaproxy/action-baseline@v0.11.0
@@ -187,13 +192,12 @@ jobs:
           target: "${{ inputs.target_url }}"
           rules_file_name: ""
           cmd_options: "-m ${{ inputs.zap_max_time }}"
-      # 액션이 올린 아티팩트를 로컬에도 복사(가능한 경우)
-      - name: "ZAP 리포트 수집(선택)"
+      - name: "ZAP 리포트 수집(가능 시)"
         run: |
           set -Eeuo pipefail
-          # 액션이 생성하는 기본 파일명이 워크플로 변동될 수 있어 존재 시만 복사
+          mkdir -p "$ECHO_OUT"
           for f in report.html report.xml zap_report.html zap_report.xml; do
-            test -f "$f" && { mkdir -p "$ECHO_OUT"; cp "$f" "$ECHO_OUT/"; }
+            [[ -f "$f" ]] && cp "$f" "$ECHO_OUT/" || true
           done
           ls -al "$ECHO_OUT" || true
       - uses: actions/upload-artifact@v4
@@ -266,7 +270,7 @@ jobs:
           name: echoosec-nmap
           path: |
             ${{ env.ECHO_OUT }}/nmap.txt
-            ${{ env.EOO_OUT }}/nmap.xml
+            ${{ env.ECHO_OUT }}/nmap.xml
           if-no-files-found: warn
           retention-days: 7
 
@@ -279,7 +283,7 @@ jobs:
       - name: "결과 요약"
         run: |
           {
-            echo "## EchoSec v3 실행 요약"
+            echo "## EchoSec v4 실행 요약"
             echo "- legal_ack(외부스캔 허용): \`${{ needs.guard.outputs.allowed }}\`"
             echo "- 산출물: \`$ECHO_OUT\`"
             echo ""
