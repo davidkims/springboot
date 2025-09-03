@@ -1,34 +1,34 @@
-name: "🛡️ EchoSec: White-Hat Security Scan (Unified)"
+name: "🛡️ EchoSec v2: White-Hat Security Scan (Unified, Fixed Paths + Caching)"
 
 on:
   workflow_dispatch:
     inputs:
       legal_ack:
-        description: "권한 확인: 본인 소유/관리 시스템에 한해 점검합니다. 활성화하려면 정확히 'I OWN THIS' 입력"
+        description: "외부 스캔 허용: 본인 소유/관리 시스템만. 'I OWN THIS' 입력 시 ZAP/Nmap 활성화"
         required: true
         default: "NO"
       target_url:
-        description: "(선택) ZAP 웹 취약점 기본 점검 대상 URL (https:// 포함)"
+        description: "(선택) ZAP 대상 URL (https:// 포함)"
         required: false
         default: ""
       nmap_targets:
-        description: "(선택) Nmap 대상 호스트/IP (공백으로 다수 가능)"
+        description: "(선택) Nmap 대상 호스트/IP (공백 구분)"
         required: false
         default: ""
       enable_nmap:
-        description: "(선택) Nmap 안전 스캔 실행 여부 (true/false)"
+        description: "Nmap 안전 스캔 실행 (true/false)"
         required: true
         default: "false"
       docker_image:
-        description: "(선택) 컨테이너 이미지 취약점 스캔 대상 (예: ghcr.io/owner/app:tag)"
+        description: "(선택) Trivy 이미지 스캔 대상 (예: ghcr.io/owner/app:tag)"
         required: false
         default: ""
       trivy_severity:
-        description: "Trivy 보고 심각도 필터 (예: CRITICAL,HIGH)"
+        description: "Trivy 심각도 필터 (예: CRITICAL,HIGH)"
         required: true
         default: "CRITICAL,HIGH"
       semgrep_config:
-        description: "Semgrep 규칙 세트 (기본: p/ci)"
+        description: "Semgrep 규칙 세트 (예: p/ci)"
         required: true
         default: "p/ci"
       zap_max_time:
@@ -39,6 +39,14 @@ on:
         description: "스캔할 코드 루트 경로(모노레포면 서브폴더)"
         required: true
         default: "."
+      trivy_skip_files:
+        description: "Trivy --skip-files (쉼표 구분 패턴들)"
+        required: false
+        default: ".github/migration/*.csv,**/*.csv,**/*.zip,**/*.jar,**/*.png,**/*.jpg,**/*.pdf"
+
+  schedule:
+    # repo 코드(SAST/Secrets/Deps)만 주기 스캔. 외부 타겟(ZAP/Nmap)은 스케줄에서 비활성.
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
@@ -46,10 +54,12 @@ permissions:
   id-token: none
 
 env:
-  ECHO_DIR: .github/echo_sec
-  ECHO_LOG: .github/echo_sec/logs
-  ECHO_OUT: .github/echo_sec/out
-  ECHO_TMP: .github/echo_sec/tmp
+  ECHO_ROOT: ${{ github.workspace }}/.github/echo_sec
+  ECHO_OUT:  ${{ github.workspace }}/.github/echo_sec/out
+  ECHO_LOG:  ${{ github.workspace }}/.github/echo_sec/logs
+  ECHO_TMP:  ${{ github.workspace }}/.github/echo_sec/tmp
+  TRIVY_CACHE:   ${{ github.workspace }}/.github/echo_sec/cache/trivy
+  SEMGREP_CACHE: ${{ github.workspace }}/.github/echo_sec/cache/semgrep
 
 concurrency:
   group: echoosec-${{ github.ref }}
@@ -57,37 +67,41 @@ concurrency:
 
 jobs:
   guard:
-    name: "🧩 Guard: 합법성 확인 & 디렉토리 준비"
+    name: "🧩 Guard: 합법성 확인 & 디렉토리/캐시 준비"
     runs-on: ubuntu-latest
     outputs:
       allowed: ${{ steps.legal.outputs.allowed }}
     steps:
-      - name: "Checkout"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: "폴더 준비"
+      - name: "디렉토리/캐시 생성"
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_DIR"/{logs,out,tmp,tools}
-          echo "[ECHO][OK] 디렉토리 준비 완료 -> $ECHO_DIR"
+          mkdir -p "$ECHO_OUT" "$ECHO_LOG" "$ECHO_TMP" "$TRIVY_CACHE" "$SEMGREP_CACHE"
+          echo "[ECHO][OK] echo-sec dirs ready at $ECHO_ROOT"
+
+      - name: "도커 이미지 최신화(업그레이드)"
+        run: |
+          set -Eeuo pipefail
+          docker pull gitleaks/gitleaks:latest
+          docker pull returntocorp/semgrep:latest
+          docker pull aquasec/trivy:latest
+          docker pull owasp/zap2docker-stable
 
       - id: legal
         name: "법적 동의(legal_ack) 검사"
-        shell: bash
         run: |
-          allowed="false"
-          if [[ "${{ inputs.legal_ack }}" == "I OWN THIS" ]]; then allowed="true"; fi
-          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
-          echo "[ECHO] legal_ack='${{ inputs.legal_ack }}' -> allowed=$allowed" | tee -a "$ECHO_LOG/guard.txt"
+          [[ "${{ inputs.legal_ack }}" == "I OWN THIS" ]] && echo "allowed=true"  >> "$GITHUB_OUTPUT" || echo "allowed=false" >> "$GITHUB_OUTPUT"
+          echo "[ECHO] legal_ack='${{ inputs.legal_ack }}' -> allowed=${{ steps.legal.outputs.allowed || 'false' }}" | tee -a "$ECHO_LOG/guard.txt"
 
       - name: "요약"
         run: |
           {
             echo "### EchoSec Guard"
-            echo "- legal_ack: \`${{ inputs.legal_ack }}\`"
-            echo "- allowed (ZAP/Nmap 활성화): \`${{ steps.legal.outputs.allowed }}\`"
+            echo "- allowed(ZAP/Nmap): \`${{ steps.legal.outputs.allowed }}\`"
             echo "- target_url: \`${{ inputs.target_url || 'N/A' }}\`"
             echo "- nmap_targets: \`${{ inputs.nmap_targets || 'N/A' }}\`"
+            echo "- outputs: \`$ECHO_OUT\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   sast_and_secrets:
@@ -97,52 +111,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: "환경 패키지 설치"
+      - name: "경로/디렉토리 보장"
         run: |
           set -Eeuo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq python3 python3-pip
+          mkdir -p "$ECHO_OUT" "$ECHO_LOG" "$TRIVY_CACHE" "$SEMGREP_CACHE"
+          SRC_DIR="$(python3 - <<'PY'\nimport os,sys\np=os.path.normpath(os.path.join(os.environ['GITHUB_WORKSPACE'], '${{ inputs.repo_path }}'))\nprint(p)\nPY\n)"
+          echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
+          echo "[ECHO][OK] SRC_DIR=$SRC_DIR"
 
-      - name: "Gitleaks(비밀키) - Docker"
+      - name: "Gitleaks(비밀키)"
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          cd "${{ inputs.repo_path }}"
-          docker run --rm -v "$PWD:/repo" gitleaks/gitleaks:latest detect \
-            -s /repo -r /repo/../$ECHO_OUT/gitleaks.sarif -f sarif --no-git || true
-          echo "[ECHO][OK] gitleaks 완료 -> $ECHO_OUT/gitleaks.sarif"
+          docker run --rm \
+            -v "$SRC_DIR:/repo" \
+            -v "$ECHO_OUT:/out" \
+            gitleaks/gitleaks:latest detect -s /repo -r /out/gitleaks.sarif -f sarif --no-git || true
+          echo "[ECHO][OK] gitleaks -> $ECHO_OUT/gitleaks.sarif"
 
-      - name: "Semgrep(SAST) - Docker"
+      - name: "Semgrep(SAST)"
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          cd "${{ inputs.repo_path }}"
-          docker run --rm -v "$PWD:/src" returntocorp/semgrep:latest \
-            semgrep --config "${{ inputs.semgrep_config }}" --json \
-            --error --timeout 240 \
-            > ../$ECHO_OUT/semgrep.json || true
-          echo "[ECHO][OK] semgrep 완료 -> $ECHO_OUT/semgrep.json"
+          docker run --rm \
+            -v "$SRC_DIR:/src" \
+            -v "$SEMGREP_CACHE:/home/semgrep/.cache/semgrep" \
+            returntocorp/semgrep:latest semgrep --config "${{ inputs.semgrep_config }}" \
+              --json --error --timeout 240 \
+              > "$ECHO_OUT/semgrep.json" || true
+          echo "[ECHO][OK] semgrep -> $ECHO_OUT/semgrep.json"
 
-      - name: "Trivy Filesystem(종속성/바이너리) - Docker"
+      - name: "Trivy Filesystem(종속성/바이너리/비밀/라이선스/구성)"
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          cd "${{ inputs.repo_path }}"
-          docker run --rm -v "$PWD:/fs" aquasec/trivy:latest fs /fs \
-            --severity "${{ inputs.trivy_severity }}" \
-            --scanners vuln,secret,misconfig,license \
-            --timeout 5m \
-            --format sarif --output ../$ECHO_OUT/trivy-fs.sarif || true
-          echo "[ECHO][OK] trivy fs 완료 -> $ECHO_OUT/trivy-fs.sarif"
+          SKIP=""
+          IFS=',' read -ra PATS <<< "${{ inputs.trivy_skip_files }}"
+          for p in "${PATS[@]}"; do SKIP="$SKIP --skip-files $p"; done
+          docker run --rm \
+            -v "$SRC_DIR:/fs" \
+            -v "$TRIVY_CACHE:/root/.cache/trivy" \
+            -v "$ECHO_OUT:/out" \
+            aquasec/trivy:latest fs /fs \
+              --severity "${{ inputs.trivy_severity }}" \
+              --scanners vuln,secret,misconfig,license \
+              --timeout 5m \
+              --format sarif --output /out/trivy-fs.sarif $SKIP || true
+          echo "[ECHO][OK] trivy fs -> $ECHO_OUT/trivy-fs.sarif"
 
-      - name: "아티팩트 업로드 (SAST/Secrets/Deps)"
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: echoosec-sast-secrets-deps
           path: |
-            .github/echo_sec/out/gitleaks.sarif
-            .github/echo_sec/out/semgrep.json
-            .github/echo_sec/out/trivy-fs.sarif
+            ${{ env.ECHO_OUT }}/gitleaks.sarif
+            ${{ env.ECHO_OUT }}/semgrep.json
+            ${{ env.ECHO_OUT }}/trivy-fs.sarif
           if-no-files-found: warn
           retention-days: 7
 
@@ -153,138 +176,115 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: "Trivy Image - Docker"
+      - name: "보관 디렉토리"
+        run: mkdir -p "$ECHO_OUT" "$TRIVY_CACHE"
+      - name: "Trivy Image"
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_OUT"
           docker pull "${{ inputs.docker_image }}" || true
-          docker run --rm aquasec/trivy:latest image "${{ inputs.docker_image }}" \
-            --severity "${{ inputs.trivy_severity }}" \
-            --timeout 5m \
-            --format sarif --output "$ECHO_OUT/trivy-image.sarif" || true
-          echo "[ECHO][OK] trivy image 완료 -> $ECHO_OUT/trivy-image.sarif"
+          docker run --rm \
+            -v "$TRIVY_CACHE:/root/.cache/trivy" \
+            -v "$ECHO_OUT:/out" \
+            aquasec/trivy:latest image "${{ inputs.docker_image }}" \
+              --severity "${{ inputs.trivy_severity }}" \
+              --timeout 5m \
+              --format sarif --output /out/trivy-image.sarif || true
+          echo "[ECHO][OK] trivy image -> $ECHO_OUT/trivy-image.sarif"
       - uses: actions/upload-artifact@v4
         with:
           name: echoosec-image
-          path: .github/echo_sec/out/trivy-image.sarif
+          path: ${{ env.ECHO_OUT }}/trivy-image.sarif
           if-no-files-found: warn
           retention-days: 7
 
   web_scan_zap:
     name: "🌐 ZAP Baseline (옵션)"
     needs: guard
-    if: ${{ needs.guard.outputs.allowed == 'true' && inputs.target_url != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.guard.outputs.allowed == 'true' && inputs.target_url != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: "ZAP Baseline - Docker"
+      - run: mkdir -p "$ECHO_OUT"
+      - name: "ZAP Baseline"
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_OUT"
-          docker run --rm -u root owasp/zap2docker-stable zap-baseline.py \
-            -t "${{ inputs.target_url }}" \
-            -m ${{ inputs.zap_max_time }} \
-            -r report.html -x report.xml || true
-          # 수집물 저장
-          cid=$(docker create owasp/zap2docker-stable)
-          docker cp "$cid:/zap/report.html" "$ECHO_OUT/zap-report.html" || true
-          docker cp "$cid:/zap/report.xml"  "$ECHO_OUT/zap-report.xml"  || true
-          docker rm "$cid" >/dev/null || true
-          echo "[ECHO][OK] ZAP 보고서 -> $ECHO_OUT/zap-report.[html|xml]"
-
+          docker run --rm -u root \
+            -v "$ECHO_OUT:/zap/wrk" \
+            owasp/zap2docker-stable zap-baseline.py \
+              -t "${{ inputs.target_url }}" \
+              -m ${{ inputs.zap_max_time }} \
+              -r zap-report.html -x zap-report.xml || true
+          echo "[ECHO][OK] ZAP -> $ECHO_OUT/zap-report.[html|xml]"
       - uses: actions/upload-artifact@v4
         with:
           name: echoosec-zap
           path: |
-            .github/echo_sec/out/zap-report.html
-            .github/echo_sec/out/zap-report.xml
+            ${{ env.ECHO_OUT }}/zap-report.html
+            ${{ env.ECHO_OUT }}/zap-report.xml
           if-no-files-found: warn
           retention-days: 7
 
   http_header_audit:
-    name: "🧪 HTTP 보안헤더 점검(샘플 프로그램)"
+    name: "🧪 HTTP 보안헤더 점검(샘플)"
     needs: guard
-    if: ${{ needs.guard.outputs.allowed == 'true' && inputs.target_url != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.guard.outputs.allowed == 'true' && inputs.target_url != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: "샘플 코드 생성: headers_audit.py"
+      - run: mkdir -p "$ECHO_ROOT/tools" "$ECHO_OUT"
+      - name: "headers_audit.py 생성"
         run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_DIR/tools" "$ECHO_OUT"
-          cat <<'PY' > "$ECHO_DIR/tools/headers_audit.py"
+          cat > "$ECHO_ROOT/tools/headers_audit.py" <<'PY'
           import sys, json, requests
-          from urllib.parse import urlparse
-
           TARGET = sys.argv[1]
           MUST = [
-              "strict-transport-security",
-              "content-security-policy",
-              "x-frame-options",
-              "x-content-type-options",
-              "referrer-policy",
-              "permissions-policy",
+            "strict-transport-security",
+            "content-security-policy",
+            "x-frame-options",
+            "x-content-type-options",
+            "referrer-policy",
+            "permissions-policy",
           ]
           res = requests.get(TARGET, timeout=20, allow_redirects=True)
           headers = {k.lower(): v for k, v in res.headers.items()}
           report = {"target": TARGET, "status": res.status_code, "missing": [], "present": {}}
           for h in MUST:
-              if h in headers:
-                  report["present"][h] = headers[h]
-              else:
-                  report["missing"].append(h)
+              (report["present"] if h in headers else report["missing"]).append(headers.get(h, h))
           print(json.dumps(report, ensure_ascii=False, indent=2))
           PY
-          echo "[ECHO][OK] headers_audit.py 생성"
-
-      - name: "실행 & 보고서 저장"
+      - name: "실행"
         run: |
           python3 -m pip install --upgrade pip requests >/dev/null
-          python3 "$ECHO_DIR/tools/headers_audit.py" "${{ inputs.target_url }}" \
-            | tee "$ECHO_OUT/http-headers.json"
-          echo "[ECHO][OK] HTTP 헤더 점검 완료 -> $ECHO_OUT/http-headers.json"
-
+          python3 "$ECHO_ROOT/tools/headers_audit.py" "${{ inputs.target_url }}" | tee "$ECHO_OUT/http-headers.json"
       - uses: actions/upload-artifact@v4
         with:
           name: echoosec-http-headers
-          path: .github/echo_sec/out/http-headers.json
+          path: ${{ env.ECHO_OUT }}/http-headers.json
           if-no-files-found: warn
           retention-days: 7
 
   nmap_safe:
     name: "📡 Nmap 안전 스캔(옵션)"
     needs: guard
-    if: ${{ needs.guard.outputs.allowed == 'true' && inputs.enable_nmap == 'true' && inputs.nmap_targets != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.guard.outputs.allowed == 'true' && inputs.enable_nmap == 'true' && inputs.nmap_targets != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: "Nmap 설치"
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y nmap
-
-      - name: "Nmap 안전 옵션 실행"
+      - run: sudo apt-get update -y && sudo apt-get install -y nmap && mkdir -p "$ECHO_OUT"
+      - name: "Nmap 안전 옵션"
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_OUT"
-          # 안전 범주: 서비스 버전 식별, 상위 200포트, 보수적 타이밍
-          nmap -sV -T3 --top-ports 200 -oN "$ECHO_OUT/nmap.txt" -oX "$ECHO_OUT/nmap.xml" \
-            ${{ inputs.nmap_targets }} || true
-          echo "[ECHO][OK] nmap 결과 -> $ECHO_OUT/nmap.[txt|xml]"
-
+          nmap -sV -T3 --top-ports 200 -oN "$ECHO_OUT/nmap.txt" -oX "$ECHO_OUT/nmap.xml" ${{ inputs.nmap_targets }} || true
+          echo "[ECHO][OK] nmap -> $ECHO_OUT/nmap.[txt|xml]"
       - uses: actions/upload-artifact@v4
         with:
           name: echoosec-nmap
           path: |
-            .github/echo_sec/out/nmap.txt
-            .github/echo_sec/out/nmap.xml
+            ${{ env.ECHO_OUT }}/nmap.txt
+            ${{ env.ECHO_OUT }}/nmap.xml
           if-no-files-found: warn
           retention-days: 7
 
@@ -294,12 +294,12 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: "결과 요약(SUMMARY)"
+      - name: "결과 요약"
         run: |
           {
-            echo "## EchoSec 실행 요약"
+            echo "## EchoSec v2 실행 요약"
             echo "- legal_ack(외부스캔 허용): \`${{ needs.guard.outputs.allowed }}\`"
-            echo "- 산출물 경로: \`$ECHO_DIR/out\` (아티팩트 첨부)"
+            echo "- 산출물: \`$ECHO_OUT\`"
             echo ""
             echo "| 카테고리 | 파일 |"
             echo "|---|---|"
