@@ -1,34 +1,26 @@
-name: "🗄️ Hitachi Storage CLI Installer + EchoOps v2 (CCI/SNM2/OpsCenter | GH Release + S3 + Artifactory + Fallback)"
+name: "🗄️ Hitachi Storage CLI Installer + EchoOps v2.1 (≤10 inputs)"
 
 on:
   workflow_dispatch:
     inputs:
       accept_eula:
-        description: "벤더 EULA/라이선스 동의 여부 (true 여야 진행)"
+        description: "벤더 EULA/라이선스 동의 (true 여야 진행)"
         required: true
         default: "false"
-      family:
-        description: "제품군 (vsp, vssb, snm2)"
+      product_family:
+        description: "제품군 (vsp | vssb | snm2)"
         required: true
         default: "vsp"
-      cci_version:
-        description: "CCI/OpsCenter/SNM2 버전 식별자 (예: 01-82-03-00, 11.0.x 등)"
+      version:
+        description: "버전 식별자 (예: 01-82-03-00, 11.0.x)"
         required: false
         default: ""
-      distro:
-        description: "배포판 (ubuntu, rhel, rocky, sles)"
+      target:
+        description: "배포/아키텍처 (예: ubuntu:noble@amd64 또는 ubuntu-jammy-amd64 / rhel-9-x86_64)"
         required: true
-        default: "ubuntu"
-      release:
-        description: "배포판 릴리스 (ubuntu: noble|jammy, rhel/rocky: 8|9 등)"
-        required: true
-        default: "noble"
-      arch:
-        description: "아키텍처 (x86_64|amd64|aarch64)"
-        required: true
-        default: "amd64"
+        default: "ubuntu:noble@amd64"
       install_dir:
-        description: "수동 배포시 설치 경로"
+        description: "수동 배포 설치 경로"
         required: true
         default: "/opt/hitachi/cli"
       run_sanity_tests:
@@ -39,17 +31,14 @@ on:
         description: "로그/산출물 site/ 커밋 및 아티팩트 업로드"
         required: true
         default: "true"
-      # 외부 매니페스트 URL(여러 개 가능, 공백으로 구분). presigned/사내용 가능.
       manifest_urls:
-        description: "(선택) 추가 매니페스트 URL 목록(공백 구분)"
+        description: "(선택) 추가 매니페스트 URL 목록(공백 구분, presigned/사내용 가능)"
         required: false
         default: ""
-      # 내부 사설 URL에 접근할 때 필요한 헤더 키=값 페어(여러 줄 입력)
       extra_headers:
-        description: "(선택) 사설 URL용 HTTP 헤더 (예: Authorization: Bearer XXX)"
+        description: "(선택) 사설 URL용 HTTP 헤더 (여러 줄 입력 가능: Authorization: Bearer XXX)"
         required: false
         default: ""
-      # 강제 설치 대상 파일명(매니페스트 우회용). 확장자에 따라 deb/rpm/tar/zip 처리
       force_filename:
         description: "(선택) 강제 파일명 (예: CCI-01-82-03-Linux-x86_64.deb)"
         required: false
@@ -92,13 +81,41 @@ jobs:
           fi
           echo "[ECHO] EULA accepted." | tee -a "$ECHO_LOG/install.log"
 
+      - name: "Parse target (distro/release/arch)"
+        id: target
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -Eeuo pipefail
+          t="$TARGET"
+          # 허용 형식:
+          # 1) ubuntu:noble@amd64
+          # 2) ubuntu-noble-amd64
+          # 3) rhel-9-x86_64 / rocky-8-x86_64 / sles-15-x86_64 등
+          if [[ "$t" =~ ^([^:@-]+):([^@]+)@(.+)$ ]]; then
+            distro="${BASH_REMATCH[1]}"
+            release="${BASH_REMATCH[2]}"
+            arch="${BASH_REMATCH[3]}"
+          else
+            IFS='-' read -r distro release arch <<<"$t"
+            if [[ -z "$arch" ]]; then
+              echo "[ECHO][FAIL] target 형식이 올바르지 않습니다: $t" | tee -a "$ECHO_LOG/install.log"
+              exit 10
+            fi
+          fi
+          echo "distro=$distro"   >> $GITHUB_OUTPUT
+          echo "release=$release" >> $GITHUB_OUTPUT
+          echo "arch=$arch"       >> $GITHUB_OUTPUT
+          echo "[ECHO] target => distro=$distro release=$release arch=$arch" | tee -a "$ECHO_LOG/install.log"
+
       - name: "Apt update + deps"
         shell: bash
         run: |
           set -Eeuo pipefail
           echo "[ECHO] apt update + base deps..." | tee -a "$ECHO_LOG/install.log"
           sudo apt-get update -y >>"$ECHO_LOG/apt.log" 2>&1
-          sudo apt-get install -y --no-install-recommends curl ca-certificates jq tar xz-utils unzip rpm alien file coreutils >>"$ECHO_LOG/apt.log" 2>&1
+          sudo apt-get install -y --no-install-recommends curl ca-certificates jq tar xz-utils unzip rpm alien file coreutils gh >>"$ECHO_LOG/apt.log" 2>&1
           echo "[ECHO][OK] apt deps installed." | tee -a "$ECHO_LOG/install.log"
 
       - name: "Build default manifest (embedded)"
@@ -106,8 +123,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # NOTE: 아래는 예시 스키마. 실제 URL은 사내용(비공개)으로 관리하세요.
-          # sources: gh_release / s3 / artifactory / http(s)
           cat > "$ECHO_OUT/manifest.base.json" <<'JSON'
           {
             "schema": "hitachi-cli-manifest/v1",
@@ -180,7 +195,6 @@ jobs:
               [[ -z "$u" ]] && continue
               echo "[ECHO] Fetch manifest: $u" | tee -a "$ECHO_LOG/install.log"
               HFILE="$ECHO_OUT/$(basename "$u" | tr -cd '[:alnum:]._-')"
-              # 헤더 주입 지원
               if [[ -n "${{ inputs.extra_headers }}" ]]; then
                 while IFS= read -r line; do
                   [[ -z "$line" ]] && continue
@@ -190,7 +204,6 @@ jobs:
               else
                 curl -fsSL "$u" -o "$HFILE"
               fi
-              # 단순 병합(뒤가 우선). 필요시 jq 깊은 병합 정책 조정 가능.
               jq -s '.[0] as $a | .[1] as $b |
                      $a + {entries: ($a.entries + ($b.entries // []))}' \
                 "$ECHO_OUT/manifest.merged.json" "$HFILE" > "$ECHO_OUT/manifest.tmp.json"
@@ -203,11 +216,11 @@ jobs:
         id: resolve
         shell: bash
         env:
-          FAMILY: ${{ inputs.family }}
-          CCI_VER: ${{ inputs.cci_version }}
-          DISTRO: ${{ inputs.distro }}
-          REL:    ${{ inputs.release }}
-          ARCH:   ${{ inputs.arch }}
+          FAMILY:  ${{ inputs.product_family }}
+          CCI_VER: ${{ inputs.version }}
+          DISTRO:  ${{ steps.target.outputs.distro }}
+          REL:     ${{ steps.target.outputs.release }}
+          ARCH:    ${{ steps.target.outputs.arch }}
           FORCE_FILENAME: ${{ inputs.force_filename }}
         run: |
           set -Eeuo pipefail
@@ -215,14 +228,12 @@ jobs:
           echo "[ECHO] Resolve asset for family=$FAMILY ver=$CCI_VER ${DISTRO}/${REL} ${ARCH}" | tee -a "$ECHO_LOG/install.log"
 
           if [[ -n "$FORCE_FILENAME" ]]; then
-            echo "[ECHO] FORCE filename specified: $FORCE_FILENAME" | tee -a "$ECHO_LOG/install.log"
             echo "filename=$FORCE_FILENAME" >> $GITHUB_OUTPUT
             echo "type=$(echo "$FORCE_FILENAME" | awk -F. '{print $NF}')" >> $GITHUB_OUTPUT
             echo "source=forced" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # 후보 항목 필터링
           jq -r --arg f "$FAMILY" --arg v "$CCI_VER" --arg d "$DISTRO" --arg r "$REL" --arg a "$ARCH" '
             .entries
             | map(select(.family==$f and (.cci_version==$v or ($v|length==0)) and .distro==$d and .release==$r and .arch==$a))
@@ -237,7 +248,7 @@ jobs:
           PREF=$(jq -r '.prefer[]?' "$ECHO_OUT/resolve.entry.json")
           [[ -z "$PREF" ]] && PREF="deb rpm tar zip"
 
-          FOUND_TYPE=""
+          : > "$ECHO_OUT/candidates.txt"
           for t in $PREF; do
             jq -e --arg t "$t" '.files[$t]' "$ECHO_OUT/resolve.entry.json" >/dev/null 2>&1 || continue
             FN=$(jq -r --arg t "$t" '.files[$t].filename' "$ECHO_OUT/resolve.entry.json")
@@ -259,34 +270,26 @@ jobs:
           TYPE:     ${{ steps.resolve.outputs.type }}
           FILENAME: ${{ steps.resolve.outputs.filename }}
           SHA256:   ${{ steps.resolve.outputs.sha256 }}
-          MFILE:    ${{ steps.manifest_merge.outputs.path }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 선택: 사설 베이스 URL(리포 환경변수/시크릿로 제공)
-          S3_CCI_BASE: ${{ secrets.S3_CCI_BASE }}
-          S3_SNM2_BASE: ${{ secrets.S3_SNM2_BASE }}
+          S3_CCI_BASE:   ${{ secrets.S3_CCI_BASE }}
+          S3_SNM2_BASE:  ${{ secrets.S3_SNM2_BASE }}
           ARTI_CCI_BASE: ${{ secrets.ARTI_CCI_BASE }}
         run: |
           set -Eeuo pipefail
           cd "$ECHO_OUT"
           echo "[ECHO] Fetching $FILENAME (type=$TYPE)" | tee -a "$ECHO_LOG/install.log"
-
-          # resolve.entry.json 재사용
           cp "$ECHO_OUT/resolve.entry.json" ./entry.json
 
-          # 1) GH Releases
           SRC=$(jq -r '.files[$TYPE].sources[]? | select(.type=="gh_release") | @base64' entry.json | head -n1 || true)
           if [[ -n "$SRC" ]]; then
-            echo "[ECHO] Try GH Release..." | tee -a "$ECHO_LOG/install.log"
             REPO=$(echo "$SRC" | base64 -d | jq -r '.repo')
             TAG=$(echo "$SRC"  | base64 -d | jq -r '.tag')
             gh release download "$TAG" --repo "$REPO" --pattern "$FILENAME" --clobber >>"$ECHO_LOG/fetch.log" 2>&1 || true
           fi
 
-          # 2) S3
           if [[ ! -f "$FILENAME" ]]; then
             SRC=$(jq -r '.files[$TYPE].sources[]? | select(.type=="s3") | .url' entry.json | head -n1 || true)
             if [[ -n "$SRC" ]]; then
-              echo "[ECHO] Try S3 url..." | tee -a "$ECHO_LOG/install.log"
               if [[ -n "${{ inputs.extra_headers }}" ]]; then
                 while IFS= read -r line; do [[ -z "$line" ]] && continue; H+=(-H "$line"); done <<< "${{ inputs.extra_headers }}"
                 curl -fsSL "${H[@]}" "$SRC" -o "$FILENAME" >>"$ECHO_LOG/fetch.log" 2>&1 || true
@@ -296,11 +299,9 @@ jobs:
             fi
           fi
 
-          # 3) Artifactory
           if [[ ! -f "$FILENAME" ]]; then
             SRC=$(jq -r '.files[$TYPE].sources[]? | select(.type=="artifactory") | .url' entry.json | head -n1 || true)
             if [[ -n "$SRC" ]]; then
-              echo "[ECHO] Try Artifactory url..." | tee -a "$ECHO_LOG/install.log"
               if [[ -n "${{ inputs.extra_headers }}" ]]; then
                 while IFS= read -r line; do [[ -z "$line" ]] && continue; H+=(-H "$line"); done <<< "${{ inputs.extra_headers }}"
                 curl -fsSL "${H[@]}" "$SRC" -o "$FILENAME" >>"$ECHO_LOG/fetch.log" 2>&1 || true
@@ -310,11 +311,9 @@ jobs:
             fi
           fi
 
-          # 4) HTTP(S) generic (manifest에 type 없이 url만 있는 경우를 대비)
           if [[ ! -f "$FILENAME" ]]; then
             URL=$(jq -r '.files[$TYPE].sources[]? | select(.url!=null) | .url' entry.json | head -n1 || true)
             if [[ -n "$URL" ]]; then
-              echo "[ECHO] Try generic url..." | tee -a "$ECHO_LOG/install.log"
               if [[ -n "${{ inputs.extra_headers }}" ]]; then
                 while IFS= read -r line; do [[ -z "$line" ]] && continue; H+=(-H "$line"); done <<< "${{ inputs.extra_headers }}"
                 curl -fsSL "${H[@]}" "$URL" -o "$FILENAME" >>"$ECHO_LOG/fetch.log" 2>&1 || true
@@ -342,13 +341,12 @@ jobs:
         shell: bash
         env:
           FILENAME: ${{ steps.resolve.outputs.filename }}
-          TYPE:     ${{ steps.resolve.outputs.type }}
           DEST:     ${{ inputs.install_dir }}
         run: |
           set -Eeuo pipefail
           cd "$ECHO_OUT"
           case "$FILENAME" in
-            *.deb) 
+            *.deb)
               echo "[ECHO] dpkg -i $FILENAME" | tee -a "$ECHO_LOG/install.log"
               sudo dpkg -i "$FILENAME" >>"$ECHO_LOG/deb_install.log" 2>&1 || sudo apt-get -f install -y >>"$ECHO_LOG/deb_install.log" 2>&1
               ;;
@@ -364,9 +362,9 @@ jobs:
               sudo chown -R $USER:$USER "$DEST"
               case "$FILENAME" in
                 *.tar.gz|*.tgz) tar -xzf "$FILENAME" -C "$DEST" ;;
-                *.tar.xz) tar -xJf "$FILENAME" -C "$DEST" ;;
-                *.tar) tar -xf "$FILENAME" -C "$DEST" ;;
-                *.zip) unzip -o "$FILENAME" -d "$DEST" >>"$ECHO_LOG/unzip.log" 2>&1 ;;
+                *.tar.xz)       tar -xJf "$FILENAME" -C "$DEST" ;;
+                *.tar)          tar -xf  "$FILENAME" -C "$DEST" ;;
+                *.zip)          unzip -o "$FILENAME" -d "$DEST" >>"$ECHO_LOG/unzip.log" 2>&1 ;;
               esac
               sudo mkdir -p /opt/hitachi/cli/bin
               for b in raidcom auunitadd; do
@@ -393,7 +391,6 @@ jobs:
           echo "[ECHO] Sanity checks..." | tee -a "$ECHO_LOG/test.log"
           (command -v raidcom && echo "[ECHO][OK] raidcom in PATH: $(command -v raidcom)") | tee -a "$ECHO_LOG/test.log" || echo "[ECHO][WARN] raidcom not found" | tee -a "$ECHO_LOG/test.log"
           (command -v auunitadd && echo "[ECHO][OK] auunitadd in PATH: $(command -v auunitadd)") | tee -a "$ECHO_LOG/test.log" || echo "[ECHO][WARN] auunitadd not found" | tee -a "$ECHO_LOG/test.log"
-          # Some builds may not support --version; ignore errors
           if command -v raidcom >/dev/null 2>&1; then
             (raidcom --version || true) >>"$ECHO_LOG/test.log" 2>&1 || true
           fi
@@ -404,11 +401,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                --arg family "${{ inputs.family }}" \
-                --arg cci_version "${{ inputs.cci_version }}" \
-                --arg distro "${{ inputs.distro }}" \
-                --arg release "${{ inputs.release }}" \
-                --arg arch "${{ inputs.arch }}" \
+                --arg family "${{ inputs.product_family }}" \
+                --arg cci_version "${{ inputs.version }}" \
+                --arg distro "${{ steps.target.outputs.distro }}" \
+                --arg release "${{ steps.target.outputs.release }}" \
+                --arg arch "${{ steps.target.outputs.arch }}" \
                 --arg install_dir "${{ inputs.install_dir }}" \
                 '{ts:$ts,family:$family,cci_version:$cci_version,distro:$distro,release:$release,arch:$arch,install_dir:$install_dir}' \
             | tee "$ECHO_OUT/inputs.json"
