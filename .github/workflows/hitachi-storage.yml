@@ -1,23 +1,254 @@
-name: Hitachi Bulk Storage Install
+name: "🗄️ Hitachi Storage CLI Installer + EchoOps v1 (Deb/RPM/Tar Fallback + Archive)"
 
 on:
-  push:
-    branches:
-      - main
-      - 'release/**'
-      - 'feature/**'
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      hitachi_deb_url:
+        description: "(선택) Hitachi CLI .deb 다운로드 URL"
+        required: false
+        default: ""
+      hitachi_rpm_url:
+        description: "(선택) Hitachi CLI .rpm 다운로드 URL (alien으로 변환)"
+        required: false
+        default: ""
+      hitachi_tar_url:
+        description: "(선택) Hitachi CLI .tar(.gz/.xz) 또는 .zip 다운로드 URL"
+        required: false
+        default: ""
+      cli_install_dir:
+        description: "수동 배포 설치 대상 경로(폴백 시 사용). 예: /opt/hitachi/cli"
+        required: true
+        default: "/opt/hitachi/cli"
+      accept_eula:
+        description: "벤더 EULA/라이선스 동의 여부(true일 때만 설치 진행)"
+        required: true
+        default: "false"
+      run_sanity_tests:
+        description: "설치 후 raidcom 등 바이너리 확인/버전 호출"
+        required: true
+        default: "true"
+      make_archives:
+        description: "로그/산출물 site/ 및 artifact 업로드"
+        required: true
+        default: "true"
+  # 요청하신 주기 실행이 필요하면 주석 해제 (5분마다)
+  # schedule:
+  #   - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  ECHO_ROOT: .github/echo_storage
+  ECHO_LOG: .github/echo_storage/logs
+  ECHO_OUT: .github/echo_storage/out
+  SITE_DIR: site/hitachi
+  PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/hitachi/cli/bin
 
 jobs:
-  install-hitachi-storage:
+  install-hitachi-cli:
+    name: "Install Hitachi Storage CLI with Fallbacks"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Install Hitachi Storage
-        env:
-          HITACHI_STORAGE_SIZE: large
-          HITACHI_STORAGE_RELEASE: ${{ github.ref_name }}
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Prep: mkdir + Echo headers"
+        shell: bash
         run: |
-          bash scripts/install_hitachi_storage.sh
+          set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
+          TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "[ECHO] TS=$TS :: Start Hitachi CLI install" | tee -a "$ECHO_LOG/install.log"
+          echo "[ECHO] Runner: $(uname -a)" | tee -a "$ECHO_LOG/install.log"
+
+      - name: "Env/EULA check"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "${{ inputs.accept_eula }}" != "true" ]]; then
+            echo "[ECHO][FAIL] EULA not accepted. Set accept_eula=true to proceed." | tee -a "$ECHO_LOG/install.log"
+            exit 2
+          fi
+          echo "[ECHO] EULA accepted." | tee -a "$ECHO_LOG/install.log"
+
+      - name: "Apt update + deps"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] apt update + base deps..." | tee -a "$ECHO_LOG/install.log"
+          sudo apt-get update -y >>"$ECHO_LOG/apt.log" 2>&1
+          sudo apt-get install -y --no-install-recommends curl ca-certificates jq tar xz-utils unzip rpm alien file >>"$ECHO_LOG/apt.log" 2>&1
+          echo "[ECHO][OK] apt deps installed." | tee -a "$ECHO_LOG/install.log"
+
+      - name: "Guard: remove failing apt path (hitachi-storage-cli)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] Skipping apt install of 'hitachi-storage-cli' (not in Ubuntu repos)." | tee -a "$ECHO_LOG/install.log"
+
+      - name: "Try DEB install (if hitachi_deb_url provided)"
+        id: deb
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          URL="${{ inputs.hitachi_deb_url }}"
+          if [[ -n "$URL" ]]; then
+            echo "[ECHO] DEB path via URL: $URL" | tee -a "$ECHO_LOG/install.log"
+            cd "$ECHO_OUT"
+            curl -fsSL "$URL" -o hitachi-cli.deb
+            file hitachi-cli.deb | tee -a "$ECHO_LOG/install.log"
+            sudo dpkg -i hitachi-cli.deb >>"$ECHO_LOG/deb_install.log" 2>&1 || sudo apt-get -f install -y >>"$ECHO_LOG/deb_install.log" 2>&1
+            echo "status=ok" >> $GITHUB_OUTPUT
+            echo "[ECHO][OK] DEB install attempted." | tee -a "$ECHO_LOG/install.log"
+          else
+            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "[ECHO] No DEB URL provided. Skipping DEB path." | tee -a "$ECHO_LOG/install.log"
+          fi
+
+      - name: "Try RPM->DEB convert (if deb skipped and rpm provided)"
+        if: steps.deb.outputs.status == 'skip'
+        id: rpm
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          URL="${{ inputs.hitachi_rpm_url }}"
+          if [[ -n "$URL" ]]; then
+            echo "[ECHO] RPM path via URL: $URL" | tee -a "$ECHO_LOG/install.log"
+            cd "$ECHO_OUT"
+            curl -fsSL "$URL" -o hitachi-cli.rpm
+            file hitachi-cli.rpm | tee -a "$ECHO_LOG/install.log"
+            sudo alien -k --scripts hitachi-cli.rpm >>"$ECHO_LOG/rpm_alien.log" 2>&1
+            DEB_FILE="$(ls -1 *.deb | head -n1 || true)"
+            if [[ -n "$DEB_FILE" ]]; then
+              echo "[ECHO] Converted: $DEB_FILE" | tee -a "$ECHO_LOG/install.log"
+              sudo dpkg -i "$DEB_FILE" >>"$ECHO_LOG/rpm_install.log" 2>&1 || sudo apt-get -f install -y >>"$ECHO_LOG/rpm_install.log" 2>&1
+              echo "status=ok" >> $GITHUB_OUTPUT
+              echo "[ECHO][OK] RPM->DEB install attempted." | tee -a "$ECHO_LOG/install.log"
+            else
+              echo "status=fail" >> $GITHUB_OUTPUT
+              echo "[ECHO][WARN] No DEB produced by alien." | tee -a "$ECHO_LOG/install.log"
+            fi
+          else
+            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "[ECHO] No RPM URL provided. Skipping RPM path." | tee -a "$ECHO_LOG/install.log"
+          fi
+
+      - name: "Try TAR/ZIP unpack (if deb & rpm skipped/fail)"
+        if: |
+          (steps.deb.outputs.status == 'skip') &&
+          (steps.rpm.outputs.status == 'skip' || steps.rpm.outputs.status == 'fail')
+        id: tar
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          URL="${{ inputs.hitachi_tar_url }}"
+          DEST="${{ inputs.cli_install_dir }}"
+          if [[ -z "$URL" ]]; then
+            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "[ECHO] No TAR/ZIP URL provided. Skipping archive path." | tee -a "$ECHO_LOG/install.log"
+            exit 0
+          fi
+          echo "[ECHO] TAR/ZIP path via URL: $URL" | tee -a "$ECHO_LOG/install.log"
+          sudo mkdir -p "$DEST"
+          sudo chown -R $USER:$USER "$DEST"
+          cd "$ECHO_OUT"
+          FNAME="hitachi-cli.$(basename "$URL" | sed 's/.*\.//')"
+          curl -fsSL "$URL" -o "$FNAME"
+          file "$FNAME" | tee -a "$ECHO_LOG/install.log"
+
+          # Extract by type
+          if [[ "$FNAME" == *.tar.gz || "$FNAME" == *.tgz ]]; then
+            tar -xzf "$FNAME" -C "$DEST"
+          elif [[ "$FNAME" == *.tar.xz ]]; then
+            tar -xJf "$FNAME" -C "$DEST"
+          elif [[ "$FNAME" == *.tar ]]; then
+            tar -xf "$FNAME" -C "$DEST"
+          elif [[ "$FNAME" == *.zip ]]; then
+            unzip -o "$FNAME" -d "$DEST" >>"$ECHO_LOG/unzip.log" 2>&1
+          else
+            echo "[ECHO][FAIL] Unsupported archive type: $FNAME" | tee -a "$ECHO_LOG/install.log"
+            exit 3
+          fi
+
+          # Symlink common bins if present
+          sudo mkdir -p /opt/hitachi/cli/bin
+          if compgen -G "$DEST/**/raidcom" > /dev/null; then
+            SRC="$(ls -1 $DEST/**/raidcom | head -n1)"
+            sudo ln -sf "$SRC" /opt/hitachi/cli/bin/raidcom
+          fi
+          if compgen -G "$DEST/**/auunitadd" > /dev/null; then
+            SRC="$(ls -1 $DEST/**/auunitadd | head -n1)"
+            sudo ln -sf "$SRC" /opt/hitachi/cli/bin/auunitadd
+          fi
+          sudo chmod -R a+rx /opt/hitachi/cli || true
+          echo "status=ok" >> $GITHUB_OUTPUT
+          echo "[ECHO][OK] TAR/ZIP unpack completed." | tee -a "$ECHO_LOG/install.log"
+
+      - name: "Sanity tests (optional)"
+        if: ${{ inputs.run_sanity_tests == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "[ECHO] Sanity checks..." | tee -a "$ECHO_LOG/test.log"
+          (command -v raidcom && echo "[ECHO][OK] raidcom in PATH: $(command -v raidcom)") | tee -a "$ECHO_LOG/test.log" || echo "[ECHO][WARN] raidcom not found" | tee -a "$ECHO_LOG/test.log"
+          (command -v auunitadd && echo "[ECHO][OK] auunitadd in PATH: $(command -v auunitadd)") | tee -a "$ECHO_LOG/test.log" || echo "[ECHO][WARN] auunitadd not found" | tee -a "$ECHO_LOG/test.log"
+          # 일부 배포본은 --version 미지원일 수 있음. 존재만 확인
+          if command -v raidcom >/dev/null 2>&1; then
+            (raidcom --version || true) >>"$ECHO_LOG/test.log" 2>&1 || true
+          fi
+          echo "[ECHO][OK] Sanity completed." | tee -a "$ECHO_LOG/test.log"
+
+      - name: "Emit manifest"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "{"
+            echo "  \"ts\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+            echo "  \"deb_url\": \"${{ inputs.hitachi_deb_url }}\","
+            echo "  \"rpm_url\": \"${{ inputs.hitachi_rpm_url }}\","
+            echo "  \"tar_url\": \"${{ inputs.hitachi_tar_url }}\","
+            echo "  \"install_dir\": \"${{ inputs.cli_install_dir }}\""
+            echo "}"
+          } | tee "$ECHO_OUT/manifest.json"
+
+      - name: "Make site/ archives (optional)"
+        if: ${{ inputs.make_archives == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "$SITE_DIR/logs" "$SITE_DIR/out"
+          cp -a "$ECHO_LOG"/*.log "$SITE_DIR/logs/" || true
+          cp -a "$ECHO_OUT"/* "$SITE_DIR/out/" || true
+          tar -C site -czf "site/hitachi_${TS}.tar.gz" "hitachi"
+          echo "[ECHO][OK] Archived to site/hitachi_${TS}.tar.gz" | tee -a "$ECHO_LOG/install.log"
+
+      - name: "Upload artifact (logs/out/site)"
+        if: ${{ inputs.make_archives == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hitachi-cli-install-${{ github.run_id }}
+          path: |
+            .github/echo_storage/logs/*
+            .github/echo_storage/out/*
+            site/**/*
+
+      - name: "Commit site/ (optional)"
+        if: ${{ inputs.make_archives == 'true' && github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # 변경사항 있을 때만 커밋
+          if ! git diff --quiet --exit-code -- site/; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add site/
+            git commit -m "chore(hitachi): archive logs & outputs [${{ github.run_id }}]"
+            git push
+            echo "[ECHO][OK] site/ committed." | tee -a "$ECHO_LOG/install.log"
+          else
+            echo "[ECHO] No changes to commit in site/." | tee -a "$ECHO_LOG/install.log"
+          fi
