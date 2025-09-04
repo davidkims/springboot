@@ -1,4 +1,4 @@
-name: "🗄️ Hitachi Storage CLI Installer + EchoOps v2.1 (≤10 inputs)"
+name: "🗄️ Hitachi Storage CLI Installer + EchoOps v2.3 (≤10 inputs + mkdir guard)"
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         required: false
         default: ""
       target:
-        description: "배포/아키텍처 (예: ubuntu:noble@amd64 또는 ubuntu-jammy-amd64 / rhel-9-x86_64)"
+        description: "배포/아키텍처 (예: ubuntu:noble@amd64 | ubuntu-jammy-amd64 | rhel-9-x86_64)"
         required: true
         default: "ubuntu:noble@amd64"
       install_dir:
@@ -32,11 +32,11 @@ on:
         required: true
         default: "true"
       manifest_urls:
-        description: "(선택) 추가 매니페스트 URL 목록(공백 구분, presigned/사내용 가능)"
+        description: "(선택) 추가 매니페스트 URL 목록(공백 구분)"
         required: false
         default: ""
       extra_headers:
-        description: "(선택) 사설 URL용 HTTP 헤더 (여러 줄 입력 가능: Authorization: Bearer XXX)"
+        description: "(선택) 사설 URL용 HTTP 헤더 (여러 줄 가능: Authorization: Bearer XXX)"
         required: false
         default: ""
       force_filename:
@@ -59,10 +59,10 @@ jobs:
   install-hitachi-cli:
     runs-on: ubuntu-latest
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Prep: mkdir + Echo headers"
+      - name: Prep: mkdir + Echo headers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -71,37 +71,32 @@ jobs:
           echo "[ECHO] TS=$TS :: Start Hitachi CLI install" | tee -a "$ECHO_LOG/install.log"
           echo "[ECHO] Runner: $(uname -a)" | tee -a "$ECHO_LOG/install.log"
 
-      - name: "EULA check"
+      - name: EULA check
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           if [[ "${{ inputs.accept_eula }}" != "true" ]]; then
             echo "[ECHO][FAIL] EULA not accepted. Set accept_eula=true to proceed." | tee -a "$ECHO_LOG/install.log"
             exit 2
           fi
           echo "[ECHO] EULA accepted." | tee -a "$ECHO_LOG/install.log"
 
-      - name: "Parse target (distro/release/arch)"
+      - name: Parse target (distro/release/arch)
         id: target
         shell: bash
         env:
           TARGET: ${{ inputs.target }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           t="$TARGET"
-          # 허용 형식:
-          # 1) ubuntu:noble@amd64
-          # 2) ubuntu-noble-amd64
-          # 3) rhel-9-x86_64 / rocky-8-x86_64 / sles-15-x86_64 등
           if [[ "$t" =~ ^([^:@-]+):([^@]+)@(.+)$ ]]; then
-            distro="${BASH_REMATCH[1]}"
-            release="${BASH_REMATCH[2]}"
-            arch="${BASH_REMATCH[3]}"
+            distro="${BASH_REMATCH[1]}"; release="${BASH_REMATCH[2]}"; arch="${BASH_REMATCH[3]}"
           else
             IFS='-' read -r distro release arch <<<"$t"
             if [[ -z "$arch" ]]; then
-              echo "[ECHO][FAIL] target 형식이 올바르지 않습니다: $t" | tee -a "$ECHO_LOG/install.log"
-              exit 10
+              echo "[ECHO][FAIL] invalid target: $t" | tee -a "$ECHO_LOG/install.log"; exit 10
             fi
           fi
           echo "distro=$distro"   >> $GITHUB_OUTPUT
@@ -109,20 +104,22 @@ jobs:
           echo "arch=$arch"       >> $GITHUB_OUTPUT
           echo "[ECHO] target => distro=$distro release=$release arch=$arch" | tee -a "$ECHO_LOG/install.log"
 
-      - name: "Apt update + deps"
+      - name: Apt update + deps
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[ECHO] apt update + base deps..." | tee -a "$ECHO_LOG/install.log"
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
+          echo "[ECHO] apt update + deps..." | tee -a "$ECHO_LOG/install.log"
           sudo apt-get update -y >>"$ECHO_LOG/apt.log" 2>&1
           sudo apt-get install -y --no-install-recommends curl ca-certificates jq tar xz-utils unzip rpm alien file coreutils gh >>"$ECHO_LOG/apt.log" 2>&1
-          echo "[ECHO][OK] apt deps installed." | tee -a "$ECHO_LOG/install.log"
+          echo "[ECHO][OK] deps installed." | tee -a "$ECHO_LOG/install.log"
 
-      - name: "Build default manifest (embedded)"
+      - name: Build default manifest (embedded)
         id: manifest_base
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           cat > "$ECHO_OUT/manifest.base.json" <<'JSON'
           {
             "schema": "hitachi-cli-manifest/v1",
@@ -182,13 +179,14 @@ jobs:
           JSON
           echo "path=$ECHO_OUT/manifest.base.json" >> $GITHUB_OUTPUT
 
-      - name: "Fetch and merge extra manifest(s)"
+      - name: Fetch and merge extra manifest(s)
         id: manifest_merge
         shell: bash
         env:
           EXTRA_MANIFESTS: ${{ inputs.manifest_urls }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           cp "${{ steps.manifest_base.outputs.path }}" "$ECHO_OUT/manifest.merged.json"
           if [[ -n "${EXTRA_MANIFESTS// }" ]]; then
             echo "$EXTRA_MANIFESTS" | tr ' ' '\n' | while read -r u; do
@@ -196,23 +194,19 @@ jobs:
               echo "[ECHO] Fetch manifest: $u" | tee -a "$ECHO_LOG/install.log"
               HFILE="$ECHO_OUT/$(basename "$u" | tr -cd '[:alnum:]._-')"
               if [[ -n "${{ inputs.extra_headers }}" ]]; then
-                while IFS= read -r line; do
-                  [[ -z "$line" ]] && continue
-                  H+=(-H "$line")
-                done <<< "${{ inputs.extra_headers }}"
+                while IFS= read -r line; do [[ -z "$line" ]] && continue; H+=(-H "$line"); done <<< "${{ inputs.extra_headers }}"
                 curl -fsSL "${H[@]}" "$u" -o "$HFILE"
               else
                 curl -fsSL "$u" -o "$HFILE"
               fi
-              jq -s '.[0] as $a | .[1] as $b |
-                     $a + {entries: ($a.entries + ($b.entries // []))}' \
+              jq -s '.[0] as $a | .[1] as $b | $a + {entries: ($a.entries + ($b.entries // []))}' \
                 "$ECHO_OUT/manifest.merged.json" "$HFILE" > "$ECHO_OUT/manifest.tmp.json"
               mv "$ECHO_OUT/manifest.tmp.json" "$ECHO_OUT/manifest.merged.json"
             done
           fi
           echo "path=$ECHO_OUT/manifest.merged.json" >> $GITHUB_OUTPUT
 
-      - name: "Resolve asset from manifest"
+      - name: Resolve asset from manifest
         id: resolve
         shell: bash
         env:
@@ -224,6 +218,7 @@ jobs:
           FORCE_FILENAME: ${{ inputs.force_filename }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           MFILE="${{ steps.manifest_merge.outputs.path }}"
           echo "[ECHO] Resolve asset for family=$FAMILY ver=$CCI_VER ${DISTRO}/${REL} ${ARCH}" | tee -a "$ECHO_LOG/install.log"
 
@@ -235,9 +230,7 @@ jobs:
           fi
 
           jq -r --arg f "$FAMILY" --arg v "$CCI_VER" --arg d "$DISTRO" --arg r "$REL" --arg a "$ARCH" '
-            .entries
-            | map(select(.family==$f and (.cci_version==$v or ($v|length==0)) and .distro==$d and .release==$r and .arch==$a))
-            | .[0] // empty
+            .entries | map(select(.family==$f and (.cci_version==$v or ($v|length==0)) and .distro==$d and .release==$r and .arch==$a)) | .[0] // empty
           ' "$MFILE" > "$ECHO_OUT/resolve.entry.json"
 
           if [[ ! -s "$ECHO_OUT/resolve.entry.json" ]]; then
@@ -257,13 +250,12 @@ jobs:
           done
 
           if [[ ! -s "$ECHO_OUT/candidates.txt" ]]; then
-            echo "[ECHO][FAIL] No candidate file types in manifest." | tee -a "$ECHO_LOG/install.log"
-            exit 5
+            echo "[ECHO][FAIL] No candidate file types in manifest." | tee -a "$ECHO_LOG/install.log"; exit 5
           fi
 
           head -n1 "$ECHO_OUT/candidates.txt" | awk -F'|' '{print "type="$1"\nfilename="$2"\nsha256="$3}' >> $GITHUB_OUTPUT
 
-      - name: "Try download from sources (GH Release → S3 → Artifactory → HTTP(S))"
+      - name: Try download from sources (GH Release → S3 → Artifactory → HTTP(S))
         id: fetch
         shell: bash
         env:
@@ -276,10 +268,12 @@ jobs:
           ARTI_CCI_BASE: ${{ secrets.ARTI_CCI_BASE }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           cd "$ECHO_OUT"
           echo "[ECHO] Fetching $FILENAME (type=$TYPE)" | tee -a "$ECHO_LOG/install.log"
           cp "$ECHO_OUT/resolve.entry.json" ./entry.json
 
+          # 1) GitHub Releases
           SRC=$(jq -r '.files[$TYPE].sources[]? | select(.type=="gh_release") | @base64' entry.json | head -n1 || true)
           if [[ -n "$SRC" ]]; then
             REPO=$(echo "$SRC" | base64 -d | jq -r '.repo')
@@ -287,6 +281,7 @@ jobs:
             gh release download "$TAG" --repo "$REPO" --pattern "$FILENAME" --clobber >>"$ECHO_LOG/fetch.log" 2>&1 || true
           fi
 
+          # 2) S3
           if [[ ! -f "$FILENAME" ]]; then
             SRC=$(jq -r '.files[$TYPE].sources[]? | select(.type=="s3") | .url' entry.json | head -n1 || true)
             if [[ -n "$SRC" ]]; then
@@ -299,6 +294,7 @@ jobs:
             fi
           fi
 
+          # 3) Artifactory
           if [[ ! -f "$FILENAME" ]]; then
             SRC=$(jq -r '.files[$TYPE].sources[]? | select(.type=="artifactory") | .url' entry.json | head -n1 || true)
             if [[ -n "$SRC" ]]; then
@@ -311,6 +307,7 @@ jobs:
             fi
           fi
 
+          # 4) Generic HTTP(S)
           if [[ ! -f "$FILENAME" ]]; then
             URL=$(jq -r '.files[$TYPE].sources[]? | select(.url!=null) | .url' entry.json | head -n1 || true)
             if [[ -n "$URL" ]]; then
@@ -324,8 +321,7 @@ jobs:
           fi
 
           if [[ ! -f "$FILENAME" ]]; then
-            echo "[ECHO][FAIL] All sources failed: $FILENAME" | tee -a "$ECHO_LOG/install.log"
-            exit 6
+            echo "[ECHO][FAIL] All sources failed: $FILENAME" | tee -a "$ECHO_LOG/install.log"; exit 6
           fi
           echo "[ECHO][OK] Downloaded $FILENAME" | tee -a "$ECHO_LOG/install.log"
 
@@ -336,7 +332,7 @@ jobs:
             echo "[ECHO][WARN] No valid sha256 in manifest. Skipping checksum." | tee -a "$ECHO_LOG/install.log"
           fi
 
-      - name: "Install (DEB → RPM(alien) → TAR/ZIP)"
+      - name: Install (DEB → RPM(alien) → TAR/ZIP)
         id: install
         shell: bash
         env:
@@ -344,6 +340,7 @@ jobs:
           DEST:     ${{ inputs.install_dir }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           cd "$ECHO_OUT"
           case "$FILENAME" in
             *.deb)
@@ -376,18 +373,17 @@ jobs:
               sudo chmod -R a+rx /opt/hitachi/cli || true
               ;;
             *)
-              echo "[ECHO][FAIL] Unsupported file type: $FILENAME" | tee -a "$ECHO_LOG/install.log"
-              exit 7
-              ;;
+              echo "[ECHO][FAIL] Unsupported file type: $FILENAME" | tee -a "$ECHO_LOG/install.log"; exit 7 ;;
           esac
           echo "status=ok" >> $GITHUB_OUTPUT
           echo "[ECHO][OK] Install step completed." | tee -a "$ECHO_LOG/install.log"
 
-      - name: "Sanity tests (optional)"
+      - name: Sanity tests (optional)
         if: ${{ inputs.run_sanity_tests == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           echo "[ECHO] Sanity checks..." | tee -a "$ECHO_LOG/test.log"
           (command -v raidcom && echo "[ECHO][OK] raidcom in PATH: $(command -v raidcom)") | tee -a "$ECHO_LOG/test.log" || echo "[ECHO][WARN] raidcom not found" | tee -a "$ECHO_LOG/test.log"
           (command -v auunitadd && echo "[ECHO][OK] auunitadd in PATH: $(command -v auunitadd)") | tee -a "$ECHO_LOG/test.log" || echo "[ECHO][WARN] auunitadd not found" | tee -a "$ECHO_LOG/test.log"
@@ -396,10 +392,11 @@ jobs:
           fi
           echo "[ECHO][OK] Sanity completed." | tee -a "$ECHO_LOG/test.log"
 
-      - name: "Emit manifest + inputs snapshot"
+      - name: Emit manifest + inputs snapshot
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                 --arg family "${{ inputs.product_family }}" \
                 --arg cci_version "${{ inputs.version }}" \
@@ -410,11 +407,12 @@ jobs:
                 '{ts:$ts,family:$family,cci_version:$cci_version,distro:$distro,release:$release,arch:$arch,install_dir:$install_dir}' \
             | tee "$ECHO_OUT/inputs.json"
 
-      - name: "Archive to site/ (optional)"
+      - name: Archive to site/ (optional)
         if: ${{ inputs.make_archives == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           TS="$(date -u +%Y%m%dT%H%M%SZ)"
           mkdir -p "$SITE_DIR/logs" "$SITE_DIR/out"
           cp -a "$ECHO_LOG"/*.log "$SITE_DIR/logs/" || true
@@ -422,7 +420,7 @@ jobs:
           tar -C site -czf "site/hitachi_${TS}.tar.gz" "hitachi"
           echo "[ECHO][OK] Archived to site/hitachi_${TS}.tar.gz" | tee -a "$ECHO_LOG/install.log"
 
-      - name: "Upload artifact (logs/out/site)"
+      - name: Upload artifact (logs/out/site)
         if: ${{ inputs.make_archives == 'true' }}
         uses: actions/upload-artifact@v4
         with:
@@ -432,11 +430,12 @@ jobs:
             .github/echo_storage/out/*
             site/**/*
 
-      - name: "Commit site/ (optional)"
+      - name: Commit site/ (optional)
         if: ${{ inputs.make_archives == 'true' && github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           if ! git diff --quiet --exit-code -- site/; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
