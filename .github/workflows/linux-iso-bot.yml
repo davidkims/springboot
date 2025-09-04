@@ -1,4 +1,4 @@
-name: "🏦 Teradata + DW + Omni EchoOps v8.0.1 (Slots+NIC+Kernel+Storage+GHCR+Archives)"
+name: "🏦 Teradata + DW + Omni EchoOps v8.0.2 (Multi-Service+Release+Slots+NIC+Kernel+Storage+GHCR+Archives)"
 
 on:
   workflow_dispatch:
@@ -15,8 +15,28 @@ on:
         description: "옴니채널 서버(FastAPI) 실행 (true/false)"
         required: true
         default: "true"
-      push_image:
-        description: "옴니 이미지를 GHCR 푸시/서명 (true/false)"
+      run_analytics:
+        description: "애널리틱스 서비스 실행 (true/false)"
+        required: true
+        default: "true"
+      run_notification:
+        description: "알림 서비스 실행 (true/false)"
+        required: true
+        default: "true"
+      run_audit:
+        description: "감사 서비스 실행 (true/false)"
+        required: true
+        default: "true"
+      run_scheduler:
+        description: "스케줄러 서비스 실행 (true/false)"
+        required: true
+        default: "true"
+      push_images:
+        description: "모든 이미지를 GHCR 푸시/서명 (true/false)"
+        required: true
+        default: "false"
+      create_release:
+        description: "GitHub Release 생성 (true/false)"
         required: true
         default: "false"
       commit_changes:
@@ -29,6 +49,18 @@ on:
         default: "false"
       slots_omni:
         description: "Omni 서버 슬롯 수(컨테이너 복제 개수)"
+        required: true
+        default: "1"
+      slots_analytics:
+        description: "Analytics 서버 슬롯 수"
+        required: true
+        default: "1"
+      slots_notification:
+        description: "Notification 서버 슬롯 수"
+        required: true
+        default: "1"
+      slots_audit:
+        description: "Audit 서버 슬롯 수"
         required: true
         default: "1"
       install_nic_tools:
@@ -66,17 +98,34 @@ jobs:
       ECHO_DW: .github/echo_dw
       ECHO_NET: .github/echo_net
       ECHO_OMNI: .github/echo_omni
+      ECHO_ANALYTICS: .github/echo_analytics
+      ECHO_NOTIFICATION: .github/echo_notification
+      ECHO_AUDIT: .github/echo_audit
+      ECHO_SCHEDULER: .github/echo_scheduler
+      ECHO_RELEASE: .github/echo_releases
       ECHO_LOG: .github/echo_logs
       ECHO_ARC: .github/echo_archives
       IMAGE_REGISTRY: ghcr.io
       IMAGE_OWNER: ${{ github.repository_owner }}
       OMNI_IMAGE: omni-echo
+      ANALYTICS_IMAGE: analytics-echo
+      NOTIFICATION_IMAGE: notification-echo
+      AUDIT_IMAGE: audit-echo
+      SCHEDULER_IMAGE: scheduler-echo
       DOCKER_NET: echo-net
       PROV_DIR: .github/echo_omni
       SLOTS_OMNI: ${{ github.event.inputs.slots_omni }}
+      SLOTS_ANALYTICS: ${{ github.event.inputs.slots_analytics }}
+      SLOTS_NOTIFICATION: ${{ github.event.inputs.slots_notification }}
+      SLOTS_AUDIT: ${{ github.event.inputs.slots_audit }}
       RUN_NETWORK: ${{ github.event.inputs.run_network }}
       RUN_OMNI: ${{ github.event.inputs.run_omni }}
-      PUSH_IMAGE: ${{ github.event.inputs.push_image }}
+      RUN_ANALYTICS: ${{ github.event.inputs.run_analytics }}
+      RUN_NOTIFICATION: ${{ github.event.inputs.run_notification }}
+      RUN_AUDIT: ${{ github.event.inputs.run_audit }}
+      RUN_SCHEDULER: ${{ github.event.inputs.run_scheduler }}
+      PUSH_IMAGES: ${{ github.event.inputs.push_images }}
+      CREATE_RELEASE: ${{ github.event.inputs.create_release }}
       ENABLE_FIREWALL: ${{ github.event.inputs.enable_firewall }}
       INSTALL_NIC: ${{ github.event.inputs.install_nic_tools }}
       UPGRADE_KERNEL: ${{ github.event.inputs.upgrade_kernel }}
@@ -95,7 +144,8 @@ jobs:
           mkdir -p "${ECHO_TD}/sql/teradata" "${ECHO_TD}/sql/td_sim" \
                    "${ECHO_DW}/db" "${ECHO_DW}/queries" \
                    "${ECHO_NET}/nginx" "${ECHO_NET}/logs" "${ECHO_NET}/promtail" "${ECHO_NET}/prometheus" \
-                   "${ECHO_OMNI}" "${ECHO_LOG}" "${ECHO_ARC}"
+                   "${ECHO_OMNI}" "${ECHO_ANALYTICS}" "${ECHO_NOTIFICATION}" "${ECHO_AUDIT}" "${ECHO_SCHEDULER}" \
+                   "${ECHO_LOG}" "${ECHO_ARC}" "${ECHO_RELEASE}"
           cat > .github/echo_tools.sh <<'BASH'
           set -Eeuo pipefail
           TS(){ date +%Y%m%d_%H%M%S; }
@@ -246,6 +296,35 @@ jobs:
           CREATE TABLE IF NOT EXISTS td.dim_account( account_id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES td.dim_customer(customer_id), bank_code VARCHAR(10), currency CHAR(3) DEFAULT 'KRW', opened_ts TIMESTAMP DEFAULT NOW() );
           CREATE TABLE IF NOT EXISTS td.fact_transaction( txn_id BIGSERIAL PRIMARY KEY, account_id BIGINT NOT NULL REFERENCES td.dim_account(account_id), amount NUMERIC(18,2) NOT NULL, txn_type VARCHAR(16) CHECK (txn_type IN ('DEBIT','CREDIT')), txn_ts TIMESTAMP DEFAULT NOW() );
           CREATE TABLE IF NOT EXISTS td.echo_install_log( installed_at TIMESTAMP DEFAULT NOW(), component TEXT, detail TEXT );
+          CREATE SCHEMA IF NOT EXISTS analytics;
+          CREATE TABLE IF NOT EXISTS analytics.event_log(
+            event_id BIGSERIAL PRIMARY KEY,
+            service TEXT,
+            payload JSONB,
+            created_ts TIMESTAMP DEFAULT NOW()
+          );
+          CREATE SCHEMA IF NOT EXISTS notification;
+          CREATE TABLE IF NOT EXISTS notification.message_queue(
+            msg_id BIGSERIAL PRIMARY KEY,
+            recipient TEXT,
+            message TEXT,
+            created_ts TIMESTAMP DEFAULT NOW(),
+            sent_ts TIMESTAMP
+          );
+          CREATE SCHEMA IF NOT EXISTS audit;
+          CREATE TABLE IF NOT EXISTS audit.audit_trail(
+            audit_id BIGSERIAL PRIMARY KEY,
+            actor TEXT,
+            action TEXT,
+            audit_ts TIMESTAMP DEFAULT NOW()
+          );
+          CREATE SCHEMA IF NOT EXISTS scheduler;
+          CREATE TABLE IF NOT EXISTS scheduler.job_schedule(
+            job_id BIGSERIAL PRIMARY KEY,
+            job_name TEXT,
+            scheduled_ts TIMESTAMP DEFAULT NOW(),
+            status TEXT DEFAULT 'pending'
+          );
           SQL
           cat > "${ECHO_DW}/queries/01_daily_volume.sql" <<'SQL'
           SELECT date_trunc('day', txn_ts) AS day, COUNT(*) AS txn_count, SUM(amount) AS total_amount FROM td.fact_transaction GROUP BY 1 ORDER BY 1 DESC;
@@ -254,6 +333,18 @@ jobs:
           SELECT c.customer_id, c.name, SUM(CASE WHEN f.txn_type='CREDIT' THEN f.amount ELSE -f.amount END) AS net_flow
           FROM td.fact_transaction f JOIN td.dim_account a ON a.account_id=f.account_id JOIN td.dim_customer c ON c.customer_id=a.customer_id
           GROUP BY 1,2 ORDER BY net_flow DESC LIMIT 20;
+          SQL
+          cat > "${ECHO_DW}/queries/03_analytics_summary.sql" <<'SQL'
+          SELECT service, COUNT(*) AS event_count FROM analytics.event_log GROUP BY 1 ORDER BY 2 DESC;
+          SQL
+          cat > "${ECHO_DW}/queries/04_notification_pending.sql" <<'SQL'
+          SELECT COUNT(*) AS pending_messages FROM notification.message_queue WHERE sent_ts IS NULL;
+          SQL
+          cat > "${ECHO_DW}/queries/05_audit_recent.sql" <<'SQL'
+          SELECT actor, action, audit_ts FROM audit.audit_trail ORDER BY audit_ts DESC LIMIT 50;
+          SQL
+          cat > "${ECHO_DW}/queries/06_scheduler_tasks.sql" <<'SQL'
+          SELECT status, COUNT(*) AS cnt FROM scheduler.job_schedule GROUP BY 1;
           SQL
           . .github/echo_tools.sh
           make_archive "04_sql_templates" "${ECHO_TD}" "${ECHO_DW}"
@@ -428,6 +519,74 @@ jobs:
           DOCKER
           retry 3 3 -- ctr pull python:3.11-slim
           ctr build -t "${OMNI_IMAGE}:latest" "${ECHO_OMNI}"
+          # Build additional service images
+          cat > "${ECHO_ANALYTICS}/app.py" <<'PY'
+          from fastapi import FastAPI
+          app = FastAPI(title="Analytics Echo API")
+          @app.get("/health")
+          def health():
+            return {"status":"ok","service":"analytics"}
+          PY
+          cat > "${ECHO_ANALYTICS}/Dockerfile" <<'DOCKER'
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir fastapi uvicorn
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+          ctr build -t "${ANALYTICS_IMAGE}:latest" "${ECHO_ANALYTICS}"
+
+          cat > "${ECHO_NOTIFICATION}/app.py" <<'PY'
+          from fastapi import FastAPI
+          app = FastAPI(title="Notification Echo API")
+          @app.get("/health")
+          def health():
+            return {"status":"ok","service":"notification"}
+          PY
+          cat > "${ECHO_NOTIFICATION}/Dockerfile" <<'DOCKER'
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir fastapi uvicorn
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+          ctr build -t "${NOTIFICATION_IMAGE}:latest" "${ECHO_NOTIFICATION}"
+
+          cat > "${ECHO_AUDIT}/app.py" <<'PY'
+          from fastapi import FastAPI
+          app = FastAPI(title="Audit Echo API")
+          @app.get("/health")
+          def health():
+            return {"status":"ok","service":"audit"}
+          PY
+          cat > "${ECHO_AUDIT}/Dockerfile" <<'DOCKER'
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir fastapi uvicorn
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+          ctr build -t "${AUDIT_IMAGE}:latest" "${ECHO_AUDIT}"
+
+          cat > "${ECHO_SCHEDULER}/app.py" <<'PY'
+          from fastapi import FastAPI
+          app = FastAPI(title="Scheduler Echo API")
+          @app.get("/health")
+          def health():
+            return {"status":"ok","service":"scheduler"}
+          PY
+          cat > "${ECHO_SCHEDULER}/Dockerfile" <<'DOCKER'
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir fastapi uvicorn
+          WORKDIR /app
+          COPY app.py /app/app.py
+          EXPOSE 8000
+          CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
+          DOCKER
+          ctr build -t "${SCHEDULER_IMAGE}:latest" "${ECHO_SCHEDULER}"
           # 슬롯 기동
           export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           for i in $(seq 1 ${SLOTS_OMNI}); do
@@ -449,6 +608,51 @@ jobs:
           done
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/health >/dev/null 2>&1 && break; sleep 2; done
           echo "[OMNI] ${SLOTS_OMNI} slots up"
+          # Deploy Analytics service slots
+          if [ "${RUN_ANALYTICS}" = "true" ]; then
+            export SLOTS_ANALYTICS="${SLOTS_ANALYTICS:-1}"; [[ "${SLOTS_ANALYTICS}" =~ ^[0-9]+$ ]] || export SLOTS_ANALYTICS=1
+            for i in $(seq 1 ${SLOTS_ANALYTICS}); do
+              name="analytics-$i"; ctr rm -f "$name" >/dev/null 2>&1 || true
+              if [ "$i" -eq 1 ]; then
+                ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped -p 8091:8000 "${ANALYTICS_IMAGE}:latest"
+              else
+                ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped "${ANALYTICS_IMAGE}:latest"
+              fi
+            done
+            echo "[ANALYTICS] ${SLOTS_ANALYTICS} slots up"
+          fi
+          # Deploy Notification service slots
+          if [ "${RUN_NOTIFICATION}" = "true" ]; then
+            export SLOTS_NOTIFICATION="${SLOTS_NOTIFICATION:-1}"; [[ "${SLOTS_NOTIFICATION}" =~ ^[0-9]+$ ]] || export SLOTS_NOTIFICATION=1
+            for i in $(seq 1 ${SLOTS_NOTIFICATION}); do
+              name="notification-$i"; ctr rm -f "$name" >/dev/null 2>&1 || true
+              if [ "$i" -eq 1 ]; then
+                ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped -p 8092:8000 "${NOTIFICATION_IMAGE}:latest"
+              else
+                ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped "${NOTIFICATION_IMAGE}:latest"
+              fi
+            done
+            echo "[NOTIFICATION] ${SLOTS_NOTIFICATION} slots up"
+          fi
+          # Deploy Audit service slots
+          if [ "${RUN_AUDIT}" = "true" ]; then
+            export SLOTS_AUDIT="${SLOTS_AUDIT:-1}"; [[ "${SLOTS_AUDIT}" =~ ^[0-9]+$ ]] || export SLOTS_AUDIT=1
+            for i in $(seq 1 ${SLOTS_AUDIT}); do
+              name="audit-$i"; ctr rm -f "$name" >/dev/null 2>&1 || true
+              if [ "$i" -eq 1 ]; then
+                ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped -p 8093:8000 "${AUDIT_IMAGE}:latest"
+              else
+                ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped "${AUDIT_IMAGE}:latest"
+              fi
+            done
+            echo "[AUDIT] ${SLOTS_AUDIT} slots up"
+          fi
+          # Deploy Scheduler service
+          if [ "${RUN_SCHEDULER}" = "true" ]; then
+            name="scheduler-1"; ctr rm -f "$name" >/dev/null 2>&1 || true
+            ctr run -d --name "$name" --network "${DOCKER_NET}" --restart unless-stopped -p 8094:8000 "${SCHEDULER_IMAGE}:latest"
+            echo "[SCHEDULER] 1 slot up"
+          fi
           make_archive "09_omni_image_slots" "${ECHO_OMNI}"
       - name: 🌐 Nginx RP(슬롯 라우팅) + Exporter
         if: ${{ env.RUN_NETWORK == 'true' }}
@@ -695,19 +899,20 @@ jobs:
           make_archive "16_prom_stack" "${ECHO_NET}/prometheus"
       # ===== GHCR push + SBOM + Cosign (digest signing; auth/지연 대응) =====
       - name: 🔐 Install cosign (keyless)
-        if: ${{ env.PUSH_IMAGE == 'true' }}
+        if: ${{ env.PUSH_IMAGES == 'true' }}
         uses: sigstore/cosign-installer@v3
 
       - name: 🔑 GHCR login (actor)
-        if: ${{ env.PUSH_IMAGE == 'true' }}
+        if: ${{ env.PUSH_IMAGES == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: 🏷️ Push → resolve digest → SBOM/Scan → cosign sign/attest (+Archive)
-        if: ${{ env.PUSH_IMAGE == 'true' }}
+
+      - name: 🏷️ Push images → cosign sign (+Archive)
+        if: ${{ env.PUSH_IMAGES == 'true' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -716,40 +921,26 @@ jobs:
         run: |
           set -Eeuo pipefail
           . .github/echo_tools.sh
-          IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}:latest"
-          echo "${GITHUB_TOKEN}" | ctr login "${IMAGE_REGISTRY}" -u "${{ github.actor }}" --password-stdin
-          ctr tag "${OMNI_IMAGE}:latest" "${IMAGE}"
-          ctr push "${IMAGE}"
-          DIGEST=""
-          for i in $(seq 1 12); do
-            set +e
-            DIGEST="$(skopeo inspect --creds "${{ github.actor }}:${GITHUB_TOKEN}" docker://${IMAGE} --format '{{.Digest}}' 2>/dev/null)"
-            RC=$?; set -e
-            [ $RC -eq 0 ] && [ -n "$DIGEST" ] && break
-            echo "[INFO] waiting GHCR indexing... ($i)"; sleep 5
+          mkdir -p "${ECHO_RELEASE}"
+          for IMG in "${OMNI_IMAGE}" "${ANALYTICS_IMAGE}" "${NOTIFICATION_IMAGE}" "${AUDIT_IMAGE}" "${SCHEDULER_IMAGE}"; do
+            IMAGE="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${IMG}:latest"
+            echo "${GITHUB_TOKEN}" | ctr login "${IMAGE_REGISTRY}" -u "${{ github.actor }}" --password-stdin
+            ctr tag "${IMG}:latest" "${IMAGE}"
+            ctr push "${IMAGE}"
+            DIGEST="$(skopeo inspect --creds "${{ github.actor }}:${GITHUB_TOKEN}" docker://${IMAGE} --format '{{.Digest}}')"
+            cosign sign "${IMAGE_REGISTRY}/${IMAGE_OWNER}/${IMG}@${DIGEST}"
+            echo "${IMG}@${DIGEST}" >> "${ECHO_RELEASE}/PUSHED_IMAGES.txt"
           done
-          [ -n "$DIGEST" ] || { echo "[FAIL] cannot resolve digest for ${IMAGE}"; exit 1; }
-          SIGN_TARGET="${IMAGE_REGISTRY}/${IMAGE_OWNER}/${OMNI_IMAGE}@${DIGEST}"
-          echo "[INFO] SIGN_TARGET=${SIGN_TARGET}"
-          mkdir -p "${PROV_DIR}/supplychain"
-          ctr run --rm -e SYFT_REGISTRY_AUTH_USERNAME="${{ github.actor }}" -e SYFT_REGISTRY_AUTH_PASSWORD="${GITHUB_TOKEN}" \
-            anchore/syft:latest "${SIGN_TARGET}" -o json > "${PROV_DIR}/supplychain/sbom-syft.json" || true
-          ctr run --rm -e TRIVY_USERNAME="${{ github.actor }}" -e TRIVY_PASSWORD="${GITHUB_TOKEN}" \
-            aquasec/trivy:latest image --timeout 10m --format json "${SIGN_TARGET}" > "${PROV_DIR}/supplychain/sbom-trivy.json" || true
-          echo '{"buildType":"github-actions","builder":"echo-ops"}' > "${PROV_DIR}/supplychain/provenance.json"
-          ok=0
-          for i in 1 2 3; do
-            if cosign sign "${SIGN_TARGET}" && cosign attest --predicate "${PROV_DIR}/supplychain/provenance.json" --type slsaprovenance "${SIGN_TARGET}"; then ok=1; break; fi
-            echo "[WARN] cosign attempt #$i failed; retrying..."; sleep 5
-          done
-          [ "$ok" = "1" ] || { echo "[FAIL] cosign sign/attest failed"; exit 1; }
-          {
-            echo "IMAGE=${IMAGE}"
-            echo "SIGN_TARGET=${SIGN_TARGET}"
-            echo "PUSHED_AT=$(date -Iseconds)"
-            echo "ENGINE=${USE_PODMAN:+podman}${USE_PODMAN:-docker}"
-          } | tee "${PROV_DIR}/PROVENANCE.txt" "${ECHO_LOG}/provenance.log"
-          make_archive "17_supplychain" "${PROV_DIR}/supplychain" "${ECHO_LOG}/provenance.log" "${PROV_DIR}/PROVENANCE.txt"
+          echo "PUSHED_AT=$(date -Iseconds)" >> "${ECHO_RELEASE}/PUSHED_IMAGES.txt"
+
+      - name: 📦 Create GitHub Release
+        if: ${{ env.CREATE_RELEASE == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: echoops-${{ github.run_number }}
+          name: EchoOps Multi-Service Release ${{ github.run_number }}
+          draft: false
+          prerelease: false
       - name: 🗃️ Snapshot(SQLite) + 권한 정리 (+Archive)
         shell: bash
         run: |
@@ -794,9 +985,9 @@ jobs:
           set -Eeuo pipefail
           git config user.name "echo-bot"
           git config user.email "echo-bot@users.noreply.github.com"
-          git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_logs .github/echo_archives || true
+          git add .github/echo_td .github/echo_dw .github/echo_net .github/echo_omni .github/echo_analytics .github/echo_notification .github/echo_audit .github/echo_scheduler .github/echo_logs .github/echo_archives .github/echo_releases || true
           if git diff --cached --quiet; then echo "[GIT] no changes"; exit 0; fi
-          git commit -m "EchoOps v8.0.1: Slots+NIC+Kernel+Storage+GHCR + Archive snapshots ($(date -Iseconds))"
+          git commit -m "EchoOps v8.0.2: Multi-service DB+Images+Release ($(date -Iseconds))"
           if [ -n "${GH_ADMIN_TOKEN:-}" ]; then
             git push "https://${GH_ADMIN_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${{ github.ref_name }}
           else
