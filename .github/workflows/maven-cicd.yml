@@ -1,17 +1,23 @@
-name: "🌱 Spring Boot Maven + Scaffold Safe + Echo C/C Fullset (5min cadence)"
+name: "🌱 Spring Boot CI + Maven EchoOps + Scaffold Safe + C/C Fullset (5min cadence)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # 5분마다 실행
+    - cron: "*/5 * * * *"   # 5분 주기 C/C Pack
 
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 env:
+  ECHO_ROOT: .github/echo_sb
   ECHO_LOG: .github/echo_sb/logs
   ECHO_OUT: .github/echo_sb/out
   SITE_DIR: site/springboot
+  PROJECT_DIR: springboot-app   # 스캐폴딩/실행 디렉토리 강제 지정
 
 jobs:
   build-springboot:
@@ -20,22 +26,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare echo dirs
+      - name: Prepare dirs
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR" "$PROJECT_DIR"
 
       - name: Scaffold Spring Boot if missing
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR/scaffold"
-          if [ ! -f pom.xml ]; then
-            echo "[ECHO] No pom.xml found. Generating Spring Boot scaffold." | tee -a "$ECHO_LOG/main.log"
+          if [ ! -f "$PROJECT_DIR/pom.xml" ]; then
+            echo "[ECHO] No pom.xml → scaffolding Spring Boot." | tee -a "$ECHO_LOG/scaffold.log"
             curl -fsSL "https://start.spring.io/starter.zip?type=maven-project&language=java&groupId=com.example&artifactId=demo&name=demo&packageName=com.example.demo&javaVersion=21&dependencies=web,data-jpa,security,actuator,lombok" -o "$ECHO_OUT/starter.zip"
-            unzip -q "$ECHO_OUT/starter.zip" -d "$ECHO_OUT/sb_scaffold"
-            cp -r "$ECHO_OUT/sb_scaffold"/* "$SITE_DIR/scaffold/"
+            unzip -q "$ECHO_OUT/starter.zip" -d "$PROJECT_DIR"
+            cp -r "$PROJECT_DIR" "$SITE_DIR/scaffold/"
           else
-            echo "[ECHO] Existing pom.xml detected, skipping scaffold." | tee -a "$ECHO_LOG/main.log"
+            echo "[ECHO] Existing pom.xml detected, skipping scaffold." | tee -a "$ECHO_LOG/scaffold.log"
           fi
 
       - name: Setup Java
@@ -45,50 +50,54 @@ jobs:
           java-version: 21
           cache: maven
 
-      - name: Build with Maven
+      - name: Build & Test
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/out"
-          mvn -B -ntp clean package | tee -a "$ECHO_LOG/build.log"
-          cp target/*.jar "$SITE_DIR/out/" || true
+          mvn -B -ntp clean verify | tee -a "../$ECHO_LOG/build.log"
+          mkdir -p "../$SITE_DIR/out"
+          cp target/*.jar "../$SITE_DIR/out/" || true
 
-      - name: Generate C/C Fullset (manual run)
+      - name: Generate C/C Fullset
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/cc"
+          mkdir -p "../$SITE_DIR/cc"
           # SBOM
           mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.8.0:makeAggregateBom \
-            -DoutputFormat=json -DoutputDirectory="$SITE_DIR/cc" | tee -a "$ECHO_LOG/cc.log"
+            -DoutputFormat=json -DoutputDirectory="../$SITE_DIR/cc" | tee -a "../$ECHO_LOG/cc.log"
           # License
           mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.3.0:aggregate-add-third-party \
-            -DthirdPartyFilename="$SITE_DIR/cc/THIRD-PARTY.txt" | tee -a "$ECHO_LOG/cc.log"
+            -DthirdPartyFilename="../$SITE_DIR/cc/THIRD-PARTY.txt" | tee -a "../$ECHO_LOG/cc.log"
           # Checksums
-          : > "$SITE_DIR/cc/CHECKSUMS.sha256"
-          find "$SITE_DIR/out" -type f -name "*.jar" -print0 | xargs -0 sha256sum >> "$SITE_DIR/cc/CHECKSUMS.sha256"
+          : > "../$SITE_DIR/cc/CHECKSUMS.sha256"
+          find target -type f -name "*.jar" -print0 | xargs -0 sha256sum >> "../$SITE_DIR/cc/CHECKSUMS.sha256" || true
           # Signature mock
-          echo "-----BEGIN SIGNATURE-----" > "$SITE_DIR/cc/SIGNATURE.asc"
-          date -u >> "$SITE_DIR/cc/SIGNATURE.asc"
-          echo "-----END SIGNATURE-----" >> "$SITE_DIR/cc/SIGNATURE.asc"
+          echo "-----BEGIN SIGNATURE-----" > "../$SITE_DIR/cc/SIGNATURE.asc"
+          date -u >> "../$SITE_DIR/cc/SIGNATURE.asc"
+          echo "-----END SIGNATURE-----" >> "../$SITE_DIR/cc/SIGNATURE.asc"
+          # Archive
+          TS=$(date -u +%Y%m%d%H%M)
+          mkdir -p "../$SITE_DIR/cc/releases"
+          tar -C "../$SITE_DIR/cc" -czf "../$SITE_DIR/cc/releases/cc-pack_${TS}.tar.gz" .
+          echo "[ECHO] Archived to cc-pack_${TS}.tar.gz" | tee -a "../$ECHO_LOG/cc.log"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: springboot-echo-fullset-${{ github.run_id }}
+          name: springboot-fullset-${{ github.run_id }}
           path: |
             site/springboot/**
             .github/echo_sb/logs/*
 
   cc-pack:
-    # 5분마다 실행 (scaffold/빌드 스킵, C/C만 생성)
     if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare echo dirs
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"/cc
+      - name: Prepare dirs
+        run: mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR/cc"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -98,22 +107,23 @@ jobs:
           cache: maven
 
       - name: Generate Scheduled C/C Pack
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/cc"
-          # SBOM
+          mkdir -p "../$SITE_DIR/cc"
           mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.8.0:makeAggregateBom \
-            -DoutputFormat=json -DoutputDirectory="$SITE_DIR/cc" | tee -a "$ECHO_LOG/cc.log"
-          # License
+            -DoutputFormat=json -DoutputDirectory="../$SITE_DIR/cc" | tee -a "../$ECHO_LOG/cc.log"
           mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.3.0:aggregate-add-third-party \
-            -DthirdPartyFilename="$SITE_DIR/cc/THIRD-PARTY.txt" | tee -a "$ECHO_LOG/cc.log"
-          # Checksums
-          : > "$SITE_DIR/cc/CHECKSUMS.sha256"
-          find . -type f -name "*.jar" -print0 | xargs -0 sha256sum >> "$SITE_DIR/cc/CHECKSUMS.sha256" || true
-          # Signature mock
-          echo "-----BEGIN SIGNATURE-----" > "$SITE_DIR/cc/SIGNATURE.asc"
-          date -u >> "$SITE_DIR/cc/SIGNATURE.asc"
-          echo "-----END SIGNATURE-----" >> "$SITE_DIR/cc/SIGNATURE.asc"
+            -DthirdPartyFilename="../$SITE_DIR/cc/THIRD-PARTY.txt" | tee -a "../$ECHO_LOG/cc.log"
+          : > "../$SITE_DIR/cc/CHECKSUMS.sha256"
+          find . -type f -name "*.jar" -print0 | xargs -0 sha256sum >> "../$SITE_DIR/cc/CHECKSUMS.sha256" || true
+          echo "-----BEGIN SIGNATURE-----" > "../$SITE_DIR/cc/SIGNATURE.asc"
+          date -u >> "../$SITE_DIR/cc/SIGNATURE.asc"
+          echo "-----END SIGNATURE-----" >> "../$SITE_DIR/cc/SIGNATURE.asc"
+          TS=$(date -u +%Y%m%d%H%M)
+          mkdir -p "../$SITE_DIR/cc/releases"
+          tar -C "../$SITE_DIR/cc" -czf "../$SITE_DIR/cc/releases/cc-pack_${TS}.tar.gz" .
+          echo "[ECHO] Scheduled C/C archive cc-pack_${TS}.tar.gz created." | tee -a "../$ECHO_LOG/cc.log"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
