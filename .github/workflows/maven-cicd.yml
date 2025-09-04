@@ -1,357 +1,276 @@
-name: "🚀 Maven Enterprise: Install/Upgrade + Release + C/C Pack (5-min cadence)"
+name: "🌱 Spring Boot Bootstrap + Maven Build + Echo/Perm (auto scaffold if missing)"
 
 on:
   workflow_dispatch:
     inputs:
-      maven_version:
-        description: "설치/업그레이드할 Maven 버전 (예: 3.9.9). 빈 값이면 runner 기본 사용"
-        required: false
-        default: ""
-      jdk_distribution:
-        description: "JDK 배포판 (temurin/zulu/corretto 등)"
+      scaffold_if_missing:
+        description: "pom.xml 없으면 Spring Boot 자동 생성"
         required: true
-        default: "temurin"
-      jdk_version:
-        description: "JDK 버전"
+        default: "true"
+      group_id:
+        description: "Maven groupId (스캐폴딩용)"
+        required: true
+        default: "com.example"
+      artifact_id:
+        description: "Maven artifactId (스캐폴딩용)"
+        required: true
+        default: "demo"
+      package_name:
+        description: "패키지명 (스캐폴딩용)"
+        required: true
+        default: "com.example.demo"
+      java_version:
+        description: "Java version"
         required: true
         default: "21"
-      do_release:
-        description: "GitHub Release 생성/업로드 수행 여부 (true/false)"
-        required: true
-        default: "true"
-      release_tag:
-        description: "릴리즈 태그 (예: v1.2.3)"
+      boot_version:
+        description: "Spring Boot 버전 (빈 값이면 최신)"
         required: false
         default: ""
-      release_name:
-        description: "릴리즈 이름 (미입력 시 태그로 대체)"
-        required: false
-        default: ""
-      do_deploy:
-        description: "mvn deploy 수행 여부(settings.xml 필요)"
-        required: true
-        default: "false"
-      commit_outputs:
-        description: "site/ 하위 산출물 커밋 여부 (true/false)"
+      commit_scaffold:
+        description: "스캐폴딩된 파일을 커밋"
         required: true
         default: "true"
-      eula_accept:
-        description: "기업 정책/EULA 수락 (true/false)"
-        required: true
-        default: "true"
-
-  schedule:
-    - cron: "*/5 * * * *"   # 5분 주기 C/C Pack 생성
 
 permissions:
   contents: write
   actions: read
 
 env:
-  ECHO_ROOT: .github/echo_maven
-  ECHO_LOG: .github/echo_maven/logs
-  ECHO_OUT: .github/echo_maven/out
-  SITE_DIR: site/maven
-  MAVEN_HOME_CUSTOM: /opt/apache-maven
-  PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/apache-maven/bin
+  ECHO_ROOT: .github/echo_sb
+  ECHO_LOG: .github/echo_sb/logs
+  ECHO_OUT: .github/echo_sb/out
+  SITE_DIR: site/springboot
+  PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 jobs:
-  setup-java-maven:
-    name: "Setup JDK + Maven (install/upgrade)"
+  bootstrap-and-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Accept EULA/policy gate
+      # 0) 공통 디렉토리 보증 + 기본 정보 에코
+      - name: Prepare echo dirs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"/{logs,out,cc,perm,scaffold}
+          echo "[ECHO] Repo: $GITHUB_REPOSITORY  SHA=$GITHUB_SHA" | tee -a "$ECHO_LOG/main.log"
+
+      # 1) Spring Boot 스캐폴딩(없을 때만)
+      - name: Detect pom.xml (and optionally scaffold)
+        shell: bash
+        env:
+          GROUP_ID:     ${{ inputs.group_id }}
+          ARTIFACT_ID:  ${{ inputs.artifact_id }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          JAVA_VERSION: ${{ inputs.java_version }}
+          BOOT_VERSION: ${{ inputs.boot_version }}
+          DO_SCAFFOLD:  ${{ inputs.scaffold_if_missing }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"/scaffold
+          if find . -maxdepth 3 -name "pom.xml" | grep -q pom.xml; then
+            echo "[ECHO] Found existing pom.xml" | tee -a "$ECHO_LOG/main.log"
+            exit 0
+          fi
+
+          if [[ "$DO_SCAFFOLD" != "true" ]]; then
+            echo "[ECHO][FAIL] No pom.xml and scaffold_if_missing=false" | tee -a "$ECHO_LOG/main.log"
+            exit 22
+          fi
+
+          echo "[ECHO] Scaffolding Spring Boot project (Initializr)..." | tee -a "$ECHO_LOG/main.log"
+
+          # Spring Initializr zip 생성
+          # 외부 네트워크가 차단된 Runner라면 사내 미러 URL로 변경하세요.
+          BOOT_PARAM=""
+          if [[ -n "$BOOT_VERSION" ]]; then BOOT_PARAM="&bootVersion=${BOOT_VERSION}"; fi
+          curl -fsSL "https://start.spring.io/starter.zip?type=maven-project&language=java&groupId=${GROUP_ID}&artifactId=${ARTIFACT_ID}&name=${ARTIFACT_ID}&packageName=${PACKAGE_NAME}&javaVersion=${JAVA_VERSION}&dependencies=web,actuator${BOOT_PARAM}" \
+            -o "$ECHO_OUT/sb_starter.zip"
+          unzip -q "$ECHO_OUT/sb_starter.zip" -d "$ECHO_OUT/sb_init"
+          shopt -s dotglob
+          mv "$ECHO_OUT/sb_init"/* ./
+          shopt -u dotglob
+
+          # 샘플 Controller/설정 보강
+          mkdir -p src/main/java/$(echo "$PACKAGE_NAME" | tr . /)/controller
+          cat > src/main/java/$(echo "$PACKAGE_NAME" | tr . /)/controller/HelloController.java <<'JAVA'
+          package REPLACE_PACKAGE.controller;
+          import org.springframework.web.bind.annotation.GetMapping;
+          import org.springframework.web.bind.annotation.RestController;
+          @RestController
+          public class HelloController {
+              @GetMapping("/hello")
+              public String hello() { return "Hello, Spring Boot!"; }
+          }
+          JAVA
+          sed -i "s|REPLACE_PACKAGE|${PACKAGE_NAME}|g" src/main/java/$(echo "$PACKAGE_NAME" | tr . /)/controller/HelloController.java
+
+          mkdir -p src/main/resources
+          cat > src/main/resources/application.yml <<'YAML'
+          server:
+            port: 8080
+          management:
+            endpoints:
+              web:
+                exposure:
+                  include: health,info
+          YAML
+
+          echo "[ECHO] Scaffolded Spring Boot project." | tee -a "$ECHO_LOG/main.log"
+          cp -a pom.xml "$SITE_DIR/scaffold/pom.xml"
+          cp -a src "$SITE_DIR/scaffold/src"
+
+      # 2) (옵션) 스캐폴딩 커밋
+      - name: Commit scaffold (optional)
+        if: ${{ inputs.commit_scaffold == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
-          val="${{ inputs.eula_accept }}"
-          val="$(echo "${val:-}" | tr '[:upper:]' '[:lower:]')"
-          case "$val" in true|yes|y|1|on) echo "[ECHO] EULA/policy accepted";; *) echo "[ECHO][FAIL] EULA not accepted"; exit 2;; esac
+          if ! git diff --quiet --exit-code; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .
+            git commit -m "chore(springboot): initial scaffold via CI [${{ github.run_id }}]"
+            git push
+            echo "[ECHO] Scaffold committed." | tee -a "$ECHO_LOG/main.log"
+          else
+            echo "[ECHO] Nothing to commit." | tee -a "$ECHO_LOG/main.log"
+          fi
 
-      - name: Setup JDK (${{ inputs.jdk_distribution }} ${{ inputs.jdk_version }})
+      # 3) JDK 세팅 (setup-java는 server-id 설정을 주지 않아 settings.xml 충돌을 피함)
+      - name: Setup Java (Temurin ${{ inputs.java_version }})
         uses: actions/setup-java@v4
         with:
-          distribution: ${{ inputs.jdk_distribution }}
-          java-version: ${{ inputs.jdk_version }}
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
           cache: maven
 
-      - name: Install/Upgrade Maven (optional specific version)
-        if: ${{ inputs.maven_version != '' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR" "$MAVEN_HOME_CUSTOM"
-          VER="${{ inputs.maven_version }}"
-          echo "[ECHO] Installing Apache Maven $VER ..."
-          cd "$ECHO_OUT"
-          curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${VER}/binaries/apache-maven-${VER}-bin.tar.gz" -o "maven.tar.gz"
-          tar -xzf maven.tar.gz
-          sudo rm -rf "$MAVEN_HOME_CUSTOM"
-          sudo mv "apache-maven-${VER}" "$MAVEN_HOME_CUSTOM"
-          echo "MAVEN_HOME=$MAVEN_HOME_CUSTOM" | tee -a "$GITHUB_ENV"
-          echo "$MAVEN_HOME_CUSTOM/bin" | tee -a "$GITHUB_PATH"
-          mvn -version | tee -a "$ECHO_LOG/install.log"
-
-      - name: Verify Maven available
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
-          mvn -version | tee -a "$ECHO_LOG/install.log"
-
-      - name: Create enterprise permission & settings files
+      # 4) 기업 권한/설정 파일 생성 (settings.xml, 권한 매니페스트, 크리덴셜 템플릿 등)
+      - name: Create enterprise settings & permission files
         shell: bash
         env:
           MAVEN_SERVER_ID: ${{ secrets.MAVEN_SERVER_ID }}
-          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE:  ${{ secrets.GPG_PASSPHRASE }}
+          MAVEN_USERNAME:  ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_PASSWORD:  ${{ secrets.MAVEN_PASSWORD }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR" ~/.m2
-          echo "[ECHO] Generating ~/.m2/settings.xml (servers/profiles/mirrors)"
-          cat > ~/.m2/settings.xml <<'XML'
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR" ~/.m2 "$SITE_DIR"/perm "$SITE_DIR"/cc/credentials
+
+          # ~/.m2/settings.xml (민감값은 Secrets로만 주입)
+          cat > ~/.m2/settings.xml <<XML
           <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                                        https://maven.apache.org/xsd/settings-1.0.0.xsd">
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
             <servers>
               <server>
-                <id>${env.MAVEN_SERVER_ID}</id>
-                <username>${env.MAVEN_USERNAME}</username>
-                <password>${env.MAVEN_PASSWORD}</password>
+                <id>${MAVEN_SERVER_ID:-github}</id>
+                <username>${MAVEN_USERNAME}</username>
+                <password>${MAVEN_PASSWORD}</password>
               </server>
             </servers>
-            <mirrors>
-              <!-- 기업 미러 (필요 시 수정) -->
-              <!--
-              <mirror>
-                <id>corp-mirror</id>
-                <name>Corporate Maven Mirror</name>
-                <url>https://maven.corp.local/repository/mirror/</url>
-                <mirrorOf>*</mirrorOf>
-              </mirror>
-              -->
-            </mirrors>
             <profiles>
               <profile>
-                <id>gpg-sign</id>
+                <id>corp-default</id>
                 <properties>
-                  <gpg.executable>gpg</gpg.executable>
-                  <gpg.passphrase>${env.GPG_PASSPHRASE}</gpg.passphrase>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
                 </properties>
               </profile>
             </profiles>
             <activeProfiles>
-              <activeProfile>gpg-sign</activeProfile>
+              <activeProfile>corp-default</activeProfile>
             </activeProfiles>
           </settings>
           XML
 
-          # 권한/요구사항 매니페스트 (문서화 용)
-          mkdir -p "$SITE_DIR/perm"
+          # 권한 매니페스트 (문서/감사용)
           cat > "$SITE_DIR/perm/permission-manifest.yaml" <<'YAML'
-          # Enterprise Permission Manifest for Maven CI/CD
-          required_env:
+          required_secrets:
             - MAVEN_SERVER_ID
             - MAVEN_USERNAME
             - MAVEN_PASSWORD
-          optional_env:
-            - GPG_PRIVATE_KEY
-            - GPG_PASSPHRASE
           required_permissions:
             - contents:write
           notes:
-            - "settings.xml에는 비밀값이 포함되므로 절대 커밋하지 말 것"
-            - "GPG 서명을 사용하는 경우, CI 단계에서 비밀키 import 필요"
+            - "settings.xml은 Runner 홈(~/.m2)에만 존재해야 하며 VCS에 포함시키지 말 것"
           YAML
 
-          # GPG 비밀키 Import (선택)
-          if [[ -n "${GPG_PRIVATE_KEY}" ]]; then
-            echo "[ECHO] Importing GPG key"
-            echo "${GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
-          fi
-
-  build-release:
-    name: "Build & (optional) Release/Deploy"
-    runs-on: ubuntu-latest
-    needs: setup-java-maven
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build (mvn -B -ntp clean package)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
-          mvn -B -ntp -DskipTests=false clean package | tee -a "$ECHO_LOG/build.log"
-
-      - name: Archive build outputs to site/
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/out"
-          find . -name "*.jar" -o -name "*.war" -o -name "*.pom" | tar -czf "$SITE_DIR/out/build-artifacts.tgz" -T -
-          echo "[ECHO] Packed build artifacts to $SITE_DIR/out/build-artifacts.tgz"
-
-      - name: Optional deploy (mvn deploy)
-        if: ${{ inputs.do_deploy == 'true' }}
-        env:
-          MAVEN_SERVER_ID: ${{ secrets.MAVEN_SERVER_ID }}
-          MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
-          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
-          mvn -B -ntp -DskipTests=true deploy | tee -a "$ECHO_LOG/deploy.log"
-
-      - name: Optional GitHub Release
-        if: ${{ inputs.do_release == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.sha }}
-          name: ${{ inputs.release_name != '' && inputs.release_name || inputs.release_tag }}
-          files: |
-            site/maven/out/build-artifacts.tgz
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN != '' && secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Upload artifact (build logs & outputs)
-        uses: actions/upload-artifact@v4
-        with:
-          name: maven-build-${{ github.run_id }}
-          path: |
-            .github/echo_maven/logs/*
-            site/maven/out/*
-
-      - name: Commit site/ (optional)
-        if: ${{ inputs.commit_outputs == 'true' && github.event_name == 'workflow_dispatch' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
-          if ! git diff --quiet --exit-code -- site/; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add site/
-            git commit -m "chore(maven): build/release outputs [${{ github.run_id }}]"
-            git push
-            echo "[ECHO] site/ committed"
-          else
-            echo "[ECHO] No changes to commit"
-          fi
-
-  cc-pack:
-    # 5분 주기 + 수동 실행 시에도 수행
-    name: "Generate Corporate C/C Pack (SBOM/Licenses/Checksums) - every 5 min"
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Java (for plugins)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-          cache: maven
-
-      - name: Ensure Maven present
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
-          mvn -version | tee -a "$ECHO_LOG/cc.log"
-
-      - name: Generate SBOM (CycloneDX)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/cc"
-          mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.8.0:makeAggregateBom \
-            -DskipTests=true -Dcyclonedx.includeBomSerialNumber=true \
-            -DoutputFormat=json \
-            -DoutputDirectory="$SITE_DIR/cc" | tee -a "$ECHO_LOG/cc.log"
-
-      - name: Generate Third-Party License Report
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/cc"
-          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.3.0:aggregate-add-third-party \
-            -Dlicense.usedLicensesFile="$SITE_DIR/cc/THIRD-PARTY.txt" \
-            -DthirdPartyFilename="$SITE_DIR/cc/THIRD-PARTY.txt" \
-            -DskipTests=true | tee -a "$ECHO_LOG/cc.log"
-
-      - name: Compute checksums for artifacts (sha256)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/cc"
-          find . -type f \( -name "*.jar" -o -name "*.war" -o -name "*.pom" \) -print0 | while IFS= read -r -d '' f; do
-            sha256sum "$f" >> "$SITE_DIR/cc/CHECKSUMS.sha256"
-          done
-          sort -u "$SITE_DIR/cc/CHECKSUMS.sha256" -o "$SITE_DIR/cc/CHECKSUMS.sha256"
-
-      - name: Create credentials templates (sanitized)
-        shell: bash
-        env:
-          MAVEN_SERVER_ID: ${{ secrets.MAVEN_SERVER_ID }}
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$SITE_DIR/cc/credentials"
-          cat > "$SITE_DIR/cc/credentials/settings.template.xml" <<EOF
-          <!-- TEMPLATE: fill with secrets via CI only -->
+          # 크리덴셜 템플릿(민감정보 없이 배포)
+          cat > "$SITE_DIR/cc/credentials/settings.template.xml" <<'XML'
+          <!-- Fill with CI secrets; do not commit real credentials -->
           <settings>
             <servers>
               <server>
-                <id>${MAVEN_SERVER_ID:-your-server-id}</id>
-                <username>\${env.MAVEN_USERNAME}</username>
-                <password>\${env.MAVEN_PASSWORD}</password>
+                <id>${MAVEN_SERVER_ID}</id>
+                <username>${MAVEN_USERNAME}</username>
+                <password>${MAVEN_PASSWORD}</password>
               </server>
             </servers>
           </settings>
-          EOF
-          # 퍼미션 문서 복사
-          mkdir -p "$SITE_DIR/cc/meta"
-          cp -a site/maven/perm/permission-manifest.yaml "$SITE_DIR/cc/meta/" 2>/dev/null || true
+          XML
 
-      - name: Pack C/C set
+          echo "[ECHO] settings.xml & permission/credential templates generated." | tee -a "$ECHO_LOG/main.log"
+
+      # 5) 빌드/테스트/패키징
+      - name: Build & Test (mvn -B -ntp clean verify)
         shell: bash
         run: |
           set -Eeuo pipefail
-          TS="$(date -u +%Y%m%dT%H%M%SZ)"
-          mkdir -p "$SITE_DIR/releases"
-          tar -C "$SITE_DIR" -czf "$SITE_DIR/releases/cc-pack_${TS}.tar.gz" cc
-          echo "[ECHO] C/C Pack created: $SITE_DIR/releases/cc-pack_${TS}.tar.gz" | tee -a "$ECHO_LOG/cc.log"
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"/out
+          mvn -B -ntp -DskipTests=false clean verify | tee -a "$ECHO_LOG/build.log"
+          find target -maxdepth 1 -type f \( -name "*.jar" -o -name "*.war" -o -name "*.pom" \) -print0 \
+            | xargs -0 -I{} cp -a "{}" "$SITE_DIR/out/" || true
+          echo "[ECHO] Copied artifacts to $SITE_DIR/out" | tee -a "$ECHO_LOG/build.log"
 
-      - name: Upload artifact (C/C Pack)
+      # 6) C/C 파일(라이선스/체크섬 등) 대량 생성
+      - name: Generate C/C (licenses & checksums)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$SITE_DIR/cc" "$ECHO_LOG"
+          # 라이선스 스캔(간이 버전) — 필요 시 license-maven-plugin으로 대체
+          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.3.0:aggregate-add-third-party \
+            -DthirdPartyFilename="$SITE_DIR/cc/THIRD-PARTY.txt" -DskipTests=true | tee -a "$ECHO_LOG/cc.log" || true
+
+          # 체크섬
+          : > "$SITE_DIR/cc/CHECKSUMS.sha256"
+          find "$SITE_DIR/out" -type f -print0 | xargs -0 -I{} sha256sum "{}" >> "$SITE_DIR/cc/CHECKSUMS.sha256" || true
+
+      # 7) 아카이브/아티팩트 업로드
+      - name: Archive echo/site
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$SITE_DIR/releases" "$ECHO_LOG"
+          TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          tar -C site -czf "site/springboot/releases/echo_${TS}.tar.gz" "springboot"
+          echo "[ECHO] Archived to site/springboot/releases/echo_${TS}.tar.gz" | tee -a "$ECHO_LOG/main.log"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cc-pack-${{ github.run_id }}
+          name: springboot-echo-${{ github.run_id }}
           path: |
-            site/maven/cc/**
-            site/maven/releases/*.tar.gz
-            .github/echo_maven/logs/*
+            site/springboot/**
+            .github/echo_sb/logs/*
 
-      - name: Commit site/ (optional on dispatch)
+      # (선택) 변경사항 커밋
+      - name: Commit site/ (only on dispatch)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "$ECHO_LOG" "$ECHO_OUT" "$SITE_DIR"
           if ! git diff --quiet --exit-code -- site/; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add site/
-            git commit -m "chore(maven): C/C pack update [${{ github.run_id }}]"
+            git commit -m "chore(springboot): echo/perm outputs [${{ github.run_id }}]"
             git push
-            echo "[ECHO] site/ committed"
+            echo "[ECHO] site/ committed" | tee -a "$ECHO_LOG/main.log"
           else
-            echo "[ECHO] No changes to commit"
+            echo "[ECHO] No changes to commit" | tee -a "$ECHO_LOG/main.log"
           fi
