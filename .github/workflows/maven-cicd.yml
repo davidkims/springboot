@@ -1,13 +1,20 @@
-name: "⚙️ Spring Boot + Maven FullOps (DB + Echo + SBOM + Release + C/C Pack)"
+name: "🌍 Spring Boot + Maven FullOps (Multi-DB Matrix + Echo + SBOM + Release + C/C Pack)"
 
 on:
-  schedule:
-    - cron: "*/5 * * * *" # 5분마다 실행 (C/C Pack 생성 포함)
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *" # 5분마다 C/C Pack
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  build-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [h2, mysql, postgres, oracle]
 
     services:
       mysql:
@@ -17,17 +24,41 @@ jobs:
           MYSQL_DATABASE: demo
           MYSQL_USER: demo
           MYSQL_PASSWORD: demopass
-        ports:
-          - 3306:3306
+        ports: ["3306:3306"]
         options: >-
           --health-cmd="mysqladmin ping --silent"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=3
+          --health-retries=5
+
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: demo
+          POSTGRES_PASSWORD: demopass
+          POSTGRES_DB: demo
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U demo"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      oracle:
+        image: gvenzl/oracle-xe:21-slim
+        env:
+          ORACLE_PASSWORD: demopass
+          APP_USER: demo
+          APP_USER_PASSWORD: demopass
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd="echo 'SELECT 1 FROM dual;' | sqlplus -s demo/demopass@localhost:1521/XEPDB1"
+          --health-interval=30s
+          --health-timeout=10s
+          --health-retries=10
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up JDK + Maven
         uses: actions/setup-java@v4
@@ -35,85 +66,99 @@ jobs:
           distribution: temurin
           java-version: 21
           cache: maven
-          server-id: github
-          server-username: GITHUB_ACTOR
-          server-password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Scaffold application.yml (MySQL for local/production)
+      - name: Scaffold application.yml (DB profiles)
         run: |
           set -Eeuo pipefail
           mkdir -p src/main/resources
-          if [ ! -f "src/main/resources/application.yml" ]; then
-            cat > src/main/resources/application.yml <<'YML'
-            spring:
-              datasource:
-                url: jdbc:mysql://localhost:3306/demo
-                username: demo
-                password: demopass
-                driver-class-name: com.mysql.cj.jdbc.Driver
-              jpa:
-                hibernate:
-                  ddl-auto: update
-                show-sql: true
-            YML
-            echo "[ECHO] application.yml created with MySQL config."
-          fi
+          case "${{ matrix.db }}" in
+            mysql)
+              cat > src/main/resources/application.yml <<'YML'
+              spring:
+                datasource:
+                  url: jdbc:mysql://localhost:3306/demo
+                  username: demo
+                  password: demopass
+                  driver-class-name: com.mysql.cj.jdbc.Driver
+                jpa:
+                  hibernate:
+                    ddl-auto: update
+                  show-sql: true
+              YML
+              ;;
+            postgres)
+              cat > src/main/resources/application.yml <<'YML'
+              spring:
+                datasource:
+                  url: jdbc:postgresql://localhost:5432/demo
+                  username: demo
+                  password: demopass
+                  driver-class-name: org.postgresql.Driver
+                jpa:
+                  hibernate:
+                    ddl-auto: update
+                  show-sql: true
+              YML
+              ;;
+            oracle)
+              cat > src/main/resources/application.yml <<'YML'
+              spring:
+                datasource:
+                  url: jdbc:oracle:thin:@localhost:1521/XEPDB1
+                  username: demo
+                  password: demopass
+                  driver-class-name: oracle.jdbc.OracleDriver
+                jpa:
+                  hibernate:
+                    ddl-auto: update
+                  show-sql: true
+              YML
+              ;;
+            *)
+              cat > src/main/resources/application.yml <<'YML'
+              spring:
+                datasource:
+                  url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+                  driver-class-name: org.h2.Driver
+                  username: sa
+                  password:
+                jpa:
+                  hibernate:
+                    ddl-auto: update
+                  database-platform: org.hibernate.dialect.H2Dialect
+              YML
+              ;;
+          esac
+          echo "[ECHO] application.yml created for ${{ matrix.db }} profile"
 
-      - name: Scaffold application-test.yml (H2 fallback for CI)
+      - name: Build & Test
         run: |
           set -Eeuo pipefail
-          mkdir -p src/test/resources
-          cat > src/test/resources/application-test.yml <<'YML'
-          spring:
-            datasource:
-              url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
-              driver-class-name: org.h2.Driver
-              username: sa
-              password:
-            jpa:
-              hibernate:
-                ddl-auto: update
-              database-platform: org.hibernate.dialect.H2Dialect
-          YML
-          echo "[ECHO] application-test.yml created with H2 (CI fallback)."
+          mvn -B clean verify -Dspring.profiles.active=${{ matrix.db }} | tee build_${{ matrix.db }}.log
 
-      - name: Build with Maven
-        run: mvn -B clean package -DskipTests
-
-      - name: Run Unit Tests (H2 profile)
-        run: mvn test -Dspring.profiles.active=test
-
-      - name: Run Integration Tests (MySQL profile)
+      - name: Generate SBOM + Hash
+        if: ${{ matrix.db == 'mysql' }}
         run: |
-          echo "[ECHO] Running integration tests with MySQL service..."
-          mvn verify -Dspring.profiles.active=default
-
-      - name: Generate SBOM + License + Hash + Signature
-        run: |
-          set -Eeuo pipefail
           mkdir -p .github/echo_storage/out
-          echo "[ECHO] Generating CycloneDX SBOM..."
           mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom
           sha256sum target/*.jar > .github/echo_storage/out/checksums.txt
-          gpg --batch --yes --armor --detach-sign target/*.jar || echo "[ECHO][WARN] GPG not configured"
-          echo "[ECHO] SBOM + License + Hash + Signature created."
+          echo "[ECHO] SBOM + checksums generated."
 
-      - name: Generate Enterprise C/C Pack (5min cycle)
+      - name: Generate C/C Pack
+        if: ${{ matrix.db == 'mysql' }}
         run: |
-          set -Eeuo pipefail
           mkdir -p .github/echo_storage/cc_pack
-          timestamp=$(date +%Y%m%d%H%M%S)
-          echo "[ECHO] Generating C/C Pack for enterprise compliance..."
-          echo "C/C ENTERPRISE FILE - $timestamp" > .github/echo_storage/cc_pack/cc_${timestamp}.c
-          echo "C/C ENTERPRISE HEADER - $timestamp" > .github/echo_storage/cc_pack/cc_${timestamp}.h
-          echo "[ECHO] C/C Pack generated at .github/echo_storage/cc_pack/"
+          TS=$(date +%Y%m%d%H%M%S)
+          echo "/* Auto C file for compliance */" > .github/echo_storage/cc_pack/cc_${TS}.c
+          echo "// Auto header file" > .github/echo_storage/cc_pack/cc_${TS}.h
+          tar -C .github/echo_storage/cc_pack -czf .github/echo_storage/cc_pack/cc-pack_${TS}.tar.gz .
+          echo "[ECHO] C/C Pack archived."
 
-      - name: Release Artifact
-        uses: softprops/action-gh-release@v2
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: springboot-${{ matrix.db }}-${{ github.run_id }}
+          path: |
             target/*.jar
-            .github/echo_storage/out/*
-            .github/echo_storage/cc_pack/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            build_${{ matrix.db }}.log
+            .github/echo_storage/**
