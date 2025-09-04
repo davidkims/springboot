@@ -1,9 +1,9 @@
-name: "🌍 Spring Boot + Maven FullOps (Multi-DB Matrix + Echo + SBOM + Release + C/C Pack)"
+name: "🏢 Spring Boot + Maven MegaOps (DB + Middleware + Echo FullOps)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *" # 5분마다 C/C Pack
+    - cron: "*/5 * * * *"   # 5분마다 C/C Pack 및 보안 산출물 생성
 
 permissions:
   contents: write
@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        db: [h2, mysql, postgres, oracle]
+        service: [h2, mysql, mariadb, postgres, oracle, mssql, cassandra, redis, mongodb, kafka]
 
     services:
       mysql:
@@ -25,11 +25,15 @@ jobs:
           MYSQL_USER: demo
           MYSQL_PASSWORD: demopass
         ports: ["3306:3306"]
-        options: >-
-          --health-cmd="mysqladmin ping --silent"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
+
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: rootpass
+          MARIADB_DATABASE: demo
+          MARIADB_USER: demo
+          MARIADB_PASSWORD: demopass
+        ports: ["3307:3306"]
 
       postgres:
         image: postgres:15
@@ -38,11 +42,6 @@ jobs:
           POSTGRES_PASSWORD: demopass
           POSTGRES_DB: demo
         ports: ["5432:5432"]
-        options: >-
-          --health-cmd="pg_isready -U demo"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
 
       oracle:
         image: gvenzl/oracle-xe:21-slim
@@ -51,114 +50,170 @@ jobs:
           APP_USER: demo
           APP_USER_PASSWORD: demopass
         ports: ["1521:1521"]
-        options: >-
-          --health-cmd="echo 'SELECT 1 FROM dual;' | sqlplus -s demo/demopass@localhost:1521/XEPDB1"
-          --health-interval=30s
-          --health-timeout=10s
-          --health-retries=10
+
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: "Strong!Passw0rd"
+        ports: ["1433:1433"]
+
+      cassandra:
+        image: cassandra:4.1
+        ports: ["9042:9042"]
+
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+
+      mongodb:
+        image: mongo:6
+        ports: ["27017:27017"]
+
+      kafka:
+        image: bitnami/kafka:3.7.0
+        env:
+          KAFKA_CFG_ZOOKEEPER_CONNECT: localhost:2181
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+        ports: ["9092:9092"]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK + Maven
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-          cache: maven
+      - name: Ensure Echo Directories
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .github/echo/logs .github/echo/out site/echo
+          echo "[ECHO] Directories ready: logs/out/site"
 
-      - name: Scaffold application.yml (DB profiles)
+      - name: Scaffold Spring Boot project if missing
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f pom.xml ]; then
+            echo "[ECHO][WARN] pom.xml missing → scaffolding Spring Boot project"
+            curl -fsSL "https://start.spring.io/starter.zip?type=maven-project&language=java&groupId=com.example&artifactId=demo&name=demo&packageName=com.example.demo&javaVersion=21&dependencies=web,data-jpa,security,actuator,lombok" \
+              -o starter.zip
+            unzip -q starter.zip -d scaffold
+            cp -r scaffold/* .
+            echo "[ECHO][OK] Spring Boot scaffold generated"
+          fi
+
+      - name: Scaffold application.yml per service
         run: |
           set -Eeuo pipefail
           mkdir -p src/main/resources
-          case "${{ matrix.db }}" in
+          case "${{ matrix.service }}" in
             mysql)
               cat > src/main/resources/application.yml <<'YML'
-              spring:
-                datasource:
-                  url: jdbc:mysql://localhost:3306/demo
-                  username: demo
-                  password: demopass
-                  driver-class-name: com.mysql.cj.jdbc.Driver
-                jpa:
-                  hibernate:
-                    ddl-auto: update
-                  show-sql: true
+              spring.datasource.url=jdbc:mysql://localhost:3306/demo
+              spring.datasource.username=demo
+              spring.datasource.password=demopass
+              spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+              spring.jpa.hibernate.ddl-auto=update
+              YML
+              ;;
+            mariadb)
+              cat > src/main/resources/application.yml <<'YML'
+              spring.datasource.url=jdbc:mariadb://localhost:3307/demo
+              spring.datasource.username=demo
+              spring.datasource.password=demopass
+              spring.datasource.driver-class-name=org.mariadb.jdbc.Driver
+              spring.jpa.hibernate.ddl-auto=update
               YML
               ;;
             postgres)
               cat > src/main/resources/application.yml <<'YML'
-              spring:
-                datasource:
-                  url: jdbc:postgresql://localhost:5432/demo
-                  username: demo
-                  password: demopass
-                  driver-class-name: org.postgresql.Driver
-                jpa:
-                  hibernate:
-                    ddl-auto: update
-                  show-sql: true
+              spring.datasource.url=jdbc:postgresql://localhost:5432/demo
+              spring.datasource.username=demo
+              spring.datasource.password=demopass
+              spring.datasource.driver-class-name=org.postgresql.Driver
+              spring.jpa.hibernate.ddl-auto=update
               YML
               ;;
             oracle)
               cat > src/main/resources/application.yml <<'YML'
-              spring:
-                datasource:
-                  url: jdbc:oracle:thin:@localhost:1521/XEPDB1
-                  username: demo
-                  password: demopass
-                  driver-class-name: oracle.jdbc.OracleDriver
-                jpa:
-                  hibernate:
-                    ddl-auto: update
-                  show-sql: true
+              spring.datasource.url=jdbc:oracle:thin:@localhost:1521/XEPDB1
+              spring.datasource.username=demo
+              spring.datasource.password=demopass
+              spring.datasource.driver-class-name=oracle.jdbc.OracleDriver
+              spring.jpa.hibernate.ddl-auto=update
+              YML
+              ;;
+            mssql)
+              cat > src/main/resources/application.yml <<'YML'
+              spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=master
+              spring.datasource.username=SA
+              spring.datasource.password=Strong!Passw0rd
+              spring.datasource.driver-class-name=com.microsoft.sqlserver.jdbc.SQLServerDriver
+              spring.jpa.hibernate.ddl-auto=update
+              YML
+              ;;
+            cassandra)
+              cat > src/main/resources/application.yml <<'YML'
+              spring.data.cassandra.contact-points=localhost
+              spring.data.cassandra.port=9042
+              spring.data.cassandra.keyspace-name=demo
+              spring.data.cassandra.local-datacenter=datacenter1
+              YML
+              ;;
+            redis)
+              cat > src/main/resources/application.yml <<'YML'
+              spring.data.redis.host=localhost
+              spring.data.redis.port=6379
+              YML
+              ;;
+            mongodb)
+              cat > src/main/resources/application.yml <<'YML'
+              spring.data.mongodb.uri=mongodb://localhost:27017/demo
+              YML
+              ;;
+            kafka)
+              cat > src/main/resources/application.yml <<'YML'
+              spring.kafka.bootstrap-servers=localhost:9092
+              spring.kafka.consumer.group-id=demo-group
+              spring.kafka.consumer.auto-offset-reset=earliest
               YML
               ;;
             *)
               cat > src/main/resources/application.yml <<'YML'
-              spring:
-                datasource:
-                  url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
-                  driver-class-name: org.h2.Driver
-                  username: sa
-                  password:
-                jpa:
-                  hibernate:
-                    ddl-auto: update
-                  database-platform: org.hibernate.dialect.H2Dialect
+              spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+              spring.datasource.driver-class-name=org.h2.Driver
+              spring.datasource.username=sa
+              spring.jpa.hibernate.ddl-auto=update
               YML
               ;;
           esac
-          echo "[ECHO] application.yml created for ${{ matrix.db }} profile"
+          echo "[ECHO] application.yml scaffolded for ${{ matrix.service }}"
 
-      - name: Build & Test
+      - name: Build + Test
         run: |
           set -Eeuo pipefail
-          mvn -B clean verify -Dspring.profiles.active=${{ matrix.db }} | tee build_${{ matrix.db }}.log
+          mvn -B clean verify -Dspring.profiles.active=${{ matrix.service }} | tee .github/echo/logs/build_${{ matrix.service }}.log
 
-      - name: Generate SBOM + Hash
-        if: ${{ matrix.db == 'mysql' }}
+      - name: Generate SBOM + Security Files
+        if: ${{ matrix.service == 'mysql' }}
         run: |
-          mkdir -p .github/echo_storage/out
+          set -Eeuo pipefail
+          mkdir -p .github/echo/out
           mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom
-          sha256sum target/*.jar > .github/echo_storage/out/checksums.txt
-          echo "[ECHO] SBOM + checksums generated."
+          sha256sum target/*.jar > .github/echo/out/checksums.txt
+          echo "[ECHO] SBOM + checksums created"
 
-      - name: Generate C/C Pack
-        if: ${{ matrix.db == 'mysql' }}
+      - name: Generate Echo C/C Pack
+        if: ${{ matrix.service == 'mysql' }}
         run: |
-          mkdir -p .github/echo_storage/cc_pack
+          set -Eeuo pipefail
+          mkdir -p .github/echo/cc_pack
           TS=$(date +%Y%m%d%H%M%S)
-          echo "/* Auto C file for compliance */" > .github/echo_storage/cc_pack/cc_${TS}.c
-          echo "// Auto header file" > .github/echo_storage/cc_pack/cc_${TS}.h
-          tar -C .github/echo_storage/cc_pack -czf .github/echo_storage/cc_pack/cc-pack_${TS}.tar.gz .
-          echo "[ECHO] C/C Pack archived."
+          echo "/* Enterprise C compliance file */" > .github/echo/cc_pack/cc_${TS}.c
+          echo "// Enterprise H compliance file" > .github/echo/cc_pack/cc_${TS}.h
+          tar -C .github/echo/cc_pack -czf .github/echo/cc_pack/cc-pack_${TS}.tar.gz .
+          echo "[ECHO] Echo C/C Pack generated and archived"
 
-      - name: Upload artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: springboot-${{ matrix.db }}-${{ github.run_id }}
+          name: build-${{ matrix.service }}-${{ github.run_id }}
           path: |
             target/*.jar
-            build_${{ matrix.db }}.log
-            .github/echo_storage/**
+            .github/echo/**
