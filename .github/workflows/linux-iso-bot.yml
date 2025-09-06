@@ -41,7 +41,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # ⚠️ JSON을 파싱해 job-level env에 즉시 주입 (if: 표현식에서도 사용 가능)
     env:
       ECHO_TD: .github/echo_td
       ECHO_DW: .github/echo_dw
@@ -132,58 +131,41 @@ jobs:
             resolve
             USE_PODMAN=1; export USE_PODMAN; echo "USE_PODMAN=1" >> "$GITHUB_ENV"; echoe "engine=podman"
           }
-          install_awscli(){
-            if have aws; then echoe "awscli: $(aws --version 2>&1)"; return 0; fi
-            set +e
-            sudo apt-get update -y && sudo apt-get install -y awscli
-            rc=$?; set -e
-            if [ $rc -ne 0 ]; then
-              echoe "awscli APT not found, installing via pip"
-              python3 -m pip install --upgrade --user pip >/dev/null 2>&1 || true
-              python3 -m pip install --user awscli || warn "awscli pip install failed (non-fatal)"
-              if have aws; then return 0; fi
-              [ -d "$HOME/.local/bin" ] && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            fi
-          }
-          install_s3fs(){ have s3fs && { echoe "s3fs present"; return 0; }; sudo apt-get update -y; sudo apt-get install -y s3fs || sudo apt-get install -y s3fs-fuse || warn "s3fs install failed (non-fatal)"; }
-          install_gcsfuse(){
-            if have gcsfuse; then echoe "gcsfuse present: $(gcsfuse --version 2>/dev/null || echo v2)"; return 0; fi
-            . /etc/os-release
-            CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
-            [ -z "$CODENAME" ] && CODENAME="$(lsb_release -cs 2>/dev/null || echo jammy)"
-            REPO_CODENAME="$CODENAME"; [ "$CODENAME" = "noble" ] && REPO_CODENAME="jammy"
-            sudo mkdir -p /usr/share/keyrings
-            curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.gpg >/dev/null
-            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt gcsfuse-${REPO_CODENAME} main" | sudo tee /etc/apt/sources.list.d/gcsfuse.list >/dev/null
-            set +e; sudo apt-get update -y; sudo apt-get install -y fuse3 gcsfuse; rc=$?; set -e
-            if [ $rc -ne 0 ]; then
-              warn "gcsfuse APT install failed; trying release binary"
-              tmpdir="$(mktemp -d)"; url="https://github.com/GoogleCloudPlatform/gcsfuse/releases/latest/download/gcsfuse_linux_amd64.tar.gz"
-              if curl -fsSL "$url" -o "${tmpdir}/gcsfuse.tgz"; then
-                tar -xzf "${tmpdir}/gcsfuse.tgz" -C "${tmpdir}" || true
-                found="$(find "${tmpdir}" -maxdepth 2 -type f -name gcsfuse | head -n1 || true)"
-                [ -n "$found" ] && sudo install -m 0755 "$found" /usr/local/bin/gcsfuse || true
-              fi
-              have gcsfuse || warn "gcsfuse install failed (non-fatal)."
-            fi
-          }
-          install_blobfuse2(){
-            if have blobfuse2; then echoe "blobfuse2 present"; return 0; fi
-            . /etc/os-release
-            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /usr/share/keyrings/microsoft.gpg >/dev/null
-            echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/${VERSION_ID}/prod ${UBUNTU_CODENAME} main" | sudo tee /etc/apt/sources.list.d/microsoft-prod.list >/dev/null
-            sudo apt-get update -y || true
-            sudo apt-get install -y fuse3 blobfuse2 || warn "blobfuse2 install failed (non-fatal)"
-          }
+
+          # ---------- Archive helper (robust) ----------
           make_archive(){
+            # 사용법: make_archive "label" <paths...>
             local label="$1"; shift
-            local ts="$(TS)"
+            local ts="$(date +%Y%m%d_%H%M%S)"
             local outdir="${ECHO_ARC:-.github/echo_archives}"
             mkdir -p "$outdir"
             local tgt="${outdir}/${label}_${ts}.tar.gz"
-            tar -czf "$tgt" "$@" 2>/dev/null || tar -czf "$tgt" $(printf "%q " "$@") || true
-            if command -v sha256sum >/dev/null 2>&1; then sha256sum "$tgt" > "${tgt}.sha256"; fi
-            echoe "archive => ${tgt}"
+
+            # 존재하는 경로만 수집
+            local existing=()
+            for p in "$@"; do
+              [ -e "$p" ] && existing+=("$p")
+            done
+            # 없으면 스킵(성공 처리)
+            if [ ${#existing[@]} -eq 0 ]; then
+              echo "[ECHO] archive(skip: no existing paths) => ${tgt}"
+              return 0
+            fi
+
+            # 절대경로 경고 회피: -C / + 상대경로 목록
+            if command -v realpath >/dev/null 2>&1; then
+              tmpfile="$(mktemp)"
+              for p in "${existing[@]}"; do
+                rp="$(realpath -m "$p")"
+                printf "%s\n" "${rp#/}" >> "$tmpfile"
+              done
+              tar -C / --ignore-failed-read --warning=no-file-ignored -czf "$tgt" -T "$tmpfile" || true
+              rm -f "$tmpfile"
+            else
+              tar --ignore-failed-read --warning=no-file-ignored -czf "$tgt" "${existing[@]}" || true
+            fi
+            command -v sha256sum >/dev/null 2>&1 && sha256sum "$tgt" > "${tgt}.sha256" || true
+            echo "[ECHO] archive => ${tgt}"
           }
           BASH
           chmod +x .github/echo_tools.sh
@@ -626,7 +608,9 @@ jobs:
           retry 3 3 -- ctr pull nginx/nginx-prometheus-exporter:0.11.0
           export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           UPSTREAM_SERVERS=""; for i in $(seq 1 ${SLOTS_OMNI}); do UPSTREAM_SERVERS="${UPSTREAM_SERVERS}    server omni-${i}:8000;\n"; done
-          cat > "${ECHO_NET}/nginx/nginx.conf" <<CONF
+
+          # Nginx config (고유 here-doc 토큰)
+          cat > "${ECHO_NET}/nginx/nginx.conf" <<NGINX_CONF
           user nginx; worker_processes auto;
           error_log /var/log/nginx/error.log warn; pid /var/run/nginx.pid;
           events { worker_connections 1024; }
@@ -659,7 +643,8 @@ jobs:
               location = / { add_header Content-Type text/plain; return 200 "OmniChannel Gateway (slots=${SLOTS_OMNI})"; }
             }
           }
-          CONF
+          NGINX_CONF
+
           ctr rm -f echo-nginx >/dev/null 2>&1 || true
           ctr run -d --name echo-nginx --network "${DOCKER_NET}" --restart unless-stopped \
             -p 8088:80 \
@@ -667,11 +652,13 @@ jobs:
             -v "$PWD/${ECHO_NET}/logs":/var/log/nginx \
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             nginx:alpine
+
           ctr rm -f nginx-exp >/dev/null 2>&1 || true
           ctr run -d --name nginx-exp --network "${DOCKER_NET}" --restart unless-stopped \
             -p 9113:9113 \
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             nginx/nginx-prometheus-exporter:0.11.0 -nginx.scrape-uri=http://echo-nginx/nginx_status
+
           make_archive "10_nginx_exporter" "${ECHO_NET}/nginx" "${ECHO_NET}/logs"
 
       - name: 📈 Logs (Loki/Promtail, engine별)
@@ -687,8 +674,9 @@ jobs:
             -p 3100:3100 \
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
+
           if [ "${USE_PODMAN:-0}" = "1" ]; then
-            cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
+            cat > "${ECHO_NET}/promtail/config.yml" <<'PROMTAIL_A'
             server: { http_listen_port: 9080, grpc_listen_port: 0 }
             positions: { filename: /tmp/positions.yaml }
             clients: [ { url: http://loki:3100/loki/api/v1/push } ]
@@ -697,7 +685,7 @@ jobs:
                 static_configs:
                   - targets: [localhost]
                     labels: { job: nginx, __path__: /var/log/nginx/echo.access.log }
-            YAML
+            PROMTAIL_A
             ctr rm -f promtail >/dev/null 2>&1 || true
             ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
               -v "$PWD/${ECHO_NET}/logs":/var/log/nginx:ro \
@@ -705,7 +693,7 @@ jobs:
               -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
               grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
           else
-            cat > "${ECHO_NET}/promtail/config.yml" <<'YAML'
+            cat > "${ECHO_NET}/promtail/config.yml" <<'PROMTAIL_B'
             server: { http_listen_port: 9080, grpc_listen_port: 0 }
             positions: { filename: /tmp/positions.yaml }
             clients: [ { url: http://loki:3100/loki/api/v1/push } ]
@@ -716,7 +704,7 @@ jobs:
                   - { source_labels: ['__meta_docker_container_name'], regex: '/(echo-nginx|nginx-exp|omni.*|td-sim).*', action: keep }
                   - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '$1' }
                 pipeline_stages: [ { docker: {} } ]
-            YAML
+            PROMTAIL_B
             ctr rm -f promtail >/dev/null 2>&1 || true
             ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
               -v /var/run/docker.sock:/var/run/docker.sock:ro \
@@ -805,15 +793,17 @@ jobs:
           mkdir -p "${ECHO_NET}/prometheus"
           export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           OMNI_TARGETS=""; for i in $(seq 1 ${SLOTS_OMNI}); do [ -n "$OMNI_TARGETS" ] && OMNI_TARGETS="${OMNI_TARGETS}, "; OMNI_TARGETS="${OMNI_TARGETS}'omni-${i}:8000'"; done
-          cat > "${ECHO_NET}/prometheus/recording_rules.yml" <<'YAML'
+
+          cat > "${ECHO_NET}/prometheus/recording_rules.yml" <<'REC_RULES'
           groups:
             - name: omni.rules
               interval: 30s
               rules:
                 - record: omni_requests_rate_5m
                   expr: rate(omni_requests_total[5m])
-          YAML
-          cat > "${ECHO_NET}/prometheus/alert_rules.yml" <<'YAML'
+          REC_RULES
+
+          cat > "${ECHO_NET}/prometheus/alert_rules.yml" <<'ALERT_RULES'
           groups:
             - name: omni.alerts
               rules:
@@ -827,8 +817,9 @@ jobs:
                   for: 2m
                   labels: { severity: warning }
                   annotations: { summary: "Nginx exporter is down" }
-          YAML
-          cat > "${ECHO_NET}/prometheus/prometheus.yml" <<YAML
+          ALERT_RULES
+
+          cat > "${ECHO_NET}/prometheus/prometheus.yml" <<PROM_CFG
           global:
             scrape_interval: 15s
             evaluation_interval: 30s
@@ -852,7 +843,9 @@ jobs:
               metrics_path: /metrics
               static_configs:
                 - targets: ['loki:3100']
-          YAML
+          PROM_CFG
+
+          . .github/echo_tools.sh
           ctr rm -f alertmanager prometheus >/dev/null 2>&1 || true
           ctr run -d --name alertmanager --network "${DOCKER_NET}" -p 9093:9093 \
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
