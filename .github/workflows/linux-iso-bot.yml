@@ -63,7 +63,6 @@ jobs:
       DOCKER_NET: echo-net
       PROV_DIR: .github/echo_omni
 
-      # ---- inputs → env (JSON 파싱) ----
       GENERATE_ROWS: ${{ github.event.inputs.generate_rows || '1000' }}
       STORAGE_PROFILE: ${{ github.event.inputs.storage_profile || 'none' }}
 
@@ -134,31 +133,22 @@ jobs:
 
           # ---------- Archive helper (robust) ----------
           make_archive(){
-            # 사용법: make_archive "label" <paths...>
             local label="$1"; shift
             local ts="$(date +%Y%m%d_%H%M%S)"
             local outdir="${ECHO_ARC:-.github/echo_archives}"
             mkdir -p "$outdir"
             local tgt="${outdir}/${label}_${ts}.tar.gz"
 
-            # 존재하는 경로만 수집
             local existing=()
-            for p in "$@"; do
-              [ -e "$p" ] && existing+=("$p")
-            done
-            # 없으면 스킵(성공 처리)
+            for p in "$@"; do [ -e "$p" ] && existing+=("$p"); done
             if [ ${#existing[@]} -eq 0 ]; then
               echo "[ECHO] archive(skip: no existing paths) => ${tgt}"
               return 0
             fi
 
-            # 절대경로 경고 회피: -C / + 상대경로 목록
             if command -v realpath >/dev/null 2>&1; then
               tmpfile="$(mktemp)"
-              for p in "${existing[@]}"; do
-                rp="$(realpath -m "$p")"
-                printf "%s\n" "${rp#/}" >> "$tmpfile"
-              done
+              for p in "${existing[@]}"; do rp="$(realpath -m "$p")"; printf "%s\n" "${rp#/}" >> "$tmpfile"; done
               tar -C / --ignore-failed-read --warning=no-file-ignored -czf "$tgt" -T "$tmpfile" || true
               rm -f "$tmpfile"
             else
@@ -609,7 +599,7 @@ jobs:
           export SLOTS_OMNI="${SLOTS_OMNI:-1}"; [[ "${SLOTS_OMNI}" =~ ^[0-9]+$ ]] || export SLOTS_OMNI=1
           UPSTREAM_SERVERS=""; for i in $(seq 1 ${SLOTS_OMNI}); do UPSTREAM_SERVERS="${UPSTREAM_SERVERS}    server omni-${i}:8000;\n"; done
 
-          # Nginx config (고유 here-doc 토큰)
+          # Nginx config (here-doc, 종료 토큰 행頭)
           cat > "${ECHO_NET}/nginx/nginx.conf" <<NGINX_CONF
           user nginx; worker_processes auto;
           error_log /var/log/nginx/error.log warn; pid /var/run/nginx.pid;
@@ -675,17 +665,19 @@ jobs:
             -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
             grafana/loki:2.9.0 -config.file=/etc/loki/local-config.yaml
 
+          # ── PROMTAIL 설정(heredoc 대신 printf로 안전하게 생성) ──
           if [ "${USE_PODMAN:-0}" = "1" ]; then
-            cat > "${ECHO_NET}/promtail/config.yml" <<'PROMTAIL_A'
-            server: { http_listen_port: 9080, grpc_listen_port: 0 }
-            positions: { filename: /tmp/positions.yaml }
-            clients: [ { url: http://loki:3100/loki/api/v1/push } ]
-            scrape_configs:
-              - job_name: nginx_files
-                static_configs:
-                  - targets: [localhost]
-                    labels: { job: nginx, __path__: /var/log/nginx/echo.access.log }
-            PROMTAIL_A
+            printf '%s\n' \
+'server: { http_listen_port: 9080, grpc_listen_port: 0 }' \
+'positions: { filename: /tmp/positions.yaml }' \
+'clients: [ { url: http://loki:3100/loki/api/v1/push } ]' \
+'scrape_configs:' \
+'  - job_name: nginx_files' \
+'    static_configs:' \
+'      - targets: [localhost]' \
+'        labels: { job: nginx, __path__: /var/log/nginx/echo.access.log }' \
+> "${ECHO_NET}/promtail/config.yml"
+
             ctr rm -f promtail >/dev/null 2>&1 || true
             ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
               -v "$PWD/${ECHO_NET}/logs":/var/log/nginx:ro \
@@ -693,18 +685,19 @@ jobs:
               -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
               grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
           else
-            cat > "${ECHO_NET}/promtail/config.yml" <<'PROMTAIL_B'
-            server: { http_listen_port: 9080, grpc_listen_port: 0 }
-            positions: { filename: /tmp/positions.yaml }
-            clients: [ { url: http://loki:3100/loki/api/v1/push } ]
-            scrape_configs:
-              - job_name: docker
-                docker_sd_configs: [ { host: unix:///var/run/docker.sock } ]
-                relabel_configs:
-                  - { source_labels: ['__meta_docker_container_name'], regex: '/(echo-nginx|nginx-exp|omni.*|td-sim).*', action: keep }
-                  - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '$1' }
-                pipeline_stages: [ { docker: {} } ]
-            PROMTAIL_B
+            printf '%s\n' \
+'server: { http_listen_port: 9080, grpc_listen_port: 0 }' \
+'positions: { filename: /tmp/positions.yaml }' \
+'clients: [ { url: http://loki:3100/loki/api/v1/push } ]' \
+'scrape_configs:' \
+'  - job_name: docker' \
+'    docker_sd_configs: [ { host: unix:///var/run/docker.sock } ]' \
+'    relabel_configs:' \
+"      - { source_labels: ['__meta_docker_container_name'], regex: '/(echo-nginx|nginx-exp|omni.*|td-sim).*', action: keep }" \
+"      - { source_labels: ['__meta_docker_container_name'], target_label: container, regex: '/(.*)', replacement: '\$1' }" \
+'    pipeline_stages: [ { docker: {} } ]' \
+> "${ECHO_NET}/promtail/config.yml"
+
             ctr rm -f promtail >/dev/null 2>&1 || true
             ctr run -d --name promtail --network "${DOCKER_NET}" --restart unless-stopped \
               -v /var/run/docker.sock:/var/run/docker.sock:ro \
@@ -713,6 +706,7 @@ jobs:
               -v "$PWD/${ECHO_NET}/device_info.json":/echo/device_info.json:ro \
               grafana/promtail:2.9.0 -config.file=/etc/promtail/config.yml
           fi
+
           make_archive "11_logs_stack" "${ECHO_NET}/promtail" "${ECHO_NET}/logs"
 
       - name: 🔥 (옵션) UFW 방화벽
