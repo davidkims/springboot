@@ -1,0 +1,129 @@
+name: Provenance with Pages Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  attestations: write
+
+env:
+  ARTIFACT_NAME: provenance-${{ github.run_id }}-${{ github.run_number }}
+  OUT_DIR: output
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Generate artifact file
+        run: |
+          mkdir -p $OUT_DIR
+          echo "Generated at $(date -u)" > $OUT_DIR/build.txt
+
+      - name: 🧾 Generate provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.OUT_DIR }}/build.txt
+
+      - name: 📂 Prepare provenance, index.md, config.yml
+        run: |
+          set -e
+          mkdir -p _provenance
+
+          # Copy provenance or fallback
+          if [ -f .attestation/provenance.json ]; then
+            cp .attestation/provenance.json "_provenance/${ARTIFACT_NAME}.json"
+          else
+            echo '{"note": "No provenance.json available"}' > "_provenance/${ARTIFACT_NAME}.json"
+          fi
+
+          # SARIF creation
+          echo '{'                                         > "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '  "version": "2.1.0",'                    >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '  "runs": [{'                             >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '    "tool": {'                            >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '      "driver": {'                        >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '        "name": "attestation-converter",' >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '        "version": "1.0.0"'               >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '      }'                                  >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '    },'                                   >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '    "results": []'                        >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '  }]'                                     >> "_provenance/${ARTIFACT_NAME}.sarif"
+          echo '}'                                        >> "_provenance/${ARTIFACT_NAME}.sarif"
+
+          # index.md
+          if [ ! -f index.md ]; then
+            echo '---'                                         > index.md
+            echo 'layout: default'                            >> index.md
+            echo 'title: Provenance Index'                    >> index.md
+            echo '---'                                        >> index.md
+            echo ''                                           >> index.md
+            echo '# 🧾 증명서 목록'                           >> index.md
+            echo ''                                           >> index.md
+            echo '{% assign files = site.static_files | where_exp:"f", "f.path contains '\''/_provenance/'\''" %}' >> index.md
+            echo '<ul>'                                       >> index.md
+            echo '  {% for file in files %}'                 >> index.md
+            echo '    <li><a href="{{ file.path }}">{{ file.name }}</a></li>' >> index.md
+            echo '  {% endfor %}'                            >> index.md
+            echo '</ul>'                                     >> index.md
+          fi
+
+          # _config.yml
+          if [ ! -f _config.yml ]; then
+            echo 'title: "Provenance Viewer"'     > _config.yml
+            echo 'markdown: kramdown'            >> _config.yml
+            echo 'theme: minima'                 >> _config.yml
+            echo 'include:'                      >> _config.yml
+            echo '  - _provenance'              >> _config.yml
+          fi
+
+      - name: 💾 Commit provenance files to repo
+        run: |
+          git config --global user.email "bot@example.com"
+          git config --global user.name "github-actions[bot]"
+          git pull --rebase
+          git add _provenance index.md _config.yml
+          git commit -m "📌 Add provenance ${{ env.ARTIFACT_NAME }}" || echo "No changes to commit"
+          git push
+
+      - name: ⚙️ Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: 🧱 Build Jekyll site
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./
+          destination: ./_site
+
+      - name: 📦 Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

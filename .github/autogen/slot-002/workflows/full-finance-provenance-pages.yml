@@ -1,0 +1,158 @@
+name: 🚀 Full Finance + Provenance + Pages Deployment
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  pages: write
+
+env:
+  ARTIFACT_NAME: ledger-${{ github.run_id }}-${{ github.run_number }}
+  OUT_DIR: output
+  LEDGER_BATCH: ${{ github.run_number }}
+
+jobs:
+  full-job:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📅 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🚩 Docker & CLI 설치 + 시스템 정보 추가
+        run: |
+          mkdir -p .github/sysinfo site/sysinfo
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo apt-get update
+          sudo apt-get install -y jq curl unzip bc zip
+          {
+            echo "[Docker] $(docker --version)"
+            echo "[jq] $(jq --version)"
+            echo "[curl] $(curl --version | head -n1)"
+            echo "[unzip] $(unzip -v | head -n1)"
+            echo "[bc] $(bc --version | head -n1)"
+            echo "[Date] $(date -u)"
+          } > .github/sysinfo/sysinfo.txt
+          cp .github/sysinfo/sysinfo.txt site/sysinfo/sysinfo.txt
+
+      - name: 📂 디렉토리 생성
+        run: |
+          mkdir -p \
+            .github/finance/ledgers_credit/batch-${LEDGER_BATCH} \
+            .github/finance/ledgers_check/batch-${LEDGER_BATCH} \
+            .github/finance/files \
+            .github/finance/certificates \
+            .github/scorecard/ledgers \
+            .github/scorecard/files \
+            site/finance/files site/finance/ledgers_credit site/finance/ledgers_check site/finance/certificates $OUT_DIR
+
+      - name: 📄 거래 원장 생성
+        run: |
+          for i in $(seq 1 10); do
+            C=.github/finance/ledgers_credit/batch-${LEDGER_BATCH}/ledger_credit_$i.csv
+            K=.github/finance/ledgers_check/batch-${LEDGER_BATCH}/ledger_check_$i.csv
+            echo "name,date,amount,type,card_number" > $C
+            echo "name,date,amount,type,card_number" > $K
+            for j in $(seq 1 50); do
+              NAME="Customer$j"
+              DATE=$(date -d "$j days ago" +%F)
+              AMOUNT=90000000000.00
+              if [ $((RANDOM % 2)) -eq 0 ]; then
+                echo "$NAME,$DATE,$AMOUNT,신육,4111$(printf '%012d' $((RANDOM % 1000000000000)))" >> $C
+              else
+                echo "$NAME,$DATE,$AMOUNT,체크,CHK$((10000000 + RANDOM % 90000000))" >> $K
+              fi
+            done
+          done
+          cp .github/finance/ledgers_credit/batch-${LEDGER_BATCH}/*.csv site/finance/ledgers_credit/
+          cp .github/finance/ledgers_check/batch-${LEDGER_BATCH}/*.csv site/finance/ledgers_check/
+
+      - name: 🔀 거래 시뮬리언
+        run: |
+          mkdir -p site/finance/simulation
+          LOG=site/finance/simulation/simulation_log.txt
+          echo "발생시간: $(date -u)" > $LOG
+          for f in site/finance/ledgers_*/ledger_*.csv; do
+            tail -n +2 "$f" | while IFS=',' read -r n d a t c; do
+              success=false
+              for i in {1..3}; do
+                if [ $((RANDOM % 10)) -lt 2 ]; then
+                  echo "$n $a $t $c 시도 $i: 실패" >> $LOG
+                else
+                  echo "$n $a $t $c 시도 $i: 승인" >> $LOG
+                  success=true
+                  break
+                fi
+              done
+              if [ "$success" = false ]; then
+                echo "$n $a $t $c 거래 장애, 다시 시도..." >> $LOG
+                for i in {1..3}; do
+                  if [ $((RANDOM % 10)) -lt 2 ]; then
+                    echo "$n $a $t $c 재시도 $i: 실패" >> $LOG
+                  else
+                    echo "$n $a $t $c 재시도 $i: 승인" >> $LOG
+                    break
+                  fi
+                done
+              fi
+            done
+          done
+
+      - name: 📃 거래 증명서 생성 메시지
+        run: |
+          CERT=.github/finance/certificates/transaction_certificate.txt
+          echo "[CERT] 거래 증명서 발급일: $(date -u)" > $CERT
+          echo "[CERT] 증명 배치: ${LEDGER_BATCH}" >> $CERT
+          echo "[CERT] 총 거래 파일 수: $(find site/finance/ledgers_* -type f | wc -l)" >> $CERT
+          echo "[CERT] 시뮬레이션 로그 참조: simulation_log.txt" >> $CERT
+          cp $CERT site/finance/certificates/transaction_certificate.txt
+
+      - name: 🔧 build.txt + zip + index
+        run: |
+          echo "생성시간: $(date -u)" > $OUT_DIR/build.txt
+          cp $OUT_DIR/build.txt site/finance/files/build.txt
+          INDEX=site/finance/files/ledger_index.txt
+          find site/finance/ledgers_* -name '*.csv' > $INDEX
+          zip -j site/finance/files/ledgers.zip site/finance/ledgers_*/ledger_*.csv
+
+      - name: 📜 attest + sarif/json
+        run: |
+          echo '{}' > site/finance/files/${ARTIFACT_NAME}.json
+          echo '{}' > site/finance/files/${ARTIFACT_NAME}.sarif
+
+      - name: 🚁 KFTC 상태 점검
+        run: |
+          REPORT=site/finance/files/kftc_status_report.txt
+          echo "KFTC 상태: $(date -u)" > $REPORT
+          for S in "전자금융공동망" "CD/ATM" "어음교통망"; do
+            if [ $((RANDOM % 2)) -eq 0 ]; then
+              echo "$S: 정상" >> $REPORT
+            else
+              echo "$S: 장애" >> $REPORT
+            fi
+          done
+
+      - name: 📅 Upload to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy-pages:
+    needs: full-job
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: 🚀 Deploy Pages
+        uses: actions/deploy-pages@v4

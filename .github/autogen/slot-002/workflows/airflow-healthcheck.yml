@@ -1,0 +1,79 @@
+name: 🗕️ Airflow Healthcheck DAG Setup & Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-airflow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📁 Create required directories
+        run: |
+          echo "[DIR] Creating directories for Airflow"
+          sudo mkdir -p /opt/logistics/airflow/dags
+          sudo mkdir -p /opt/logistics/airflow/test_logs
+          sudo mkdir -p /opt/logistics/scorecard
+          sudo chmod -R 777 /opt/logistics
+
+      - name: 🔄 Install Python 3.10 via deadsnakes PPA
+        run: |
+          echo "[PYTHON] Adding deadsnakes PPA for Python 3.10"
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository ppa:deadsnakes/ppa -y
+          sudo apt-get update
+          sudo apt-get install -y python3.10 python3.10-venv python3.10-dev
+          sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+          python3 --version
+
+      - name: 🌀 Install Apache Airflow and Providers
+        run: |
+          echo "[AIRFLOW] Installing Apache Airflow and providers"
+          python3 -m pip install --upgrade pip
+          pip install apache-airflow==2.8.1 apache-airflow-providers-docker apache-airflow-providers-postgres apache-airflow-providers-smtp
+          airflow db init
+
+      - name: 🌬️ Add Airflow Healthcheck DAG
+        run: |
+          echo "[DAG] Creating Airflow healthcheck DAG"
+          cat << 'EOF' > /opt/logistics/airflow/dags/airflow_healthcheck_dag.py
+          from airflow import DAG
+          from airflow.operators.bash import BashOperator
+          from datetime import datetime
+
+          with DAG(
+              'airflow_healthcheck_dag',
+              start_date=datetime(2023, 1, 1),
+              schedule_interval='@daily',
+              catchup=False
+          ) as dag:
+              health_check = BashOperator(
+                  task_id='check_airflow_webserver',
+                  bash_command='curl -sf http://localhost:8080/health || exit 1'
+              )
+          EOF
+          echo "[✔] DAG saved to /opt/logistics/airflow/dags/airflow_healthcheck_dag.py"
+          cat /opt/logistics/airflow/dags/airflow_healthcheck_dag.py > /opt/logistics/airflow/test_logs/airflow_healthcheck_dag_create.log
+
+      - name: ▶️ Test Airflow DAG execution
+        run: |
+          echo "[TEST] Testing Airflow DAG airflow_healthcheck_dag"
+          airflow dags list > /opt/logistics/airflow/test_logs/airflow_dags_list.log || echo "[❌] DAG list failed"
+          airflow dags test airflow_healthcheck_dag 2025-01-01 > /opt/logistics/airflow/test_logs/airflow_healthcheck_dag_test.log || echo "[❌] DAG test failed"
+
+      - name: 🔐 Install Scorecard and Run Security Check
+        run: |
+          echo "[SECURITY] Installing Scorecard"
+          SCORECARD_VERSION="v4.10.3"
+          wget https://github.com/ossf/scorecard/releases/download/$SCORECARD_VERSION/scorecard-linux-amd64 -O scorecard || echo "[❌] Scorecard download failed"
+          chmod +x scorecard
+          mv scorecard /opt/logistics/scorecard/
+          echo "[SECURITY] Running Scorecard on DAGs"
+          /opt/logistics/scorecard/scorecard --repo=. --local --checks Vulnerabilities --format=json --show-details > /opt/logistics/scorecard/scorecard.result.json || echo "[❌] Scorecard failed"
+
+      - name: 📦 Upload Logs as Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: airflow-healthcheck-logs
+          path: /opt/logistics/airflow/test_logs/

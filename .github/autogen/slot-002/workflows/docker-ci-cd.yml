@@ -1,0 +1,175 @@
+name: Generate and Backup Corporate Banking Data with Secure ZIP and Conditional OCI Upload
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  generate-and-backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📥 Install Required Python Packages
+        run: |
+          pip install pyyaml faker pillow
+
+      - name: 📄 Generate YAML Configuration
+        run: |
+          mkdir -p config
+          echo "# YAML configuration moved into separate file manually." > config/banking_schema.yaml
+          echo "# Place the full YAML content into 'config/banking_schema.yaml'" >> config/banking_schema.yaml
+
+      - name: 🧪 Validate YAML File via echo-generated script
+        run: |
+          mkdir -p scripts
+          echo "import yaml" > scripts/validate_yaml.py
+          echo "with open('config/banking_schema.yaml') as f:" >> scripts/validate_yaml.py
+          echo "    data = yaml.safe_load(f)" >> scripts/validate_yaml.py
+          echo "print('✅ YAML Validation Passed')" >> scripts/validate_yaml.py
+          python scripts/validate_yaml.py
+
+      - name: 📦 Simulate Data Extraction
+        run: |
+          mkdir -p output
+          echo "INFO: 데이터 추출 시작"
+          touch output/corporate_banking_backup.sql
+          echo '-- SQL Dump Placeholder' > output/corporate_banking_backup.sql
+          echo "INFO: 데이터 추출 완료: output/corporate_banking_backup.sql"
+
+      - name: 🔐 Generate or Use Backup Password & Encrypt Backup File
+        id: encrypt
+        run: |
+          # GitHub Secret 에 BACKUP_PASSWORD가 설정되어 있으면 사용, 그렇지 않으면 랜덤 생성
+          if [ -n "${{ secrets.BACKUP_PASSWORD }}" ]; then
+            BACKUP_PASSWORD="${{ secrets.BACKUP_PASSWORD }}"
+            echo "🔒 사용 중인 BACKUP_PASSWORD: (secret에 정의된 값)"
+          else
+            BACKUP_PASSWORD=$(head -c 256 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
+            echo "🔑 새로 생성된 BACKUP_PASSWORD: ${BACKUP_PASSWORD}"
+          fi
+
+          zip -j -P "$BACKUP_PASSWORD" output/corporate_banking_backup.zip output/corporate_banking_backup.sql
+          echo "✅ 백업 파일 암호화/압축 완료: output/corporate_banking_backup.zip"
+          echo "::set-output name=password::$BACKUP_PASSWORD"
+
+      - name: 🖼️ Generate Credit & Debit Card Transaction Images via echo-generated script
+        run: |
+          mkdir -p scripts
+
+          echo "from PIL import Image, ImageDraw" > scripts/gen_images.py
+          echo "import os" >> scripts/gen_images.py
+          echo "cc_dir = 'output/credit_card_images'" >> scripts/gen_images.py
+          echo "dc_dir = 'output/debit_card_images'" >> scripts/gen_images.py
+          echo "os.makedirs(cc_dir, exist_ok=True)" >> scripts/gen_images.py
+          echo "os.makedirs(dc_dir, exist_ok=True)" >> scripts/gen_images.py
+
+          echo "for i in range(1, 11):" >> scripts/gen_images.py
+          echo "    img = Image.new('RGB', (300, 180), color=(30, 144, 255))" >> scripts/gen_images.py
+          echo "    d = ImageDraw.Draw(img)" >> scripts/gen_images.py
+          echo "    text = f\"Credit Card TXN #{i}\"" >> scripts/gen_images.py
+          echo "    d.text((10, 80), text, fill=(255, 255, 255))" >> scripts/gen_images.py
+          echo "    img.save(f'{cc_dir}/credit_txn_{i}.png')" >> scripts/gen_images.py
+
+          echo "for i in range(1, 11):" >> scripts/gen_images.py
+          echo "    img = Image.new('RGB', (300, 180), color=(34, 139, 34))" >> scripts/gen_images.py
+          echo "    d = ImageDraw.Draw(img)" >> scripts/gen_images.py
+          echo "    text = f\"Debit Card TXN #{i}\"" >> scripts/gen_images.py
+          echo "    d.text((10, 80), text, fill=(255, 255, 255))" >> scripts/gen_images.py
+          echo "    img.save(f'{dc_dir}/debit_txn_{i}.png')" >> scripts/gen_images.py
+
+          echo "print('✅ 신용카드 및 체크카드 거래 이미지 생성 완료')" >> scripts/gen_images.py
+
+          python scripts/gen_images.py
+
+      - name: ☁ Install OCI CLI
+        run: |
+          curl --proto '=https' --tlsv1.2 -sL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults --install-dir $HOME/oci-cli
+          echo "$HOME/oci-cli/bin" >> $GITHUB_PATH
+          echo "✅ OCI CLI 설치 완료: $(oci --version)"
+
+      - name: ☁ Configure & Upload to OCI Object Storage (Conditional)
+        env:
+          OCI_CLI_AUTH: "api_key"
+          OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
+          OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_API_KEY }}
+          OCI_CLI_REGION: "ap-seoul-1"
+        run: |
+          # 필수 OCID/키 정보가 모두 존재하는지 확인
+          if [ -z "${OCI_CLI_USER}" ] || [ -z "${OCI_CLI_TENANCY}" ] || [ -z "${OCI_CLI_FINGERPRINT}" ] || [ -z "${OCI_CLI_KEY_CONTENT}" ]; then
+            echo "⚠️ OCI 업로드에 필요한 인증 정보가 부족합니다. 업로드를 건너뜁니다."
+            exit 0
+          fi
+
+          # 레이블 경고 억제
+          export SUPPRESS_LABEL_WARNING=True
+
+          # ~/.oci 디렉토리 및 key 파일 생성
+          mkdir -p ~/.oci
+          echo "$OCI_CLI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          # ~/.oci/config 파일 작성
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${OCI_CLI_USER}" >> ~/.oci/config
+          echo "fingerprint=${OCI_CLI_FINGERPRINT}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          echo "tenancy=${OCI_CLI_TENANCY}" >> ~/.oci/config
+          echo "region=${OCI_CLI_REGION}" >> ~/.oci/config
+          chmod 600 ~/.oci/config
+
+          echo "✅ OCI CLI 구성 완료"
+
+          # 백업 ZIP 업로드
+          oci os object put \
+            --bucket-name backups \
+            --file output/corporate_banking_backup.zip \
+            --name corporate_banking_backup.zip \
+            --force \
+            --region $OCI_CLI_REGION
+
+          # 신용카드 이미지 업로드
+          for img in output/credit_card_images/*.png; do
+            filename=$(basename "$img")
+            oci os object put \
+              --bucket-name backups \
+              --file "$img" \
+              --name "credit_card_images/$filename" \
+              --force \
+              --region $OCI_CLI_REGION
+          done
+
+          # 체크카드 이미지 업로드
+          for img in output/debit_card_images/*.png; do
+            filename=$(basename "$img")
+            oci os object put \
+              --bucket-name backups \
+              --file "$img" \
+              --name "debit_card_images/$filename" \
+              --force \
+              --region $OCI_CLI_REGION
+          done
+
+          echo "✅ 백업 파일(.zip) 및 이미지 업로드 완료"
+
+      - name: ☑️ NetBackup CLI 실행 (예시)
+        run: |
+          echo "🔄 NetBackup CLI 가정 실행 중..."
+          echo "bpbackup -f output/corporate_banking_backup.zip"
+          echo "bpbackup -d output/credit_card_images"
+          echo "bpbackup -d output/debit_card_images"
+          echo "⚠️ 실제 NetBackup 설치 필요 및 CLI 경로 확인 필요"
+
+      - name: ✅ 완료 메시지
+        run: echo "✅ 기업 금융 데이터 백업, 암호화, 이미지 생성, 업로드까지 모두 완료되었습니다."

@@ -1,0 +1,65 @@
+name: MySQL Latest Version Upgrade
+
+on:
+  workflow_dispatch:
+
+jobs:
+  upgrade-mysql:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up MySQL APT repository
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y apt-transport-https
+        wget --https-only --secure-protocol=TLSv1_2 https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
+        sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
+        sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure mysql-apt-config
+        sudo apt-get update
+
+    - name: Stop MySQL service (if running) and clean up
+      run: |
+        sudo systemctl stop mysql || true
+        # 기존 MySQL 설치 제거 시도 (선택 사항, 클린 설치를 원할 경우)
+        # sudo apt-get purge -y mysql-server mysql-client mysql-common || true
+        # sudo rm -rf /var/lib/mysql # 데이터 디렉토리도 제거 (데이터 손실 주의!)
+
+    - name: Install/Upgrade MySQL Server to latest version
+      run: |
+        # 깨진 종속성 수정 및 구성되지 않은 패키지 처리
+        sudo apt-get install -f -y
+        sudo dpkg --configure -a
+        
+        # MySQL 서버 및 클라이언트 최신 버전 설치/업그레이드
+        sudo apt-get install -y mysql-server mysql-client
+
+    - name: Set MySQL data directory permissions (ensure correct ownership)
+      run: |
+        # MySQL 데이터 디렉토리의 소유권 및 권한 설정
+        sudo chown -R mysql:mysql /var/lib/mysql
+        sudo chmod -R 750 /var/lib/mysql
+
+    - name: Start MySQL service
+      run: |
+        sudo systemctl start mysql
+        # 서비스가 시작되었는지 확인. 시작 실패 시 오류 발생
+        sudo systemctl status mysql
+
+    - name: Run mysql_upgrade and restart service
+      run: |
+        # mysql_upgrade 실행
+        sudo mysql_upgrade --force || true
+        # 서비스 재시작하여 변경 사항 적용
+        sudo systemctl restart mysql
+        sudo systemctl status mysql # 재시작 후 다시 상태 확인
+
+    - name: Verify MySQL version and check logs for errors
+      run: |
+        mysql --version
+        echo "Attempting to get MySQL error logs:"
+        sudo journalctl -u mysql.service --no-pager -n 100 # 최근 100줄 로그 출력
+        # 또는 sudo cat /var/log/mysql/error.log || true # 파일이 없어도 에러 발생 안함
+        echo "MySQL upgrade process completed. Please check logs for any warnings/errors."
