@@ -1,0 +1,115 @@
+name: 💰 Check Workflow Costs with Valid Completed Runs Only
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 매일 오전 3시 (KST 정오)
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  analyze-cost:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📂 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Install Dependencies
+        run: |
+          echo "[+] Installing Python dependencies..."
+          pip install requests
+          echo "[✔] Dependencies installed"
+
+      - name: 🔍 Analyze Costs of Completed Workflows Only
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "[+] Starting cost analysis..."
+          echo "[+] Creating Python script..."
+
+          echo 'import requests' > check_costs.py
+          echo 'import os, sys' >> check_costs.py
+          echo 'from datetime import datetime, timedelta' >> check_costs.py
+          echo '' >> check_costs.py
+          echo 'REPO = os.getenv("REPO")' >> check_costs.py
+          echo 'TOKEN = os.getenv("GH_TOKEN")' >> check_costs.py
+          echo 'headers = {' >> check_costs.py
+          echo '    "Authorization": f"Bearer {TOKEN}",' >> check_costs.py
+          echo '    "Accept": "application/vnd.github+json"' >> check_costs.py
+          echo '}' >> check_costs.py
+          echo '' >> check_costs.py
+          echo 'base_url = f"https://api.github.com/repos/{REPO}"' >> check_costs.py
+          echo 'cutoff = datetime.utcnow() - timedelta(days=7)' >> check_costs.py
+          echo '' >> check_costs.py
+
+          echo 'def get_workflow_runs():' >> check_costs.py
+          echo '    runs = []' >> check_costs.py
+          echo '    page = 1' >> check_costs.py
+          echo '    while True:' >> check_costs.py
+          echo '        url = f"{base_url}/actions/runs?per_page=100&page={page}"' >> check_costs.py
+          echo '        res = requests.get(url, headers=headers)' >> check_costs.py
+          echo '        if res.status_code != 200:' >> check_costs.py
+          echo '            print(f"[❌] Failed to fetch runs: {res.status_code}")' >> check_costs.py
+          echo '            break' >> check_costs.py
+          echo '        page_runs = res.json().get("workflow_runs", [])' >> check_costs.py
+          echo '        if not page_runs:' >> check_costs.py
+          echo '            break' >> check_costs.py
+          echo '        for run in page_runs:' >> check_costs.py
+          echo '            if run.get("status") != "completed":' >> check_costs.py
+          echo '                continue  # ✅ Skip non-completed runs' >> check_costs.py
+          echo '            created = datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ")' >> check_costs.py
+          echo '            if created < cutoff:' >> check_costs.py
+          echo '                return runs' >> check_costs.py
+          echo '            runs.append(run)' >> check_costs.py
+          echo '        page += 1' >> check_costs.py
+          echo '    return runs' >> check_costs.py
+          echo '' >> check_costs.py
+
+          echo 'def calculate_cost(run):' >> check_costs.py
+          echo '    usage_url = run["url"] + "/timing"' >> check_costs.py
+          echo '    res = requests.get(usage_url, headers=headers)' >> check_costs.py
+          echo '    if res.status_code != 200:' >> check_costs.py
+          echo "        print(f\"[❌] Failed to fetch timing for {run['id']} (status={res.status_code})\")" >> check_costs.py
+          echo '        return 0' >> check_costs.py
+          echo '    usage = res.json().get("billable", {})' >> check_costs.py
+          echo '    cost = 0' >> check_costs.py
+          echo '    rates = {"UBUNTU": 0.008, "WINDOWS": 0.016, "MACOS": 0.08}' >> check_costs.py
+          echo '    for os_type, rate in rates.items():' >> check_costs.py
+          echo '        ms = usage.get(os_type, {}).get("total_ms", 0)' >> check_costs.py
+          echo '        cost += (ms / 60000.0) * rate' >> check_costs.py
+          echo '    return round(cost, 2)' >> check_costs.py
+          echo '' >> check_costs.py
+
+          echo 'def main():' >> check_costs.py
+          echo '    print(f"[+] Fetching completed workflow runs for repo: {REPO}")' >> check_costs.py
+          echo '    runs = get_workflow_runs()' >> check_costs.py
+          echo '    total_cost = 0' >> check_costs.py
+          echo '    expensive = []' >> check_costs.py
+          echo '' >> check_costs.py
+          echo '    for run in runs:' >> check_costs.py
+          echo '        cost = calculate_cost(run)' >> check_costs.py
+          echo '        total_cost += cost' >> check_costs.py
+          echo '        if cost > 5:' >> check_costs.py
+          echo '            expensive.append((run["html_url"], cost))' >> check_costs.py
+          echo '' >> check_costs.py
+          echo '    print(f"\\n[💸] Total Cost (7일간): ${round(total_cost,2)}")' >> check_costs.py
+          echo '    print(f"[✔] Completed runs analyzed: {len(runs)}")' >> check_costs.py
+          echo '' >> check_costs.py
+          echo '    if expensive:' >> check_costs.py
+          echo '        print("🔥 Expensive Workflows (>$5):")' >> check_costs.py
+          echo '        for url, c in expensive:' >> check_costs.py
+          echo '            print(f" - {url} : ${c}")' >> check_costs.py
+          echo '        print("[🚫] Failing workflow due to high-cost runs.")' >> check_costs.py
+          echo '        sys.exit(1)' >> check_costs.py
+          echo '    else:' >> check_costs.py
+          echo '        print("[✔] No expensive runs found.")' >> check_costs.py
+          echo '' >> check_costs.py
+          echo 'if __name__ == "__main__":' >> check_costs.py
+          echo '    main()' >> check_costs.py
+
+          echo "[✔] Script created. Running analysis..."
+          python3 check_costs.py
+          echo "[✔] Cost analysis completed."
